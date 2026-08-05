@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from collections.abc import Mapping
 from dataclasses import asdict, dataclass
+from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any, Literal
 
@@ -28,6 +29,14 @@ _ERROR_CATEGORIES = {
 }
 
 EvidenceScope = Literal["summary", "rows", "traces"]
+
+_INTERVENTION_LOCK_INPUT_FIELDS = {
+    "failure_lock_sha256",
+    "discovery_suite_sha256",
+    "holdout_suite_sha256",
+    "failure_locked_at",
+    "suites_frozen_at",
+}
 
 
 class CampaignError(ValueError):
@@ -64,6 +73,58 @@ class CampaignError(ValueError):
             **unsigned,
             "error_digest": _artifact_digest(unsigned, "error_digest"),
         }
+
+
+def intervention_lock_inputs_from_data(raw: Any) -> dict[str, str] | None:
+    """Normalize the pre-discovery intervention identity shared by all façades."""
+
+    if raw in (None, ""):
+        return None
+    if not isinstance(raw, Mapping):
+        raise ValueError("intervention lock inputs must be a mapping")
+    value = dict(raw)
+    unknown = sorted(set(value) - _INTERVENTION_LOCK_INPUT_FIELDS)
+    if unknown:
+        raise ValueError(
+            "unknown intervention lock inputs field(s): " + ", ".join(unknown)
+        )
+    missing = sorted(_INTERVENTION_LOCK_INPUT_FIELDS - set(value))
+    if missing:
+        raise ValueError(
+            "intervention lock inputs are missing: " + ", ".join(missing)
+        )
+    failure_time = _canonical_timestamp(
+        value["failure_locked_at"],
+        "failure_locked_at",
+    )
+    suites_time = _canonical_timestamp(
+        value["suites_frozen_at"],
+        "suites_frozen_at",
+    )
+    if datetime.fromisoformat(failure_time) > datetime.fromisoformat(suites_time):
+        raise ValueError(
+            "intervention suites must be frozen after the failure is locked"
+        )
+    discovery_digest = _sha256(
+        value["discovery_suite_sha256"],
+        "discovery suite digest",
+    )
+    holdout_digest = _sha256(
+        value["holdout_suite_sha256"],
+        "holdout suite digest",
+    )
+    if discovery_digest == holdout_digest:
+        raise ValueError("intervention discovery and holdout suites must be distinct")
+    return {
+        "failure_lock_sha256": _sha256(
+            value["failure_lock_sha256"],
+            "failure lock digest",
+        ),
+        "discovery_suite_sha256": discovery_digest,
+        "holdout_suite_sha256": holdout_digest,
+        "failure_locked_at": failure_time,
+        "suites_frozen_at": suites_time,
+    }
 
 
 @dataclass(frozen=True)
@@ -183,13 +244,26 @@ class ExperimentProposalV1:
     n_concurrent: int
     trace_content: str
     task_suite_digest: str | None = None
+    intervention_lock_inputs: dict[str, str] | None = None
+    failure_lock: str | None = None
+    intervention_component_locks: tuple[str, ...] = ()
+    selection_lock: str | None = None
     analysis_ids: tuple[str, ...] = ()
     parent_outcome_id: str | None = None
     decision_rationale: str = ""
     proposal_digest: str = ""
 
     def to_dict(self) -> dict[str, Any]:
-        return _json_value(asdict(self))
+        value = _json_value(asdict(self))
+        if self.intervention_lock_inputs is None:
+            value.pop("intervention_lock_inputs", None)
+        if self.failure_lock is None:
+            value.pop("failure_lock", None)
+        if not self.intervention_component_locks:
+            value.pop("intervention_component_locks", None)
+        if self.selection_lock is None:
+            value.pop("selection_lock", None)
+        return value
 
 
 @dataclass(frozen=True)
@@ -351,6 +425,24 @@ def _artifact_digest(value: Mapping[str, Any], digest_field: str) -> str:
     unsigned = dict(_json_value(value))
     unsigned[digest_field] = ""
     return stable_digest(unsigned)
+
+
+def _sha256(value: Any, label: str) -> str:
+    text = str(value or "")
+    if len(text) != 64 or any(character not in "0123456789abcdef" for character in text):
+        raise ValueError(f"{label} must be a SHA-256 digest")
+    return text
+
+
+def _canonical_timestamp(value: Any, label: str) -> str:
+    text = str(value or "").strip()
+    try:
+        parsed = datetime.fromisoformat(text.replace("Z", "+00:00"))
+    except ValueError as exc:
+        raise ValueError(f"{label} must be an ISO-8601 timestamp") from exc
+    if parsed.tzinfo is None:
+        raise ValueError(f"{label} must include a timezone")
+    return parsed.astimezone(UTC).isoformat()
 
 
 def _json_value(value: Any) -> Any:

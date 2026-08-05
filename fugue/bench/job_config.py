@@ -123,6 +123,8 @@ class RenderedJob:
     candidate_id: str
     resolved_candidate: ResolvedCandidate
     execution_kind: str
+    outer_wall_time_sec: int | None = None
+    execution_limits_digest: str = ""
     expected_evidence_paths: tuple[str, ...] = ()
     evaluation_case: dict[str, Any] | None = None
     evaluation_rubrics: tuple[dict[str, Any], ...] = ()
@@ -425,6 +427,11 @@ def _build_jobs(
                     "sandbox_policy_version": SANDBOX_POLICY_VERSION,
                     "fugue_source": selected_source_provenance,
                     **(
+                        {"execution_limits": experiment.execution_limits.to_dict()}
+                        if experiment.execution_limits is not None
+                        else {}
+                    ),
+                    **(
                         {
                             "sandbox_runtime": wandb_execution_identity(
                                 selected_environment,
@@ -609,6 +616,16 @@ def _build_jobs(
                         candidate_id=candidate_id,
                         resolved_candidate=resolved_candidate,
                         execution_kind="agent",
+                        outer_wall_time_sec=(
+                            experiment.execution_limits.wall_time_sec
+                            if experiment.execution_limits is not None
+                            else None
+                        ),
+                        execution_limits_digest=(
+                            experiment.execution_limits.limits_digest
+                            if experiment.execution_limits is not None
+                            else ""
+                        ),
                         expected_evidence_paths=tuple(tasks[0].expected_paths),
                         evaluation_case=evaluation_cases.get(tasks[0].id),
                         evaluation_rubrics=evaluation_rubrics,
@@ -776,6 +793,7 @@ def _job_config(
         "candidate_id": candidate_id,
         "execution_fingerprint": execution_fingerprint,
         "workload_id": workload_id,
+        "runner": "harbor",
         "preset_id": preset_id,
         "variant_id": variant.id,
         "variant_label": variant.label,
@@ -824,6 +842,11 @@ def _job_config(
         "expected_artifact_paths": artifact_source_paths(expected_artifacts),
         "task_authoring": _task_authoring_metadata(tasks[0]),
         "wandb_serverless_runtime": wandb_identity,
+        "execution_limits": (
+            experiment.execution_limits.to_dict()
+            if experiment.execution_limits is not None
+            else None
+        ),
     }
     rendered = _drop_empty(config)
     _validate_harbor_job_config(rendered)
@@ -1106,7 +1129,22 @@ def _job_env(
             "FUGUE_AGENT_CONFIG_HASH": agent_config_hash,
             "FUGUE_HARBOR_ENVIRONMENT": str(experiment.environment.get("type") or ""),
             "FUGUE_HARBOR_RESOURCES": json.dumps(
-                _resource_summary(experiment.environment), sort_keys=True
+                {
+                    **_resource_summary(experiment.environment),
+                    **(
+                        {
+                            "outer_wall_time_sec": (
+                                experiment.execution_limits.wall_time_sec
+                            ),
+                            "execution_limits_digest": (
+                                experiment.execution_limits.limits_digest
+                            ),
+                        }
+                        if experiment.execution_limits is not None
+                        else {}
+                    ),
+                },
+                sort_keys=True,
             ),
             "FUGUE_RUN_NAME": run_name,
             "FUGUE_RUN_GROUP": env_group(base_env, run_name),

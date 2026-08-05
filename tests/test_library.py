@@ -599,6 +599,16 @@ n_attempts: 0
 """,
             tmp_path,
         )
+    with pytest.raises(ValueError, match="execution wall_time_sec must be positive"):
+        save_experiment(
+            "bad-wall-time",
+            """
+id: bad-wall-time
+execution_limits:
+  wall_time_sec: 0
+""",
+            tmp_path,
+        )
 
 
 def test_preset_rejects_unknown_workload_reference(tmp_path):

@@ -3,6 +3,7 @@ from __future__ import annotations
 import difflib
 import hashlib
 import json
+import math
 import re
 import uuid
 from collections import defaultdict
@@ -23,6 +24,28 @@ from fugue.assistant import (
     AssistantUsage,
     select_assistant_model,
 )
+from fugue.bench.analysis_contracts import (
+    AlignedAnalysisDeclarationV1,
+    AlignedAnalysisV1,
+    AlignedAttemptSetV1,
+    AlignedContrastResultV1,
+    AlignedDimensionV1,
+    AlignedInteractionDimensionResultV1,
+    AlignedInteractionResultV1,
+    AlignedTaskEffectV1,
+    AlignedTaskInteractionEffectV1,
+    TaskStratifiedSummaryV1,
+    aligned_analysis_declaration_from_dict,
+)
+from fugue.bench.candidates import (
+    attempt_id as canonical_attempt_id,
+)
+from fugue.bench.candidates import (
+    attempt_identity as canonical_attempt_identity,
+)
+from fugue.bench.candidates import (
+    stable_digest,
+)
 from fugue.bench.catalog import FILTER_FIELDS, ArtifactExcerpt, ExperimentCatalog
 from fugue.bench.context import get_context_system, list_context_systems
 from fugue.bench.evaluations import (
@@ -35,6 +58,10 @@ from fugue.bench.evaluations import (
 )
 from fugue.bench.export import fetch_weave_summaries
 from fugue.bench.integrations import list_integrations, load_integration
+from fugue.bench.intervention_provenance import (
+    InterventionComponentLockV1,
+    read_intervention_component_lock,
+)
 from fugue.bench.library import (
     ExperimentSpec,
     experiment_from_data,
@@ -67,7 +94,6 @@ from fugue.model_plane import (
     resolve_model_route,
     select_model,
     trace_api_key,
-    trace_project_slug,
 )
 from fugue.redaction import redact_value
 
@@ -143,9 +169,15 @@ class AnalysisSpec:
     model: str | None = None
     trace_content: str = "full"
     selection: SelectionPolicy | None = None
+    aligned_analysis: AlignedAnalysisDeclarationV1 | None = None
 
     def to_dict(self) -> dict[str, Any]:
-        return asdict(self)
+        value = asdict(self)
+        if self.aligned_analysis is None:
+            value.pop("aligned_analysis")
+        else:
+            value["aligned_analysis"] = self.aligned_analysis.to_dict()
+        return value
 
 
 @dataclass(frozen=True)
@@ -199,6 +231,7 @@ class AnalysisResult:
     session_id: str
     input_tokens: int
     output_tokens: int
+    aligned_analysis: AlignedAnalysisV1 | None = None
 
 
 @dataclass(frozen=True)
@@ -209,6 +242,7 @@ class AnalysisPreview:
     evidence: tuple[EvidenceRef, ...]
     aggregates: tuple[dict[str, Any], ...]
     selection: CandidateSelection | None
+    aligned_analysis: AlignedAnalysisV1 | None = None
 
 
 class ExperimentComposer:
@@ -814,6 +848,7 @@ class ExperimentAnalyst:
         scope = _scope(rows, spec.metrics, [])
         aggregates, evidence = _aggregate(rows, spec)
         selection = _selection(rows, spec, snapshot.digest)
+        aligned_analysis = _materialize_aligned_analysis(rows, spec.aligned_analysis)
         if selection is not None:
             evidence.append(_selection_evidence(selection, len(evidence) + 1, rows))
         return AnalysisPreview(
@@ -823,6 +858,7 @@ class ExperimentAnalyst:
             evidence=tuple(evidence),
             aggregates=tuple(aggregates),
             selection=selection,
+            aligned_analysis=aligned_analysis,
         )
 
     async def execute(
@@ -835,6 +871,7 @@ class ExperimentAnalyst:
         rows = [dict(row) for row in preview.snapshot.rows]
         warnings: list[str] = []
         if spec.source == "hybrid":
+            project = _scoped_result_project(rows)
             try:
                 run_keys = [str(row["run_key"]) for row in rows if row.get("run_key")]
                 conversations = {
@@ -853,14 +890,30 @@ class ExperimentAnalyst:
                 remote = fetch_weave_summaries(
                     run_keys,
                     conversation_ids_by_run=conversations,
-                    project=trace_project_slug(self.operator.env),
+                    project=project,
                     env=self.operator.env,
                 )
+                if spec.aligned_analysis is not None and set(remote) != set(run_keys):
+                    missing = sorted(set(run_keys) - set(remote))
+                    extras = sorted(set(remote) - set(run_keys))
+                    raise ValueError(
+                        "governed aligned Weave enrichment did not resolve "
+                        f"the exact scoped runs (missing={missing}, extras={extras})"
+                    )
                 rows = [
                     _merge_weave_record(row, remote.get(str(row.get("run_key"))))
                     for row in rows
                 ]
+                if _scoped_result_project(rows) != project:
+                    raise ValueError(
+                        "Weave enrichment changed the governed result project"
+                    )
             except Exception as exc:
+                if spec.aligned_analysis is not None:
+                    raise ValueError(
+                        "governed aligned analysis requires exact Weave "
+                        f"enrichment from {project}: {exc}"
+                    ) from exc
                 warnings.append(
                     f"Weave enrichment unavailable; using local data: {exc}"
                 )
@@ -868,6 +921,7 @@ class ExperimentAnalyst:
         scope = _scope(rows, spec.metrics, warnings)
         aggregates, evidence = _aggregate(rows, spec)
         selection = _selection(rows, spec, snapshot.digest)
+        aligned_analysis = _materialize_aligned_analysis(rows, spec.aligned_analysis)
         if selection is not None:
             evidence.append(_selection_evidence(selection, len(evidence) + 1, rows))
         selected_model = select_assistant_model(
@@ -968,6 +1022,11 @@ class ExperimentAnalyst:
                     lambda _: {
                         "scope": asdict(scope),
                         "aggregates": aggregates,
+                        "aligned_analysis": (
+                            aligned_analysis.to_dict()
+                            if aligned_analysis is not None
+                            else None
+                        ),
                         "selection": selection.to_dict() if selection else None,
                         "evidence": [asdict(item) for item in evidence_values],
                     },
@@ -1038,6 +1097,11 @@ class ExperimentAnalyst:
                             "question": spec.question,
                             "scope": asdict(scope),
                             "aggregates": aggregates,
+                            "aligned_analysis": (
+                                aligned_analysis.to_dict()
+                                if aligned_analysis is not None
+                                else None
+                            ),
                             "selection": selection.to_dict() if selection else None,
                             "evidence": [asdict(item) for item in evidence_values],
                         },
@@ -1083,6 +1147,7 @@ class ExperimentAnalyst:
             session_id=run.session_id,
             input_tokens=run.usage.input_tokens or 0,
             output_tokens=run.usage.output_tokens or 0,
+            aligned_analysis=aligned_analysis,
         )
         _write_analysis(result, self.repo_root)
         return result
@@ -1169,7 +1234,20 @@ def _analysis_spec(raw: Mapping[str, Any]) -> AnalysisSpec:
         model=str(raw["model"]) if raw.get("model") else None,
         trace_content=trace_content,
         selection=_selection_policy(raw.get("selection")),
+        aligned_analysis=(
+            aligned_analysis_declaration_from_dict(
+                _analysis_mapping(raw.get("aligned_analysis"), "aligned_analysis")
+            )
+            if raw.get("aligned_analysis") is not None
+            else None
+        ),
     )
+
+
+def _analysis_mapping(value: Any, label: str) -> dict[str, Any]:
+    if not isinstance(value, Mapping):
+        raise ValueError(f"analysis {label} must be a mapping")
+    return dict(value)
 
 
 def _selection_policy(raw: Any) -> SelectionPolicy | None:
@@ -1245,9 +1323,7 @@ def _selection_policy(raw: Any) -> SelectionPolicy | None:
         ),
         require_agent_links=bool(raw.get("require_agent_links", False)),
         require_registration=bool(raw.get("require_registration", False)),
-        require_skill_invocation=bool(
-            raw.get("require_skill_invocation", False)
-        ),
+        require_skill_invocation=bool(raw.get("require_skill_invocation", False)),
         required_any_tool_names=tuple(
             str(value) for value in raw.get("required_any_tool_names") or ()
         ),
@@ -1326,6 +1402,9 @@ def _aggregate(
                 row.get("pass") is False or bool(row.get("exception_class"))
                 for row in values
             ),
+            "agent_runtime_completion_rate": _average(
+                _numbers(values, "agent_runtime_completed")
+            ),
             "tool_calls": sum(
                 int(row.get("weave_tool_call_count") or 0) for row in values
             ),
@@ -1348,6 +1427,12 @@ def _aggregate(
             ),
             "relevant_retrieval_open_rate": _average(
                 _numbers(values, "relevant_retrieval_opened")
+            ),
+            "relevant_retrieval_return_rate": _average(
+                _numbers(values, "relevant_retrieval_returned")
+            ),
+            "relevant_retrieval_use_rate": _average(
+                _numbers(values, "relevant_retrieval_used")
             ),
             "relevant_retrieval_change_rate": _average(
                 _numbers(values, "relevant_retrieval_changed")
@@ -1392,6 +1477,611 @@ def _aggregate(
             )
         )
     return aggregates, evidence
+
+
+def _materialize_aligned_analysis(
+    rows: Sequence[dict[str, Any]],
+    declaration: AlignedAnalysisDeclarationV1 | None,
+) -> AlignedAnalysisV1 | None:
+    """Materialize a preregistered complete grid without label-based pairing."""
+
+    if declaration is None:
+        return None
+    arm_ids = tuple(item.id for item in declaration.arms)
+    dimensions = _declared_aligned_dimensions(declaration)
+    grouped: dict[tuple[str, ...], dict[str, tuple[dict[str, Any], str]]] = defaultdict(
+        dict
+    )
+    coordinates_by_key: dict[tuple[str, ...], dict[str, str]] = {}
+    for row in rows:
+        arm = _aligned_row_arm(row, arm_ids)
+        coordinates = {
+            coordinate: _aligned_coordinate(row, coordinate)
+            for coordinate in declaration.alignment_coordinates
+        }
+        key = tuple(coordinates[item] for item in declaration.alignment_coordinates)
+        if arm in grouped[key]:
+            raise ValueError(
+                "aligned analysis contains duplicate arm "
+                f"{arm!r} for coordinates {coordinates}"
+            )
+        grouped[key][arm] = (row, _canonical_row_attempt_id(row))
+        coordinates_by_key[key] = coordinates
+
+    expected_arms = set(arm_ids)
+    aligned_attempts: list[AlignedAttemptSetV1] = []
+    for key in sorted(grouped):
+        selected = grouped[key]
+        missing = expected_arms - set(selected)
+        extras = set(selected) - expected_arms
+        if missing or extras:
+            details = []
+            if missing:
+                details.append("missing " + ", ".join(sorted(missing)))
+            if extras:
+                details.append("unexpected " + ", ".join(sorted(extras)))
+            raise ValueError(
+                "aligned analysis grid is incomplete for "
+                f"{coordinates_by_key[key]}: {'; '.join(details)}"
+            )
+        values = {arm: item[0] for arm, item in selected.items()}
+        task_ids = {
+            str(row.get("task_id") or row.get("task_name") or "")
+            for row in values.values()
+        }
+        if len(task_ids) != 1 or not next(iter(task_ids), ""):
+            raise ValueError("aligned analysis coordinates do not resolve one task")
+        task_id = next(iter(task_ids))
+        attempts = {
+            _positive_analysis_int(row.get("trial_index"), "trial_index")
+            for row in values.values()
+        }
+        if len(attempts) != 1:
+            raise ValueError("aligned analysis coordinates do not resolve one attempt")
+        attempt = next(iter(attempts))
+        harnesses = {str(row.get("harness") or "") for row in values.values()}
+        if any(not item for item in harnesses):
+            raise ValueError("aligned analysis row is missing harness identity")
+        coordinates = coordinates_by_key[key]
+        alignment_id = stable_digest(
+            {
+                "schema_version": 1,
+                "declaration_digest": declaration.declaration_digest,
+                "coordinates": coordinates,
+            }
+        )
+        aligned_attempts.append(
+            AlignedAttemptSetV1(
+                alignment_id=alignment_id,
+                task_id=task_id,
+                task_label=task_id,
+                harness=(next(iter(harnesses)) if len(harnesses) == 1 else None),
+                attempt=attempt,
+                alignment_coordinates=coordinates,
+                attempt_ids_by_arm={arm: selected[arm][1] for arm in arm_ids},
+                dimension_values_by_arm={
+                    arm: {
+                        dimension_id: value
+                        for dimension_id in dimensions
+                        if (
+                            value := _aligned_dimension_value(
+                                selected[arm][0], dimension_id
+                            )
+                        )
+                        is not None
+                    }
+                    for arm in arm_ids
+                },
+            )
+        )
+
+    if not aligned_attempts:
+        raise ValueError("aligned analysis requires at least one aligned set")
+    attempt_ids = [
+        attempt_id
+        for item in aligned_attempts
+        for attempt_id in item.attempt_ids_by_arm.values()
+    ]
+    if len(set(attempt_ids)) != len(attempt_ids):
+        raise ValueError(
+            "aligned analysis contains duplicate canonical attempt identities"
+        )
+    contrast_results, task_counts, task_blockers, discriminating_tasks = (
+        _aligned_contrast_results(
+            declaration,
+            tuple(aligned_attempts),
+        )
+    )
+    interaction_results, interaction_blockers = _aligned_interaction_results(
+        declaration,
+        tuple(aligned_attempts),
+    )
+    for task_id, blockers in interaction_blockers.items():
+        task_blockers[task_id].update(blockers)
+    task_ids = sorted({item.task_id for item in aligned_attempts})
+    task_summaries = tuple(
+        TaskStratifiedSummaryV1(
+            task_id=task_id,
+            validity=(
+                "inconclusive"
+                if task_blockers[task_id]
+                else "valid"
+                if task_id in discriminating_tasks
+                else "non_discriminating"
+            ),
+            pair_counts=dict(sorted(task_counts[task_id].items())),
+            blockers=(
+                tuple(sorted(task_blockers[task_id]))
+                if task_blockers[task_id]
+                else ()
+                if task_id in discriminating_tasks
+                else ("declared outcome dimensions did not discriminate arms",)
+            ),
+        )
+        for task_id in task_ids
+    )
+    result = AlignedAnalysisV1(
+        study_intent=declaration.study_intent,
+        reference_arm=declaration.reference_arm,
+        arms=declaration.arms,
+        contrasts=declaration.contrasts,
+        aligned_attempts=tuple(aligned_attempts),
+        task_summaries=task_summaries,
+        declaration_digest=declaration.declaration_digest,
+        alignment_coordinates=declaration.alignment_coordinates,
+        contrast_results=contrast_results,
+        interactions=declaration.interactions,
+        interaction_results=interaction_results,
+    )
+    # Governed declarations require the complete arbitrary-arm grid even
+    # though historical AlignedAnalysisV1 readers remain contrast-permissive.
+    for aligned in result.aligned_attempts:
+        if set(aligned.attempt_ids_by_arm) != expected_arms:
+            raise ValueError(
+                "governed aligned result does not cover every declared arm"
+            )
+    return result
+
+
+def _declared_aligned_dimensions(
+    declaration: AlignedAnalysisDeclarationV1,
+) -> dict[str, AlignedDimensionV1]:
+    dimensions: dict[str, AlignedDimensionV1] = {}
+    for dimension in (
+        item for contrast in declaration.contrasts for item in contrast.dimensions
+    ):
+        existing = dimensions.setdefault(dimension.id, dimension)
+        if existing != dimension:
+            raise ValueError(
+                f"aligned dimension {dimension.id!r} has conflicting contracts"
+            )
+    for dimension in (
+        item
+        for interaction in declaration.interactions
+        for item in interaction.dimensions
+    ):
+        existing = dimensions.setdefault(dimension.id, dimension)
+        if existing != dimension:
+            raise ValueError(
+                f"aligned dimension {dimension.id!r} has conflicting contracts"
+            )
+    return dimensions
+
+
+def _aligned_row_arm(row: Mapping[str, Any], arm_ids: Sequence[str]) -> str:
+    declared = set(arm_ids)
+    matches = {
+        str(row.get(field) or "")
+        for field in ("variant_id", "harness")
+        if str(row.get(field) or "") in declared
+    }
+    if not matches:
+        raise ValueError(
+            "aligned analysis row does not map to a declared variant or harness arm"
+        )
+    if len(matches) != 1:
+        raise ValueError(
+            "aligned analysis row maps ambiguously to multiple declared arms: "
+            + ", ".join(sorted(matches))
+        )
+    return next(iter(matches))
+
+
+def _aligned_coordinate(row: Mapping[str, Any], coordinate: str) -> str:
+    if coordinate == "task_name":
+        value = row.get("task_name") or row.get("task_id")
+    elif coordinate == "trial_index":
+        value = row.get("trial_index")
+        if value is None and isinstance(row.get("attempt_identity"), Mapping):
+            value = row["attempt_identity"].get("attempt")
+        return str(_positive_analysis_int(value, "trial_index"))
+    else:
+        value = row.get(coordinate)
+    if value is None or str(value).strip() == "":
+        raise ValueError(f"aligned analysis row is missing coordinate {coordinate!r}")
+    return str(value)
+
+
+def _canonical_row_attempt_id(row: Mapping[str, Any]) -> str:
+    identity = row.get("attempt_identity")
+    if not isinstance(identity, Mapping):
+        raise ValueError(
+            "governed aligned analysis row is missing canonical attempt identity"
+        )
+    expected_identity = canonical_attempt_identity(
+        task_id=str(row.get("task_id") or row.get("task_name") or ""),
+        arm=str(row.get("variant_id") or ""),
+        harness=str(row.get("harness") or ""),
+        attempt=_positive_analysis_int(row.get("trial_index"), "trial_index"),
+        candidate=str(row.get("candidate_id") or ""),
+        runtime=str(row.get("execution_fingerprint") or ""),
+    )
+    if dict(identity) != expected_identity:
+        raise ValueError("aligned analysis attempt identity disagrees with its row")
+    expected_id = canonical_attempt_id(**expected_identity)
+    supplied = str(row.get("attempt_id") or "")
+    if supplied != expected_id:
+        raise ValueError(
+            "aligned analysis attempt id disagrees with canonical coordinates"
+        )
+    return supplied
+
+
+def _aligned_dimension_value(row: Mapping[str, Any], dimension_id: str) -> float | None:
+    if dimension_id == "task-success":
+        value = row.get("pass")
+    elif dimension_id == "runtime-completion":
+        value = row.get("agent_runtime_completed")
+    elif dimension_id == "outer-wall-timeout":
+        runtime_outcome = str(row.get("runtime_outcome") or "")
+        value = None if not runtime_outcome else runtime_outcome != "timed_out"
+    elif dimension_id == "wall-time":
+        value = row.get("wall_time_sec")
+    elif dimension_id == "tool-calls":
+        value = next(
+            (
+                row.get(key)
+                for key in (
+                    "tool_calls",
+                    "weave_tool_call_count",
+                    "mcp_tool_call_count",
+                )
+                if row.get(key) is not None
+            ),
+            None,
+        )
+    elif dimension_id == "observed-cost":
+        value = (
+            row.get("cost_usd")
+            if row.get("cost_usd") is not None
+            else row.get("weave_total_cost_usd")
+        )
+    elif dimension_id == "evidence-returned":
+        value = row.get("relevant_retrieval_returned")
+    elif dimension_id == "evidence-opened":
+        value = row.get("relevant_retrieval_opened")
+    elif dimension_id == "evidence-used":
+        value = row.get("relevant_retrieval_used")
+    else:
+        scores = row.get("scores")
+        deterministic = row.get("comparison_deterministic_scores")
+        value = row.get(dimension_id)
+        if value is None:
+            value = row.get(dimension_id.replace("-", "_"))
+        if value is None and isinstance(scores, Mapping):
+            value = scores.get(dimension_id)
+        if value is None and isinstance(deterministic, Mapping):
+            value = deterministic.get(dimension_id)
+    if isinstance(value, bool):
+        return float(value)
+    if (
+        isinstance(value, int | float)
+        and not isinstance(value, bool)
+        and math.isfinite(float(value))
+    ):
+        return float(value)
+    return None
+
+
+def _aligned_contrast_results(
+    declaration: AlignedAnalysisDeclarationV1,
+    aligned_attempts: Sequence[AlignedAttemptSetV1],
+) -> tuple[
+    tuple[AlignedContrastResultV1, ...],
+    defaultdict[str, defaultdict[str, int]],
+    defaultdict[str, set[str]],
+    set[str],
+]:
+    task_counts: defaultdict[str, defaultdict[str, int]] = defaultdict(
+        lambda: defaultdict(int)
+    )
+    task_blockers: defaultdict[str, set[str]] = defaultdict(set)
+    discriminating_tasks: set[str] = set()
+    results: list[AlignedContrastResultV1] = []
+    task_ids = sorted({item.task_id for item in aligned_attempts})
+    for contrast in declaration.contrasts:
+        for treatment_arm in contrast.treatment_arms:
+            for dimension in contrast.dimensions:
+                task_effects: list[AlignedTaskEffectV1] = []
+                all_pairs: list[tuple[float, float]] = []
+                global_missing = False
+                for task_id in task_ids:
+                    sets = [
+                        item for item in aligned_attempts if item.task_id == task_id
+                    ]
+                    pairs: list[tuple[float, float]] = []
+                    missing = False
+                    for item in sets:
+                        reference = item.dimension_values_by_arm.get(
+                            contrast.reference_arm, {}
+                        ).get(dimension.id)
+                        treatment = item.dimension_values_by_arm.get(
+                            treatment_arm, {}
+                        ).get(dimension.id)
+                        if reference is None or treatment is None:
+                            missing = True
+                            status = "inconclusive"
+                        else:
+                            pairs.append((reference, treatment))
+                            status = _aligned_effect_status(
+                                treatment - reference,
+                                role=dimension.role,
+                            )
+                        task_counts[task_id][
+                            ":".join(
+                                (
+                                    contrast.id,
+                                    treatment_arm,
+                                    dimension.id,
+                                    status,
+                                )
+                            )
+                        ] += 1
+                    if missing:
+                        global_missing = True
+                        if dimension.critical:
+                            task_blockers[task_id].add(
+                                f"{contrast.id}:{treatment_arm}:"
+                                f"{dimension.id} is missing"
+                            )
+                        task_effects.append(
+                            AlignedTaskEffectV1(
+                                task_id=task_id,
+                                aligned_sets=0,
+                                reference_mean=None,
+                                treatment_mean=None,
+                                estimate=None,
+                                classification="inconclusive",
+                            )
+                        )
+                        continue
+                    task_effect = _aligned_task_effect_result(
+                        task_id,
+                        pairs,
+                        role=dimension.role,
+                    )
+                    task_effects.append(task_effect)
+                    all_pairs.extend(pairs)
+                    if dimension.role == "outcome" and task_effect.classification in {
+                        "improved",
+                        "regressed",
+                        "mixed",
+                    }:
+                        discriminating_tasks.add(task_id)
+                if global_missing:
+                    results.append(
+                        AlignedContrastResultV1(
+                            contrast_id=contrast.id,
+                            reference_arm=contrast.reference_arm,
+                            treatment_arm=treatment_arm,
+                            dimension_id=dimension.id,
+                            role=dimension.role,
+                            critical=dimension.critical,
+                            aligned_sets=0,
+                            reference_mean=None,
+                            treatment_mean=None,
+                            estimate=None,
+                            classification="inconclusive",
+                            task_effects=tuple(task_effects),
+                        )
+                    )
+                    continue
+                aggregate = _aligned_task_effect_result(
+                    "__all__",
+                    all_pairs,
+                    role=dimension.role,
+                )
+                results.append(
+                    AlignedContrastResultV1(
+                        contrast_id=contrast.id,
+                        reference_arm=contrast.reference_arm,
+                        treatment_arm=treatment_arm,
+                        dimension_id=dimension.id,
+                        role=dimension.role,
+                        critical=dimension.critical,
+                        aligned_sets=aggregate.aligned_sets,
+                        reference_mean=aggregate.reference_mean,
+                        treatment_mean=aggregate.treatment_mean,
+                        estimate=aggregate.estimate,
+                        classification=aggregate.classification,
+                        task_effects=tuple(task_effects),
+                    )
+                )
+    return (
+        tuple(results),
+        task_counts,
+        task_blockers,
+        discriminating_tasks,
+    )
+
+
+def _aligned_task_effect_result(
+    task_id: str,
+    pairs: Sequence[tuple[float, float]],
+    *,
+    role: str,
+) -> AlignedTaskEffectV1:
+    if not pairs:
+        return AlignedTaskEffectV1(
+            task_id=task_id,
+            aligned_sets=0,
+            reference_mean=None,
+            treatment_mean=None,
+            estimate=None,
+            classification="inconclusive",
+        )
+    reference_mean = sum(item[0] for item in pairs) / len(pairs)
+    treatment_mean = sum(item[1] for item in pairs) / len(pairs)
+    statuses = {_aligned_effect_status(item[1] - item[0], role=role) for item in pairs}
+    classification = (
+        "mixed"
+        if "improved" in statuses and "regressed" in statuses
+        else "improved"
+        if "improved" in statuses
+        else "regressed"
+        if "regressed" in statuses
+        else "unchanged"
+    )
+    return AlignedTaskEffectV1(
+        task_id=task_id,
+        aligned_sets=len(pairs),
+        reference_mean=reference_mean,
+        treatment_mean=treatment_mean,
+        estimate=treatment_mean - reference_mean,
+        classification=classification,
+    )
+
+
+def _aligned_effect_status(delta: float, *, role: str) -> str:
+    if math.isclose(delta, 0.0, abs_tol=1e-12):
+        return "unchanged"
+    improvement = delta < 0 if role == "efficiency" else delta > 0
+    return "improved" if improvement else "regressed"
+
+
+def _aligned_interaction_results(
+    declaration: AlignedAnalysisDeclarationV1,
+    aligned_attempts: Sequence[AlignedAttemptSetV1],
+) -> tuple[
+    tuple[AlignedInteractionResultV1, ...],
+    defaultdict[str, set[str]],
+]:
+    task_blockers: defaultdict[str, set[str]] = defaultdict(set)
+    results: list[AlignedInteractionResultV1] = []
+    task_ids = sorted({item.task_id for item in aligned_attempts})
+    for interaction in declaration.interactions:
+        dimension_results: list[AlignedInteractionDimensionResultV1] = []
+        for dimension in interaction.dimensions:
+            task_effects: list[AlignedTaskInteractionEffectV1] = []
+            all_cells: dict[str, list[float]] = {
+                key: [] for key in ("00", "10", "01", "11")
+            }
+            global_missing = False
+            for task_id in task_ids:
+                sets = [item for item in aligned_attempts if item.task_id == task_id]
+                cells: dict[str, list[float]] = {
+                    key: [] for key in ("00", "10", "01", "11")
+                }
+                missing = False
+                for item in sets:
+                    for cell, arm in interaction.cell_arms.items():
+                        value = item.dimension_values_by_arm.get(arm, {}).get(
+                            dimension.id
+                        )
+                        if value is None:
+                            missing = True
+                            continue
+                        cells[cell].append(value)
+                if missing or any(
+                    len(values) != len(sets) for values in cells.values()
+                ):
+                    global_missing = True
+                    if dimension.critical:
+                        task_blockers[task_id].add(
+                            f"{interaction.id}:{dimension.id} interaction is missing"
+                        )
+                    task_effects.append(
+                        AlignedTaskInteractionEffectV1(
+                            task_id=task_id,
+                            aligned_sets=0,
+                            cell_means={},
+                            difference_in_differences=None,
+                            status="inconclusive",
+                            reason="one or more declared interaction cells are missing",
+                        )
+                    )
+                    continue
+                cell_means = {
+                    cell: sum(values) / len(values) for cell, values in cells.items()
+                }
+                for cell, values in cells.items():
+                    all_cells[cell].extend(values)
+                task_effects.append(
+                    AlignedTaskInteractionEffectV1(
+                        task_id=task_id,
+                        aligned_sets=len(sets),
+                        cell_means=cell_means,
+                        difference_in_differences=_difference_in_differences(
+                            cell_means
+                        ),
+                        status="computed",
+                    )
+                )
+            if global_missing:
+                dimension_results.append(
+                    AlignedInteractionDimensionResultV1(
+                        dimension_id=dimension.id,
+                        role=dimension.role,
+                        critical=dimension.critical,
+                        aligned_sets=0,
+                        cell_means={},
+                        difference_in_differences=None,
+                        status="inconclusive",
+                        task_effects=tuple(task_effects),
+                        reason="one or more aligned task cells are missing",
+                    )
+                )
+                continue
+            cell_means = {
+                cell: sum(values) / len(values) for cell, values in all_cells.items()
+            }
+            dimension_results.append(
+                AlignedInteractionDimensionResultV1(
+                    dimension_id=dimension.id,
+                    role=dimension.role,
+                    critical=dimension.critical,
+                    aligned_sets=len(aligned_attempts),
+                    cell_means=cell_means,
+                    difference_in_differences=_difference_in_differences(cell_means),
+                    status="computed",
+                    task_effects=tuple(task_effects),
+                )
+            )
+        results.append(
+            AlignedInteractionResultV1(
+                interaction_id=interaction.id,
+                factors=interaction.factors,
+                cell_arms=interaction.cell_arms,
+                dimensions=tuple(dimension_results),
+            )
+        )
+    return tuple(results), task_blockers
+
+
+def _difference_in_differences(cell_means: Mapping[str, float]) -> float:
+    return cell_means["11"] - cell_means["10"] - cell_means["01"] + cell_means["00"]
+
+
+def _positive_analysis_int(value: Any, label: str) -> int:
+    if isinstance(value, bool):
+        raise ValueError(f"aligned analysis {label} must be positive")
+    try:
+        result = int(value)
+    except (TypeError, ValueError) as exc:
+        raise ValueError(f"aligned analysis {label} must be positive") from exc
+    if result < 1:
+        raise ValueError(f"aligned analysis {label} must be positive")
+    return result
 
 
 def _scope(
@@ -1440,9 +2130,76 @@ def _scope(
     )
 
 
+def _scoped_result_project(rows: Sequence[Mapping[str, Any]]) -> str:
+    projects: set[str] = set()
+    for row in rows:
+        row_projects = {
+            str(value)
+            for value in (
+                row.get("result_evidence_project"),
+                row.get("trace_project"),
+            )
+            if str(value or "").strip()
+        }
+        receipt = row.get("trace_receipt")
+        if isinstance(receipt, Mapping):
+            receipt_project = str(receipt.get("project_slug") or "")
+            if not receipt_project:
+                entity = str(receipt.get("entity") or "")
+                project = str(receipt.get("project") or "")
+                receipt_project = f"{entity}/{project}" if entity and project else ""
+            if receipt_project:
+                row_projects.add(receipt_project)
+        if len(row_projects) != 1:
+            raise ValueError(
+                "hybrid analysis requires one exact result project per row; "
+                f"observed {sorted(row_projects)}"
+            )
+        projects.update(row_projects)
+    if len(projects) != 1:
+        raise ValueError(
+            "hybrid analysis rows span multiple result projects: "
+            + ", ".join(sorted(projects))
+        )
+    project = next(iter(projects))
+    if len(project.split("/")) != 2 or not all(project.split("/")):
+        raise ValueError(
+            "hybrid analysis result project must be an entity/project slug"
+        )
+    return project
+
+
 def _snapshot(rows: Sequence[dict[str, Any]], revision: str | None) -> AnalysisSnapshot:
     row_ids = tuple(sorted(str(row["row_id"]) for row in rows))
-    digest = hashlib.sha256("\n".join(row_ids).encode()).hexdigest()
+    safe_rows = sorted(
+        (redact_value(dict(row)) for row in rows),
+        key=lambda item: json.dumps(
+            item, sort_keys=True, separators=(",", ":"), default=str
+        ),
+    )
+    source_projects = sorted(
+        {
+            str(row.get("source_evidence_project") or "")
+            for row in rows
+            if row.get("source_evidence_project")
+        }
+    )
+    result_projects = sorted(
+        {
+            str(row.get("result_evidence_project") or row.get("trace_project") or "")
+            for row in rows
+            if row.get("result_evidence_project") or row.get("trace_project")
+        }
+    )
+    digest = stable_digest(
+        {
+            "schema_version": 2,
+            "row_ids": row_ids,
+            "source_projects": source_projects,
+            "result_projects": result_projects,
+            "rows": safe_rows,
+        }
+    )
     return AnalysisSnapshot(
         id=f"snapshot-{digest[:12]}",
         digest=digest,
@@ -1512,6 +2269,11 @@ def _write_analysis(result: AnalysisResult, repo_root: Path) -> None:
                     if key != "rows"
                 },
                 "aggregates": result.aggregates,
+                "aligned_analysis": (
+                    result.aligned_analysis.to_dict()
+                    if result.aligned_analysis is not None
+                    else None
+                ),
                 "selection": result.selection.to_dict() if result.selection else None,
                 "model": result.model,
                 "provider": result.provider,
@@ -1545,7 +2307,7 @@ def _write_promotion_bundle(result: AnalysisResult, repo_root: Path) -> None:
         _write_memory_treatment_lock(result)
         return
     if result.spec.id == "claude-loop-discovery-selection":
-        _write_intervention_lock(result)
+        _write_intervention_lock(result, repo_root)
         return
     rows = [dict(row) for row in result.snapshot.rows]
     selected_rows = [
@@ -1756,7 +2518,7 @@ def _write_memory_treatment_lock(result: AnalysisResult) -> None:
     )
 
 
-def _write_intervention_lock(result: AnalysisResult) -> None:
+def _write_intervention_lock(result: AnalysisResult, repo_root: Path) -> None:
     selection = result.selection
     assert selection is not None
     selected_variant = selection.selected_candidate_id
@@ -1771,9 +2533,7 @@ def _write_intervention_lock(result: AnalysisResult) -> None:
     experiment_ids = _unique(rows, "experiment_id")
     source_commits = _unique(rows, "source_commit")
     source_trees = _unique(rows, "source_tree")
-    source_dirty_digests = {
-        str(row.get("source_dirty_digest") or "") for row in rows
-    }
+    source_dirty_digests = {str(row.get("source_dirty_digest") or "") for row in rows}
     run_snapshots = tuple(
         sorted(
             {
@@ -1800,6 +2560,16 @@ def _write_intervention_lock(result: AnalysisResult) -> None:
         or not run_snapshots
         or not examples
     ):
+        return
+    lock_inputs = _intervention_lock_inputs(rows)
+    if lock_inputs is None:
+        return
+    selected_components = _intervention_component_locks(
+        rows,
+        selected_variant=selected_variant,
+        repo_root=repo_root,
+    )
+    if not selected_components:
         return
     candidate_by_variant: dict[str, str] = {}
     variant_ids = {
@@ -1855,18 +2625,133 @@ def _write_intervention_lock(result: AnalysisResult) -> None:
         source_commit=source_commits[0],
         source_tree=source_trees[0],
         source_dirty_digest="",
+        failure_lock_sha256=str(lock_inputs["failure_lock_sha256"]),
+        discovery_suite_sha256=str(lock_inputs["discovery_suite_sha256"]),
+        holdout_suite_sha256=str(lock_inputs["holdout_suite_sha256"]),
         analysis_snapshot_sha256=result.snapshot.digest,
         discovery_run_snapshot_sha256s=run_snapshots,
         comparison_example_ids=examples,
+        discovery_variant_ids=tuple(sorted(candidate_by_variant)),
         baseline_variant_id=baseline_variant,
         selected_variant_id=selected_variant,
+        selected_components=selected_components,
         rankings=rankings,
         decision=selection.decision,
         rationale=selection.reason,
+        failure_locked_at=str(lock_inputs["failure_locked_at"]),
+        suites_frozen_at=str(lock_inputs["suites_frozen_at"]),
+        discovery_completed_at=result.snapshot.created_at,
+        selection_locked_at=datetime.now(UTC).isoformat(),
     )
     write_intervention_selection_lock(
         result.report_dir / "intervention-selection-lock.json", lock
     )
+
+
+def _intervention_component_locks(
+    rows: Sequence[Mapping[str, Any]],
+    *,
+    selected_variant: str,
+    repo_root: Path,
+) -> tuple[InterventionComponentLockV1, ...]:
+    declared_paths: set[tuple[str, ...]] = set()
+    for row in rows:
+        paths = tuple(
+            sorted(
+                str(tag).removeprefix("intervention-component-lock:")
+                for tag in row.get("tags") or ()
+                if str(tag).startswith("intervention-component-lock:")
+            )
+        )
+        if not paths:
+            return ()
+        declared_paths.add(paths)
+    if len(declared_paths) != 1:
+        return ()
+    selected_rows = [
+        row for row in rows if str(row.get("variant_id") or "") == selected_variant
+    ]
+    if not selected_rows:
+        return ()
+    assigned_ids = {
+        str(value)
+        for row in selected_rows
+        for key in ("skill_ids", "skills_assigned", "integration_ids")
+        for value in row.get(key) or ()
+        if str(value)
+    }
+    components: list[InterventionComponentLockV1] = []
+    root = repo_root.resolve()
+    for raw in next(iter(declared_paths)):
+        path = (root / raw).resolve()
+        if root not in path.parents or not path.is_file():
+            return ()
+        try:
+            component = read_intervention_component_lock(path)
+        except (OSError, ValueError):
+            return ()
+        if component.component_id in assigned_ids:
+            components.append(component)
+    keys = {(item.kind, item.component_id) for item in components}
+    if not components or len(keys) != len(components):
+        return ()
+    return tuple(sorted(components, key=lambda item: (item.kind, item.component_id)))
+
+
+def _intervention_lock_inputs(
+    rows: Sequence[Mapping[str, Any]],
+) -> dict[str, Any] | None:
+    required = {
+        "failure_lock_sha256",
+        "discovery_suite_sha256",
+        "holdout_suite_sha256",
+        "failure_locked_at",
+        "suites_frozen_at",
+    }
+    values: dict[str, dict[str, Any]] = {}
+    observed_suite_digests: set[str] = set()
+    for row in rows:
+        raw = row.get("intervention_lock_inputs")
+        if not isinstance(raw, Mapping):
+            task_authoring = row.get("task_authoring")
+            raw = (
+                task_authoring.get("intervention_lock_inputs")
+                if isinstance(task_authoring, Mapping)
+                else None
+            )
+        tagged: dict[str, str] = {}
+        for tag in row.get("tags") or ():
+            value = str(tag)
+            if not value.startswith("intervention-lock:"):
+                continue
+            key, separator, item = value.removeprefix("intervention-lock:").partition(
+                "="
+            )
+            if not separator or key in tagged:
+                return None
+            tagged[key] = item
+        if tagged:
+            if isinstance(raw, Mapping) and dict(raw) != tagged:
+                return None
+            raw = tagged
+        if not isinstance(raw, Mapping) or set(raw) != required:
+            return None
+        value = {key: raw[key] for key in sorted(required)}
+        values[json.dumps(value, sort_keys=True, separators=(",", ":"))] = value
+        task_suite_tags = {
+            str(tag).removeprefix("task-suite:")
+            for tag in row.get("tags") or ()
+            if str(tag).startswith("task-suite:")
+        }
+        if len(task_suite_tags) != 1:
+            return None
+        observed_suite_digests.update(task_suite_tags)
+    if len(values) != 1 or len(observed_suite_digests) != 1:
+        return None
+    selected = next(iter(values.values()))
+    if selected["discovery_suite_sha256"] != next(iter(observed_suite_digests)):
+        return None
+    return selected
 
 
 def _suite_provenance(
@@ -2333,8 +3218,11 @@ def _metric_present(row: Mapping[str, Any], metric: str) -> bool:
         "tokens": "n_input_tokens",
         "failures": "pass",
         "tool_calls": "weave_tool_call_count",
+        "agent_runtime_completion_rate": "agent_runtime_completed",
         "context_invocation_rate": "context_invoked",
+        "relevant_retrieval_return_rate": "relevant_retrieval_returned",
         "relevant_retrieval_open_rate": "relevant_retrieval_opened",
+        "relevant_retrieval_use_rate": "relevant_retrieval_used",
         "relevant_retrieval_change_rate": "relevant_retrieval_changed",
         "off_target_change_only_rate": "off_target_change_only",
         "premature_completion_rate": "premature_completion",

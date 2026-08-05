@@ -595,10 +595,10 @@ class OperatorService:
     ) -> tuple[PreflightCheck, ...]:
         from fugue.preflight import PreflightCheck, run_preflight
 
-        env = self.env
-        external_graphiti_uri = bool(env.get("FUGUE_GRAPHITI_URI", "").strip())
         selected = experiment or self.experiment(request.experiment_id)
         selected = _experiment_with_request_overrides(selected, request)
+        env = _experiment_evidence_environment(selected, self.env)
+        external_graphiti_uri = bool(env.get("FUGUE_GRAPHITI_URI", "").strip())
         target_model = select_model(
             request.model,
             env=env,
@@ -746,8 +746,9 @@ class OperatorService:
         *,
         experiment: ExperimentSpec | None = None,
     ) -> BridgeFiles:
-        env = self.env
         selected = experiment or self.experiment(request.experiment_id)
+        selected = _experiment_with_request_overrides(selected, request)
+        env = _experiment_evidence_environment(selected, self.env)
         target = select_model(
             request.model,
             env=env,
@@ -925,7 +926,7 @@ class OperatorService:
         )
         request = plan.request
         selected = plan.experiment
-        env = self.env
+        env = _experiment_evidence_environment(selected, self.env)
         if "graphiti" in _selected_request_system_ids(selected, request):
             env = managed_service_environment(env, repo_root=self.repo_root)
         env["FUGUE_BUILDER_MODEL"] = (
@@ -1092,10 +1093,11 @@ class OperatorService:
         selected_tasks: list[tuple[BenchmarkManifest, Any]] = []
         workload_datasets: list[PreparedWorkloadDataset] = []
         evaluation_asset_locks: set[str] = set()
+        preparation_env = _experiment_evidence_environment(selected, self.env)
         dataset_runtime = ContextRuntime(
             repo_root=self.repo_root,
             cache_root=self.repo_root / DEFAULT_CACHE_ROOT,
-            env=self.env,
+            env=preparation_env,
         )
         for workload in workloads:
             if workload.runner != "harbor":
@@ -3850,6 +3852,19 @@ def _request_with_selection_lock(
         ):
             raise ValueError(
                 "intervention selection lock source tree differs from this clean checkout"
+            )
+        task_suite_digests = {
+            value.removeprefix("task-suite:")
+            for value in experiment.tags
+            if value.startswith("task-suite:")
+        }
+        if len(task_suite_digests) != 1:
+            raise ValueError(
+                "intervention holdout requires one exact locked Task Suite"
+            )
+        if task_suite_digests != {intervention.holdout_suite_sha256}:
+            raise ValueError(
+                "holdout Task Suite differs from the intervention selection lock"
             )
         selected = (
             intervention.baseline_variant_id,

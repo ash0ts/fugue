@@ -37,6 +37,13 @@ CellStatus = Literal[
 EventCallback = Callable[[dict[str, Any]], None]
 ExecutionKind = Literal["agent", "provider_diagnostic"]
 BenchmarkOutcome = Literal["passed", "failed", "unscored", "not_applicable"]
+RuntimeOutcome = Literal[
+    "completed",
+    "timed_out",
+    "cancelled",
+    "not_started",
+    "not_applicable",
+]
 CellStartedCallback = Callable[["PlannedCell"], Mapping[str, str] | None]
 CellFinishedCallback = Callable[["PlannedCell", "CellOutcome"], None]
 
@@ -63,6 +70,8 @@ class PlannedCell:
     env: dict[str, str]
     n_attempts: int
     execution_kind: ExecutionKind = "agent"
+    outer_wall_time_sec: int | None = None
+    execution_limits_digest: str = ""
     context_delivery: str = "portable"
     expected_evidence_paths: tuple[str, ...] = ()
     evaluation_asset_lock_sha256: str = ""
@@ -117,6 +126,8 @@ class PlannedCell:
             "candidate_id": self.candidate_id,
             "execution_fingerprint": self.execution_fingerprint,
             "execution_kind": self.execution_kind,
+            "outer_wall_time_sec": self.outer_wall_time_sec,
+            "execution_limits_digest": self.execution_limits_digest or None,
             "applicable": self.applicable,
             "config_path": self.config_path.as_posix(),
             "result_path": self.result_path.as_posix(),
@@ -149,6 +160,7 @@ class CellOutcome:
     error: str | None = None
     benchmark_outcome: BenchmarkOutcome = "unscored"
     reward: float | None = None
+    runtime_outcome: RuntimeOutcome = "not_started"
 
 
 @dataclass(frozen=True)
@@ -156,6 +168,10 @@ class _HarborJobResult:
     error: str | None
     benchmark_outcome: BenchmarkOutcome
     reward: float | None = None
+
+
+class _CellWallTimeExceeded(RuntimeError):
+    pass
 
 
 def new_run_id() -> str:
@@ -216,6 +232,8 @@ def plan_cells(
                 command=tuple(job.command),
                 env={**job.env, "FUGUE_ATTEMPT_ID": stable_attempt_id},
                 n_attempts=job.n_attempts,
+                outer_wall_time_sec=job.outer_wall_time_sec,
+                execution_limits_digest=job.execution_limits_digest,
                 context_delivery=job.context_delivery,
                 expected_evidence_paths=job.expected_evidence_paths,
                 evaluation_case=job.evaluation_case,
@@ -301,7 +319,11 @@ def execute_cells(
             runnable.append(cell)
         else:
             store.append_cell(
-                cell.record("not_applicable", benchmark_outcome="not_applicable")
+                cell.record(
+                    "not_applicable",
+                    benchmark_outcome="not_applicable",
+                    runtime_outcome="not_applicable",
+                )
             )
             store.append_event(
                 "cell_state",
@@ -314,19 +336,26 @@ def execute_cells(
                     cell.id,
                     "not_applicable",
                     benchmark_outcome="not_applicable",
+                    runtime_outcome="not_applicable",
                 )
             )
 
     def run_one(cell: PlannedCell) -> CellOutcome:
         assert store is not None
         if cancellation_event is not None and cancellation_event.is_set():
-            outcome = CellOutcome(cell.id, "cancelled", error=cancellation_message)
+            outcome = CellOutcome(
+                cell.id,
+                "cancelled",
+                error=cancellation_message,
+                runtime_outcome="cancelled",
+            )
             ended = datetime.now(UTC)
             store.append_cell(
                 cell.record(
                     "cancelled",
                     error=cancellation_message,
                     benchmark_outcome=outcome.benchmark_outcome,
+                    runtime_outcome="cancelled",
                     ended_at=ended.isoformat(),
                 )
             )
@@ -347,6 +376,7 @@ def execute_cells(
                     "failed",
                     error=error,
                     benchmark_outcome="unscored",
+                    runtime_outcome="not_started",
                     ended_at=datetime.now(UTC).isoformat(),
                 )
             )
@@ -368,7 +398,12 @@ def execute_cells(
         if start_failure is not None:
             return start_failure
         if cancellation_event is not None and cancellation_event.is_set():
-            outcome = CellOutcome(cell.id, "cancelled", error=cancellation_message)
+            outcome = CellOutcome(
+                cell.id,
+                "cancelled",
+                error=cancellation_message,
+                runtime_outcome="cancelled",
+            )
             ended = datetime.now(UTC)
             if cell_started_called and cell_finished is not None:
                 try:
@@ -384,6 +419,7 @@ def execute_cells(
                     "cancelled",
                     error=cancellation_message,
                     benchmark_outcome=outcome.benchmark_outcome,
+                    runtime_outcome="cancelled",
                     started_at=started.isoformat(),
                     ended_at=ended.isoformat(),
                     wall_time_sec=(ended - started).total_seconds(),
@@ -441,12 +477,24 @@ def execute_cells(
                 error=trial_error,
                 benchmark_outcome=harbor_result.benchmark_outcome,
                 reward=harbor_result.reward,
+                runtime_outcome=(
+                    "cancelled" if status == "cancelled" else "completed"
+                ),
+            )
+        except _CellWallTimeExceeded as exc:
+            outcome = CellOutcome(
+                cell.id,
+                "failed",
+                error=str(exc),
+                benchmark_outcome="unscored",
+                runtime_outcome="timed_out",
             )
         except Exception as exc:
             outcome = CellOutcome(
                 cell.id,
                 "failed",
                 error=f"{type(exc).__name__}: {exc}",
+                runtime_outcome="not_started",
             )
         ended = datetime.now(UTC)
         if cell_finished is not None:
@@ -465,6 +513,7 @@ def execute_cells(
                 error=outcome.error,
                 benchmark_outcome=outcome.benchmark_outcome,
                 reward=outcome.reward,
+                runtime_outcome=outcome.runtime_outcome,
                 started_at=started.isoformat(),
                 ended_at=ended.isoformat(),
                 wall_time_sec=(ended - started).total_seconds(),
@@ -478,6 +527,7 @@ def execute_cells(
             message=outcome.error,
             benchmark_outcome=outcome.benchmark_outcome,
             reward=outcome.reward,
+            runtime_outcome=outcome.runtime_outcome,
             wall_time_sec=(ended - started).total_seconds(),
         )
         return outcome
@@ -515,6 +565,7 @@ def _initialize_cell_evidence(
             cell.id,
             "failed",
             error=f"required live-evidence initialization failed: {error}",
+            runtime_outcome="not_started",
         )
         ended = datetime.now(UTC)
         wall_time = (ended - started).total_seconds()
@@ -523,6 +574,7 @@ def _initialize_cell_evidence(
                 "failed",
                 error=outcome.error,
                 benchmark_outcome="unscored",
+                runtime_outcome="not_started",
                 started_at=started.isoformat(),
                 ended_at=ended.isoformat(),
                 wall_time_sec=wall_time,
@@ -568,6 +620,12 @@ def _run_cell_process(
     )
     secrets = secrets_from_env(env)
     reader_error: list[BaseException] = []
+    deadline = (
+        time.monotonic() + cell.outer_wall_time_sec
+        if cell.outer_wall_time_sec is not None
+        else None
+    )
+    timed_out = False
 
     with log_path.open("a") as log:
         assert process.stdout is not None
@@ -595,6 +653,10 @@ def _run_cell_process(
             if cancellation_event is not None and cancellation_event.wait(0.1):
                 _terminate_process_group(process)
                 break
+            if deadline is not None and time.monotonic() >= deadline:
+                timed_out = True
+                _terminate_process_group(process)
+                break
             time.sleep(0.05)
         returncode = process.wait()
         reader.join(timeout=2)
@@ -603,6 +665,11 @@ def _run_cell_process(
             reader.join(timeout=2)
     if reader_error:
         raise RuntimeError(f"cell log reader failed: {reader_error[0]}")
+    if timed_out:
+        raise _CellWallTimeExceeded(
+            "outer cell wall-time limit exceeded after "
+            f"{cell.outer_wall_time_sec} seconds"
+        )
     return returncode
 
 

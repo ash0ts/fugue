@@ -1,0 +1,31 @@
+schema_version: 1
+id: real-memory-study-v1
+revision: v1
+title: Real repository-memory intervention canary
+objective: Determine whether locked dense repository retrieval, an inspect-and-verify policy, or their combination changes outcomes on two real maintenance tasks with Claude Code and Sonnet 5 fixed.
+allowed:
+  experiments: [real-memory-study]
+  models: [anthropic/claude-sonnet-5]
+  harnesses: [claude-code]
+  workloads: [canary]
+  variants: [baseline, rag-dense, policy-only, combined]
+  context_systems: [none, rag-dense]
+  analyses: [real-memory-factorial]
+  trace_content: [full]
+stages:
+  - id: canary
+    predecessors: []
+    max_proposals: 1
+    max_cells: 8
+    require_eligible_parent: false
+limits:
+  total_cost_usd: 10
+  initial_cell_reserve_usd: 1.25
+  safety_margin: 1
+  max_cells_per_proposal: 8
+  max_total_cells: 8
+  max_attempts_per_cell: 1
+  max_concurrent: 1
+  max_active_runs: 1
+evidence_scope: traces
+require_clean_source: true

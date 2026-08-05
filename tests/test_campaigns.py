@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import subprocess
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 from types import SimpleNamespace
@@ -9,6 +10,9 @@ from typing import Any
 import pytest
 
 import fugue.bench.campaign_lifecycle as campaign_lifecycle
+import fugue.bench.loop_failure as loop_failure
+import fugue.bench.run_conformance as run_conformance
+from fugue.bench.ai import _intervention_lock_inputs
 from fugue.bench.campaign_evidence import _runtime_locks_valid
 from fugue.bench.campaign_lifecycle import _auxiliary_model_preflight_checks
 from fugue.bench.campaigns import (
@@ -30,6 +34,10 @@ from fugue.bench.campaigns import (
 from fugue.bench.candidates import stable_digest
 from fugue.bench.export import PublishedEvaluation
 from fugue.bench.files import atomic_write_json
+from fugue.bench.intervention_provenance import (
+    build_intervention_component_lock,
+    write_intervention_component_lock,
+)
 from fugue.bench.operator import (
     AgentRuntimePreparation,
     CellSummary,
@@ -41,6 +49,10 @@ from fugue.bench.operator import (
     TaskRuntimePreparation,
 )
 from fugue.bench.runtime_provenance import resolve_fugue_source_provenance
+from fugue.bench.scoring import (
+    build_intervention_selection_lock,
+    write_intervention_selection_lock,
+)
 from fugue.bench.task_authoring import (
     scoring_revision_from_dict,
     task_profile_catalog_from_dict,
@@ -193,6 +205,126 @@ scorer_runtimes: []
     )
 
 
+def _selection_campaign_repo(tmp_path: Path) -> None:
+    _campaign_repo(tmp_path)
+    (tmp_path / "configs/fugue/experiments/demo.yaml").write_text(
+        """
+id: demo
+title: Selection-locked campaign
+manifest: datasets/demo.yaml
+model: openai/gpt-5
+harnesses: [codex]
+workloads:
+  - id: holdout
+    runner: harbor
+    manifest: datasets/demo.yaml
+    systems: [none]
+    variants: [production, candidate]
+default_preset: discovery
+presets:
+  discovery:
+    workloads: [holdout]
+    n_tasks: 1
+    n_attempts: 1
+  holdout:
+    workloads: [holdout]
+    n_tasks: 1
+    n_attempts: 1
+    selection_lock_required: true
+    selection_lock_kind: intervention
+variants:
+  - {id: production, label: Production, context: {system_id: none, delivery: portable}}
+  - {id: candidate, label: Candidate, context: {system_id: none, delivery: portable}}
+n_attempts: 1
+n_concurrent: 1
+jobs_dir: jobs/demo
+trace_content: full
+"""
+    )
+    campaign_path = tmp_path / "configs/fugue/campaigns/demo.yaml"
+    campaign_path.write_text(
+        """
+schema_version: 1
+id: demo
+revision: v1
+title: Selection-locked campaign
+objective: Freeze holdout tasks before discovery and confirm one selected intervention.
+allowed:
+  experiments: [demo]
+  models: [openai/gpt-5]
+  harnesses: [codex]
+  workloads: [holdout]
+  variants: [production, candidate]
+  context_systems: [none]
+  analyses: []
+  trace_content: [full]
+stages:
+  - id: discovery
+    predecessors: []
+    max_proposals: 1
+    max_cells: 2
+    require_eligible_parent: false
+  - id: holdout
+    predecessors: [discovery]
+    max_proposals: 1
+    max_cells: 2
+    require_eligible_parent: false
+limits:
+  total_cost_usd: 100
+  initial_cell_reserve_usd: 2
+  safety_margin: 1.5
+  max_cells_per_proposal: 2
+  max_total_cells: 4
+  max_attempts_per_cell: 1
+  max_concurrent: 1
+  max_active_runs: 1
+task_authoring:
+  enabled_stages: [discovery, holdout]
+  allowed_partitions: [discovery, holdout]
+  allowed_environment_profiles: [artifact-v1]
+  allowed_resource_profiles: []
+  allowed_interactor_profiles: []
+  allowed_judge_profiles: []
+  allowed_scorer_runtimes: []
+  allowed_prompt_parts: [text]
+  adaptive_discovery: true
+  limits:
+    max_tasks: 1
+    max_scenarios: 1
+    max_prompt_bytes: 4096
+    max_authored_asset_bytes: 4096
+    max_user_turns: 1
+    max_agent_turns: 1
+    max_interactor_calls: 0
+    max_judge_calls: 0
+    scorer_timeout_sec: 10
+    scorer_memory_mb: 128
+    scorer_cpus: 0.5
+    scorer_output_bytes: 4096
+evidence_scope: traces
+require_clean_source: false
+"""
+    )
+    (tmp_path / "source-marker.txt").write_text("locked source\n")
+    (tmp_path / ".gitignore").write_text(".fugue/\njobs/\n")
+    subprocess.run(["git", "init", "-q"], cwd=tmp_path, check=True)
+    subprocess.run(["git", "add", "."], cwd=tmp_path, check=True)
+    subprocess.run(
+        [
+            "git",
+            "-c",
+            "user.name=Fugue Tests",
+            "-c",
+            "user.email=fugue-tests@example.invalid",
+            "commit",
+            "-qm",
+            "fixture",
+        ],
+        cwd=tmp_path,
+        check=True,
+    )
+
+
 class FakeCampaignOperator(OperatorService):
     def __init__(self, repo_root: Path) -> None:
         super().__init__(repo_root, repo_root / ".env")
@@ -205,6 +337,8 @@ class FakeCampaignOperator(OperatorService):
         self.route_drift = False
         self.runtime_drift = False
         self.extra_runtime_lock = False
+        self.snapshot_identity_drift = False
+        self.strip_harbor_markers = False
         self.evaluation_drift = False
         self.bridge_ready = True
         self.bridge_starts = 0
@@ -287,12 +421,15 @@ class FakeCampaignOperator(OperatorService):
         planned_matrix = [
             {
                 "cell_id": cell.id,
+                "attempt_id": cell.attempt_id,
+                "attempt_identity": cell.attempt_identity,
                 "candidate_id": cell.candidate_id,
                 "execution_fingerprint": cell.execution_fingerprint,
                 "execution_kind": cell.execution_kind,
                 "comparison_example_id": cell.comparison_example_id,
                 "trial_index": cell.trial_index,
                 "workload_id": cell.workload_id,
+                "workload_runner": "harbor",
                 "task_id": cell.task_id,
                 "applicable": cell.applicable,
                 "skip_reason": cell.skip_reason,
@@ -300,6 +437,8 @@ class FakeCampaignOperator(OperatorService):
             }
             for cell in plan.cells
         ]
+        if self.snapshot_identity_drift and planned_matrix:
+            planned_matrix[0]["attempt_id"] = "0" * 64
         candidate_runtime: dict[str, dict[str, Any]] = {}
         runtime_locks: list[dict[str, Any]] = []
         for cell in plan.cells:
@@ -469,17 +608,35 @@ class FakeCampaignOperator(OperatorService):
         snapshot = value["snapshot"]
         rows = []
         for index, cell in enumerate(value["plan"].cells, 1):
-            root = f"root-{index}"
+            root = f"{index:016x}"
             conversation = f"conversation-{index}"
+            trace_id = f"{index:032x}"
+            project = "team/fugue-experiments"
+            app = "https://wandb.ai/team/fugue-experiments"
+            evaluation_call = f"evaluation-{index}"
+            attempt_call = f"attempt-{index}"
+            prediction_call = f"prediction-call-{index}"
+            agent_call = f"agent-{index}"
+
+            def call_ref(call_id: str) -> str:
+                return f"weave:///team/fugue-experiments/call/{call_id}"
+
+            def call_url(call_id: str, base: str = app) -> str:
+                return f"{base}/weave/calls/{call_id}"
+
             rows.append(
                 {
                     "schema_version": 1,
                     "prediction_schema_version": 1,
                     "record_type": "trial",
                     "prediction_id": f"prediction-{index}",
+                    "attempt_id": cell.attempt_id,
+                    "attempt_identity": cell.attempt_identity,
                     "run_id": run_id,
                     "candidate_id": cell.candidate_id,
+                    "execution_fingerprint": cell.execution_fingerprint,
                     "comparison_example_id": cell.comparison_example_id,
+                    "task_id": cell.task_id,
                     "trial_index": cell.trial_index,
                     "execution_kind": "agent",
                     "status": "passed",
@@ -492,14 +649,56 @@ class FakeCampaignOperator(OperatorService):
                     "context_system_id": cell.context_system_id,
                     "model_provider": cell.model_provider,
                     "model": cell.model,
+                    "trace_project": project,
+                    "result_evidence_project": project,
+                    "trace_receipt": {
+                        "project_slug": project,
+                        "app_base_url": "https://wandb.ai",
+                    },
                     "trace_link_status": "linked",
                     "root_span_id": root,
-                    "weave_root_span_ids": [root] if self.valid_evidence else [],
+                    "otel_root_span_ids": [root],
+                    "otel_trace_ids": [trace_id],
                     "observed_conversation_id": conversation,
                     "weave_conversation_ids": [conversation],
-                    "weave_trace_ids": [f"trace-{index}"],
+                    "conversation_correlation_verified": self.valid_evidence,
+                    "weave_evaluation_root_call_id": evaluation_call,
+                    "weave_evaluation_root_ref": call_ref(evaluation_call),
+                    "weave_evaluation_root_url": call_url(evaluation_call),
+                    "evaluation_root_object_verified": self.valid_evidence,
+                    "eval_predict_and_score_call_id": attempt_call,
+                    "eval_predict_and_score_ref": call_ref(attempt_call),
+                    "eval_predict_and_score_url": call_url(attempt_call),
+                    "eval_predict_and_score_object_verified": self.valid_evidence,
+                    "weave_prediction_call_id": prediction_call,
+                    "weave_prediction_ref": call_ref(prediction_call),
+                    "weave_prediction_url": call_url(prediction_call),
+                    "weave_prediction_object_verified": self.valid_evidence,
+                    "weave_agent_root_call_id": agent_call,
+                    "weave_agent_root_ref": call_ref(agent_call),
+                    "weave_agent_root_url": call_url(agent_call),
+                    "agent_graph_verified": self.valid_evidence,
+                    "weave_dataset_ref": (
+                        "weave:///team/fugue-experiments/object/dataset:v1"
+                    ),
+                    "weave_dataset_url": (
+                        f"{app}/weave/objects/dataset/versions/v1"
+                    ),
+                    "dataset_version_object_verified": self.valid_evidence,
+                    "evaluation_prediction_graph_verified": self.valid_evidence,
                     "runtime_equivalence_status": "equivalent",
                     "runtime_drift": False,
+                    "harbor_environment": "local_harbor_docker",
+                    "harbor_conformance_status": "passed",
+                    "harbor_policy_attestation_verified": True,
+                    "privacy_contract_version": 2,
+                    "local_artifact_privacy_scan_status": "passed",
+                    "local_artifact_privacy_match_count": 0,
+                    "hosted_evidence_privacy_scan_status": "passed",
+                    "hosted_evidence_privacy_match_count": 0,
+                    "private_label_boundary_verified": True,
+                    "sandbox_cleanup_verified": True,
+                    "orphaned_sandbox": False,
                     "run_snapshot_sha256": snapshot["snapshot_sha256"],
                     "evaluation_asset_lock_sha256": value["evaluation_lock"],
                     "cost_usd": 1.0,
@@ -514,6 +713,24 @@ class FakeCampaignOperator(OperatorService):
             )
             if self.invalid_agent_url:
                 rows[-1]["agent_url"] = "http://user:secret@example.invalid/?token=x"
+            if self.strip_harbor_markers:
+                for field in (
+                    "harbor_environment",
+                    "harbor_conformance_status",
+                    "harbor_conformance_receipt_digest",
+                    "harbor_policy_attestation_verified",
+                    "privacy_contract_version",
+                    "local_artifact_privacy_scan_status",
+                    "local_artifact_privacy_scan_digest",
+                    "local_artifact_privacy_match_count",
+                    "hosted_evidence_privacy_scan_status",
+                    "hosted_evidence_privacy_scan_digest",
+                    "hosted_evidence_privacy_match_count",
+                    "private_label_boundary_verified",
+                    "sandbox_cleanup_verified",
+                    "orphaned_sandbox",
+                ):
+                    rows[-1].pop(field, None)
         if self.missing_rows:
             rows = rows[:-1]
         if self.duplicate_rows and rows:
@@ -529,7 +746,31 @@ class FakeCampaignOperator(OperatorService):
 def _service(tmp_path: Path) -> CampaignService:
     _campaign_repo(tmp_path)
     operator = FakeCampaignOperator(tmp_path)
-    return CampaignService(tmp_path, operator=operator)
+    service = CampaignService(tmp_path, operator=operator)
+
+    real_privacy_check = service._apply_hosted_privacy_receipt
+
+    def apply_hosted_privacy_receipt(
+        *,
+        proposal: Any,
+        plan: Any,
+        run_id: str,
+        rows: list[dict[str, Any]],
+    ) -> None:
+        # The fake operator's ordinary rows already contain exact V2 evidence.
+        # Authored-suite tests and direct privacy tests still exercise the real
+        # hosted receipt boundary.
+        if run_id in operator.launched and proposal.task_suite_digest is None:
+            return
+        real_privacy_check(
+            proposal=proposal,
+            plan=plan,
+            run_id=run_id,
+            rows=rows,
+        )
+
+    service._apply_hosted_privacy_receipt = apply_hosted_privacy_receipt  # type: ignore[method-assign]
+    return service
 
 
 def _proposal(
@@ -586,6 +827,120 @@ def test_campaign_contracts_are_strict_and_digest_verified(tmp_path: Path) -> No
     tampered["model"] = "openai/other"
     with pytest.raises(ValueError, match="proposal_digest"):
         experiment_proposal_from_dict(tampered)
+
+
+def test_campaign_proposal_binds_and_propagates_intervention_prefreeze(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    service = _service(tmp_path)
+    catalog = service.catalog("demo")
+    inputs = {
+        "failure_lock_sha256": "a" * 64,
+        "discovery_suite_sha256": "b" * 64,
+        "holdout_suite_sha256": "c" * 64,
+        "failure_locked_at": "2026-07-30T10:00:00Z",
+        "suites_frozen_at": "2026-07-30T10:05:00Z",
+    }
+    proposal = build_experiment_proposal(
+        proposal_id="loop-discovery",
+        campaign_id="demo",
+        catalog_digest=catalog.catalog_digest,
+        stage_id="qualification",
+        research_question="Which locked intervention repairs the failure?",
+        hypothesis="One predeclared arm improves the deterministic outcome.",
+        fixed_dimensions=("model", "task", "runtime"),
+        varied_dimensions=("skill", "mcp"),
+        measured_dimensions=("task outcome", "mechanism use"),
+        experiment_id="demo",
+        model="openai/gpt-5",
+        n_attempts=1,
+        n_concurrent=1,
+        task_suite_digest="b" * 64,
+        intervention_lock_inputs=inputs,
+        failure_lock=".fugue/failures/repeated-failure.json",
+        intervention_component_locks=(
+            ".fugue/interventions/skill.lock.json",
+        ),
+    )
+
+    parsed = experiment_proposal_from_dict(proposal.to_dict())
+    assert parsed.intervention_lock_inputs == {
+        **inputs,
+        "failure_locked_at": "2026-07-30T10:00:00+00:00",
+        "suites_frozen_at": "2026-07-30T10:05:00+00:00",
+    }
+    assert parsed.failure_lock == ".fugue/failures/repeated-failure.json"
+    monkeypatch.setattr(
+        campaign_lifecycle,
+        "read_task_suite_lock",
+        lambda *_args, **_kwargs: SimpleNamespace(task_count=2),
+    )
+    request = service._request(parsed)
+    rows = [
+        {
+            "tags": [
+                *request.tags,
+                "task-suite:" + parsed.task_suite_digest,
+            ]
+        }
+    ]
+    assert _intervention_lock_inputs(rows) == parsed.intervention_lock_inputs
+    assert (
+        "intervention-component-lock:"
+        ".fugue/interventions/skill.lock.json"
+    ) in request.tags
+
+    with pytest.raises(ValueError, match="must match the governed phase lock"):
+        build_experiment_proposal(
+            proposal_id="loop-drifted-suite",
+            campaign_id="demo",
+            catalog_digest=catalog.catalog_digest,
+            stage_id="qualification",
+            research_question="Can a drifted suite be used?",
+            hypothesis="It must fail before planning.",
+            fixed_dimensions=("model",),
+            varied_dimensions=("skill",),
+            measured_dimensions=("task outcome",),
+            experiment_id="demo",
+            model="openai/gpt-5",
+            n_attempts=1,
+            n_concurrent=1,
+            task_suite_digest="d" * 64,
+            intervention_lock_inputs=inputs,
+        )
+
+
+def test_campaign_hosted_privacy_stays_unavailable_without_private_truth(
+    tmp_path: Path,
+) -> None:
+    service = _service(tmp_path)
+    proposal = _proposal(service)
+    rows = [
+        {
+            "run_id": "run-without-authored-suite",
+            "workload_id": "harbor",
+            "execution_kind": "agent",
+            "privacy_contract_version": 2,
+            "local_artifact_privacy_scan_status": "passed",
+            "hosted_evidence_privacy_scan_status": "passed",
+        }
+    ]
+
+    service._apply_hosted_privacy_receipt(
+        proposal=proposal,
+        plan=service.preview(proposal),
+        run_id="run-without-authored-suite",
+        rows=rows,
+    )
+
+    receipt = run_conformance.read_hosted_evidence_privacy_receipt(
+        repo_root=tmp_path,
+        run_id="run-without-authored-suite",
+    )
+    assert receipt["status"] == "unavailable"
+    assert rows[0]["local_artifact_privacy_scan_status"] == "unavailable"
+    assert rows[0]["hosted_evidence_privacy_scan_status"] == "unavailable"
 
 
 def test_catalog_and_preview_are_pure_and_hide_execution_details(
@@ -753,6 +1108,15 @@ def test_full_campaign_lifecycle_is_idempotent_and_reconciled(tmp_path: Path) ->
     service = _service(tmp_path)
     proposal = _proposal(service)
     plan = service.preview(proposal)
+    assert plan.cells[0]["attempt_id"]
+    assert plan.cells[0]["attempt_identity"] == {
+        "task_id": plan.cells[0]["task_id"],
+        "arm": plan.cells[0]["variant_id"],
+        "harness": plan.cells[0]["harness"],
+        "attempt": plan.cells[0]["trial_index"],
+        "candidate": plan.cells[0]["candidate_id"],
+        "runtime": plan.cells[0]["execution_fingerprint"],
+    }
 
     prepared = service.prepare(plan, "prepare-1")
     assert prepared_plan_from_dict(prepared.to_dict()) == prepared
@@ -777,7 +1141,30 @@ def test_full_campaign_lifecycle_is_idempotent_and_reconciled(tmp_path: Path) ->
     assert outcome.passed == 1
     assert outcome.accounted_cost_usd == 1.0
     assert outcome.row_refs[0]["prediction_id"] == "prediction-1"
+    assert len(outcome.row_refs[0]["attempt_id"]) == 64
+    assert outcome.row_refs[0]["attempt_identity"]["task_id"] == "task-one"
+    assert outcome.row_refs[0]["execution_fingerprint"] == plan.cells[0][
+        "execution_fingerprint"
+    ]
+    assert [
+        link["slot"] for link in outcome.row_refs[0]["evidence_links"]
+    ] == [
+        "prediction_and_score",
+        "prediction",
+        "evaluation_root",
+        "agent_root",
+        "dataset",
+    ]
     assert outcome.evidence_refs[0]["conversation_ids"] == ["conversation-1"]
+    assert outcome.evidence_refs[0]["attempt_id"] == outcome.row_refs[0][
+        "attempt_id"
+    ]
+    assert outcome.evidence_refs[0]["otel_root_span_ids"] == ["0000000000000001"]
+    assert all(
+        link["call_id"] != "0000000000000001"
+        for link in outcome.evidence_refs[0]["links"]
+        if link.get("call_id")
+    )
     assert outcome.evaluation_runs[0]["evaluation_ref"].endswith("/object/eval:v1")
     serialized = json.dumps(outcome.to_dict(), sort_keys=True)
     assert "expected_evidence_paths" not in serialized
@@ -811,6 +1198,7 @@ def test_campaign_preparation_bootstraps_a_required_bridge_once(tmp_path: Path) 
 
 def test_authored_task_suite_uses_the_campaign_lifecycle_and_replays_scoring(
     tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     service = _service(tmp_path)
     catalog = service.catalog("demo")
@@ -899,7 +1287,40 @@ def test_authored_task_suite_uses_the_campaign_lifecycle_and_replays_scoring(
     operator = service.operator
     assert isinstance(operator, FakeCampaignOperator)
     [run_id] = operator.launched
-    service.finalize(run_id, "finalize-authored-suite")
+    monkeypatch.setattr(
+        run_conformance,
+        "_fetch_hosted_evidence_snapshot",
+        lambda **_kwargs: run_conformance._HostedEvidenceSnapshot(
+            status="passed",
+            payloads=(),
+            required_call_count=4,
+            observed_required_call_count=4,
+            descendant_call_count=1,
+            agent_span_count=1,
+            required_agent_conversation_count=1,
+            observed_agent_conversation_count=1,
+            required_dataset_count=1,
+            observed_dataset_count=1,
+            query_error_count=0,
+        ),
+    )
+    outcome = service.finalize(run_id, "finalize-authored-suite")
+    hosted_privacy = run_conformance.read_hosted_evidence_privacy_receipt(
+        repo_root=tmp_path,
+        run_id=run_id,
+    )
+    [exported_row] = [
+        json.loads(line)
+        for line in (tmp_path / outcome.export_path).read_text().splitlines()
+        if line.strip()
+    ]
+    assert hosted_privacy["status"] == "passed"
+    assert hosted_privacy["private_label_record_count"] == 1
+    assert exported_row["hosted_evidence_privacy_scan_status"] == "passed"
+    assert (
+        exported_row["hosted_evidence_privacy_scan_digest"]
+        == hosted_privacy["receipt_sha256"]
+    )
 
     revision = scoring_revision_from_dict(
         {
@@ -932,6 +1353,432 @@ def test_authored_task_suite_uses_the_campaign_lifecycle_and_replays_scoring(
     )
     assert analysis.evaluation_digest == evaluation.evaluation_digest
     assert analysis.task_results[0]["criteria_passes"] == 1
+
+
+def test_authored_holdout_preserves_preset_and_binds_intervention_lock(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _selection_campaign_repo(tmp_path)
+    service = CampaignService(
+        tmp_path,
+        tmp_path / ".env",
+        operator=FakeCampaignOperator(tmp_path),
+    )
+    catalog = service.catalog("demo")
+    discovery = service.operator.rendered_jobs(
+        ExperimentRequest(experiment_id="demo", preset="discovery"),
+        run_id="discovery",
+        write_configs=False,
+    )
+    candidate_by_variant = {
+        job.variant_id: job.candidate_id for job in discovery
+    }
+    def suite_draft(
+        phase: str,
+        *,
+        suffix: str = "",
+        stage: str | None = None,
+        partition: str | None = None,
+    ) -> Any:
+        identity = f"{phase}{suffix}"
+        return task_suite_draft_from_dict(
+            {
+                "schema_version": 1,
+                "id": f"locked-{identity}",
+                "title": f"Locked {identity}",
+                "objective": f"Exercise the independently frozen {phase} task.",
+                "stage_id": stage or phase,
+                "tasks": [
+                    {
+                        "id": f"{identity}-one",
+                        "title": "Verify the evidence",
+                        "prompt": [
+                            {"type": "text", "text": "Verify the supplied evidence."}
+                        ],
+                        "environment": {"profile_id": "artifact-v1"},
+                        "interaction": {
+                            "type": "single_turn",
+                            "max_user_turns": 1,
+                            "max_agent_turns": 1,
+                            "timeout_sec": 300,
+                        },
+                        "criteria_set_id": "deterministic",
+                        "tags": [phase],
+                        "partition": partition or phase,
+                    }
+                ],
+                "scenarios": [
+                    {
+                        "id": identity,
+                        "title": phase.title(),
+                        "tasks": [
+                            {
+                                "task_id": f"{identity}-one",
+                                "weight": 1,
+                                "must_pass": True,
+                            }
+                        ],
+                    }
+                ],
+                "criteria_sets": [
+                    {
+                        "id": "deterministic",
+                        "title": "Deterministic outcome",
+                        "pass_threshold": 1,
+                        "criteria": [
+                            {
+                                "id": "benchmark",
+                                "description": "The benchmark passes.",
+                                "evaluator": {
+                                    "type": "benchmark_outcome",
+                                    "config": {},
+                                },
+                                "evidence": ["benchmark"],
+                                "weight": 1,
+                                "threshold": 1,
+                                "required": True,
+                            }
+                        ],
+                    }
+                ],
+            }
+        )
+
+    draft = suite_draft("holdout")
+    task_preview = service.preview_task_suite(
+        "demo", catalog.catalog_digest, draft
+    )
+    task_lock = service.lock_task_suite(task_preview, "lock-holdout")
+    discovery_preview = service.preview_task_suite(
+        "demo",
+        catalog.catalog_digest,
+        suite_draft("discovery"),
+    )
+    discovery_lock = service.lock_task_suite(discovery_preview, "lock-discovery")
+    discovery_event = next(
+        event
+        for event in service.events("demo")
+        if event.event == "task_suite_locked"
+        and event.artifact_digest == discovery_lock.suite_digest
+    )
+    suites_frozen_at = discovery_event.recorded_at
+    intervention_inputs = {
+        "failure_lock_sha256": "f" * 64,
+        "discovery_suite_sha256": discovery_lock.suite_digest,
+        "holdout_suite_sha256": task_lock.suite_digest,
+        "failure_locked_at": "2020-07-30T10:00:00Z",
+        "suites_frozen_at": suites_frozen_at,
+    }
+    failure_path = tmp_path / ".fugue/failures/repeated-failure.json"
+    failure_path.parent.mkdir(parents=True, exist_ok=True)
+    failure_path.write_text('{"reviewed":true}\n', encoding="utf-8")
+    def read_failure_lock(path: Path) -> dict[str, str]:
+        if path != failure_path:
+            raise FileNotFoundError(path)
+        return {
+            "lock_sha256": "f" * 64,
+            "locked_at": "2020-07-30T10:00:00+00:00",
+        }
+
+    monkeypatch.setattr(
+        loop_failure,
+        "read_comparison_failure_lock",
+        read_failure_lock,
+    )
+    relative_failure_path = failure_path.relative_to(tmp_path)
+    selected_component = build_intervention_component_lock(
+        kind="skill",
+        component_id="bounded-evidence",
+        lock_digest="3" * 64,
+        repository="https://github.com/wandb/fugue",
+        source_commit="1" * 40,
+        source_tree="2" * 40,
+    )
+    component_path = write_intervention_component_lock(
+        tmp_path / ".fugue/interventions/bounded-evidence.json",
+        selected_component,
+    ).relative_to(tmp_path)
+
+    def discovery_proposal_for(
+        proposal_id: str,
+        discovery_digest: str,
+        holdout_digest: str,
+        frozen_at: str,
+    ) -> Any:
+        return build_experiment_proposal(
+            proposal_id=proposal_id,
+            campaign_id="demo",
+            catalog_digest=catalog.catalog_digest,
+            stage_id="discovery",
+            research_question="Which intervention repairs the failure?",
+            hypothesis="The candidate improves the deterministic outcome.",
+            fixed_dimensions=("model", "task", "runtime"),
+            varied_dimensions=("variant",),
+            measured_dimensions=("benchmark",),
+            experiment_id="demo",
+            preset_id="discovery",
+            model="openai/gpt-5",
+            n_attempts=1,
+            n_tasks=1,
+            n_concurrent=1,
+            task_suite_digest=discovery_digest,
+            intervention_lock_inputs={
+                **intervention_inputs,
+                "discovery_suite_sha256": discovery_digest,
+                "holdout_suite_sha256": holdout_digest,
+                "suites_frozen_at": frozen_at,
+            },
+            failure_lock=relative_failure_path,
+            intervention_component_locks=(component_path,),
+        )
+
+    discovery_proposal = discovery_proposal_for(
+        "locked-discovery",
+        discovery_lock.suite_digest,
+        task_lock.suite_digest,
+        suites_frozen_at,
+    )
+    discovery_plan = service.preview(discovery_proposal)
+    assert discovery_plan.cell_count == 2
+    component_prefix = "intervention_component:skill:bounded-evidence"
+    assert (
+        discovery_plan.component_digests[f"{component_prefix}:canonical"]
+        == selected_component.component_digest
+    )
+    assert len(discovery_plan.component_digests[f"{component_prefix}:file"]) == 64
+    assert (
+        discovery_plan.component_digests["intervention_failure_lock:canonical"]
+        == "f" * 64
+    )
+    assert len(
+        discovery_plan.component_digests["intervention_failure_lock:file"]
+    ) == 64
+    monkeypatch.setattr(
+        loop_failure,
+        "read_comparison_failure_lock",
+        lambda _path: {
+            "lock_sha256": "f" * 64,
+            "locked_at": "2020-07-30T10:01:00+00:00",
+        },
+    )
+    with pytest.raises(CampaignError, match="time differs"):
+        service.preview(discovery_proposal)
+    monkeypatch.setattr(
+        loop_failure,
+        "read_comparison_failure_lock",
+        read_failure_lock,
+    )
+    original_component = (tmp_path / component_path).read_bytes()
+    (tmp_path / component_path).write_bytes(original_component + b"\n")
+    with pytest.raises(CampaignError, match="current resolved plan differs"):
+        service.prepare(discovery_plan, "prepare-drifted-component-file")
+    (tmp_path / component_path).write_bytes(original_component)
+    with pytest.raises(CampaignError, match="canonical discovery lock event"):
+        service.preview(
+            discovery_proposal_for(
+                "drifted-freeze-time",
+                discovery_lock.suite_digest,
+                task_lock.suite_digest,
+                "2026-07-30T10:05:00Z",
+            )
+        )
+    with pytest.raises(CampaignError, match="real TaskSuiteLockV1"):
+        service.preview(
+            discovery_proposal_for(
+                "fabricated-holdout",
+                discovery_lock.suite_digest,
+                "e" * 64,
+                suites_frozen_at,
+            )
+        )
+
+    wrong_partition_preview = service.preview_task_suite(
+        "demo",
+        catalog.catalog_digest,
+        suite_draft(
+            "discovery",
+            suffix="-wrong-partition",
+            partition="holdout",
+        ),
+    )
+    wrong_partition = service.lock_task_suite(
+        wrong_partition_preview,
+        "lock-wrong-partition",
+    )
+    wrong_partition_event = next(
+        event
+        for event in service.events("demo")
+        if event.artifact_digest == wrong_partition.suite_digest
+    )
+    with pytest.raises(CampaignError, match="only the 'discovery' partition"):
+        service.preview(
+            discovery_proposal_for(
+                "wrong-discovery-partition",
+                wrong_partition.suite_digest,
+                task_lock.suite_digest,
+                wrong_partition_event.recorded_at,
+            )
+        )
+
+    reversed_discovery_preview = service.preview_task_suite(
+        "demo",
+        catalog.catalog_digest,
+        suite_draft("discovery", suffix="-reversed"),
+    )
+    reversed_discovery = service.lock_task_suite(
+        reversed_discovery_preview,
+        "lock-reversed-discovery",
+    )
+    reversed_holdout_preview = service.preview_task_suite(
+        "demo",
+        catalog.catalog_digest,
+        suite_draft("holdout", suffix="-reversed"),
+    )
+    reversed_holdout = service.lock_task_suite(
+        reversed_holdout_preview,
+        "lock-reversed-holdout",
+    )
+    reversed_holdout_event = next(
+        event
+        for event in service.events("demo")
+        if event.artifact_digest == reversed_holdout.suite_digest
+    )
+    with pytest.raises(CampaignError, match="frozen before the discovery"):
+        service.preview(
+            discovery_proposal_for(
+                "late-holdout",
+                reversed_discovery.suite_digest,
+                reversed_holdout.suite_digest,
+                reversed_holdout_event.recorded_at,
+            )
+        )
+
+    source = resolve_fugue_source_provenance(tmp_path)
+    selection = build_intervention_selection_lock(
+        experiment_id="demo",
+        source_commit=str(source["commit"]),
+        source_tree=str(source["tree"]),
+        source_dirty_digest="",
+        failure_lock_sha256="f" * 64,
+        discovery_suite_sha256=discovery_lock.suite_digest,
+        holdout_suite_sha256=task_lock.suite_digest,
+        analysis_snapshot_sha256="a" * 64,
+        discovery_run_snapshot_sha256s=("b" * 64,),
+        comparison_example_ids=("c" * 64,),
+        discovery_variant_ids=("production", "candidate"),
+        baseline_variant_id="production",
+        selected_variant_id="candidate",
+        selected_components=(
+            selected_component,
+        ),
+        rankings=tuple(
+            {
+                "variant_id": variant_id,
+                "candidate_digest": candidate_by_variant[variant_id],
+            }
+            for variant_id in ("production", "candidate")
+        ),
+        decision="recommend",
+        rationale="candidate passed the preregistered discovery gate",
+        failure_locked_at="2020-07-30T10:00:00Z",
+        suites_frozen_at=suites_frozen_at,
+        discovery_completed_at="2099-07-30T11:00:00Z",
+        selection_locked_at="2099-07-30T11:05:00Z",
+    )
+    selection_path = write_intervention_selection_lock(
+        tmp_path / ".fugue/selection.json", selection
+    )
+
+    proposal_args = {
+        "proposal_id": "locked-holdout",
+        "campaign_id": "demo",
+        "catalog_digest": catalog.catalog_digest,
+        "stage_id": "holdout",
+        "research_question": "Does the frozen candidate hold on new tasks?",
+        "hypothesis": "The candidate preserves the discovery improvement.",
+        "fixed_dimensions": ("model", "task", "runtime"),
+        "varied_dimensions": ("variant",),
+        "measured_dimensions": ("benchmark",),
+        "experiment_id": "demo",
+        "preset_id": "holdout",
+        "model": "openai/gpt-5",
+        "n_attempts": 1,
+        "n_tasks": 1,
+        "n_concurrent": 1,
+        "task_suite_digest": task_lock.suite_digest,
+        "intervention_lock_inputs": intervention_inputs,
+        "failure_lock": relative_failure_path,
+    }
+    without_lock = build_experiment_proposal(**proposal_args)
+    with pytest.raises(CampaignError, match="requires an immutable selection lock"):
+        service.preview(without_lock)
+
+    proposal = build_experiment_proposal(
+        **proposal_args,
+        selection_lock=".fugue/selection.json",
+        intervention_component_locks=(component_path,),
+    )
+    plan = service.preview(proposal)
+    assert plan.cell_count == 2
+    assert {cell["variant_id"] for cell in plan.cells} == {
+        "production",
+        "candidate",
+    }
+    assert {cell["workload_id"] for cell in plan.cells} == {"holdout"}
+    assert plan.request["preset"] == "holdout"
+    assert plan.request["selection_lock"] == ".fugue/selection.json"
+    assert len(plan.component_digests["selection_lock"]) == 64
+
+    alternate_failure_path = (
+        tmp_path / ".fugue/failures/different-repeated-failure.json"
+    )
+    alternate_failure_path.write_text('{"reviewed":true}\n', encoding="utf-8")
+
+    def read_alternate_failure_lock(path: Path) -> dict[str, str]:
+        if path == alternate_failure_path:
+            return {
+                "lock_sha256": "e" * 64,
+                "locked_at": "2020-07-30T10:00:00+00:00",
+            }
+        return read_failure_lock(path)
+
+    monkeypatch.setattr(
+        loop_failure,
+        "read_comparison_failure_lock",
+        read_alternate_failure_lock,
+    )
+    wrong_failure_proposal = build_experiment_proposal(
+        **{
+            **proposal_args,
+            "proposal_id": "wrong-failure-holdout",
+            "intervention_lock_inputs": {
+                **intervention_inputs,
+                "failure_lock_sha256": "e" * 64,
+            },
+            "failure_lock": alternate_failure_path.relative_to(tmp_path),
+        },
+        selection_lock=".fugue/selection.json",
+        intervention_component_locks=(component_path,),
+    )
+    with pytest.raises(CampaignError, match="different locked failure"):
+        service.preview(wrong_failure_proposal)
+    monkeypatch.setattr(
+        loop_failure,
+        "read_comparison_failure_lock",
+        read_failure_lock,
+    )
+
+    source_marker = tmp_path / "source-marker.txt"
+    original_source_marker = source_marker.read_text()
+    source_marker.write_text(original_source_marker + "drift\n")
+    with pytest.raises(CampaignError, match="catalog digest"):
+        service.preview(proposal)
+    source_marker.write_text(original_source_marker)
+
+    selection_path.write_text(selection_path.read_text() + "\n")
+    with pytest.raises(CampaignError, match="current resolved plan differs"):
+        service.prepare(plan, "prepare-drifted-selection")
 
 
 def test_authored_auxiliary_model_routes_fail_preflight_without_keys() -> None:
@@ -1214,7 +2061,7 @@ def test_incomplete_agent_evidence_cannot_unlock_the_next_stage(
 
     assert not outcome.eligible
     assert any(
-        "exactly one Agent root" in item for item in outcome.eligibility_failures
+        "verified Weave link" in item for item in outcome.eligibility_failures
     )
     primary = _proposal(
         service,
@@ -1470,10 +2317,12 @@ def test_cancellation_recovers_without_repeating_supervisor_call(
         ("route_drift", "model-route receipts"),
         ("runtime_drift", "exact runtime locks"),
         ("extra_runtime_lock", "exact runtime locks"),
+        ("snapshot_identity_drift", "snapshot coordinates"),
         ("evaluation_drift", "exact evaluation asset lock"),
         ("invalid_agent_url", "invalid Agent link"),
         ("missing_rows", "observed 0 prediction rows"),
         ("duplicate_rows", "duplicates prediction identity"),
+        ("strip_harbor_markers", "does not identify the exact local Harbor backend"),
     ),
 )
 def test_invalid_or_partial_evidence_is_preserved_but_ineligible(
@@ -1505,7 +2354,8 @@ def test_runtime_lock_validation_scopes_context_runtime_to_context_cells() -> No
                 "context_system_id": "none",
                 "execution_fingerprint": "control-fingerprint",
                 "execution_kind": "agent",
-                "workload_id": "harbor",
+                "workload_id": "maintenance-canary",
+                "workload_runner": "harbor",
             },
             {
                 "applicable": True,
@@ -1513,7 +2363,8 @@ def test_runtime_lock_validation_scopes_context_runtime_to_context_cells() -> No
                 "context_system_id": "rag-dense",
                 "execution_fingerprint": "search-fingerprint",
                 "execution_kind": "agent",
-                "workload_id": "harbor",
+                "workload_id": "maintenance-canary",
+                "workload_runner": "harbor",
             },
         )
     )
@@ -1556,6 +2407,14 @@ def test_runtime_lock_validation_scopes_context_runtime_to_context_cells() -> No
     }
 
     assert _runtime_locks_valid(snapshot, plan, prepared)
+
+    missing_task_runtime = SimpleNamespace(
+        preparation={
+            **prepared.preparation,
+            "task_runtimes": [],
+        }
+    )
+    assert not _runtime_locks_valid(snapshot, plan, missing_task_runtime)
 
     invalid = json.loads(json.dumps(snapshot))
     invalid["runtime_locks"][0] = lock(

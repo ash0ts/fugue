@@ -1,0 +1,31 @@
+schema_version: 1
+id: real-harness-study-v1
+revision: v1
+title: Real harness behavior canary
+objective: Measure task-specific harness behavior without changing the W&B-routed GLM-5.2 model, task cohort, context, runtime policy, or attempt count and without claiming a universal harness ranking.
+allowed:
+  experiments: [real-harness-study]
+  models: [wandb/zai-org/GLM-5.2]
+  harnesses: [hermes, openclaw, claude-code, codex]
+  workloads: [canary]
+  variants: [baseline]
+  context_systems: [none]
+  analyses: [real-harness-task-stratified]
+  trace_content: [full]
+stages:
+  - id: canary
+    predecessors: []
+    max_proposals: 1
+    max_cells: 8
+    require_eligible_parent: false
+limits:
+  total_cost_usd: 10
+  initial_cell_reserve_usd: 1.25
+  safety_margin: 1
+  max_cells_per_proposal: 8
+  max_total_cells: 8
+  max_attempts_per_cell: 1
+  max_concurrent: 1
+  max_active_runs: 1
+evidence_scope: traces
+require_clean_source: true

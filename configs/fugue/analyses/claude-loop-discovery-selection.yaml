@@ -1,0 +1,30 @@
+id: claude-loop-discovery-selection
+title: Claude loop Skill and MCP intervention selection
+question: Which independently locked Skill or MCP intervention produces a deterministic gain on the two reviewed discovery failures while actually using the assigned behavior assets?
+filters:
+  experiment_id: claude-loop-skill-mcp
+  tag: claude-loop-discovery-v1
+group_by: [variant_id, harness, model]
+metrics:
+  - pass_rate
+  - tool_calls
+  - wall_time_sec
+  - tokens
+  - cost_usd
+source: hybrid
+include_artifacts: false
+selection:
+  selection_unit: variant
+  baseline_variant_id: production
+  metric: pass_rate
+  confidence: 0.95
+  noninferiority_margin: 0.05
+  require_complete_grid: true
+  required_examples: 2
+  required_harnesses: [claude-code]
+  require_agent_links: true
+  require_skill_invocation: true
+  required_any_tool_names: [query_wandb_tool, summarize_evaluation_tool]
+  minimum_paired_pass_rate_delta: 0.5
+  bootstrap_samples: 2000
+  tie_breakers: [recoverable_error_rate, cost_per_success, median_wall_time_sec]

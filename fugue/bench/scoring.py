@@ -5,13 +5,18 @@ import json
 import math
 import random
 from collections.abc import Iterable, Mapping
-from dataclasses import asdict, dataclass
+from dataclasses import asdict, dataclass, replace
+from datetime import UTC, datetime
 from pathlib import Path
 from statistics import median
 from typing import Any, Literal
 
 from fugue.bench.context import RetrievalHit, RetrievalQuery
 from fugue.bench.files import atomic_write_json
+from fugue.bench.intervention_provenance import (
+    InterventionComponentLockV1,
+    intervention_component_lock_from_dict,
+)
 
 
 @dataclass(frozen=True)
@@ -141,14 +146,23 @@ class InterventionSelectionLockV1:
     source_commit: str
     source_tree: str
     source_dirty_digest: str
+    failure_lock_sha256: str
+    discovery_suite_sha256: str
+    holdout_suite_sha256: str
     analysis_snapshot_sha256: str
     discovery_run_snapshot_sha256s: tuple[str, ...]
     comparison_example_ids: tuple[str, ...]
+    discovery_variant_ids: tuple[str, ...]
     baseline_variant_id: str
     selected_variant_id: str
+    selected_components: tuple[InterventionComponentLockV1, ...]
     rankings: tuple[dict[str, Any], ...]
     decision: Literal["recommend", "promote"]
     rationale: str
+    failure_locked_at: str
+    suites_frozen_at: str
+    discovery_completed_at: str
+    selection_locked_at: str
     lock_sha256: str = ""
 
     def to_dict(self) -> dict[str, Any]:
@@ -157,6 +171,10 @@ class InterventionSelectionLockV1:
             self.discovery_run_snapshot_sha256s
         )
         value["comparison_example_ids"] = list(self.comparison_example_ids)
+        value["discovery_variant_ids"] = list(self.discovery_variant_ids)
+        value["selected_components"] = [
+            item.to_dict() for item in self.selected_components
+        ]
         value["rankings"] = list(self.rankings)
         return value
 
@@ -439,20 +457,31 @@ def read_treatment_selection_lock(path: Path) -> TreatmentSelectionLockV1:
     )
 
 
-def build_intervention_selection_lock(
+def build_intervention_selection_lock(  # noqa: C901 - one strict lock contract
     *,
     experiment_id: str,
     source_commit: str,
     source_tree: str,
     source_dirty_digest: str,
+    failure_lock_sha256: str,
+    discovery_suite_sha256: str,
+    holdout_suite_sha256: str,
     analysis_snapshot_sha256: str,
     discovery_run_snapshot_sha256s: Iterable[str],
     comparison_example_ids: Iterable[str],
+    discovery_variant_ids: Iterable[str],
     baseline_variant_id: str,
     selected_variant_id: str,
+    selected_components: Iterable[
+        InterventionComponentLockV1 | Mapping[str, Any]
+    ],
     rankings: Iterable[Mapping[str, Any]],
     decision: str,
     rationale: str,
+    failure_locked_at: str,
+    suites_frozen_at: str,
+    discovery_completed_at: str,
+    selection_locked_at: str,
 ) -> InterventionSelectionLockV1:
     experiment = str(experiment_id).strip()
     baseline = str(baseline_variant_id).strip()
@@ -476,6 +505,15 @@ def build_intervention_selection_lock(
             "intervention selection requires a clean source tree; "
             "dirty worktrees cannot be qualified"
         )
+    for value, label in (
+        (failure_lock_sha256, "failure lock"),
+        (discovery_suite_sha256, "discovery suite"),
+        (holdout_suite_sha256, "holdout suite"),
+    ):
+        if not _sha256(value):
+            raise ValueError(f"{label} must be a SHA-256 digest")
+    if discovery_suite_sha256 == holdout_suite_sha256:
+        raise ValueError("discovery and holdout suites must be independently frozen")
     if not _sha256(analysis_snapshot_sha256):
         raise ValueError("analysis snapshot must be a SHA-256 digest")
     run_snapshots = tuple(
@@ -490,6 +528,26 @@ def build_intervention_selection_lock(
         raise ValueError(
             "intervention selection requires nonzero comparison example digests"
         )
+    variants = tuple(
+        dict.fromkeys(str(value).strip() for value in discovery_variant_ids)
+    )
+    if len(variants) < 2 or any(not value for value in variants):
+        raise ValueError(
+            "intervention selection requires every discovery arm identity"
+        )
+    components = tuple(
+        intervention_component_lock_from_dict(
+            value.to_dict()
+            if isinstance(value, InterventionComponentLockV1)
+            else value
+        )
+        for value in selected_components
+    )
+    component_keys = tuple((item.kind, item.component_id) for item in components)
+    if not components or len(component_keys) != len(set(component_keys)):
+        raise ValueError(
+            "intervention selection requires unique exact selected component locks"
+        )
     normalized = tuple(dict(value) for value in rankings)
     ranked_ids = [str(value.get("variant_id") or "") for value in normalized]
     if not normalized or len(ranked_ids) != len(set(ranked_ids)) or "" in ranked_ids:
@@ -497,6 +555,10 @@ def build_intervention_selection_lock(
     if not {baseline, selected} <= set(ranked_ids):
         raise ValueError(
             "baseline and selected variants must appear in the complete rankings"
+        )
+    if set(variants) != set(ranked_ids):
+        raise ValueError(
+            "intervention rankings must bind every predeclared discovery arm"
         )
     for ranking in normalized:
         if not _sha256(str(ranking.get("candidate_digest") or "")):
@@ -508,6 +570,28 @@ def build_intervention_selection_lock(
     reason = str(rationale).strip()
     if not reason:
         raise ValueError("intervention selection lock requires a rationale")
+    failure_time = _utc_timestamp(failure_locked_at, "failure lock time")
+    suites_time = _utc_timestamp(suites_frozen_at, "suite freeze time")
+    discovery_time = _utc_timestamp(
+        discovery_completed_at,
+        "discovery completion time",
+    )
+    selection_time = _utc_timestamp(selection_locked_at, "selection lock time")
+    parsed_times = tuple(datetime.fromisoformat(value) for value in (
+        failure_time,
+        suites_time,
+        discovery_time,
+        selection_time,
+    ))
+    if not (
+        parsed_times[0] <= parsed_times[1]
+        < parsed_times[2]
+        <= parsed_times[3]
+    ):
+        raise ValueError(
+            "intervention chronology must lock the failure, freeze both suites, "
+            "complete discovery, then lock selection"
+        )
     base = InterventionSelectionLockV1(
         schema_version=1,
         kind="intervention_selection",
@@ -515,19 +599,26 @@ def build_intervention_selection_lock(
         source_commit=source_commit,
         source_tree=source_tree,
         source_dirty_digest="",
+        failure_lock_sha256=failure_lock_sha256,
+        discovery_suite_sha256=discovery_suite_sha256,
+        holdout_suite_sha256=holdout_suite_sha256,
         analysis_snapshot_sha256=analysis_snapshot_sha256,
         discovery_run_snapshot_sha256s=run_snapshots,
         comparison_example_ids=examples,
+        discovery_variant_ids=variants,
         baseline_variant_id=baseline,
         selected_variant_id=selected,
+        selected_components=components,
         rankings=normalized,
         decision=decision,  # type: ignore[arg-type]
         rationale=reason,
+        failure_locked_at=failure_time,
+        suites_frozen_at=suites_time,
+        discovery_completed_at=discovery_time,
+        selection_locked_at=selection_time,
     )
     digest = _digest(base.to_dict())
-    return InterventionSelectionLockV1(
-        **{**asdict(base), "lock_sha256": digest}
-    )
+    return replace(base, lock_sha256=digest)
 
 
 def write_intervention_selection_lock(
@@ -557,6 +648,11 @@ def read_intervention_selection_lock(path: Path) -> InterventionSelectionLockV1:
         source_commit=str(payload.get("source_commit") or ""),
         source_tree=str(payload.get("source_tree") or ""),
         source_dirty_digest=str(payload.get("source_dirty_digest") or ""),
+        failure_lock_sha256=str(payload.get("failure_lock_sha256") or ""),
+        discovery_suite_sha256=str(
+            payload.get("discovery_suite_sha256") or ""
+        ),
+        holdout_suite_sha256=str(payload.get("holdout_suite_sha256") or ""),
         analysis_snapshot_sha256=str(
             payload.get("analysis_snapshot_sha256") or ""
         ),
@@ -567,15 +663,40 @@ def read_intervention_selection_lock(path: Path) -> InterventionSelectionLockV1:
         comparison_example_ids=tuple(
             str(value) for value in payload.get("comparison_example_ids") or ()
         ),
+        discovery_variant_ids=tuple(
+            str(value) for value in payload.get("discovery_variant_ids") or ()
+        ),
         baseline_variant_id=str(payload.get("baseline_variant_id") or ""),
         selected_variant_id=str(payload.get("selected_variant_id") or ""),
+        selected_components=tuple(
+            intervention_component_lock_from_dict(value)
+            for value in payload.get("selected_components") or ()
+            if isinstance(value, Mapping)
+        ),
         rankings=tuple(dict(value) for value in payload.get("rankings") or ()),
         decision=str(payload.get("decision") or ""),
         rationale=str(payload.get("rationale") or ""),
+        failure_locked_at=str(payload.get("failure_locked_at") or ""),
+        suites_frozen_at=str(payload.get("suites_frozen_at") or ""),
+        discovery_completed_at=str(
+            payload.get("discovery_completed_at") or ""
+        ),
+        selection_locked_at=str(payload.get("selection_locked_at") or ""),
     )
     if rebuilt.lock_sha256 != expected:
         raise ValueError("intervention selection lock normalization changed its digest")
     return rebuilt
+
+
+def _utc_timestamp(value: str, label: str) -> str:
+    text = str(value).strip()
+    try:
+        parsed = datetime.fromisoformat(text.replace("Z", "+00:00"))
+    except ValueError as exc:
+        raise ValueError(f"{label} must be an ISO-8601 timestamp") from exc
+    if parsed.tzinfo is None:
+        raise ValueError(f"{label} must include a timezone")
+    return parsed.astimezone(UTC).isoformat()
 
 
 def _sha256(value: str) -> bool:

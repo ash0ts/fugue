@@ -1,0 +1,61 @@
+id: real-memory-factorial
+title: Dense retrieval × evidence-policy analysis
+question: Does locked dense repository retrieval change task outcomes by itself, or only when Claude Code must inspect and verify returned evidence?
+filters:
+  experiment_id: real-memory-study
+  tag: real-study-lane-v1
+group_by: [variant_id, task_name, context_system_id, model]
+metrics:
+  - pass_rate
+  - context_invocation_rate
+  - relevant_retrieval_return_rate
+  - relevant_retrieval_open_rate
+  - relevant_retrieval_use_rate
+  - relevant_retrieval_change_rate
+  - wall_time_sec
+  - tool_calls
+  - tokens
+  - cost_usd
+source: hybrid
+include_artifacts: false
+aligned_analysis:
+  schema_version: 1
+  study_intent: dense-retrieval-by-evidence-policy
+  reference_arm: baseline
+  arms:
+    - {id: baseline, label: No added retrieval or evidence policy}
+    - {id: rag-dense, label: Locked dense retrieval}
+    - {id: policy-only, label: Inspect-and-verify policy}
+    - {id: combined, label: Dense retrieval plus policy}
+  contrasts:
+    - id: rag-dense-vs-baseline
+      reference_arm: baseline
+      treatment_arms: [rag-dense]
+      dimensions: &memory_dimensions
+        - {id: task-success, label: Harbor task success, role: outcome, critical: true}
+        - {id: evidence-returned, label: Relevant evidence returned, role: mechanism, critical: false}
+        - {id: evidence-opened, label: Returned evidence opened, role: mechanism, critical: false}
+        - {id: evidence-used, label: Opened evidence cited or changed, role: mechanism, critical: false}
+        - {id: runtime-completion, label: Claude Code runtime completion, role: infrastructure, critical: true}
+        - {id: wall-time, label: Observed wall time, role: efficiency, critical: false}
+        - {id: observed-cost, label: Observed cost, role: efficiency, critical: false}
+    - id: policy-only-vs-baseline
+      reference_arm: baseline
+      treatment_arms: [policy-only]
+      dimensions: *memory_dimensions
+    - id: combined-vs-baseline
+      reference_arm: baseline
+      treatment_arms: [combined]
+      dimensions: *memory_dimensions
+  alignment_coordinates: [task_name, trial_index]
+  interactions:
+    - id: retrieval-by-evidence-policy
+      factors:
+        - {id: retrieval, off_level: "off", on_level: dense}
+        - {id: evidence-policy, off_level: standard, on_level: required}
+      cell_arms:
+        "00": baseline
+        "10": rag-dense
+        "01": policy-only
+        "11": combined
+      dimensions: *memory_dimensions

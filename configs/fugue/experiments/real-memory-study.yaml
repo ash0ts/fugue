@@ -1,0 +1,97 @@
+id: real-memory-study
+title: Real repository-memory intervention canary
+description: Compare no intervention, locked rag-dense retrieval, an inspect-and-verify policy, and their combination on two real maintenance tasks with Claude Code and Anthropic Sonnet 5 held fixed.
+research_view:
+  observation: A maintenance Agent can miss repository evidence either because retrieval did not surface it or because returned evidence was not opened and used.
+  rationale: Use a 2×2 dense-retrieval × evidence-policy design to separate retrieval availability from evidence-use behavior.
+  alternative_explanations:
+    - Dense retrieval may return relevant evidence that the Agent ignores.
+    - The policy may help without retrieval by encouraging direct inspection.
+    - One attempt per task cannot establish a universal memory effect.
+  success_definition: Produce eight linked terminal rows, keep dense retrieval fail-closed, and report returned, opened, used, and task-outcome evidence separately.
+  task_title: Test dense repository memory and evidence policy
+  task_summary: Compare baseline, dense retrieval, inspect-and-verify policy, and their combination on two locked maintenance tasks.
+  interaction_mode: Single-turn isolated Claude Code cells
+  tools: [Shell, Fugue context retrieval]
+  resources: [Locked task images, dense index lock, evidence-policy prompt]
+  base_instruction_summary: Solve the assigned maintenance task from the checked-out repository.
+  treatment_summaries:
+    baseline: No added retrieval and standard evidence behavior.
+    rag-dense: Add only locked dense repository retrieval.
+    policy-only: Add only the inspect-and-verify evidence policy.
+    combined: Add locked dense retrieval and the inspect-and-verify policy.
+  arm_factor_levels:
+    baseline: {retrieval: "off", evidence-policy: standard}
+    rag-dense: {retrieval: dense, evidence-policy: standard}
+    policy-only: {retrieval: "off", evidence-policy: required}
+    combined: {retrieval: dense, evidence-policy: required}
+  mechanism_stages:
+    - {id: retrieval-registered, label: Dense retrieval registered, source_key: context_registration_confirmed}
+    - {id: evidence-returned, label: Relevant evidence returned, source_key: relevant_retrieval_returned, eligibility_key: context_registration_confirmed}
+    - {id: evidence-opened, label: Returned evidence opened, source_key: relevant_retrieval_opened, eligibility_key: relevant_retrieval_returned}
+    - {id: evidence-used, label: Evidence used in the change, source_key: relevant_retrieval_used, eligibility_key: relevant_retrieval_opened}
+  pass_rule: The locked Harbor verifier passes; retrieval availability and source use remain separate mechanism evidence.
+  scorers:
+    - id: memory-task-outcome
+      label: Memory Study task outcome
+      kind: benchmark
+      description: Uses the locked Harbor verifier and reports retrieval/source-use mechanisms separately.
+      required: true
+      aggregation: Stratify by task and 2×2 factor levels; do not infer a universal memory effect.
+      evidence_inputs: [Harbor verifier result, retrieval telemetry, Agent trajectory]
+      revision: memory-task-outcome-v1
+      dimensions:
+        - {id: task-pass, label: Task outcome, source_key: pass, target: true, primary: true}
+        - {id: evidence-used, label: Relevant evidence used, source_key: relevant_retrieval_used, target: true}
+model: anthropic/claude-sonnet-5
+run_name: real-memory-study
+evidence_project: wandb/fugue-memory-experiments-v1
+evidence_destination:
+  entity: wandb
+  project: fugue-memory-experiments-v1
+  api_base_url: https://api.wandb.ai
+  trace_base_url: https://trace.wandb.ai
+  app_base_url: https://wandb.ai
+default_preset: canary
+tags: [agent-eval, repository-memory, retrieval-to-action, real-study-lane-v1]
+harnesses: [claude-code]
+workloads:
+  - id: canary
+    runner: harbor
+    manifest: datasets/real-study-lanes/memory-canary-v1.yaml
+    required_capabilities: [bind]
+    systems: [none, rag-dense]
+    variants: [baseline, rag-dense, policy-only, combined]
+    scorers:
+      - {type: builtin, id: harbor-outcome}
+presets:
+  canary:
+    workloads: [canary]
+    systems: [none, rag-dense]
+    harnesses: [claude-code]
+    environment: {type: docker}
+    n_attempts: 1
+    n_tasks: 2
+    n_concurrent: 1
+    scheduling_seed: real-memory-canary-v1
+variants:
+  - id: baseline
+    label: Standard instructions without repository retrieval
+    context: {system_id: none, delivery: portable}
+  - id: rag-dense
+    label: Locked dense repository retrieval
+    context: {system_id: rag-dense, delivery: portable}
+  - id: policy-only
+    label: Inspect-and-verify policy without retrieval
+    prompt_id: repository-evidence-gate
+    context: {system_id: none, delivery: portable}
+  - id: combined
+    label: Locked dense retrieval plus inspect-and-verify policy
+    prompt_id: repository-evidence-gate
+    context: {system_id: rag-dense, delivery: portable}
+n_attempts: 1
+n_concurrent: 1
+n_tasks: 2
+jobs_dir: .fugue/runtime/jobs/real-memory-study
+trace_content: full
+environment: {type: docker}

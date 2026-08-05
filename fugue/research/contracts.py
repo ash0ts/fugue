@@ -6,10 +6,13 @@ import re
 from collections.abc import Mapping, Sequence
 from dataclasses import asdict, dataclass, field, replace
 from datetime import UTC, datetime
+from pathlib import Path
 from typing import Any, Literal
 
+from fugue.bench.campaign_contracts import intervention_lock_inputs_from_data
 from fugue.bench.candidates import stable_digest
 from fugue.bench.library import research_view_from_data, validate_id
+from fugue.model_plane import evidence_destination_from_dict
 
 RESEARCH_SCHEMA_VERSION = 1
 _DIGEST = re.compile(r"^[0-9a-f]{64}$")
@@ -310,6 +313,10 @@ class ExperimentDraftV1:
     parent_outcome_id: str | None = None
     decision_rationale: str = ""
     task_suite_digest: str | None = None
+    intervention_lock_inputs: dict[str, str] | None = None
+    failure_lock: str | None = None
+    intervention_component_locks: tuple[str, ...] = ()
+    selection_lock: str | None = None
     task_suite_draft: dict[str, Any] | None = None
     task_recipe_preview: dict[str, Any] | None = None
     candidate_refs: tuple[dict[str, Any], ...] = ()
@@ -338,6 +345,7 @@ class ExperimentPreviewV1:
     eligible: bool
     blockers: tuple[str, ...]
     evidence_scope: dict[str, Any] | None = None
+    evidence_destination: dict[str, Any] | None = None
     preview_digest: str = ""
 
     def to_dict(self) -> dict[str, Any]:
@@ -771,6 +779,26 @@ def experiment_draft_from_dict(
             "experiment draft accepts a task suite digest or draft, not both"
         )
     task_digest = _optional_digest(raw.get("task_suite_digest"), "task suite digest")
+    intervention_inputs = intervention_lock_inputs_from_data(
+        raw.get("intervention_lock_inputs")
+    )
+    if intervention_inputs is not None:
+        if task_digest is None:
+            raise ValueError(
+                "intervention lock inputs require a prelocked task_suite_digest"
+            )
+        if task_digest != intervention_inputs["discovery_suite_sha256"]:
+            raise ValueError(
+                "intervention discovery suite must equal task_suite_digest"
+            )
+        if not raw.get("failure_lock"):
+            raise ValueError(
+                "intervention discovery requires a comparison failure lock"
+            )
+    elif raw.get("failure_lock"):
+        raise ValueError(
+            "comparison failure locks are only valid for intervention discovery"
+        )
     research_view = research_view_from_data(raw.get("research_view"))
     draft = ExperimentDraftV1(
         schema_version=_schema(raw, "experiment draft"),
@@ -815,6 +843,20 @@ def experiment_draft_from_dict(
             raw.get("decision_rationale"), "decision rationale", 8000
         ),
         task_suite_digest=task_digest,
+        intervention_lock_inputs=intervention_inputs,
+        failure_lock=(
+            _selection_lock_path(raw["failure_lock"])
+            if raw.get("failure_lock")
+            else None
+        ),
+        intervention_component_locks=_component_lock_paths(
+            raw.get("intervention_component_locks")
+        ),
+        selection_lock=(
+            _selection_lock_path(raw["selection_lock"])
+            if raw.get("selection_lock")
+            else None
+        ),
         task_suite_draft=(
             _mapping(raw["task_suite_draft"], "task suite draft")
             if raw.get("task_suite_draft") is not None
@@ -900,6 +942,9 @@ def experiment_preview_from_dict(raw: Mapping[str, Any]) -> ExperimentPreviewV1:
         eligible=_strict_bool(raw.get("eligible"), "preview eligible"),
         blockers=_texts(raw.get("blockers"), "preview blocker", allow_empty=True),
         evidence_scope=_preview_evidence_scope(raw.get("evidence_scope")),
+        evidence_destination=_preview_evidence_destination(
+            raw.get("evidence_destination")
+        ),
         preview_digest=_required_digest(raw.get("preview_digest"), "preview digest"),
     )
     _verify_digest(preview.to_dict(), "preview_digest", "experiment preview")
@@ -927,6 +972,14 @@ def _preview_evidence_scope(raw: Any) -> dict[str, Any] | None:
             )
         ),
     }
+
+
+def _preview_evidence_destination(raw: Any) -> dict[str, Any] | None:
+    if raw is None:
+        return None
+    return evidence_destination_from_dict(
+        _mapping(raw, "evidence destination")
+    ).to_dict()
 
 
 def experiment_record_from_dict(raw: Mapping[str, Any]) -> ExperimentRecordV1:
@@ -1065,6 +1118,33 @@ def _optional_id(value: Any, label: str) -> str | None:
     if value in (None, ""):
         return None
     return validate_id(str(value), kind=label)
+
+
+def _selection_lock_path(value: Any) -> str:
+    text = str(value or "").strip()
+    candidate = Path(text)
+    if (
+        not text
+        or candidate.is_absolute()
+        or ".." in candidate.parts
+        or not candidate.parts
+        or candidate.parts[0] != ".fugue"
+    ):
+        raise ValueError(
+            "selection lock must be a repository-relative path inside .fugue"
+        )
+    return candidate.as_posix()
+
+
+def _component_lock_paths(value: Any) -> tuple[str, ...]:
+    if value in (None, ""):
+        return ()
+    if not isinstance(value, (list, tuple)):
+        raise ValueError("intervention component locks must be a list")
+    paths = tuple(_selection_lock_path(item) for item in value)
+    if len(set(paths)) != len(paths):
+        raise ValueError("intervention component lock paths must be unique")
+    return paths
 
 
 def _positive_int(value: Any, label: str) -> int:
