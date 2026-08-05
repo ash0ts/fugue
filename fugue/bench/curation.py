@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import argparse
+import asyncio
 import json
 import re
 import sys
@@ -752,6 +753,14 @@ def _build_parser() -> argparse.ArgumentParser:
     skill = subparsers.add_parser("validate-skill")
     skill.add_argument("skill_dir", type=Path)
     skill.add_argument("--allow-missing-provenance", action="store_true")
+    proposal = subparsers.add_parser(
+        "validate-proposal",
+        help="validate the exact Skill or context proposal produced by curation",
+    )
+    proposal.add_argument("--candidate", required=True)
+    proposal.add_argument("--source", required=True, type=Path)
+    proposal.add_argument("--experiment", required=True, type=Path)
+    proposal.add_argument("--repo-root", default=Path.cwd(), type=Path)
     return parser
 
 
@@ -776,6 +785,26 @@ def main(argv: Sequence[str] | None = None) -> int:
             )
             print(json.dumps(decision.to_dict(), indent=2, sort_keys=True))
             return 0
+        if args.command == "validate-proposal":
+            candidate = _read_candidate(args.candidate)
+            if candidate.kind == "skill":
+                errors = validate_skill_proposal(
+                    candidate,
+                    source_path=args.source,
+                    experiment_path=args.experiment,
+                    repo_root=args.repo_root,
+                )
+            else:
+                errors = asyncio.run(
+                    validate_context_proposal(
+                        candidate,
+                        args.source,
+                        args.experiment,
+                        repo_root=args.repo_root,
+                    )
+                )
+            print(json.dumps({"eligible": not errors, "errors": errors}, indent=2))
+            return 0 if not errors else 1
         errors = validate_skill_bundle(
             args.skill_dir,
             require_provenance=not args.allow_missing_provenance,

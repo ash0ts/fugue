@@ -88,8 +88,9 @@ def test_gold_verification_requirement_is_manifest_scoped(tmp_path: Path) -> Non
         ),
     )
 
-    assert not task_runtime.task_runtime_requires_gold_verification(authored_manifest)
-    assert task_runtime.task_runtime_requires_gold_verification(swe_manifest)
+    task = authored_manifest.tasks[0]
+    assert not task_runtime.task_runtime_requires_verification(authored_manifest, task)
+    assert task_runtime.task_runtime_requires_verification(swe_manifest, task)
 
 
 def test_scripted_gold_verification_is_task_scoped_and_path_safe(

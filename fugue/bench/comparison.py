@@ -2485,23 +2485,6 @@ def _custom_scorer_evidence(row: Mapping[str, Any]) -> dict[str, Any]:
     }
 
 
-def _score_simple_output(
-    output: Any, expected: Any, checks: set[str]
-) -> bool:
-    if "answer_present" in checks:
-        if output is None or (isinstance(output, str) and not output.strip()):
-            return False
-    if "expected_values" not in checks:
-        return True
-    parsed = output
-    if isinstance(output, str):
-        try:
-            parsed = json.loads(output)
-        except json.JSONDecodeError:
-            parsed = output
-    return _contains_expected(parsed, expected)
-
-
 def _contains_expected(output: Any, expected: Any) -> bool:
     if isinstance(expected, dict):
         return isinstance(output, dict) and all(

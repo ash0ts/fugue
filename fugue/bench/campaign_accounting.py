@@ -13,7 +13,6 @@ class CostAccounting:
     measured_cells: int
     unmeasured_cells: int
     maximum_measured_cell_cost_usd: float | None
-    fallback_cell_cost_usd: float
 
 
 def measured_row_cost(row: Mapping[str, Any]) -> float | None:
@@ -96,7 +95,6 @@ def account_prediction_costs(
         measured_cells=len(measured),
         unmeasured_cells=missing,
         maximum_measured_cell_cost_usd=maximum,
-        fallback_cell_cost_usd=fallback,
     )
 
 
