@@ -7,7 +7,7 @@ human approval boundary, but they do not share W&B/Weave projects or claims.
 | Study | W&B/Weave project | Exact matrix | Fixed route |
 | --- | --- | --- | --- |
 | Claude loop engineering | `wandb/fugue-claude-loop-engineering-v1` | discovery: 2 tasks × 4 Skill/MCP arms = 8; holdout: 4 tasks × production/selected = 8 | `anthropic/claude-sonnet-5`, Claude Code |
-| Harness behavior | `wandb/fugue-harness-experiments-v1` | 2 locked tasks × Hermes/OpenClaw/Claude Code/Codex = 8 | `wandb/zai-org/GLM-5.2` |
+| Harness behavior | `wandb/fugue-harness-experiments-v1` | 2 locked tasks × Hermes/OpenClaw/Claude Code/Codex = 8 | `anthropic/claude-sonnet-5` |
 | Repository memory | `wandb/fugue-memory-experiments-v1` | 2 locked tasks × baseline/rag-dense/policy/combined = 8 | `anthropic/claude-sonnet-5`, Claude Code |
 
 None of these Studies writes to a legacy shared demo project. They do not use
@@ -69,10 +69,11 @@ Only then preview the local `holdout` preset. The selection lock reduces the
 holdout to production versus the selected arm on four independent tasks:
 exactly eight more cells.
 
-The source must be a repeated valid failure from
-`mcp-main-vs-0-4-natural-maintainer-canary-v3`. The old wrong-project Study
-and placeholder trace cannot be used. Both discovery and private holdout Task
-Suites are locked before discovery results are inspected.
+The source is the repeated baseline safety failure on `exact-history-target`
+from authoritative Study `mcp-main-vs-0-4-tool-surface-confirmation-v10`.
+The old wrong-project Study, incomplete V3 canary, and placeholder trace cannot
+be used. Both discovery and private holdout Task Suites are locked before
+discovery results are inspected.
 The selection lock binds the reviewed failure-lock digest, both Suite digests,
 the complete four-arm candidate map, discovery snapshots, and the ordered
 failure-lock → Suite-freeze → discovery → selection chronology.
@@ -94,9 +95,11 @@ Campaign `real-harness-study-v1`, experiment `real-harness-study`, preset
 - `astropy__astropy-13033`
 
 Each case runs once through Hermes, OpenClaw, Claude Code, and Codex. The route
-is fixed to W&B Inference `wandb/zai-org/GLM-5.2`; changing the model is outside
-the campaign allowlist and its prepared route lock. Task commits, verifier
-runtime, context (`none`), attempts, and local Docker policy are also fixed.
+is fixed to `anthropic/claude-sonnet-5`; changing the model is outside the
+campaign allowlist and its prepared route lock. Claude Code uses the native
+Messages route while the other harnesses use the locked bridge required by
+their wire protocols. Task commits, verifier runtime, context (`none`),
+attempts, and local Docker policy are also fixed.
 The separately approved preview is capped at $10.
 
 Interpret this as task-specific harness behavior. Compare completion, verifier

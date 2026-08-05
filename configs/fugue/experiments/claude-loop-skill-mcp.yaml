@@ -53,6 +53,8 @@ source_evidence_destination:
   api_base_url: https://api.wandb.ai
   trace_base_url: https://trace.wandb.ai
   app_base_url: https://wandb.ai
+require_live_evidence: true
+evidence_checkpoint_cells: 1
 evidence_project: wandb/fugue-claude-loop-engineering-v1
 evidence_destination:
   entity: wandb

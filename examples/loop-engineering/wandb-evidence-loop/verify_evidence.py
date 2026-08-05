@@ -206,7 +206,9 @@ def _evidence_issues(rows: Iterable[Mapping[str, Any]]) -> list[str]:
         if row.get("trace_project") != LOOP_PROJECT:
             issues.append(f"{identity}: evidence routed outside the loop project")
         if row.get("trace_link_status") != "linked":
-            issues.append(f"{identity}: native Agent root is not linked")
+            issues.append(
+                f"{identity}: native Agent evidence receipt is not linked"
+            )
         link_set = verified_trace_link_set(row)
         for failure in link_set["failures"]:
             issues.append(f"{identity}: {failure}")

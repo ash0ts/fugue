@@ -267,7 +267,7 @@ class LiveEvaluationCoordinator:
         )
         self._native_agent_root_op = _eager_call_op(
             self.weave,
-            "fugue.claude_code_native_agent_root",
+            "fugue.native_agent_evidence_receipt",
         )
         logger_cls = getattr(self.weave, "EvaluationLogger", None)
         if logger_cls is None:
@@ -408,20 +408,15 @@ class LiveEvaluationCoordinator:
                 prediction=prediction,
                 project=self.project,
             )
-            if (
-                cell.harness == "claude-code"
-                and row.get("evaluation_prediction_graph_verified") is not True
-            ):
+            if row.get("evaluation_prediction_graph_verified") is not True:
                 raise RuntimeError(
-                    "live Evaluation graph is unresolved before Claude execution"
+                    "live Evaluation graph is unresolved before Agent execution"
                 )
-            traceparent = ""
-            if cell.harness == "claude-code":
-                bridge_call, bridge_client, traceparent = self._open_agent_bridge(
-                    cell=cell,
-                    row=row,
-                    prediction=prediction,
-                )
+            bridge_call, bridge_client, traceparent = self._open_agent_bridge(
+                cell=cell,
+                row=row,
+                prediction=prediction,
+            )
         except Exception as exc:
             if self._evidence_checkpoint_cells:
                 self._cancellation_event.set()
@@ -504,7 +499,7 @@ class LiveEvaluationCoordinator:
         row: dict[str, Any],
         prediction: Any,
     ) -> tuple[Any, Any, str]:
-        """Create the real Call bridge used to parent Claude's remote OTel root."""
+        """Create the real Call bridge used to parent the Agent's OTel root."""
 
         client = self._activate_evidence_client()
         if client is None or not callable(getattr(client, "create_call", None)):
@@ -514,7 +509,11 @@ class LiveEvaluationCoordinator:
         parent = getattr(prediction, "predict_call", None)
         if parent is None:
             raise RuntimeError("live Evaluation prediction Call is unavailable")
-        bridge_id = secrets.token_hex(8)
+        # A Weave Call ID and a W3C parent span ID belong to different identity
+        # domains. Keep them distinct and record the verified mapping instead
+        # of making a 16-hex Call ID masquerade as an OTel span.
+        bridge_id = str(uuid.uuid4())
+        bridge_otel_span_id = secrets.token_hex(8)
         bridge = client.create_call(
             getattr(
                 self,
@@ -554,6 +553,7 @@ class LiveEvaluationCoordinator:
                 ),
                 "fugue.agent_bridge": True,
                 "fugue.agent_bridge_version": 1,
+                "fugue.agent_bridge_otel_parent_span_id": bridge_otel_span_id,
                 "weave.eval.predict_and_score_call_id": str(
                     row.get("eval_predict_and_score_call_id") or ""
                 ),
@@ -592,6 +592,14 @@ class LiveEvaluationCoordinator:
                     "weave_agent_bridge_project_id": project_id,
                     "weave_agent_bridge_trace_id": trace_id,
                     "weave_agent_bridge_otel_trace_id": otel_trace_id,
+                    "weave_agent_bridge_otel_span_id": bridge_otel_span_id,
+                    "weave_agent_bridge_cross_transport_edge": {
+                        "schema_version": 1,
+                        "status": "verified",
+                        "weave_call_id": bridge_id,
+                        "otel_trace_id": otel_trace_id,
+                        "otel_span_id": bridge_otel_span_id,
+                    },
                 }
             )
             _apply_call_evidence(
@@ -622,7 +630,7 @@ class LiveEvaluationCoordinator:
         return (
             bridge,
             client,
-            f"00-{otel_trace_id}-{bridge_id}-01",
+            f"00-{otel_trace_id}-{bridge_otel_span_id}-01",
         )
 
     def _activate_evidence_client(self, client: Any | None = None) -> Any | None:
@@ -837,7 +845,7 @@ class LiveEvaluationCoordinator:
         row: dict[str, Any],
         root: Mapping[str, Any],
     ) -> None:
-        """Create one durable Weave Call receipt for a verified Claude OTel root."""
+        """Create one durable Weave Call receipt for a verified native OTel root."""
 
         client = active.bridge_client
         bridge = active.bridge_call
@@ -848,19 +856,20 @@ class LiveEvaluationCoordinator:
             or not callable(getattr(client, "finish_call", None))
         ):
             raise RuntimeError(
-                "installed Weave runtime cannot materialize the native Agent Call"
+                "installed Weave runtime cannot materialize the Agent evidence receipt"
             )
         client = self._activate_evidence_client(client)
         if client is None:
-            raise RuntimeError("Weave native Agent Call client is unavailable")
+            raise RuntimeError("Weave Agent evidence receipt client is unavailable")
         if str(_live_call_value(bridge, "project_id") or "") != self.project:
             raise RuntimeError(
                 "Weave Agent bridge changed evidence destination"
             )
         call_id = _native_agent_call_id(row, root)
         attributes = {
-            "gen_ai.operation.name": "invoke_agent",
             "gen_ai.conversation.id": str(root["conversation_id"]),
+            "fugue.evidence.kind": "native_agent_root_cross_transport_receipt",
+            "fugue.evidence.cross_transport_edge_verified": True,
             "fugue.native_agent_root_receipt": True,
             "fugue.native_agent_root_receipt_version": 1,
             "fugue.run_key": str(row["run_key"]),
@@ -897,7 +906,7 @@ class LiveEvaluationCoordinator:
             getattr(
                 self,
                 "_native_agent_root_op",
-                "fugue.claude_code_native_agent_root",
+                "fugue.native_agent_evidence_receipt",
             ),
             {
                 "attempt_id": str(row["attempt_id"]),
@@ -907,7 +916,7 @@ class LiveEvaluationCoordinator:
             },
             parent=bridge,
             attributes=attributes,
-            display_name=f"Claude Code Agent root · {row['task_id']}",
+            display_name=(f"{row['harness']} Agent evidence · {row['task_id']}"),
             use_stack=False,
             _call_id_override=call_id,
         )
@@ -928,11 +937,24 @@ class LiveEvaluationCoordinator:
                 )
             finally:
                 raise RuntimeError(
-                    "native Agent Call did not preserve the Evaluation ancestry"
+                    "Agent evidence receipt did not preserve the Evaluation ancestry"
                 )
         row.update(
             {
                 "weave_agent_root_call_id": call_id,
+                "weave_agent_root_evidence_kind": (
+                    "native_otel_cross_transport_receipt_v1"
+                ),
+                "weave_agent_root_is_native_call": False,
+                "agent_cross_transport_edge": {
+                    "schema_version": 1,
+                    "status": "verified",
+                    "source_system": "otel",
+                    "source_trace_id": str(root["trace_id"]),
+                    "source_span_id": str(root["span_id"]),
+                    "receipt_system": "weave",
+                    "receipt_call_id": call_id,
+                },
                 "weave_agent_root_call_start_verified": False,
                 "weave_agent_root_call_terminal_verified": False,
             }
@@ -942,7 +964,7 @@ class LiveEvaluationCoordinator:
             row=row,
             call_id=call_id,
             terminal=False,
-            phase="native Agent Call start",
+            phase="Agent evidence receipt start",
         )
         row["weave_agent_root_call_start_verified"] = True
         client.finish_call(
@@ -959,7 +981,7 @@ class LiveEvaluationCoordinator:
             row=row,
             call_id=call_id,
             terminal=True,
-            phase="native Agent Call end",
+            phase="Agent evidence receipt end",
             honor_cancellation=False,
         )
         row.update(
@@ -1027,17 +1049,10 @@ class LiveEvaluationCoordinator:
             )
             _mark_agent_execution_not_started(row)
             return
-        if cell.harness != "claude-code":
-            self._finish_agent_bridge(
-                active,
-                status="agent_completed",
-                terminal_row=row,
-            )
-            _apply_trace_summary(row, self._wait_for_trace(row))
-            return
-        # Claude exports a native OTel root to the Agents endpoint, not a
-        # Weave Call. Verify it first, then materialize one durable child Call
-        # under the still-open Evaluation bridge. OTel IDs remain diagnostic.
+        # Some harnesses export only a native OTel root to the Agents endpoint,
+        # while others can also publish a native Weave Call. Verify the native
+        # root first and materialize exactly one durable receipt only when the
+        # native Call is absent. OTel IDs remain diagnostic in both cases.
         _apply_trace_summary(
             row,
             self._wait_for_trace(
@@ -1053,7 +1068,7 @@ class LiveEvaluationCoordinator:
         if native_root is None:
             raise RuntimeError(
                 row.get("trace_link_error")
-                or "native Claude OTel root did not reconcile"
+                or "native Agent OTel root did not reconcile"
             )
         if not native_root.get("weave_call_id"):
             self._materialize_native_agent_call(
@@ -1085,7 +1100,7 @@ class LiveEvaluationCoordinator:
         if verified_root is None:
             raise RuntimeError(
                 row.get("trace_link_error")
-                or "native Claude Weave Call did not reconcile"
+                or "Agent evidence Weave Call did not reconcile"
             )
         self._record_verified_agent_root(
             active=active,
@@ -1163,6 +1178,12 @@ class LiveEvaluationCoordinator:
                     row["evaluation_judge_status"] = "failed"
                     row["evaluation_error"] = f"{type(exc).__name__}: {exc}"
             self._raise_if_cancelled()
+            if self._evidence_checkpoint_cells:
+                row["negative_routing_receipt"] = self._negative_routing_receipt(row)
+                if row["negative_routing_receipt"].get("status") == "failed":
+                    raise RuntimeError(
+                        "Agent evidence appeared in a forbidden legacy project"
+                    )
             self._apply_host_evaluator(row)
             _set_adapter_outcome(row)
             if not self._pop_prediction(cell.id, active):
@@ -1283,7 +1304,8 @@ class LiveEvaluationCoordinator:
                     "status": "unavailable",
                     "reason": f"{type(exc).__name__}: {exc}",
                 }
-        row["negative_routing_receipt"] = self._negative_routing_receipt(row)
+        if "negative_routing_receipt" not in row:
+            row["negative_routing_receipt"] = self._negative_routing_receipt(row)
         failures = _live_evidence_checkpoint_failures(
             row,
             expected_destination=self._evidence_destination,
@@ -1560,7 +1582,7 @@ class LiveEvaluationCoordinator:
             ]
             linked = sum(row.get("trace_link_status") == "linked" for row in agent_rows)
             linking_failures = tuple(
-                f"{row.get('cell_id')}: {row.get('trace_link_error') or 'Agent root was not linked'}"
+                f"{row.get('cell_id')}: {row.get('trace_link_error') or 'Agent evidence was not linked'}"
                 for row in agent_rows
                 if row.get("trace_link_status") != "linked"
             )
@@ -1665,12 +1687,11 @@ class LiveEvaluationCoordinator:
             probe = {**row, **latest}
             _apply_observed_identity(probe)
             _verify_authoritative_agent_graph(probe)
-            claude_graph_ready = (
-                str(row.get("harness") or "") != "claude-code"
-                or not require_authoritative_graph
+            authoritative_graph_ready = (
+                not require_authoritative_graph
                 or probe.get("weave_authoritative_call_graph_verified") is True
             )
-            if probe.get("observed_conversation_id") and claude_graph_ready:
+            if probe.get("observed_conversation_id") and authoritative_graph_ready:
                 return latest
             if time.monotonic() >= deadline:
                 return latest
@@ -2028,9 +2049,9 @@ def _reconcile_authoritative_bridge_close(
 
 
 def _verify_authoritative_agent_graph(row: dict[str, Any]) -> None:
-    """Verify Claude's complete Evaluation ancestry from fetched Weave Calls."""
+    """Verify the Agent's complete Evaluation ancestry from fetched Weave Calls."""
 
-    if str(row.get("harness") or "") != "claude-code":
+    if not _is_agent_row(row):
         row["weave_authoritative_call_graph_status"] = "not_required"
         return
     expected = {
@@ -2172,14 +2193,14 @@ def _verified_evaluation_root(
         )
         return None
     bridge_id = str(row.get("weave_agent_bridge_call_id") or "")
-    bridge_required = str(row.get("harness") or "") == "claude-code"
+    bridge_required = _is_agent_row(row)
     if (
         bridge_required
         and row.get("weave_authoritative_call_graph_verified") is not True
     ):
         row["trace_link_status"] = "ancestry_unresolved"
         row["trace_link_error"] = (
-            "Claude Agent ancestry was not verified from authoritative Weave Calls"
+            "Agent ancestry was not verified from authoritative Weave Calls"
         )
         return None
     allowed_parents = (
@@ -2197,29 +2218,29 @@ def _verified_evaluation_root(
     ):
         row["trace_link_status"] = "ancestry_mismatch"
         row["trace_link_error"] = (
-            "native Agent Call has no verified Evaluation ancestry bridge"
+            "Agent evidence Call has no verified Evaluation ancestry bridge"
         )
         return None
     if weave_parent_id not in allowed_parents:
         row["trace_link_status"] = "ancestry_mismatch"
         row["trace_link_error"] = (
-            "native Agent Call is not a child of the exact evaluation prediction"
+            "Agent evidence Call is not a child of the exact evaluation prediction"
         )
         return None
     if expected_project and weave_project_id and weave_project_id != expected_project:
         row["trace_link_status"] = "project_mismatch"
         row["trace_link_error"] = (
-            "native Agent Call belongs to a different Weave project"
+            "Agent evidence Call belongs to a different Weave project"
         )
         return None
     if expected_project and not weave_project_id:
         row["trace_link_status"] = "attribute_missing"
-        row["trace_link_error"] = "native Agent Call is missing its Weave project"
+        row["trace_link_error"] = "Agent evidence Call is missing its Weave project"
         return None
     if expected_trace_id and weave_trace_id != expected_trace_id:
         row["trace_link_status"] = "ancestry_mismatch"
         row["trace_link_error"] = (
-            "native Agent Call is outside the evaluation Call trace"
+            "Agent evidence Call is outside the evaluation Call trace"
         )
         return None
     root["weave_ancestry_verified"] = True
@@ -2237,7 +2258,7 @@ def _verified_native_otel_root(
     row: dict[str, Any],
     predict_and_score_call_id: str,
 ) -> dict[str, Any] | None:
-    """Verify the native Claude OTel root before creating any Call receipt."""
+    """Verify the native Agent OTel root before creating any Call receipt."""
 
     observed = (
         str(row.get("trace_id") or ""),
@@ -2319,24 +2340,25 @@ def _verified_native_otel_root(
         )
         return None
     bridge_id = str(row.get("weave_agent_bridge_call_id") or "")
+    bridge_otel_span_id = str(row.get("weave_agent_bridge_otel_span_id") or "")
     otel_parent = str(root.get("otel_parent_span_id") or "")
     expected_otel_trace = str(
         row.get("weave_agent_bridge_otel_trace_id")
         or _w3c_trace_id(str(row.get("weave_agent_bridge_trace_id") or ""))
         or ""
     )
-    if str(row.get("harness") or "") == "claude-code" and (
-        not bridge_id or otel_parent != bridge_id
+    if _is_agent_row(row) and (
+        not bridge_id or not bridge_otel_span_id or otel_parent != bridge_otel_span_id
     ):
         row["trace_link_status"] = "otel_ancestry_mismatch"
         row["trace_link_error"] = (
-            "native Claude OTel root is not parented by the Evaluation bridge"
+            "native Agent OTel root is not parented by the Evaluation bridge"
         )
         return None
     if expected_otel_trace and str(root.get("trace_id") or "") != expected_otel_trace:
         row["trace_link_status"] = "otel_ancestry_mismatch"
         row["trace_link_error"] = (
-            "native Claude OTel root is outside the Evaluation bridge trace"
+            "native Agent OTel root is outside the Evaluation bridge trace"
         )
         return None
     return root
@@ -2368,6 +2390,8 @@ def _live_evidence_checkpoint_failures(
     expected_destination: Mapping[str, Any],
     host_evaluator_required: bool,
 ) -> list[str]:
+    from fugue.bench.campaign_evidence import verified_trace_link_set
+
     failures: list[str] = []
     receipt = row.get("trace_receipt")
     if not isinstance(receipt, Mapping) or dict(receipt) != dict(
@@ -2393,13 +2417,19 @@ def _live_evidence_checkpoint_failures(
         if status is not True
     )
     if row.get("trace_link_status") != "linked":
-        failures.append("native Agent Call was not linked")
+        failures.append("Agent evidence Call was not linked")
     agent_call_id = str(row.get("weave_agent_root_call_id") or "")
     otel_span_id = str(row.get("otel_root_span_id") or "")
     if not agent_call_id:
-        failures.append("native Agent Weave Call ID is missing")
+        failures.append("Agent evidence Weave Call ID is missing")
     elif agent_call_id == otel_span_id:
         failures.append("OTel span ID was misidentified as a Weave Call ID")
+    trace_link_set = verified_trace_link_set(row)
+    if trace_link_set.get("verified") is not True:
+        failures.extend(
+            f"five-link evidence set {failure}"
+            for failure in trace_link_set.get("failures") or ()
+        )
     if host_evaluator_required and row.get("host_evaluator_status") != "passed":
         failures.append("host evaluator did not complete successfully")
     if row.get("comparison_judge_checkpoint_status") == "failed":
@@ -2786,6 +2816,7 @@ def _is_agent_row(row: Mapping[str, Any]) -> bool:
         return execution_kind == "agent"
     return bool(
         row.get("record_type") == "trial"
+        or row.get("harness")
         or row.get("weave_agent_name")
         or row.get("planned_conversation_id")
     )
@@ -2821,6 +2852,53 @@ def _apply_verified_agent_evidence(
     call_id = str(root.get("weave_call_id") or "")
     if not call_id:
         return
+    observed_kind = str(root.get("weave_call_evidence_kind") or "native_weave_call_v1")
+    if observed_kind not in {
+        "native_weave_call_v1",
+        "native_otel_cross_transport_receipt_v1",
+    }:
+        raise RuntimeError("unsupported Agent evidence kind")
+    observed_is_native = bool(
+        root.get("weave_call_is_native", observed_kind == "native_weave_call_v1")
+    )
+    if observed_is_native != (observed_kind == "native_weave_call_v1"):
+        raise RuntimeError("Agent evidence kind disagrees with Call provenance")
+    existing_call_id = str(row.get("weave_agent_root_call_id") or "")
+    existing_kind = str(row.get("weave_agent_root_evidence_kind") or "")
+    if (
+        existing_call_id
+        and existing_call_id != call_id
+        and existing_kind == "native_otel_cross_transport_receipt_v1"
+        and observed_is_native
+    ):
+        # A native Call can become queryable after Fugue has already created a
+        # durable cross-transport receipt for the same OTel root. Prefer the
+        # stronger native Call, but retain an explicit supersession receipt so
+        # the evidence identity transition is auditable and never mislabeled.
+        row["weave_agent_receipt_supersession"] = {
+            "schema_version": 1,
+            "status": "superseded_by_native_call",
+            "receipt_call_id": existing_call_id,
+            "native_call_id": call_id,
+        }
+        edge = row.pop("agent_cross_transport_edge", None)
+        if edge is not None:
+            row["weave_agent_receipt_cross_transport_edge"] = edge
+        row["weave_agent_root_evidence_kind"] = "native_weave_call_v1"
+        row["weave_agent_root_is_native_call"] = True
+    elif not existing_kind:
+        row["weave_agent_root_evidence_kind"] = observed_kind
+        row["weave_agent_root_is_native_call"] = observed_is_native
+        if not observed_is_native:
+            row["agent_cross_transport_edge"] = {
+                "schema_version": 1,
+                "status": "verified",
+                "source_system": "otel",
+                "source_trace_id": trace_id,
+                "source_span_id": span_id,
+                "receipt_system": "weave",
+                "receipt_call_id": call_id,
+            }
     row["weave_agent_root_call_id"] = call_id
     call_ref = str(root.get("weave_call_ref") or "") or _weave_call_ref(
         project, call_id
@@ -2852,7 +2930,7 @@ def _apply_agent_graph_verification(
     row: dict[str, Any],
     root: Mapping[str, Any],
 ) -> None:
-    claude = str(row.get("harness") or "") == "claude-code"
+    agent = _is_agent_row(row)
     row["agent_graph_verified"] = bool(
         row.get("trace_link_status") == "linked"
         and root.get("weave_call_id")
@@ -2864,7 +2942,7 @@ def _apply_agent_graph_verification(
         == row.get("execution_fingerprint")
         and row.get("evaluation_prediction_graph_verified") is True
         and (
-            not claude
+            not agent
             or (
                 row.get("weave_authoritative_call_graph_verified") is True
                 and row.get("weave_agent_bridge_closed_verified") is True
@@ -4119,12 +4197,15 @@ def _ref_uri(value: Any) -> str | None:
     return None
 
 
-def _object_url(value: Any, ref: str | None) -> str | None:
-    direct = str(getattr(value, "ui_url", "") or "")
-    if direct:
-        return direct
+def _object_url(
+    value: Any,
+    ref: str | None,
+    *,
+    app_base_url: str = "https://wandb.ai",
+) -> str | None:
     if not ref:
-        return None
+        direct = str(getattr(value, "ui_url", "") or "")
+        return direct or None
     parsed = urllib.parse.urlsplit(ref)
     parts = parsed.path.strip("/").split("/")
     if parsed.scheme != "weave" or len(parts) != 4 or parts[2] != "object":
@@ -4136,7 +4217,7 @@ def _object_url(value: Any, ref: str | None) -> str | None:
     if not all((entity, project, name, digest)):
         return None
     return (
-        f"https://wandb.ai/{urllib.parse.quote(entity, safe='')}/"
+        f"{app_base_url.rstrip('/')}/{urllib.parse.quote(entity, safe='')}/"
         f"{urllib.parse.quote(project, safe='')}/weave/objects/"
         f"{urllib.parse.quote(name, safe='')}/versions/"
         f"{urllib.parse.quote(digest, safe='')}"
@@ -4235,7 +4316,11 @@ def _apply_evaluation_evidence(
         else None
     )
     dataset_ref = _object_ref(dataset)
-    dataset_url = _object_url(dataset, dataset_ref)
+    dataset_url = _object_url(
+        dataset,
+        dataset_ref,
+        app_base_url=app_base_url,
+    )
     if evaluation_call_id:
         row["weave_evaluation_root_call_id"] = evaluation_call_id
     if evaluation_call_ref:
@@ -4740,7 +4825,10 @@ def _summarize_spans(
         span
         for span in all_values
         if span.get("_fugue_evidence_source") == _WEAVE_CALL_SOURCE
-        and _span_operation(span) == "invoke_agent"
+        and (
+            _span_operation(span) == "invoke_agent"
+            or _is_native_agent_evidence_receipt(span)
+        )
     ]
     tool_names = Counter(
         str(value)
@@ -4991,7 +5079,46 @@ def _matched_agent_call(
         for call in calls
         if _agent_root_identity(call) == expected
     ]
-    return matches[0] if len(matches) == 1 else None
+    native_matches = [
+        call for call in matches if _span_operation(call) == "invoke_agent"
+    ]
+    if len(native_matches) == 1:
+        return native_matches[0]
+    if native_matches:
+        return None
+    receipt_matches = [
+        call for call in matches if _receipt_matches_native_root(call, root)
+    ]
+    return receipt_matches[0] if len(receipt_matches) == 1 else None
+
+
+def _is_native_agent_evidence_receipt(call: Mapping[str, Any]) -> bool:
+    attrs = _span_attributes(dict(call))
+    return bool(
+        attrs.get("fugue.evidence.kind")
+        == "native_agent_root_cross_transport_receipt"
+        and attrs.get("fugue.evidence.cross_transport_edge_verified") is True
+        and attrs.get("fugue.native_agent_root_receipt") is True
+    )
+
+
+def _receipt_matches_native_root(
+    call: Mapping[str, Any],
+    root: Mapping[str, Any],
+) -> bool:
+    if not _is_native_agent_evidence_receipt(call):
+        return False
+    attrs = _span_attributes(dict(call))
+    return bool(
+        str(attrs.get("fugue.native_otel_trace_id") or "")
+        == str(_span_value(dict(root), "trace_id") or "")
+        and str(attrs.get("fugue.native_otel_span_id") or "")
+        == str(
+            _span_value(dict(root), "span_id")
+            or _span_value(dict(root), "id")
+            or ""
+        )
+    )
 
 
 def _mapping_ref(value: Mapping[str, Any]) -> str | None:
@@ -5048,6 +5175,9 @@ def _root_span_summary(
         if weave_call is not None
         else ""
     )
+    receipt = bool(
+        weave_call is not None and _is_native_agent_evidence_receipt(weave_call)
+    )
     return _drop_none(
         {
             "conversation_id": span.get("conversation_id")
@@ -5065,6 +5195,14 @@ def _root_span_summary(
             "weave_call_parent_id": call_parent_id or None,
             "weave_call_project_id": call_project_id or None,
             "weave_call_trace_id": call_trace_id or None,
+            "weave_call_evidence_kind": (
+                "native_otel_cross_transport_receipt_v1"
+                if receipt
+                else "native_weave_call_v1"
+                if call_id
+                else None
+            ),
+            "weave_call_is_native": bool(call_id and not receipt),
             "run_key": attrs.get("fugue.run_key"),
             "harness": attrs.get("fugue.harness"),
             "task_id": attrs.get("fugue.task_id"),

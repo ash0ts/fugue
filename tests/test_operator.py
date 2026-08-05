@@ -870,6 +870,79 @@ def test_execute_run_persists_snapshot_before_first_cell(
     ).is_file()
 
 
+def test_execute_run_records_optional_live_publication_failure_without_changing_task_result(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    service = make_operator_repo(tmp_path)
+    monkeypatch.setattr(operator_module, "agent_runtime_spec", lambda harness: None)
+    monkeypatch.setattr(operator_module, "_verify_rendered_setup", lambda jobs: None)
+    monkeypatch.setattr(
+        "fugue.bench.operator.validate_harbor_job_configs", lambda paths: None
+    )
+
+    class FailedPublication:
+        def __init__(self, *args, **kwargs) -> None:
+            pass
+
+        def begin_cell(self, cell):
+            return None
+
+        def finish_cell(self, cell, outcome) -> None:
+            pass
+
+        def finalize(self) -> PublicationResult:
+            return PublicationResult(
+                published=0,
+                skipped=0,
+                failures=("cell-a: five-link evidence did not reconcile",),
+            )
+
+    monkeypatch.setattr(
+        "fugue.bench.operator.LiveEvaluationCoordinator", FailedPublication
+    )
+
+    result = service.execute_run(
+        ExperimentRequest(experiment_id="demo"),
+        run_id="publication-failure",
+        cell_runner=lambda command, **kwargs: subprocess.CompletedProcess(
+            command, 0
+        ),
+    )
+
+    assert result.status == "passed"
+    manifest = read_run_manifest(
+        tmp_path / ".fugue/runtime/publication-failure"
+    )
+    assert manifest is not None
+    assert manifest["status"] == "passed"
+    assert manifest["observability_status"] == "failed"
+    assert manifest["evaluation_failures"] == [
+        "cell-a: five-link evidence did not reconcile"
+    ]
+    assert manifest.get("error") is None
+
+    governed = service.execute_run(
+        ExperimentRequest(experiment_id="demo"),
+        experiment=replace(
+            service.experiment("demo"),
+            require_live_evidence=True,
+        ),
+        run_id="governed-publication-failure",
+        cell_runner=lambda command, **kwargs: subprocess.CompletedProcess(
+            command, 0
+        ),
+    )
+
+    assert governed.status == "failed"
+    governed_manifest = read_run_manifest(
+        tmp_path / ".fugue/runtime/governed-publication-failure"
+    )
+    assert governed_manifest is not None
+    assert governed_manifest["status"] == "failed"
+    assert "Live evidence publication did not reconcile" in governed_manifest["error"]
+
+
 def test_execute_run_uses_preset_concurrency_for_the_operator_pool(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:

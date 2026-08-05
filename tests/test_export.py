@@ -1,6 +1,7 @@
 import json
 import sys
 import threading
+from collections.abc import Mapping
 from dataclasses import asdict, replace
 from pathlib import Path
 from types import SimpleNamespace
@@ -1177,7 +1178,7 @@ def test_live_evaluation_links_native_root_and_finalizes_cleanly(
                 id="evaluation-root-1",
                 project_id="entity/project",
                 parent_id=None,
-                trace_id="weave-trace-1",
+                trace_id="a" * 32,
                 inputs={"self": self._pseudo_evaluation},
                 ref=SimpleNamespace(
                     uri="weave:///entity/project/call/evaluation-root-1"
@@ -1201,7 +1202,12 @@ def test_live_evaluation_links_native_root_and_finalizes_cleanly(
         def fail(self, exception) -> None:
             raise AssertionError(exception)
 
-    fake_weave = SimpleNamespace(Dataset=FakeDataset, EvaluationLogger=FakeLogger)
+    client = _OutOfOrderWeaveClient("entity/project")
+    fake_weave = SimpleNamespace(
+        Dataset=FakeDataset,
+        EvaluationLogger=FakeLogger,
+        get_client=lambda: client,
+    )
     cell = PlannedCell(
         id="cell-a",
         run_id="run-a",
@@ -1238,41 +1244,80 @@ def test_live_evaluation_links_native_root_and_finalizes_cleanly(
 
     def summaries(**kwargs):
         call_id = predictions[0].predict_and_score_call.id
+        bridge_ids = [
+            call_id_value
+            for call_id_value, call in client.remote.items()
+            if call.get("parent_id") == f"{call_id}-model"
+        ]
+        bridge_id = bridge_ids[0] if bridge_ids else ""
+        agent_ids = [value for value in client.remote if value not in bridge_ids]
+        agent_call_id = agent_ids[0] if agent_ids else ""
+        root = {
+            "conversation_id": "native-conversation",
+            "agent_name": "codex",
+            "trace_id": "a" * 32,
+            "span_id": "b" * 16,
+            "otel_parent_span_id": str(
+                (client.remote.get(bridge_id, {}).get("attributes") or {}).get(
+                    "fugue.agent_bridge_otel_parent_span_id"
+                )
+                or ""
+            ),
+            "run_key": ("run-a:coding:trial:task-a:codex:rag-bm25:rag-bm25:t001"),
+            "harness": "codex",
+            "task_id": "task-a",
+            "candidate_id": "candidate-a",
+            "attempt_id": cell.attempt_id,
+            "execution_fingerprint": "execution-a",
+            "comparison_example_id": "example-a",
+            "trial_index": 1,
+            "eval_predict_and_score_call_id": call_id,
+        }
+        if agent_call_id:
+            root.update(
+                {
+                    "weave_call_id": agent_call_id,
+                    "weave_call_parent_id": bridge_id,
+                    "weave_call_project_id": "entity/project",
+                    "weave_call_trace_id": "a" * 32,
+                    "weave_call_ref": (f"weave:///entity/project/call/{agent_call_id}"),
+                    "weave_call_url": (
+                        f"https://wandb.ai/entity/project/weave/calls/{agent_call_id}"
+                    ),
+                }
+            )
+        graph = [
+            {
+                "call_id": "evaluation-root-1",
+                "project_id": "entity/project",
+                "trace_id": "a" * 32,
+                "terminal": True,
+            },
+            {
+                "call_id": call_id,
+                "parent_id": "evaluation-root-1",
+                "project_id": "entity/project",
+                "trace_id": "a" * 32,
+                "terminal": True,
+            },
+            {
+                "call_id": f"{call_id}-model",
+                "parent_id": call_id,
+                "project_id": "entity/project",
+                "trace_id": "a" * 32,
+                "terminal": True,
+            },
+            *(dict(value) for value in client.remote.values()),
+        ]
         return {
             next(iter(kwargs["run_keys"])): {
                 "weave_agent_names": ["codex"],
                 "weave_conversation_ids": ["native-conversation"],
                 "weave_trace_ids": ["a" * 32],
                 "weave_root_span_ids": ["b" * 16],
-                "weave_root_spans": [
-                    {
-                        "conversation_id": "native-conversation",
-                        "agent_name": "codex",
-                        "trace_id": "a" * 32,
-                        "span_id": "b" * 16,
-                        "run_key": (
-                            "run-a:coding:trial:task-a:codex:rag-bm25:rag-bm25:t001"
-                        ),
-                        "harness": "codex",
-                        "task_id": "task-a",
-                        "candidate_id": "candidate-a",
-                        "attempt_id": cell.attempt_id,
-                        "execution_fingerprint": "execution-a",
-                        "comparison_example_id": "example-a",
-                        "trial_index": 1,
-                        "eval_predict_and_score_call_id": call_id,
-                        "weave_call_id": "agent-root-call-1",
-                        "weave_call_parent_id": call_id,
-                        "weave_call_project_id": "entity/project",
-                        "weave_call_trace_id": "weave-trace-1",
-                        "weave_call_ref": (
-                            "weave:///entity/project/call/agent-root-call-1"
-                        ),
-                        "weave_call_url": (
-                            "https://wandb.test/calls/agent-root-call-1"
-                        ),
-                    }
-                ],
+                "weave_root_spans": [root],
+                "weave_authoritative_call_graph": graph,
+                "weave_authoritative_missing_call_ids": [],
             }
         }
 
@@ -1300,6 +1345,10 @@ def test_live_evaluation_links_native_root_and_finalizes_cleanly(
         ),
     )
     overlay = coordinator.begin_cell(cell)
+    assert overlay is not None
+    traceparent = overlay.pop("FUGUE_WEAVE_TRACEPARENT")
+    assert traceparent.startswith(f"00-{'a' * 32}-")
+    assert traceparent.endswith("-01")
     assert overlay == {
         "FUGUE_ATTEMPT_ID": cell.attempt_id,
         "FUGUE_WEAVE_EVAL_PREDICT_AND_SCORE_CALL_ID": "predict-1",
@@ -1353,12 +1402,14 @@ def test_live_evaluation_links_native_root_and_finalizes_cleanly(
     )
     assert live_row["otel_trace_id"] == "a" * 32
     assert live_row["otel_root_span_id"] == "b" * 16
-    assert live_row["weave_agent_root_call_id"] == "agent-root-call-1"
+    agent_call_id = live_row["weave_agent_root_call_id"]
+    assert len(agent_call_id) == 36
+    assert str(export.uuid.UUID(agent_call_id)) == agent_call_id
     assert live_row["weave_agent_root_ref"] == (
-        "weave:///entity/project/call/agent-root-call-1"
+        f"weave:///entity/project/call/{agent_call_id}"
     )
     assert live_row["weave_agent_root_url"] == (
-        "https://wandb.ai/entity/project/weave/calls/agent-root-call-1"
+        f"https://wandb.ai/entity/project/weave/calls/{agent_call_id}"
     )
     assert live_row["weave_agent_root_call_id"] != live_row["otel_root_span_id"]
     assert live_row["evaluation_root_object_verified"] is True
@@ -1577,8 +1628,11 @@ def test_claude_live_evaluation_opens_real_otel_parent_bridge() -> None:
     assert bridge_client is client
     assert created[0]["parent"] is prediction_call
     assert created[0]["use_stack"] is False
-    assert len(str(created[0]["id"])) == 16
-    assert traceparent == f"00-{trace_id}-{bridge.id}-01"
+    assert len(str(created[0]["id"])) == 36
+    assert str(export.uuid.UUID(str(created[0]["id"]))) == created[0]["id"]
+    bridge_parent_span = str(row["weave_agent_bridge_otel_span_id"])
+    assert traceparent == f"00-{trace_id}-{bridge_parent_span}-01"
+    assert bridge.id != bridge_parent_span
     assert row["weave_agent_bridge_parent_id"] == prediction_call.id
     assert row["weave_agent_bridge_trace_id"] == trace_id
     assert row["weave_agent_bridge_object_verified"] is True
@@ -1677,6 +1731,7 @@ class _OutOfOrderWeaveClient:
                     "project_id": call.project_id,
                     "trace_id": call.trace_id,
                     "terminal": False,
+                    "attributes": dict(call.attributes),
                 }
                 self.events.append(f"start-published:{call.id}")
             elif self.drop_ends or call.id not in self.remote:
@@ -1917,7 +1972,7 @@ def test_claude_native_call_rejects_a_missing_remote_terminal_end() -> None:
 
     with pytest.raises(
         RuntimeError,
-        match="native Agent Call end was not durably published",
+        match="Agent evidence receipt end was not durably published",
     ):
         coordinator._materialize_native_agent_call(
             active=active_prediction,
@@ -2006,7 +2061,17 @@ def test_claude_live_evaluation_normalizes_weave_uuid_traceparent() -> None:
     )
 
     compact = weave_trace_id.replace("-", "")
-    assert traceparent == f"00-{compact}-{bridge.id}-01"
+    bridge_parent_span = str(row["weave_agent_bridge_otel_span_id"])
+    assert traceparent == f"00-{compact}-{bridge_parent_span}-01"
+    assert bridge.id != bridge_parent_span
+    assert len(bridge_parent_span) == 16
+    assert row["weave_agent_bridge_cross_transport_edge"] == {
+        "schema_version": 1,
+        "status": "verified",
+        "weave_call_id": bridge.id,
+        "otel_trace_id": compact,
+        "otel_span_id": bridge_parent_span,
+    }
     assert row["weave_agent_bridge_trace_id"] == weave_trace_id
     assert row["weave_agent_bridge_otel_trace_id"] == compact
 
@@ -2096,7 +2161,10 @@ def test_claude_materializes_real_call_from_verified_native_otel_root() -> None:
 
     assert created[0]["parent"] is bridge
     assert created[0]["use_stack"] is False
-    assert created[0]["attributes"]["gen_ai.operation.name"] == "invoke_agent"
+    assert "gen_ai.operation.name" not in created[0]["attributes"]
+    assert created[0]["attributes"]["fugue.evidence.kind"] == (
+        "native_agent_root_cross_transport_receipt"
+    )
     assert created[0]["attributes"]["fugue.attempt_id"] == "a" * 64
     assert len(str(created[0]["id"])) == 36
     assert str(export.uuid.UUID(str(created[0]["id"]))) == created[0]["id"]
@@ -2106,6 +2174,11 @@ def test_claude_materializes_real_call_from_verified_native_otel_root() -> None:
     assert row["weave_agent_root_call_materialization_source"] == (
         "verified_native_otel_root_v1"
     )
+    assert row["weave_agent_root_evidence_kind"] == (
+        "native_otel_cross_transport_receipt_v1"
+    )
+    assert row["weave_agent_root_is_native_call"] is False
+    assert row["agent_cross_transport_edge"]["status"] == "verified"
     assert row["weave_agent_root_call_otel_span_id"] == "b" * 16
 
 
@@ -2121,6 +2194,7 @@ def test_verified_native_claude_root_requires_bridge_otel_parent() -> None:
         "trace_id": compact_trace,
         "root_span_id": "b" * 16,
         "weave_agent_bridge_call_id": "bridge",
+        "weave_agent_bridge_otel_span_id": "c" * 16,
         "weave_agent_bridge_otel_trace_id": compact_trace,
         "weave_root_spans": [
             {
@@ -2140,8 +2214,41 @@ def test_verified_native_claude_root_requires_bridge_otel_parent() -> None:
     assert "Evaluation bridge" in row["trace_link_error"]
 
 
-def test_claude_trace_is_remotely_verified_before_evaluation_output(
+def test_verified_native_root_rejects_missing_bridge_otel_parent_identity() -> None:
+    compact_trace = "a" * 32
+    row = {
+        "harness": "claude-code",
+        "attempt_id": "a" * 64,
+        "execution_fingerprint": "e" * 64,
+        "planned_conversation_id": "planned",
+        "conversation_correlation_verified": True,
+        "weave_conversation_ids": ["native"],
+        "trace_id": compact_trace,
+        "root_span_id": "b" * 16,
+        "weave_agent_bridge_call_id": "bridge",
+        "weave_agent_bridge_otel_trace_id": compact_trace,
+        "weave_root_spans": [
+            {
+                "conversation_id": "native",
+                "trace_id": compact_trace,
+                "span_id": "b" * 16,
+                "otel_parent_span_id": "c" * 16,
+                "attempt_id": "a" * 64,
+                "execution_fingerprint": "e" * 64,
+                "eval_predict_and_score_call_id": "predict-and-score",
+            }
+        ],
+    }
+
+    assert export._verified_native_otel_root(row, "predict-and-score") is None
+    assert row["trace_link_status"] == "otel_ancestry_mismatch"
+    assert "Evaluation bridge" in row["trace_link_error"]
+
+
+@pytest.mark.parametrize("harness", ["hermes", "openclaw", "claude-code", "codex"])
+def test_agent_trace_is_remotely_verified_before_evaluation_output(
     monkeypatch: pytest.MonkeyPatch,
+    harness: str,
 ) -> None:
     events: list[str] = []
     native_root = {
@@ -2189,14 +2296,14 @@ def test_claude_trace_is_remotely_verified_before_evaluation_output(
         ),
     )
     cell = SimpleNamespace(
-        harness="claude-code",
+        harness=harness,
         id="cell-a",
         candidate_id="candidate-a",
     )
     row = {
         "agent_execution_status": "completed",
         "execution_kind": "agent",
-        "harness": "claude-code",
+        "harness": harness,
     }
     active = export._LivePrediction(
         session=SimpleNamespace(),
@@ -2322,7 +2429,7 @@ def test_claude_begin_failure_closes_entered_prediction(
 
     with pytest.raises(
         RuntimeError,
-        match="Evaluation graph is unresolved before Claude execution",
+        match="Evaluation graph is unresolved before Agent execution",
     ):
         coordinator.begin_cell(cell)
 
@@ -2341,8 +2448,41 @@ def test_claude_begin_failure_closes_entered_prediction(
     assert statuses == ["pending", "prediction_start_failed"]
 
 
+def _stub_live_agent_bridge(
+    monkeypatch: pytest.MonkeyPatch,
+    coordinator: LiveEvaluationCoordinator,
+) -> None:
+    def verified_graph(row, **_kwargs) -> None:
+        row["evaluation_prediction_graph_verified"] = True
+
+    monkeypatch.setattr(export, "_verify_live_evaluation_graph", verified_graph)
+
+    def open_bridge(*, row, **_kwargs):
+        bridge = SimpleNamespace(
+            id="b" * 16,
+            project_id=coordinator.project,
+            trace_id="a" * 32,
+        )
+        row.update(
+            {
+                "weave_agent_bridge_call_id": bridge.id,
+                "weave_agent_bridge_object_verified": True,
+            }
+        )
+        return bridge, SimpleNamespace(), f"00-{'a' * 32}-{bridge.id}-01"
+
+    coordinator._open_agent_bridge = open_bridge
+
+    def finish_bridge(active, **_kwargs) -> None:
+        active.bridge_finished = True
+        active.row["weave_agent_bridge_closed_verified"] = True
+
+    coordinator._finish_agent_bridge = finish_bridge
+
+
 def test_live_cancellation_closes_open_prediction_once_without_trace_polling(
     tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     predictions = []
     loggers = []
@@ -2418,6 +2558,7 @@ def test_live_cancellation_closes_open_prediction_once_without_trace_polling(
             AssertionError("cancelled predictions must not poll Weave")
         ),
     )
+    _stub_live_agent_bridge(monkeypatch, coordinator)
 
     coordinator.begin_cell(cells[0])
     coordinator.finish_cell(
@@ -2446,6 +2587,7 @@ def test_live_cancellation_closes_open_prediction_once_without_trace_polling(
 
 def test_live_cancellation_during_trace_fetch_closes_prediction_once(
     tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     cancellation = threading.Event()
     fetch_started = threading.Event()
@@ -2514,6 +2656,7 @@ def test_live_cancellation_during_trace_fetch_closes_prediction_once(
         trace_timeout_sec=45,
         cancellation_event=cancellation,
     )
+    _stub_live_agent_bridge(monkeypatch, coordinator)
     coordinator.begin_cell(cell)
     worker = threading.Thread(
         target=coordinator.finish_cell,
@@ -2541,6 +2684,7 @@ def test_live_cancellation_during_trace_fetch_closes_prediction_once(
 
 def test_pre_agent_setup_failure_skips_trace_poll_and_reports_observability_failure(
     tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     trial_dir = tmp_path / "jobs/job/trial"
     (trial_dir / "agent").mkdir(parents=True)
@@ -2622,6 +2766,7 @@ def test_pre_agent_setup_failure_skips_trace_poll_and_reports_observability_fail
             AssertionError("pre-agent failures must not poll Weave")
         ),
     )
+    _stub_live_agent_bridge(monkeypatch, coordinator)
 
     coordinator.begin_cell(cell)
     coordinator.finish_cell(
@@ -3699,6 +3844,109 @@ def test_agent_evidence_keeps_otel_span_and_weave_call_identities_separate() -> 
     assert "weave_call_id" not in otel_only["weave_root_spans"][0]
 
 
+def test_agent_evidence_joins_cross_transport_receipt_without_call_impersonation() -> (
+    None
+):
+    attributes = {
+        "gen_ai.operation.name": "invoke_agent",
+        "gen_ai.agent.name": "hermes",
+        "gen_ai.conversation.id": "native-conversation",
+        "fugue.run_key": "run-key",
+        "fugue.harness": "hermes",
+        "fugue.task_id": "task-a",
+        "fugue.candidate_id": "candidate-a",
+        "fugue.attempt_id": "a" * 64,
+        "fugue.execution_fingerprint": "e" * 64,
+        "fugue.comparison_example_id": "example-a",
+        "fugue.trial_index": 1,
+        "weave.eval.predict_and_score_call_id": "prediction-and-score-1",
+    }
+    otel_root = {
+        "_fugue_evidence_source": export._WEAVE_AGENT_SPAN_SOURCE,
+        "span_id": "b" * 16,
+        "trace_id": "c" * 32,
+        "attributes": attributes,
+    }
+    receipt_id = "019fabcd-agent-evidence-receipt"
+    receipt = {
+        "_fugue_evidence_source": export._WEAVE_CALL_SOURCE,
+        "id": receipt_id,
+        "parent_id": "bridge-call",
+        "project_id": "entity/project",
+        "trace_id": "d" * 32,
+        "op_name": "fugue.native_agent_evidence_receipt",
+        "attributes": {
+            **{
+                key: value
+                for key, value in attributes.items()
+                if key != "gen_ai.operation.name"
+            },
+            "fugue.evidence.kind": ("native_agent_root_cross_transport_receipt"),
+            "fugue.evidence.cross_transport_edge_verified": True,
+            "fugue.native_agent_root_receipt": True,
+            "fugue.native_otel_trace_id": "c" * 32,
+            "fugue.native_otel_span_id": "b" * 16,
+        },
+    }
+
+    summary = _summarize_spans(
+        [otel_root, receipt],
+        project="entity/project",
+        required_call_ids=[receipt_id],
+    )
+
+    [root] = summary["weave_root_spans"]
+    assert root["weave_call_id"] == receipt_id
+    assert root["weave_call_evidence_kind"] == (
+        "native_otel_cross_transport_receipt_v1"
+    )
+    assert root["weave_call_is_native"] is False
+    row = {"trace_project": "entity/project"}
+    export._apply_verified_agent_evidence(row, root, project="entity/project")
+    assert row["weave_agent_root_call_id"] == receipt_id
+    assert row["weave_agent_root_is_native_call"] is False
+    assert row["agent_cross_transport_edge"] == {
+        "schema_version": 1,
+        "status": "verified",
+        "source_system": "otel",
+        "source_trace_id": "c" * 32,
+        "source_span_id": "b" * 16,
+        "receipt_system": "weave",
+        "receipt_call_id": receipt_id,
+    }
+
+
+def test_late_native_agent_call_explicitly_supersedes_receipt() -> None:
+    row = {
+        "trace_project": "entity/project",
+        "weave_agent_root_call_id": "receipt-call",
+        "weave_agent_root_evidence_kind": ("native_otel_cross_transport_receipt_v1"),
+        "weave_agent_root_is_native_call": False,
+        "agent_cross_transport_edge": {"status": "verified"},
+    }
+    root = {
+        "trace_id": "a" * 32,
+        "span_id": "b" * 16,
+        "weave_call_id": "native-call",
+        "weave_call_evidence_kind": "native_weave_call_v1",
+        "weave_call_is_native": True,
+    }
+
+    export._apply_verified_agent_evidence(row, root, project="entity/project")
+
+    assert row["weave_agent_root_call_id"] == "native-call"
+    assert row["weave_agent_root_evidence_kind"] == "native_weave_call_v1"
+    assert row["weave_agent_root_is_native_call"] is True
+    assert "agent_cross_transport_edge" not in row
+    assert row["weave_agent_receipt_cross_transport_edge"] == {"status": "verified"}
+    assert row["weave_agent_receipt_supersession"] == {
+        "schema_version": 1,
+        "status": "superseded_by_native_call",
+        "receipt_call_id": "receipt-call",
+        "native_call_id": "native-call",
+    }
+
+
 def test_live_link_rejects_split_native_conversation_identity() -> None:
     row = {
         "attempt_id": "a" * 64,
@@ -3747,6 +3995,35 @@ def test_conversation_correlation_keeps_distinct_planned_and_native_ids() -> Non
     assert row["conversation_correlation"]["status"] == "verified"
 
 
+def _verified_checkpoint_links(destination: Mapping[str, object]) -> dict[str, object]:
+    project = str(destination["project_slug"])
+    app_base = str(destination["app_base_url"])
+    call_ids = {
+        "eval_predict_and_score": "predict-and-score-call",
+        "weave_prediction": "prediction-call",
+        "weave_evaluation_root": "evaluation-call",
+        "weave_agent_root": "agent-call",
+    }
+    values: dict[str, object] = {
+        "trace_project": project,
+        "weave_agent_root_evidence_kind": "native_weave_call_v1",
+        "weave_agent_root_is_native_call": True,
+    }
+    for prefix, call_id in call_ids.items():
+        values[f"{prefix}_call_id"] = call_id
+        values[f"{prefix}_ref"] = f"weave:///{project}/call/{call_id}"
+        values[f"{prefix}_url"] = f"{app_base}/{project}/weave/calls/{call_id}"
+    values.update(
+        {
+            "weave_dataset_ref": f"weave:///{project}/object/tasks:v1",
+            "weave_dataset_url": (
+                f"{app_base}/{project}/weave/objects/tasks/versions/v1"
+            ),
+        }
+    )
+    return values
+
+
 def test_first_cell_evidence_checkpoint_requires_real_graph_and_host_scorer() -> None:
     destination = export.trace_destination_identity(
         {
@@ -3756,6 +4033,7 @@ def test_first_cell_evidence_checkpoint_requires_real_graph_and_host_scorer() ->
         }
     )
     valid = {
+        **_verified_checkpoint_links(destination),
         "trace_receipt": destination,
         "evaluation_root_object_verified": True,
         "dataset_version_object_verified": True,
@@ -3765,7 +4043,7 @@ def test_first_cell_evidence_checkpoint_requires_real_graph_and_host_scorer() ->
         "agent_graph_verified": True,
         "conversation_correlation_verified": True,
         "trace_link_status": "linked",
-        "weave_agent_root_call_id": "019fabcd-agent-call",
+        "weave_agent_root_call_id": "agent-call",
         "otel_root_span_id": "b" * 16,
         "host_evaluator_status": "passed",
         "local_cell_conformance": {
@@ -3853,6 +4131,7 @@ def test_evidence_checkpoint_covers_every_planned_cell_and_cancels_after_late_fa
     )
     cell = SimpleNamespace(id="cell-a")
     valid = {
+        **_verified_checkpoint_links(destination),
         "cell_id": "cell-a",
         "candidate_id": "candidate-a",
         "trace_receipt": destination,
@@ -3941,6 +4220,20 @@ def test_evaluation_evidence_accepts_canonical_object_refs_not_python_identity()
     assert row["dataset_version_object_verified"] is True
 
 
+def test_dataset_navigation_uses_the_locked_application_origin() -> None:
+    project = "team/private-project"
+    ref = f"weave:///{project}/object/tasks:dataset-v1"
+
+    assert export._object_url(
+        SimpleNamespace(ui_url="https://stale.example/not-the-locked-origin"),
+        ref,
+        app_base_url="https://wandb.internal.example/",
+    ) == (
+        "https://wandb.internal.example/team/private-project/"
+        "weave/objects/tasks/versions/dataset-v1"
+    )
+
+
 def test_native_agent_call_requires_authoritative_evaluation_ancestry() -> None:
     row = {
         "attempt_id": "a" * 64,
@@ -3972,7 +4265,7 @@ def test_native_agent_call_requires_authoritative_evaluation_ancestry() -> None:
     assert root is None
     assert row["trace_link_status"] == "ancestry_mismatch"
     assert row["trace_link_error"] == (
-        "native Agent Call is not a child of the exact evaluation prediction"
+        "Agent evidence Call is not a child of the exact evaluation prediction"
     )
 
 
@@ -3992,6 +4285,7 @@ def test_claude_native_agent_call_requires_verified_bridge_ancestry() -> None:
         "eval_predict_and_score_trace_id": evaluation_trace_id,
         "weave_prediction_call_id": "prediction",
         "weave_agent_bridge_call_id": bridge_id,
+        "weave_agent_bridge_otel_span_id": "f" * 16,
         "weave_agent_bridge_parent_id": "prediction",
         "weave_agent_bridge_trace_id": evaluation_trace_id,
         "weave_agent_bridge_otel_trace_id": evaluation_trace_id,
@@ -4043,7 +4337,7 @@ def test_claude_native_agent_call_requires_verified_bridge_ancestry() -> None:
                 "execution_fingerprint": "e" * 64,
                 "trace_id": evaluation_trace_id,
                 "span_id": "b" * 16,
-                "otel_parent_span_id": bridge_id,
+                "otel_parent_span_id": "f" * 16,
                 "eval_predict_and_score_call_id": "predict-and-score",
                 "weave_call_id": agent_call_id,
                 "weave_call_parent_id": bridge_id,

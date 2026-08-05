@@ -24,6 +24,46 @@ for (const name of ['spanBase.js', 'spanBase.mjs']) {
     "this.span = span; try { this.span.setAttributes(JSON.parse(process.env.FUGUE_TRACE_ATTRIBUTES_JSON || '{}')); } catch {}",
   );
 }
+hashes['weave/turn-cjs-parent'] = patch(
+  'node_modules/weave/dist/genai/turn.js',
+  `        const span = tracer.startSpan('invoke_agent', { kind: api_1.SpanKind.CLIENT, attributes, startTime: opts.startTime }, api_1.ROOT_CONTEXT);
+        const turn = new Turn({
+            span,
+            context: api_1.trace.setSpan(api_1.ROOT_CONTEXT, span),`,
+  `        const fugueParentContext = process.env.FUGUE_WEAVE_TRACEPARENT
+            ? (() => {
+                const raw = process.env.FUGUE_WEAVE_TRACEPARENT.trim();
+                const match = /^00-([0-9a-f]{32})-([0-9a-f]{16})-([0-9a-f]{2})$/i.exec(raw);
+                if (!match || /^0+$/.test(match[1]) || /^0+$/.test(match[2]))
+                    throw new Error('invalid FUGUE_WEAVE_TRACEPARENT');
+                return api_1.trace.setSpanContext(api_1.ROOT_CONTEXT, { traceId: match[1].toLowerCase(), spanId: match[2].toLowerCase(), traceFlags: Number.parseInt(match[3], 16) & 1, isRemote: true });
+            })()
+            : api_1.ROOT_CONTEXT;
+        const span = tracer.startSpan('invoke_agent', { kind: api_1.SpanKind.CLIENT, attributes, startTime: opts.startTime }, fugueParentContext);
+        const turn = new Turn({
+            span,
+            context: api_1.trace.setSpan(fugueParentContext, span),`,
+);
+hashes['weave/turn-esm-parent'] = patch(
+  'node_modules/weave/dist/genai/turn.mjs',
+  `        const span = tracer.startSpan('invoke_agent', { kind: SpanKind.CLIENT, attributes, startTime: opts.startTime }, ROOT_CONTEXT);
+        const turn = new Turn({
+            span,
+            context: trace.setSpan(ROOT_CONTEXT, span),`,
+  `        const fugueParentContext = process.env.FUGUE_WEAVE_TRACEPARENT
+            ? (() => {
+                const raw = process.env.FUGUE_WEAVE_TRACEPARENT.trim();
+                const match = /^00-([0-9a-f]{32})-([0-9a-f]{16})-([0-9a-f]{2})$/i.exec(raw);
+                if (!match || /^0+$/.test(match[1]) || /^0+$/.test(match[2]))
+                    throw new Error('invalid FUGUE_WEAVE_TRACEPARENT');
+                return trace.setSpanContext(ROOT_CONTEXT, { traceId: match[1].toLowerCase(), spanId: match[2].toLowerCase(), traceFlags: Number.parseInt(match[3], 16) & 1, isRemote: true });
+            })()
+            : ROOT_CONTEXT;
+        const span = tracer.startSpan('invoke_agent', { kind: SpanKind.CLIENT, attributes, startTime: opts.startTime }, fugueParentContext);
+        const turn = new Turn({
+            span,
+            context: trace.setSpan(fugueParentContext, span),`,
+);
 hashes['weave-openclaw/run-start'] = patch(
   'node_modules/weave-openclaw/dist/src/handlers/diagnostic/run.js',
   `            const session = getOrCreateSession(deps, event.sessionKey, agentName);
