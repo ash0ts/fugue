@@ -162,6 +162,29 @@ def _parser() -> FugueArgumentParser:
     demo.add_argument("--repo-root", type=Path, default=Path.cwd())
     demo.set_defaults(handler=_comparison_demo)
 
+    taskset = subparsers.add_parser(
+        "taskset", help="Build or import simple Agent evaluation tasksets"
+    )
+    taskset_actions = taskset.add_subparsers(
+        dest="taskset_action", metavar="ACTION", required=True
+    )
+    taskset_schema = taskset_actions.add_parser(
+        "schema", help="Write the public-task and private-label JSON Schemas"
+    )
+    taskset_schema.add_argument(
+        "--destination", type=Path, default=Path("schemas/fugue")
+    )
+    taskset_schema.set_defaults(handler=_component_taskset)
+    taskset_weave = taskset_actions.add_parser(
+        "import-weave",
+        help="Import one immutable Weave Dataset as a public taskset",
+    )
+    taskset_weave.add_argument("--dataset", required=True)
+    taskset_weave.add_argument("--as", dest="import_id", required=True)
+    taskset_weave.add_argument("--env-file", type=Path, default=Path(".env"))
+    taskset_weave.add_argument("--repo-root", type=Path, default=Path.cwd())
+    taskset_weave.set_defaults(handler=_component_taskset)
+
     mcp_component = subparsers.add_parser(
         "mcp", help="Import, inspect, and lock a normal MCP server declaration"
     )
@@ -1312,6 +1335,30 @@ def _component_mcp(args: argparse.Namespace) -> int:
             acknowledge_package_code=args.acknowledge_package_code,
         )
         payload = value.to_dict()
+    print(json.dumps(payload, indent=2, sort_keys=True))
+    return 0
+
+
+def _component_taskset(args: argparse.Namespace) -> int:
+    from fugue.bench.tasksets import (
+        import_weave_dataset,
+        write_taskset_schemas,
+    )
+
+    if args.taskset_action == "schema":
+        public, private = write_taskset_schemas(args.destination.resolve())
+        payload: Any = {
+            "public_task_schema": public.as_posix(),
+            "private_label_schema": private.as_posix(),
+        }
+    else:
+        root = args.repo_root.resolve()
+        payload = import_weave_dataset(
+            args.dataset,
+            import_id=args.import_id,
+            repo_root=root,
+            env=load_env(args.env_file),
+        ).to_dict()
     print(json.dumps(payload, indent=2, sort_keys=True))
     return 0
 

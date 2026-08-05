@@ -15,6 +15,56 @@ writes nothing under `.fugue`. Locking is the first mutation. It materializes a
 content-addressed task definition, private evaluation contract, resources, and
 Harbor manifest. Proposals carry only the resulting suite digest.
 
+## The simple comparison adapter
+
+Most users should start with one public JSONL taskset and one private label
+file rather than authoring the full campaign contract:
+
+```json
+{"id":"expense-limit","input":{"question":"What is the current limit?"},"tags":["policy"],"partition":"holdout"}
+```
+
+```json
+{"id":"expense-limit","expected":{"amount":125,"source":"expense-policy-v4.md"}}
+```
+
+`fugue taskset schema` writes the exact JSON Schemas. The Python
+`SimpleTasksetBuilder` writes the same contract and sets the private file to
+owner-only permissions. `fugue taskset import-weave` accepts only an immutable
+Weave Dataset object revision, imports only public task fields, and records
+row and dataset digests. Expected values are never imported from a public
+Dataset.
+
+A comparison can use built-in exact checks or a repository-local scorer:
+
+```python
+def score(task, output, evidence):
+    expected = evidence["expected"]
+    return {
+        "fact_correct": output["amount"] == expected["amount"],
+        "source_current": output["source"] == expected["source"],
+    }
+```
+
+```yaml
+evaluators:
+  - id: fact-and-source
+    type: deterministic
+    required: true
+    scorer: scorer.py
+    runtime: python312-sandbox-v1
+    dimensions: [fact_correct, source_current]
+```
+
+The scorer declares its output dimensions in the comparison. Every returned
+boolean or `0..1` number must be `true` or `1.0` for the attempt to pass. Fugue runs it
+only in the pinned scorer container with no network, no secrets, a read-only
+filesystem, dropped capabilities, `pull=never`, and explicit process, CPU,
+memory, time, and output limits. `check` invokes the same scorer against base
+and gold fixtures. During a live comparison, the host-side result is attached
+to the existing Weave prediction-and-score call; private expected values do
+not become Weave inputs.
+
 ## What an outer loop can define
 
 `TaskSuiteDraftV1` contains tasks, scenarios, and criteria sets. A task has a

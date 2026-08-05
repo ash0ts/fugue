@@ -1,10 +1,12 @@
 from __future__ import annotations
 
+import ast
 import hashlib
 import json
 import math
 import os
 import shutil
+import urllib.parse
 from collections.abc import Callable, Mapping, Sequence
 from dataclasses import asdict, dataclass, field, replace
 from pathlib import Path, PurePosixPath
@@ -86,6 +88,8 @@ class ComparisonEvaluatorV1:
     type: Literal["deterministic", "llm_judge"]
     required: bool
     checks: tuple[str, ...] = ()
+    scorer: str | None = None
+    runtime: str | None = None
     profile: str | None = None
     calibration: str | None = None
     rubric: str | None = None
@@ -143,6 +147,7 @@ class ComparisonReadinessV1:
     gold_passes: int
     deterministic_evaluators: tuple[str, ...]
     judge_evaluators: tuple[str, ...]
+    evaluator_digests: dict[str, str]
     attempts: int
     estimated_cells: int
     estimated_cost_usd: float
@@ -188,6 +193,7 @@ class ComparisonResultV1:
     deterministic_summary: dict[str, Any]
     judge_summary: dict[str, Any]
     mechanism_summary: dict[str, Any]
+    operational_summary: dict[str, Any]
     evidence_links: tuple[dict[str, str], ...]
     paired_cases: tuple[dict[str, Any], ...]
     limitations: tuple[str, ...]
@@ -244,6 +250,16 @@ def comparison_from_dict(
     evaluators = tuple(
         replace(
             evaluator,
+            scorer=(
+                _portable_input_path(
+                    evaluator.scorer,
+                    base,
+                    repo_root,
+                    "deterministic scorer",
+                )
+                if evaluator.scorer
+                else None
+            ),
             calibration=(
                 _portable_input_path(
                     evaluator.calibration,
@@ -335,8 +351,22 @@ def check_comparison(
         blockers.append(
             "unsupported deterministic checks: " + ", ".join(unsupported_checks)
         )
-    base_failures, gold_passes, qualification_blockers, qualification_warnings = (
-        _qualification_results(task_ids, labels, required_checks)
+    (
+        base_failures,
+        gold_passes,
+        qualification_blockers,
+        qualification_warnings,
+    ) = (
+        _qualification_results(
+            tasks,
+            labels,
+            tuple(
+                item
+                for item in spec.evaluators
+                if item.type == "deterministic"
+            ),
+            repo_root=repo_root,
+        )
     )
     blockers.extend(qualification_blockers)
     warnings.extend(qualification_warnings)
@@ -397,6 +427,10 @@ def check_comparison(
         gold_passes=gold_passes,
         deterministic_evaluators=deterministic,
         judge_evaluators=judges,
+        evaluator_digests={
+            item.id: _evaluator_digest(item, repo_root)
+            for item in spec.evaluators
+        },
         attempts=spec.execution.attempts,
         estimated_cells=estimated_cells,
         estimated_cost_usd=round(estimated_cost, 6),
@@ -445,30 +479,66 @@ def _task_label_issues(
 
 
 def _qualification_results(
-    task_ids: Sequence[str],
+    tasks: Sequence[Mapping[str, Any]],
     labels: Sequence[Mapping[str, Any]],
-    checks: set[str],
+    evaluators: Sequence[ComparisonEvaluatorV1],
+    *,
+    repo_root: Path,
 ) -> tuple[int, int, list[str], list[str]]:
     values = {str(item["id"]): item for item in labels}
     blockers: list[str] = []
     warnings: list[str] = []
     base_failures = 0
     gold_passes = 0
-    for task_id in task_ids:
+    for task in tasks:
+        task_id = str(task["id"])
         label = values.get(task_id)
         if label is None:
             continue
-        expected = label.get("expected")
         if "base_output" not in label:
             warnings.append(f"{task_id}: missing base_output qualification fixture")
-        elif not _score_simple_output(label["base_output"], expected, checks):
-            base_failures += 1
+        else:
+            try:
+                base_passed, _ = _score_deterministic_output(
+                    task=task,
+                    output=label["base_output"],
+                    expected=label.get("expected"),
+                    evidence={},
+                    evaluators=evaluators,
+                    repo_root=repo_root,
+                )
+            except Exception as exc:
+                blockers.append(
+                    f"{task_id}: evaluator qualification failed: "
+                    f"{type(exc).__name__}"
+                )
+            else:
+                if not base_passed:
+                    base_failures += 1
         if "gold_output" not in label:
             warnings.append(f"{task_id}: missing gold_output qualification fixture")
-        elif _score_simple_output(label["gold_output"], expected, checks):
-            gold_passes += 1
         else:
-            blockers.append(f"{task_id}: known-good output fails the evaluator")
+            try:
+                gold_passed, _ = _score_deterministic_output(
+                    task=task,
+                    output=label["gold_output"],
+                    expected=label.get("expected"),
+                    evidence={},
+                    evaluators=evaluators,
+                    repo_root=repo_root,
+                )
+            except Exception as exc:
+                blockers.append(
+                    f"{task_id}: evaluator qualification failed: "
+                    f"{type(exc).__name__}"
+                )
+            else:
+                if gold_passed:
+                    gold_passes += 1
+                else:
+                    blockers.append(
+                        f"{task_id}: known-good output fails the evaluator"
+                    )
     return base_failures, gold_passes, blockers, warnings
 
 
@@ -521,6 +591,9 @@ def compile_comparison(
     ]
     public_text = _jsonl(public_rows)
     taskset_digest = hashlib.sha256(public_text.encode()).hexdigest()
+    evaluator_digests = {
+        item.id: _evaluator_digest(item, repo_root) for item in spec.evaluators
+    }
     runtime = COMPARISON_RUNTIME_ROOT / spec.spec_digest
     source_path = runtime / "public-cases.jsonl"
     manifest_path = runtime / "manifest.yaml"
@@ -562,7 +635,10 @@ def compile_comparison(
                         "interaction_controller": row["interaction"],
                         "environment_profile_id": "artifact-python-v1",
                         "environment_kind": "artifact",
-                        "profile_digests": {},
+                        "profile_digests": {
+                            f"comparison-evaluator:{evaluator_id}": digest
+                            for evaluator_id, digest in evaluator_digests.items()
+                        },
                         "harness_applicability": row["harness_applicability"],
                         "partition": row["partition"],
                         "tags": row["tags"],
@@ -605,7 +681,11 @@ def compile_comparison(
                 },
                 "pass_rule": "All required deterministic checks must pass.",
                 "scorers": [
-                    _research_scorer(item) for item in spec.evaluators
+                    _research_scorer(
+                        item,
+                        revision=evaluator_digests[item.id],
+                    )
+                    for item in spec.evaluators
                 ],
             },
         }
@@ -750,6 +830,7 @@ def analyze_comparison_rows(
         deterministic_summary=_deterministic_summary(normalized),
         judge_summary=_judge_summary(normalized),
         mechanism_summary=_mechanism_summary(normalized),
+        operational_summary=_operational_summary(normalized),
         evidence_links=_comparison_evidence_links(normalized),
         paired_cases=tuple(paired_cases),
         limitations=tuple(limitations),
@@ -768,6 +849,40 @@ def write_comparison_result(
     markdown_path = destination / "result.md"
     atomic_write_json(json_path, result.to_dict())
     _atomic_text(markdown_path, _result_markdown(result))
+    artifacts = {
+        path.name: _sha256_path(path)
+        for path in (
+            json_path,
+            markdown_path,
+            destination / "attempts.jsonl",
+        )
+        if path.is_file()
+    }
+    atomic_write_json(
+        destination / "reproduction.json",
+        {
+            "schema_version": 1,
+            "comparison_id": result.comparison_id,
+            "preview_digest": result.preview_digest,
+            "result_digest": result.result_digest,
+            "source": result.source,
+            "artifacts": artifacts,
+            "private_labels_included": False,
+            "commands": {
+                "inspect": f"uv run fugue result {result.comparison_id}",
+                "replay": (
+                    "uv run fugue demo source-use"
+                    if result.source == "bundled-replay"
+                    else None
+                ),
+            },
+            "limitations": [
+                "Private labels are intentionally excluded.",
+                "A live rerun requires the original locked private labels, "
+                "component locks, runtime locks, and exact-preview approval.",
+            ],
+        },
+    )
     return json_path, markdown_path
 
 
@@ -778,7 +893,9 @@ def scaffold_comparison(destination: Path, *, force: bool = False) -> Path:
             f"refusing to overwrite non-empty comparison directory: {root}"
         )
     root.mkdir(parents=True, exist_ok=True)
-    skill_root = root / "skills" / "verify-current-source"
+    skill_root = (
+        root / "configs" / "fugue" / "skills" / "verify-current-source"
+    )
     skill_root.mkdir(parents=True, exist_ok=True)
     _atomic_text(
         root / "tasks.jsonl",
@@ -897,12 +1014,11 @@ def score_comparison_rows(
         str(item["id"]): item
         for item in _load_private_labels(repo_root / spec.taskset.private_labels)
     }
-    checks = {
-        check
+    deterministic = tuple(
+        evaluator
         for evaluator in spec.evaluators
         if evaluator.type == "deterministic"
-        for check in evaluator.checks
-    }
+    )
     scored: list[dict[str, Any]] = []
     for source in rows:
         row = dict(source)
@@ -913,36 +1029,41 @@ def score_comparison_rows(
             else row.get("answer")
         )
         label = labels.get(task_id)
+        row.setdefault("benchmark_pass", row.get("pass"))
         if label is None:
             row["pass"] = None
             row["comparison_evaluation_status"] = "unavailable"
             row["comparison_evaluation_reason"] = "private task label is unavailable"
             row["comparison_required_evaluation_complete"] = False
         else:
-            passed = _score_simple_output(output, label["expected"], checks)
-            row["pass"] = passed
-            row["comparison_evaluation_status"] = "scored"
-            row["comparison_deterministic_scores"] = {
-                "answer_present": bool(
-                    output is not None
-                    and (not isinstance(output, str) or bool(output.strip()))
-                ),
-                "expected_values": _contains_expected(
-                    (
-                        json.loads(output)
-                        if isinstance(output, str) and _is_json(output)
-                        else output
-                    ),
-                    label["expected"],
-                ),
-            }
-            row["comparison_mechanism"] = _comparison_mechanism(
-                row,
-                expected=label["expected"],
-                passed=passed,
-                candidate_skill_ids=spec.candidate.skills,
-            )
-            row["comparison_required_evaluation_complete"] = True
+            try:
+                passed, dimensions = _score_deterministic_output(
+                    task=public_tasks.get(task_id, {}),
+                    output=output,
+                    expected=label["expected"],
+                    evidence=_custom_scorer_evidence(row),
+                    evaluators=deterministic,
+                    repo_root=repo_root,
+                )
+            except Exception as exc:
+                row["pass"] = None
+                row["comparison_evaluation_status"] = "unavailable"
+                row["comparison_evaluation_reason"] = (
+                    "deterministic evaluation failed: "
+                    f"{type(exc).__name__}"
+                )
+                row["comparison_required_evaluation_complete"] = False
+            else:
+                row["pass"] = passed
+                row["comparison_evaluation_status"] = "scored"
+                row["comparison_deterministic_scores"] = dimensions
+                row["comparison_mechanism"] = _comparison_mechanism(
+                    row,
+                    expected=label["expected"],
+                    passed=passed,
+                    candidate_skill_ids=spec.candidate.skills,
+                )
+                row["comparison_required_evaluation_complete"] = True
         judge_results: dict[str, Any] = {}
         judge_scores: dict[str, float] = {}
         for judge in (
@@ -1307,10 +1428,11 @@ def _deterministic_summary(
             "dimensions": {
                 dimension: {
                     "passed": sum(
-                        (row.get("comparison_deterministic_scores") or {}).get(
-                            dimension
+                        _dimension_passed(
+                            (row.get("comparison_deterministic_scores") or {}).get(
+                                dimension
+                            )
                         )
-                        is True
                         for row in selected
                     ),
                     "evaluated": sum(
@@ -1318,11 +1440,35 @@ def _deterministic_summary(
                         in (row.get("comparison_deterministic_scores") or {})
                         for row in selected
                     ),
+                    "mean": _numeric_summary(
+                        [
+                            (
+                                float(value)
+                                if isinstance(value, bool)
+                                else value
+                            )
+                            for row in selected
+                            if (
+                                value := (
+                                    row.get("comparison_deterministic_scores") or {}
+                                ).get(dimension)
+                            )
+                            is not None
+                        ]
+                    )["mean"],
                 }
                 for dimension in dimensions
             },
         }
     return result
+
+
+def _dimension_passed(value: Any) -> bool:
+    return value is True or (
+        isinstance(value, int | float)
+        and not isinstance(value, bool)
+        and float(value) == 1.0
+    )
 
 
 def _judge_summary(rows: Sequence[Mapping[str, Any]]) -> dict[str, Any]:
@@ -1436,11 +1582,97 @@ def _comparison_evidence_links(
     for row in rows:
         for field_name, label in fields.items():
             value = str(row.get(field_name) or "")
-            if not value.startswith("https://") or value in seen:
+            if not _safe_evidence_url(value) or value in seen:
                 continue
             seen.add(value)
             result.append({"label": label, "url": value})
     return tuple(result)
+
+
+def _safe_evidence_url(value: str) -> bool:
+    parsed = urllib.parse.urlsplit(value)
+    if parsed.scheme == "https" and parsed.netloc:
+        return True
+    return parsed.scheme == "http" and parsed.hostname in {"127.0.0.1", "localhost"}
+
+
+def _operational_summary(
+    rows: Sequence[Mapping[str, Any]],
+) -> dict[str, Any]:
+    execution: dict[str, int] = {}
+    evidence: dict[str, int] = {}
+    observed_cost = 0.0
+    cost_rows = 0
+    latency_ms = 0.0
+    latency_rows = 0
+    input_tokens = 0
+    output_tokens = 0
+    usage_rows = 0
+    infrastructure_failures = 0
+    for row in rows:
+        status = str(
+            row.get("status")
+            or row.get("execution_status")
+            or "unknown"
+        )
+        execution[status] = execution.get(status, 0) + 1
+        evidence_status = str(
+            row.get("trace_link_status")
+            or row.get("evidence_status")
+            or "unknown"
+        )
+        evidence[evidence_status] = evidence.get(evidence_status, 0) + 1
+        if status in {"failed", "error", "infrastructure_failed"} or row.get(
+            "exception_class"
+        ):
+            infrastructure_failures += 1
+        cost = row.get("accounted_cost_usd", row.get("cost_usd"))
+        if isinstance(cost, int | float) and not isinstance(cost, bool):
+            observed_cost += float(cost)
+            cost_rows += 1
+        latency = row.get("latency_ms")
+        if isinstance(latency, int | float) and not isinstance(latency, bool):
+            latency_ms += float(latency)
+            latency_rows += 1
+        row_input = row.get("input_tokens")
+        row_output = row.get("output_tokens")
+        if isinstance(row_input, int) and isinstance(row_output, int):
+            input_tokens += row_input
+            output_tokens += row_output
+            usage_rows += 1
+    return {
+        "execution_states": dict(sorted(execution.items())),
+        "evidence_states": dict(sorted(evidence.items())),
+        "infrastructure_failures": infrastructure_failures,
+        "observed_cost_usd": round(observed_cost, 6) if cost_rows else None,
+        "cost_rows": cost_rows,
+        "latency_ms": round(latency_ms, 3) if latency_rows else None,
+        "latency_rows": latency_rows,
+        "input_tokens": input_tokens if usage_rows else None,
+        "output_tokens": output_tokens if usage_rows else None,
+        "usage_rows": usage_rows,
+    }
+
+
+def _comparison_scorer_names(spec: ComparisonSpecV1) -> tuple[str, ...]:
+    names: set[str] = set()
+    for evaluator in spec.evaluators:
+        if evaluator.type == "llm_judge":
+            names.update(
+                f"comparison.judge.{evaluator.id}.{dimension}"
+                for dimension in evaluator.dimensions
+            )
+        elif evaluator.scorer:
+            names.update(
+                f"comparison.deterministic.{evaluator.id}.{dimension}"
+                for dimension in evaluator.dimensions
+            )
+        else:
+            names.update(
+                f"comparison.deterministic.{check}"
+                for check in evaluator.checks
+            )
+    return tuple(sorted(names))
 
 
 def execute_comparison(
@@ -1471,7 +1703,23 @@ def execute_comparison(
     from fugue.bench.execution import new_run_id
 
     run_id = new_run_id()
-    service.execute_run(request, run_id=run_id, experiment=experiment)
+
+    def evaluate_attempt(row: dict[str, Any]) -> None:
+        scored = score_comparison_rows(
+            spec,
+            [row],
+            repo_root=repo_root,
+            env=service.env,
+        )[0]
+        row.update(scored)
+
+    service.execute_run(
+        request,
+        run_id=run_id,
+        experiment=experiment,
+        host_evaluator=evaluate_attempt,
+        host_scorer_names=_comparison_scorer_names(spec),
+    )
     export_path = (
         repo_root / COMPARISON_RESULT_ROOT / preview.preview_digest / "attempts.jsonl"
     )
@@ -1482,12 +1730,19 @@ def execute_comparison(
         to_weave=False,
     )
     rows = _read_jsonl(summary.path, "comparison attempt rows")
-    scored = score_comparison_rows(
-        spec,
-        rows,
-        repo_root=repo_root,
-        env=service.env,
-    )
+    scored = []
+    for row in rows:
+        if row.get("comparison_evaluation_status") in {"scored", "unavailable"}:
+            scored.append(row)
+        else:
+            scored.extend(
+                score_comparison_rows(
+                    spec,
+                    [row],
+                    repo_root=repo_root,
+                    env=service.env,
+                )
+            )
     _atomic_text(summary.path, _jsonl(scored))
     result = analyze_comparison_rows(
         comparison_id=spec.id,
@@ -1584,6 +1839,8 @@ def _evaluator(raw: Any) -> ComparisonEvaluatorV1:
             "type",
             "required",
             "checks",
+            "scorer",
+            "runtime",
             "profile",
             "calibration",
             "rubric",
@@ -1599,9 +1856,11 @@ def _evaluator(raw: Any) -> ComparisonEvaluatorV1:
     checks = _string_tuple(
         value.get("checks") or [],
         "evaluator check",
-        allow_empty=evaluator_type == "llm_judge",
+        allow_empty=True,
     )
     profile = str(value.get("profile") or "") or None
+    scorer = str(value.get("scorer") or "") or None
+    runtime = str(value.get("runtime") or "") or None
     calibration = str(value.get("calibration") or "") or None
     rubric = str(value.get("rubric") or "").strip() or None
     dimensions = _string_tuple(
@@ -1610,8 +1869,18 @@ def _evaluator(raw: Any) -> ComparisonEvaluatorV1:
     evidence = _string_tuple(
         value.get("evidence") or [], "judge evidence", allow_empty=True
     )
-    if evaluator_type == "deterministic" and not checks:
-        raise ValueError("deterministic evaluator requires checks")
+    if evaluator_type == "deterministic" and bool(checks) == bool(scorer):
+        raise ValueError(
+            "deterministic evaluator requires exactly one of checks or scorer"
+        )
+    if evaluator_type == "deterministic" and scorer and not runtime:
+        runtime = "python312-sandbox-v1"
+    if evaluator_type == "deterministic" and runtime and not scorer:
+        raise ValueError("deterministic evaluator runtime requires scorer")
+    if evaluator_type == "deterministic" and scorer:
+        validate_id(str(runtime), kind="scorer runtime id")
+        if not dimensions:
+            raise ValueError("custom deterministic scorer requires dimensions")
     if evaluator_type == "llm_judge" and not profile:
         raise ValueError("LLM judge evaluator requires a profile")
     if evaluator_type == "llm_judge" and not rubric:
@@ -1638,6 +1907,8 @@ def _evaluator(raw: Any) -> ComparisonEvaluatorV1:
         type=evaluator_type,  # type: ignore[arg-type]
         required=bool(value.get("required", True)),
         checks=checks,
+        scorer=scorer,
+        runtime=runtime,
         profile=profile,
         calibration=calibration,
         rubric=rubric,
@@ -1833,8 +2104,40 @@ def _variant_dict(variant_id: str, value: ComparisonCandidateV1) -> dict[str, An
     }
 
 
-def _research_scorer(value: ComparisonEvaluatorV1) -> dict[str, Any]:
+def _research_scorer(
+    value: ComparisonEvaluatorV1,
+    *,
+    revision: str | None = None,
+) -> dict[str, Any]:
     if value.type == "deterministic":
+        if value.scorer:
+            return {
+                "id": value.id,
+                "label": value.id.replace("-", " ").title(),
+                "kind": "deterministic",
+                "description": "Pinned custom scorer executed in an isolated runtime.",
+                "required": value.required,
+                "aggregation": "Every returned dimension must pass.",
+                "revision": revision,
+                "evidence_inputs": [
+                    "Public task",
+                    "Agent output",
+                    "Permitted normalized evidence",
+                    "Host-only expected values",
+                ],
+                "dimensions": [
+                    {
+                        "id": dimension.replace("_", "-"),
+                        "label": dimension.replace("_", " ").title(),
+                        "source_key": (
+                            f"comparison.deterministic.{value.id}.{dimension}"
+                        ),
+                        "target": True,
+                        "primary": index == 0,
+                    }
+                    for index, dimension in enumerate(value.dimensions)
+                ],
+            }
         return {
             "id": value.id,
             "label": value.id.replace("-", " ").title(),
@@ -1842,6 +2145,7 @@ def _research_scorer(value: ComparisonEvaluatorV1) -> dict[str, Any]:
             "description": "Deterministic checks compiled from the comparison evaluator.",
             "required": value.required,
             "aggregation": "Every required check must pass.",
+            "revision": revision,
             "evidence_inputs": ["Agent output", "Host-only expected values"],
             "dimensions": [
                 {
@@ -1860,6 +2164,7 @@ def _research_scorer(value: ComparisonEvaluatorV1) -> dict[str, Any]:
         "kind": "llm_judge",
         "description": "Calibrated blind qualitative review.",
         "required": value.required,
+        "revision": revision,
         "model": value.profile,
         "rubric_summary": "Use only permitted evidence and remain calibrated about coverage.",
         "rubric": value.rubric,
@@ -1938,6 +2243,246 @@ def _load_private_labels(path: Path) -> list[dict[str, Any]]:
         ids.add(task_id)
         row["id"] = task_id
     return rows
+
+
+def _evaluator_digest(
+    evaluator: ComparisonEvaluatorV1, repo_root: Path
+) -> str:
+    value = evaluator.to_dict()
+    if evaluator.scorer:
+        value["scorer_sha256"] = _sha256_path(
+            _safe_input_path(
+                Path(evaluator.scorer), repo_root, "deterministic scorer"
+            )
+        )
+    if evaluator.calibration:
+        value["calibration_sha256"] = _sha256_path(
+            _safe_input_path(
+                Path(evaluator.calibration), repo_root, "judge calibration"
+            )
+        )
+    return stable_digest(value)
+
+
+def _score_deterministic_output(
+    *,
+    task: Mapping[str, Any],
+    output: Any,
+    expected: Any,
+    evidence: Mapping[str, Any],
+    evaluators: Sequence[ComparisonEvaluatorV1],
+    repo_root: Path,
+) -> tuple[bool, dict[str, bool | float]]:
+    scores: dict[str, bool | float] = {}
+    evaluator_passes: list[bool] = []
+    for evaluator in evaluators:
+        if evaluator.scorer:
+            payload = _run_custom_scorer(
+                evaluator,
+                task=task,
+                output=output,
+                evidence=evidence,
+                expected=expected,
+                repo_root=repo_root,
+            )
+            details = payload["details"]
+            if not isinstance(details, Mapping) or not details:
+                raise ValueError("custom scorer must return at least one dimension")
+            if set(details) != set(evaluator.dimensions):
+                raise ValueError(
+                    "custom scorer output does not match its declared dimensions"
+                )
+            for name, value in details.items():
+                dimension = str(name)
+                if (
+                    not 1 <= len(dimension) <= 100
+                    or not dimension[0].isalnum()
+                    or any(
+                        not (character.isalnum() or character in {"_", "-"})
+                        for character in dimension
+                    )
+                ):
+                    raise ValueError(
+                        "scorer dimension names must use letters, numbers, _ or -"
+                    )
+                if isinstance(value, bool):
+                    normalized: bool | float = value
+                elif (
+                    isinstance(value, int | float)
+                    and not isinstance(value, bool)
+                    and math.isfinite(float(value))
+                    and 0 <= float(value) <= 1
+                ):
+                    normalized = float(value)
+                else:
+                    raise ValueError(
+                        f"scorer dimension {dimension!r} must be bool or 0..1"
+                    )
+                scores[f"{evaluator.id}.{dimension}"] = normalized
+            evaluator_passes.append(float(payload["score"]) == 1.0)
+            continue
+        check_scores = {
+            "answer_present": bool(
+                output is not None
+                and (not isinstance(output, str) or bool(output.strip()))
+            ),
+            "expected_values": _contains_expected(
+                (
+                    json.loads(output)
+                    if isinstance(output, str) and _is_json(output)
+                    else output
+                ),
+                expected,
+            ),
+        }
+        selected = {
+            check: check_scores[check]
+            for check in evaluator.checks
+        }
+        scores.update(selected)
+        evaluator_passes.append(all(selected.values()))
+    return bool(evaluator_passes) and all(evaluator_passes), scores
+
+
+def _run_custom_scorer(
+    evaluator: ComparisonEvaluatorV1,
+    *,
+    task: Mapping[str, Any],
+    output: Any,
+    evidence: Mapping[str, Any],
+    expected: Any,
+    repo_root: Path,
+) -> dict[str, Any]:
+    from fugue.bench.task_authoring import (
+        TaskAuthoringLimitsV1,
+        load_task_profiles,
+        run_inline_scorer,
+    )
+
+    if not evaluator.scorer or not evaluator.runtime:
+        raise ValueError("custom scorer is missing its source or runtime")
+    path = _safe_input_path(
+        Path(evaluator.scorer), repo_root, "deterministic scorer"
+    )
+    source = path.read_text(encoding="utf-8")
+    _validate_custom_scorer_source(source)
+    wrapper = (
+        source.rstrip()
+        + "\n\n"
+        + """
+if __name__ == "__main__":
+    import json
+    import math
+    import sys
+
+    with open(sys.argv[1], encoding="utf-8") as handle:
+        _fugue_payload = json.load(handle)
+    _fugue_reference = _fugue_payload["reference"]
+    _fugue_evidence = dict(_fugue_payload["evidence"])
+    _fugue_evidence["expected"] = _fugue_reference["expected"]
+    _fugue_result = score(
+        _fugue_reference["task"],
+        _fugue_reference["output"],
+        _fugue_evidence,
+    )
+    if not isinstance(_fugue_result, dict) or not _fugue_result:
+        raise ValueError("score() must return a non-empty object")
+    _fugue_values = []
+    for _fugue_name, _fugue_value in _fugue_result.items():
+        if not isinstance(_fugue_name, str) or not _fugue_name:
+            raise ValueError("score dimension names must be non-empty strings")
+        if isinstance(_fugue_value, bool):
+            _fugue_values.append(1.0 if _fugue_value else 0.0)
+        elif (
+            isinstance(_fugue_value, (int, float))
+            and not isinstance(_fugue_value, bool)
+            and math.isfinite(float(_fugue_value))
+            and 0 <= float(_fugue_value) <= 1
+        ):
+            _fugue_values.append(float(_fugue_value))
+        else:
+            raise ValueError("score dimensions must be bool or numbers in 0..1")
+    print(json.dumps({
+        "score": min(_fugue_values),
+        "reason": "custom deterministic scorer",
+        "details": _fugue_result,
+    }, sort_keys=True))
+"""
+    )
+    profiles = load_task_profiles(repo_root)
+    profile = profiles.scorer_runtime(evaluator.runtime)
+    limits = TaskAuthoringLimitsV1(
+        max_tasks=1,
+        max_scenarios=1,
+        max_prompt_bytes=1,
+        max_authored_asset_bytes=1,
+        max_user_turns=1,
+        max_agent_turns=1,
+        max_interactor_calls=0,
+        max_judge_calls=0,
+        scorer_timeout_sec=30,
+        scorer_memory_mb=256,
+        scorer_cpus=1.0,
+        scorer_output_bytes=64_000,
+    )
+    return run_inline_scorer(
+        source=wrapper,
+        evidence=dict(evidence),
+        reference={
+            "task": dict(task),
+            "output": output,
+            "expected": expected,
+        },
+        profile=profile,
+        limits=limits,
+    )
+
+
+def _validate_custom_scorer_source(source: str) -> None:
+    if len(source.encode()) > 32_000:
+        raise ValueError("custom scorer source exceeds 32,000 bytes")
+    try:
+        tree = ast.parse(source)
+    except SyntaxError as exc:
+        raise ValueError("custom scorer is not valid Python") from exc
+    definitions = [
+        node for node in tree.body if isinstance(node, ast.FunctionDef) and node.name == "score"
+    ]
+    if len(definitions) != 1:
+        raise ValueError("custom scorer must define exactly one score function")
+    function = definitions[0]
+    if (
+        len(function.args.args) != 3
+        or function.args.vararg is not None
+        or function.args.kwarg is not None
+        or function.args.kwonlyargs
+        or function.args.defaults
+    ):
+        raise ValueError("score must have the signature score(task, output, evidence)")
+    if [argument.arg for argument in function.args.args] != [
+        "task",
+        "output",
+        "evidence",
+    ]:
+        raise ValueError("score must have the signature score(task, output, evidence)")
+
+
+def _custom_scorer_evidence(row: Mapping[str, Any]) -> dict[str, Any]:
+    permitted = (
+        "artifacts",
+        "artifact_paths",
+        "changed_paths",
+        "inspected_paths",
+        "opened_paths",
+        "retrieved_paths",
+        "tool_calls",
+        "trace_summary",
+    )
+    return {
+        key: row[key]
+        for key in permitted
+        if key in row
+    }
 
 
 def _score_simple_output(
@@ -2081,6 +2626,15 @@ def _result_markdown(result: ComparisonResultV1) -> str:
         f"- Incomplete pairs: {result.incomplete}\n\n"
         f"- Required evaluations incomplete: "
         f"{result.required_evaluations_incomplete}\n\n"
+        "## Operational health\n\n"
+        f"- Infrastructure failures: "
+        f"{result.operational_summary['infrastructure_failures']}\n"
+        f"- Execution states: "
+        f"`{json.dumps(result.operational_summary['execution_states'], sort_keys=True)}`\n"
+        f"- Evidence states: "
+        f"`{json.dumps(result.operational_summary['evidence_states'], sort_keys=True)}`\n"
+        f"- Observed cost: "
+        f"{result.operational_summary['observed_cost_usd'] if result.operational_summary['observed_cost_usd'] is not None else 'unavailable'}\n\n"
         "## Mechanism evidence\n\n"
         + (mechanism or "No mechanism evidence was available.\n")
         + "\n## Blind judge\n\n"

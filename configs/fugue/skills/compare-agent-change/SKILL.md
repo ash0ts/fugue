@@ -14,7 +14,9 @@ generation and implementation outside Fugue.
    observation from possible explanations.
 2. Define the taskset. Put Agent-visible inputs in public JSONL and expected
    values in a separate private JSONL file. Include discovery and holdout
-   partitions deliberately.
+   partitions deliberately. Use `fugue taskset schema` for the strict
+   contracts or `fugue taskset import-weave` for one immutable public Weave
+   Dataset revision.
 3. Define the baseline and candidate with exactly one declared behavioral
    change when possible. Import normal components before referencing them:
 
@@ -28,7 +30,9 @@ generation and implementation outside Fugue.
    uv run fugue skills lock ID
    ```
 
-4. Define a deterministic evaluator first. Add a blind judge only for
+4. Define a deterministic evaluator first. A custom scorer must implement
+   `score(task, output, evidence)` and declare the exact dimensions it returns;
+   Fugue runs it in the pinned scorer sandbox. Add a blind judge only for
    qualities exact checks cannot measure, and only with reviewed calibration.
 5. Run `uv run fugue check COMPARISON.yaml`. Stop on `blocked` or
    `no_comparison_justified`. Resolve `needs_review` before release-quality

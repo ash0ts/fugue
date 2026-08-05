@@ -1184,6 +1184,20 @@ def test_live_evaluation_links_native_root_and_finalizes_cleanly(
         weave_module=fake_weave,
         summary_fetcher=summaries,
         trace_timeout_sec=0,
+        host_evaluator=lambda row: row.update(
+            {
+                "comparison_evaluation_status": "scored",
+                "comparison_required_evaluation_complete": True,
+                "comparison_deterministic_scores": {
+                    "fact-correct": True,
+                    "citation-quality": 0.75,
+                },
+            }
+        ),
+        host_scorer_names=(
+            "comparison.deterministic.fact-correct",
+            "comparison.deterministic.citation-quality",
+        ),
     )
     overlay = coordinator.begin_cell(cell)
     assert overlay == {
@@ -1213,6 +1227,11 @@ def test_live_evaluation_links_native_root_and_finalizes_cleanly(
     assert live_row["eval_predict_and_score_call_id"] == "predict-1"
     assert live_row["weave_prediction_call_id"] == "predict-1-model"
     assert live_row["evaluation_judge_status"] == "not_requested"
+    assert predictions[0].scores["comparison.deterministic.fact-correct"] is True
+    assert (
+        predictions[0].scores["comparison.deterministic.citation-quality"]
+        == 0.75
+    )
     assert live_row["adapter_outcome"]["rubric_evaluation"]["state"] == (
         "not_requested"
     )
@@ -2278,7 +2297,15 @@ def test_local_generated_evaluation_runs_scoring_without_changing_outcome(
 
     monkeypatch.setattr(export, "apply_generated_evaluation", score)
     coordinator = GeneratedEvaluationCoordinator(
-        [cell], repo_root=tmp_path, env={"PRIVATE_TOKEN": "secret-value"}
+        [cell],
+        repo_root=tmp_path,
+        env={"PRIVATE_TOKEN": "secret-value"},
+        host_evaluator=lambda row: row.update(
+            {
+                "comparison_evaluation_status": "scored",
+                "comparison_deterministic_scores": {"fact-correct": True},
+            }
+        ),
     )
 
     coordinator.finish_cell(cell, CellOutcome(cell.id, "passed", returncode=0))
@@ -2293,6 +2320,7 @@ def test_local_generated_evaluation_runs_scoring_without_changing_outcome(
     assert result["evaluation_publication_mode"] == "local"
     assert result["evaluation_task_completion"] == 1
     assert result["evaluation_correctness"] == 0.9
+    assert result["comparison_deterministic_scores"] == {"fact-correct": True}
     assert "evaluation_overall" not in result
     assert "secret-value" not in json.dumps(result)
 
