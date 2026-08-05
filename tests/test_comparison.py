@@ -5,6 +5,7 @@ import json
 from dataclasses import replace
 from pathlib import Path
 
+import httpx
 import pytest
 import yaml
 
@@ -16,10 +17,14 @@ from fugue.bench.comparison import (
     ComparisonSpecV1,
     DecisionAttestationV1,
     _apply_decision_attestation,
+    _canonical_decision_gate_policies,
     _comparison_qualification_digest,
     _comparison_result_digest,
     _comparison_trial_output,
     _evaluate_decision,
+    _evaluator_digest,
+    _paired_attempt_view_v3,
+    _require_checkpoint_judges,
     _sanitized_answer_excerpt,
     analyze_comparison_rows,
     check_comparison,
@@ -37,6 +42,7 @@ from fugue.bench.comparison import (
     write_comparison_result,
 )
 from fugue.bench.comparison import _decision_policy as parse_decision_policy
+from fugue.bench.evaluations import JudgeResponseError
 from fugue.bench.operator import OperatorService
 from fugue.model_plane import trace_destination_identity
 from fugue.research.approvals import ApprovalLedger
@@ -274,7 +280,13 @@ def test_replay_scores_aligned_improvements_and_regressions() -> None:
     assert result.unchanged == 2
     assert result.incomplete == 0
     assert result.evidence_project is None
-    assert result.judge_summary == {"status": "not_used"}
+    assert result.judge_summary == {
+        "status": "not_used",
+        "claim_status": "not_applicable",
+        "judges": [],
+        "by_variant": {"baseline": {}, "candidate": {}},
+        "unavailable_attempts": 0,
+    }
     assert result.deterministic_summary["candidate"]["passed"] == 6
     assert result.operational_summary == {
         "execution_states": {"unknown": 16},
@@ -938,6 +950,27 @@ def test_v3_result_round_trips_source_topology_and_canonical_view(
         row["comparison_dimension_roles"] = {
             "release.factual_correctness": "outcome",
             "release.locked_project_scope": "safety_gate",
+        }
+        row["comparison_judge_scores"] = {
+            "maintainer-actionability.maintenance_actionability": (
+                0.8 if variant == "candidate" else 0.6
+            )
+        }
+        row["comparison_judges"] = {
+            "maintainer-actionability": {
+                "qualification": {
+                    "judge_id": "maintainer-actionability",
+                    "profile": "wandb/zai-org/GLM-5.2",
+                    "contract_digest": "7" * 64,
+                    "dimensions": ["maintenance_actionability"],
+                    "calibration": {
+                        "status": "pending_human_review",
+                        "report_sha256": "8" * 64,
+                        "cases_digest": "9" * 64,
+                        "passed": False,
+                    },
+                }
+            }
         }
         row["source_pre_run_drift"] = drift
         row["source_post_run_drift"] = drift
@@ -1918,6 +1951,20 @@ def test_answer_excerpt_requires_privacy_evidence_and_redacts_json_secrets(
     assert _sanitized_answer_excerpt(row) is None
 
 
+def test_answer_excerpt_respects_serialized_utf8_byte_limit() -> None:
+    row = _decision_row(variant="candidate")
+    row["agent_response"] = "é" * 1_000
+
+    excerpt = _sanitized_answer_excerpt(row)
+
+    assert excerpt is not None
+    assert len(excerpt.encode()) == 1_000
+
+    row["agent_response"] = ("a" * 999) + " " + "remainder"
+    excerpt = _sanitized_answer_excerpt(row)
+    assert excerpt == "a" * 999
+
+
 def test_approved_comparison_manifest_reconciles_exact_run_and_coordinates(
     tmp_path: Path,
 ) -> None:
@@ -2461,26 +2508,34 @@ def test_required_judge_needs_reviewed_calibration(tmp_path: Path) -> None:
     calibration = tmp_path / "calibration.json"
     calibration.write_text(
         json.dumps(
-                {
-                    "schema_version": 1,
-                    "review_status": "adjudicated",
-                    "reviewers_per_example": 2,
-                    "disagreements_adjudicated": True,
-                    "judge_profile": judge.profile,
-                    "rubric_digest": stable_digest(
-                        {
-                            "schema_version": 1,
-                            "judge_id": judge.id,
-                            "profile": judge.profile,
-                            "rubric": judge.rubric,
-                            "dimensions": list(judge.dimensions),
-                            "evidence": list(judge.evidence),
-                        }
-                    ),
-                    "examples": 48,
+            {
+                "schema_version": 1,
+                "review_status": "adjudicated",
+                "reviewers_per_example": 2,
+                "disagreements_adjudicated": True,
+                "judge_profile": judge.profile,
+                "rubric_digest": stable_digest(
+                    {
+                        "schema_version": 1,
+                        "judge_id": judge.id,
+                        "profile": judge.profile,
+                        "rubric": judge.rubric,
+                        "dimensions": list(judge.dimensions),
+                        "evidence": list(judge.evidence),
+                    }
+                ),
+                "examples": 48,
+                "calibration_examples": 36,
+                "holdout_examples": 12,
+                "cases_digest": "a" * 64,
                 "true_positive_rate": 0.9,
                 "true_negative_rate": 0.9,
+                "calibration_true_positive_rate": 0.9,
+                "calibration_true_negative_rate": 0.9,
+                "holdout_true_positive_rate": 0.9,
+                "holdout_true_negative_rate": 0.9,
                 "critical_false_passes": 0,
+                "passed": True,
             }
         )
     )
@@ -2497,8 +2552,256 @@ def test_required_judge_needs_reviewed_calibration(tmp_path: Path) -> None:
             execution=replace(spec.execution, max_cost_usd=10),
         )
         assert check_comparison(ready, repo_root=root).status == "ready"
+        split_regression = json.loads(copied.read_text())
+        split_regression["holdout_true_negative_rate"] = 0.8
+        copied.write_text(json.dumps(split_regression))
+        split_readiness = check_comparison(ready, repo_root=root)
+        assert split_readiness.status == "blocked"
+        assert any(
+            "calibration or holdout is below 0.85" in item
+            for item in split_readiness.blockers
+        )
     finally:
         copied.unlink(missing_ok=True)
+
+
+def test_llm_judge_timeout_is_strict_defaulted_and_bound_to_spec() -> None:
+    root = Path.cwd()
+    path = MCP_MAINTENANCE_EXAMPLE / "tool-surface-canary-local-v4.yaml"
+    raw = yaml.safe_load(path.read_text())
+    configured = comparison_from_dict(
+        raw,
+        repo_root=root,
+        source=path.parent,
+    )
+    configured_judge = next(
+        evaluator
+        for evaluator in configured.evaluators
+        if evaluator.type == "llm_judge"
+    )
+
+    default_raw = yaml.safe_load(path.read_text())
+    next(
+        evaluator
+        for evaluator in default_raw["evaluators"]
+        if evaluator["type"] == "llm_judge"
+    ).pop("timeout_sec")
+    defaulted = comparison_from_dict(
+        default_raw,
+        repo_root=root,
+        source=path.parent,
+    )
+    defaulted_judge = next(
+        evaluator
+        for evaluator in defaulted.evaluators
+        if evaluator.type == "llm_judge"
+    )
+
+    assert configured_judge.timeout_sec == 300
+    assert defaulted_judge.timeout_sec is None
+    assert next(
+        evaluator
+        for evaluator in configured.to_dict()["evaluators"]
+        if evaluator["type"] == "llm_judge"
+    )["timeout_sec"] == 300
+    assert "timeout_sec" not in next(
+        evaluator
+        for evaluator in defaulted.to_dict()["evaluators"]
+        if evaluator["type"] == "llm_judge"
+    )
+    assert _evaluator_digest(
+        configured_judge,
+        root,
+    ) != _evaluator_digest(defaulted_judge, root)
+    assert configured.spec_digest != defaulted.spec_digest
+
+
+@pytest.mark.parametrize("timeout_sec", [0, 901, 1.5, True, None])
+def test_llm_judge_timeout_rejects_invalid_values(timeout_sec: object) -> None:
+    root = Path.cwd()
+    path = MCP_MAINTENANCE_EXAMPLE / "tool-surface-canary-local-v4.yaml"
+    raw = yaml.safe_load(path.read_text())
+    next(
+        evaluator
+        for evaluator in raw["evaluators"]
+        if evaluator["type"] == "llm_judge"
+    )["timeout_sec"] = timeout_sec
+
+    with pytest.raises(ValueError, match="LLM judge timeout_sec"):
+        comparison_from_dict(raw, repo_root=root, source=path.parent)
+
+
+def test_deterministic_evaluator_rejects_judge_timeout() -> None:
+    root = Path.cwd()
+    path = MCP_MAINTENANCE_EXAMPLE / "tool-surface-canary-local-v4.yaml"
+    raw = yaml.safe_load(path.read_text())
+    next(
+        evaluator
+        for evaluator in raw["evaluators"]
+        if evaluator["type"] == "deterministic"
+    )["timeout_sec"] = 300
+
+    with pytest.raises(
+        ValueError,
+        match="supported only for LLM judge evaluators",
+    ):
+        comparison_from_dict(raw, repo_root=root, source=path.parent)
+
+
+def test_v3_attempt_exports_blind_judge_scores_without_rationale() -> None:
+    row = {
+        "attempt_id": "a" * 64,
+        "attempt_identity": {
+            "task_id": "maintainer-project-health",
+            "arm": "candidate",
+            "harness": "claude-code",
+            "attempt": 1,
+            "candidate": "b" * 64,
+            "runtime": "c" * 64,
+        },
+        "prediction_id": "prediction-1",
+        "pass": True,
+        "status": "completed",
+        "comparison_evaluation_status": "scored",
+        "comparison_deterministic_scores": {
+            "natural-maintainer.answer_correct": True,
+        },
+        "comparison_judge_scores": {
+            "maintainer-actionability.maintenance_actionability": 0.8,
+        },
+        "mcp_tool_calls": [],
+    }
+
+    attempt = _paired_attempt_view_v3(row)
+
+    assert attempt is not None
+    assert attempt.scores == {
+        "natural-maintainer.answer_correct": True,
+        ("comparison.judge.maintainer-actionability.maintenance_actionability"): 0.8,
+    }
+    assert (
+        attempt.score_explanations[
+            ("comparison.judge.maintainer-actionability.maintenance_actionability")
+        ]
+        == "Blind judge score; no rationale or private truth is published."
+    )
+
+
+def test_checkpoint_records_advisory_judge_without_gating_execution() -> None:
+    root = Path.cwd()
+    spec = load_comparison(
+        MCP_MAINTENANCE_EXAMPLE / "tool-surface-canary-local-v4.yaml",
+        repo_root=root,
+    )
+    judge = next(
+        evaluator
+        for evaluator in spec.evaluators
+        if evaluator.id == "maintainer-actionability"
+    )
+    assert judge.timeout_sec == 300
+    row = {
+        "comparison_evaluation_status": "scored",
+        "comparison_required_evaluation_complete": True,
+        "host_evaluator_status": "passed",
+        "comparison_judges": {
+            "maintainer-actionability": {
+                "status": "unavailable",
+                "reason": "judge evaluation failed: ReadTimeout",
+            }
+        }
+    }
+
+    _require_checkpoint_judges(
+        spec,
+        row,
+        checkpoint_index=0,
+    )
+
+    assert row["comparison_judge_checkpoint_status"] == "advisory_unavailable"
+    assert row["comparison_judge_checkpoint_unavailable"] == [
+        "maintainer-actionability"
+    ]
+    assert "comparison_judge_checkpoint_required_unavailable" not in row
+    assert row["comparison_evaluation_status"] == "scored"
+    assert row["comparison_required_evaluation_complete"] is True
+    assert row["host_evaluator_status"] == "passed"
+
+    scored = {
+        "comparison_judges": {
+            "maintainer-actionability": {"status": "scored"}
+        }
+    }
+    _require_checkpoint_judges(
+        spec,
+        scored,
+        checkpoint_index=0,
+    )
+    assert scored["comparison_judge_checkpoint_status"] == "passed"
+
+    after_checkpoint: dict[str, object] = {}
+    _require_checkpoint_judges(
+        spec,
+        after_checkpoint,
+        checkpoint_index=1,
+    )
+    assert after_checkpoint == {}
+
+
+def test_checkpoint_stops_when_required_judge_does_not_score() -> None:
+    root = Path.cwd()
+    optional = load_comparison(
+        MCP_MAINTENANCE_EXAMPLE / "tool-surface-canary-local-v4.yaml",
+        repo_root=root,
+    )
+    spec = replace(
+        optional,
+        evaluators=tuple(
+            replace(evaluator, required=True)
+            if evaluator.id == "maintainer-actionability"
+            else evaluator
+            for evaluator in optional.evaluators
+        ),
+    )
+    row = {
+        "comparison_judges": {
+            "maintainer-actionability": {
+                "status": "unavailable",
+                "reason": "judge evaluation failed: ReadTimeout",
+            }
+        }
+    }
+
+    with pytest.raises(
+        RuntimeError,
+        match="first-cell required judge checkpoint did not score",
+    ):
+        _require_checkpoint_judges(spec, row, checkpoint_index=0)
+
+    assert row["comparison_judge_checkpoint_status"] == "failed"
+    assert row["comparison_judge_checkpoint_unavailable"] == [
+        "maintainer-actionability"
+    ]
+    assert row["comparison_judge_checkpoint_required_unavailable"] == [
+        "maintainer-actionability"
+    ]
+
+
+def test_decision_policy_accepts_release_notes_without_infrastructure_gates() -> (
+    None
+):
+    policies = _canonical_decision_gate_policies(
+        (),
+        implicit=(),
+        release_note_coverage=(
+            {
+                "release_note": "bounded-history",
+                "status": "observed_delta",
+                "infrastructure_gates": [],
+            },
+        ),
+    )
+
+    assert policies == []
 
 
 def test_custom_scorer_uses_locked_sandbox_and_private_expected_values(
@@ -2593,7 +2896,7 @@ def test_blind_judge_receives_only_public_task_output_and_permitted_evidence(
         id="maintainer-review",
         type="llm_judge",
         required=True,
-        profile="wandb/openai/gpt-oss-120b",
+        profile="wandb/zai-org/GLM-5.2",
         rubric="Score grounding, usefulness, prioritization, and calibration.",
         dimensions=(
             "evidence_grounding",
@@ -2602,11 +2905,14 @@ def test_blind_judge_receives_only_public_task_output_and_permitted_evidence(
             "calibration",
         ),
         evidence=("tool_names", "inspected_paths"),
+        timeout_sec=300,
         reserve_cost_usd=0.1,
     )
-    captured: dict[str, str] = {}
+    captured: dict[str, object] = {"requests": 0}
 
-    def fake_post(_client, _route, _key, _env, prompt):
+    def fake_post(client, _route, _key, _env, prompt):
+        captured["requests"] = int(captured["requests"]) + 1
+        captured["timeout_sec"] = client.timeout.read
         captured["prompt"] = prompt
         return (
             {
@@ -2642,6 +2948,10 @@ def test_blind_judge_receives_only_public_task_output_and_permitted_evidence(
                         "output": "private tool body",
                     }
                 ],
+                "mcp_tool_calls": [
+                    {"tool": "query_wandb_tool"},
+                ],
+                "mcp_tool_names": ["summarize_evaluation_tool"],
                 "inspected_paths": ["expense-policy-v4.md"],
                 "comparison_deterministic_scores": {"private": True},
             }
@@ -2650,15 +2960,280 @@ def test_blind_judge_receives_only_public_task_output_and_permitted_evidence(
         env={"WANDB_API_KEY": "secret", "FUGUE_WANDB_INFERENCE_PROJECT": "wandb/test"},
     )
 
-    prompt = captured["prompt"]
+    prompt = str(captured["prompt"])
     assert "secret-candidate-revision" not in prompt
     assert "secret-harness-name" not in prompt
     assert "secret-prediction" not in prompt
     assert "do-not-send" not in prompt
     assert "private tool body" not in prompt
-    assert '"tool_names": ["search"]' in prompt
+    assert (
+        '"tool_names": ["query_wandb_tool", "search", "summarize_evaluation_tool"]'
+    ) in prompt
     assert rows[0]["comparison_judge_status"] == "scored"
     assert rows[0]["comparison_required_evaluation_complete"] is True
+    assert captured["requests"] == 1
+    assert captured["timeout_sec"] == 300
+    privacy = rows[0]["comparison_judges"]["maintainer-review"]["route_receipt"][
+        "judge_input_privacy"
+    ]
+    assert privacy["status"] == "passed"
+    assert len(privacy["payload_sha256"]) == 64
+    request_policy = rows[0]["comparison_judges"]["maintainer-review"][
+        "route_receipt"
+    ]["request_policy"]
+    assert request_policy == {
+        "schema_version": 1,
+        "timeout_sec": 300,
+        "max_output_tokens": 1_200,
+        "structured_assistant_options": {"thinking": {"type": "disabled"}},
+        "automatic_retries": 0,
+    }
+
+
+def test_blind_judge_rejects_secret_before_provider_call(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    root = Path.cwd()
+    spec = load_comparison(EXAMPLE / "comparison.yaml", repo_root=root)
+    judge = ComparisonEvaluatorV1(
+        id="maintainer-review",
+        type="llm_judge",
+        required=True,
+        profile="wandb/openai/gpt-oss-120b",
+        rubric="Score maintenance actionability.",
+        dimensions=("maintenance_actionability",),
+        evidence=("tool_names",),
+        reserve_cost_usd=0.1,
+    )
+    provider_calls = []
+
+    def forbidden_post(*_args, **_kwargs):
+        provider_calls.append("called")
+        raise AssertionError("privacy failure must stop before the provider")
+
+    monkeypatch.setattr("fugue.bench.evaluations._post_judge", forbidden_post)
+    rows = score_comparison_rows(
+        replace(spec, evaluators=(*spec.evaluators, judge)),
+        [
+            {
+                "answer": {
+                    "amount": 125,
+                    "source": "credential super-secret-value",
+                },
+                "task_id": "expense-limit",
+                "trial_index": 1,
+                "variant_id": "candidate",
+                "harness": "claude-code",
+                "mcp_tool_names": ["query_wandb_tool"],
+            }
+        ],
+        repo_root=root,
+        env={
+            "WANDB_API_KEY": "super-secret-value",
+            "FUGUE_WANDB_INFERENCE_PROJECT": "wandb/test",
+        },
+    )
+
+    assert provider_calls == []
+    assert rows[0]["comparison_judge_status"] == "unavailable"
+    assert rows[0]["comparison_required_evaluation_complete"] is False
+
+
+def test_blind_judge_read_timeout_is_not_retried(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    root = Path.cwd()
+    spec = load_comparison(EXAMPLE / "comparison.yaml", repo_root=root)
+    judge = ComparisonEvaluatorV1(
+        id="maintainer-review",
+        type="llm_judge",
+        required=False,
+        profile="wandb/openai/gpt-oss-120b",
+        rubric="Score maintenance actionability.",
+        dimensions=("maintenance_actionability",),
+        evidence=("tool_names",),
+        timeout_sec=300,
+        reserve_cost_usd=0.1,
+    )
+    provider_calls = 0
+
+    def timeout_once(*_args, **_kwargs):
+        nonlocal provider_calls
+        provider_calls += 1
+        raise httpx.ReadTimeout("judge request exceeded its deadline")
+
+    monkeypatch.setattr("fugue.bench.evaluations._post_judge", timeout_once)
+    rows = score_comparison_rows(
+        replace(spec, evaluators=(*spec.evaluators, judge)),
+        [
+            {
+                "answer": {"amount": 125, "source": "expense-policy-v4.md"},
+                "task_id": "expense-limit",
+                "trial_index": 1,
+                "variant_id": "candidate",
+                "harness": "claude-code",
+                "mcp_tool_names": ["query_wandb_tool"],
+            }
+        ],
+        repo_root=root,
+        env={
+            "WANDB_API_KEY": "secret",
+            "FUGUE_WANDB_INFERENCE_PROJECT": "wandb/test",
+        },
+    )
+
+    assert provider_calls == 1
+    assert rows[0]["comparison_judge_status"] == "unavailable"
+    assert (
+        rows[0]["comparison_judges"]["maintainer-review"]["reason"]
+        == "judge evaluation failed: ReadTimeout"
+    )
+    assert rows[0]["comparison_judges"]["maintainer-review"]["failure"] == {
+        "schema_version": 1,
+        "stage": "provider_request",
+        "code": "provider_timeout",
+        "message": "judge provider request timed out",
+        "exception_type": "ReadTimeout",
+        "request_policy": {
+            "schema_version": 1,
+            "timeout_sec": 300,
+            "max_output_tokens": 1_200,
+            "structured_assistant_options": {},
+            "automatic_retries": 0,
+        },
+    }
+
+
+def test_blind_judge_records_safe_no_json_failure_metadata(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    root = Path.cwd()
+    spec = load_comparison(EXAMPLE / "comparison.yaml", repo_root=root)
+    judge = ComparisonEvaluatorV1(
+        id="maintainer-review",
+        type="llm_judge",
+        required=False,
+        profile="wandb/zai-org/GLM-5.2",
+        rubric="Score maintenance actionability.",
+        dimensions=("maintenance_actionability",),
+        evidence=("tool_names",),
+        timeout_sec=300,
+        reserve_cost_usd=0.1,
+    )
+
+    def no_json(*_args: object, **_kwargs: object) -> None:
+        raise JudgeResponseError(
+            stage="response_extraction",
+            code="no_json_object",
+            message="judge returned no JSON object",
+            response_sha256="a" * 64,
+            response_characters=321,
+            usage={"input_tokens": 100, "output_tokens": 1_200},
+        )
+
+    monkeypatch.setattr("fugue.bench.evaluations._post_judge", no_json)
+    rows = score_comparison_rows(
+        replace(spec, evaluators=(*spec.evaluators, judge)),
+        [
+            {
+                "answer": {"amount": 125, "source": "expense-policy-v4.md"},
+                "task_id": "expense-limit",
+                "trial_index": 1,
+                "variant_id": "candidate",
+                "harness": "claude-code",
+                "mcp_tool_names": ["query_wandb_tool"],
+            }
+        ],
+        repo_root=root,
+        env={
+            "WANDB_API_KEY": "secret",
+            "FUGUE_WANDB_INFERENCE_PROJECT": "wandb/test",
+        },
+    )
+
+    failure = rows[0]["comparison_judges"]["maintainer-review"]["failure"]
+    assert failure == {
+        "schema_version": 1,
+        "stage": "response_extraction",
+        "code": "no_json_object",
+        "message": "judge returned no JSON object",
+        "exception_type": "ValueError",
+        "response_sha256": "a" * 64,
+        "response_characters": 321,
+        "usage": {"input_tokens": 100, "output_tokens": 1_200},
+        "request_policy": {
+            "schema_version": 1,
+            "timeout_sec": 300,
+            "max_output_tokens": 1_200,
+            "structured_assistant_options": {"thinking": {"type": "disabled"}},
+            "automatic_retries": 0,
+        },
+    }
+    assert "expense-policy-v4.md" not in json.dumps(failure)
+
+
+def test_blind_judge_distinguishes_strict_rubric_validation_failure() -> None:
+    root = Path.cwd()
+    spec = load_comparison(EXAMPLE / "comparison.yaml", repo_root=root)
+    judge = ComparisonEvaluatorV1(
+        id="maintainer-review",
+        type="llm_judge",
+        required=False,
+        profile="wandb/zai-org/GLM-5.2",
+        rubric="Score maintenance actionability.",
+        dimensions=("maintenance_actionability",),
+        evidence=("tool_names",),
+        timeout_sec=300,
+        reserve_cost_usd=0.1,
+    )
+
+    def invalid_payload(**_kwargs: object) -> tuple[
+        dict[str, object],
+        dict[str, object],
+        dict[str, object],
+    ]:
+        return (
+            {"scores": {"wrong-private-dimension": 1}},
+            {"input_tokens": 100, "output_tokens": 20},
+            {"request_policy": {"automatic_retries": 0}},
+        )
+
+    rows = score_comparison_rows(
+        replace(spec, evaluators=(*spec.evaluators, judge)),
+        [
+            {
+                "answer": {"amount": 125, "source": "expense-policy-v4.md"},
+                "task_id": "expense-limit",
+                "trial_index": 1,
+                "variant_id": "candidate",
+                "harness": "claude-code",
+                "mcp_tool_names": ["query_wandb_tool"],
+            }
+        ],
+        repo_root=root,
+        env={
+            "WANDB_API_KEY": "secret",
+            "FUGUE_WANDB_INFERENCE_PROJECT": "wandb/test",
+        },
+        judge_request=invalid_payload,
+    )
+
+    failure = rows[0]["comparison_judges"]["maintainer-review"]["failure"]
+    assert failure == {
+        "schema_version": 1,
+        "stage": "rubric_validation",
+        "code": "invalid_rubric_payload",
+        "message": "judge response failed strict rubric validation",
+        "exception_type": "ValueError",
+        "request_policy": {
+            "schema_version": 1,
+            "timeout_sec": 300,
+            "max_output_tokens": 1_200,
+            "structured_assistant_options": {"thinking": {"type": "disabled"}},
+            "automatic_retries": 0,
+        },
+    }
+    assert "wrong-private-dimension" not in json.dumps(failure)
 
 
 def test_scaffold_refuses_non_empty_destination(tmp_path: Path) -> None:

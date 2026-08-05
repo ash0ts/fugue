@@ -151,6 +151,68 @@
   },
   "infrastructure_health": "healthy",
   "integrity_status": "reconciled",
+  "judge_summary": {
+    "by_variant": {
+      "baseline": {
+        "maintainer-actionability.bounded_next_step": {
+          "evaluated": 1,
+          "mean": 0.4
+        },
+        "maintainer-actionability.evidence_to_action_traceability": {
+          "evaluated": 1,
+          "mean": 0.5
+        },
+        "maintainer-actionability.maintenance_actionability": {
+          "evaluated": 1,
+          "mean": 0.25
+        },
+        "maintainer-actionability.uncertainty_calibration": {
+          "evaluated": 1,
+          "mean": 0.5
+        }
+      },
+      "candidate": {
+        "maintainer-actionability.bounded_next_step": {
+          "evaluated": 1,
+          "mean": 0.7
+        },
+        "maintainer-actionability.evidence_to_action_traceability": {
+          "evaluated": 1,
+          "mean": 0.8
+        },
+        "maintainer-actionability.maintenance_actionability": {
+          "evaluated": 1,
+          "mean": 0.75
+        },
+        "maintainer-actionability.uncertainty_calibration": {
+          "evaluated": 1,
+          "mean": 0.8
+        }
+      }
+    },
+    "claim_status": "advisory_uncalibrated",
+    "judges": [
+      {
+        "calibration": {
+          "cases_digest": "c1313b4347b3bfcdb7d96d67ad529902b48166cb0f8b5abe04d4b483f3b68c22",
+          "passed": false,
+          "report_sha256": "2ae233e0f9ea7a5ba5708302dfd643a0183deec37c8d75e8581478f5cbbaf793",
+          "status": "pending_human_review"
+        },
+        "contract_digest": "82ac739d739536b259335af31e6b93fd0d553b78a4b9ef74ca0c4db5d6c4021a",
+        "dimensions": [
+          "maintenance_actionability",
+          "evidence_to_action_traceability",
+          "bounded_next_step",
+          "uncertainty_calibration"
+        ],
+        "judge_id": "maintainer-actionability",
+        "profile": "wandb/zai-org/GLM-5.2"
+      }
+    ],
+    "status": "scored",
+    "unavailable_attempts": 0
+  },
   "kind": "evaluation",
   "matrix_size": 2,
   "paired_cases": [
@@ -228,10 +290,18 @@
         "runtime_lock_digest": "harbor-runtime-lock",
         "sanitized_answer_excerpt": "The baseline summary did not reconcile direct children.",
         "score_explanations": {
-          "bounded_answer": "The answer made an unsupported broad claim."
+          "bounded_answer": "The answer made an unsupported broad claim.",
+          "comparison.judge.maintainer-actionability.bounded_next_step": "Blind judge score; no rationale or private truth is published.",
+          "comparison.judge.maintainer-actionability.evidence_to_action_traceability": "Blind judge score; no rationale or private truth is published.",
+          "comparison.judge.maintainer-actionability.maintenance_actionability": "Blind judge score; no rationale or private truth is published.",
+          "comparison.judge.maintainer-actionability.uncertainty_calibration": "Blind judge score; no rationale or private truth is published."
         },
         "scores": {
-          "bounded_answer": false
+          "bounded_answer": false,
+          "comparison.judge.maintainer-actionability.bounded_next_step": 0.4,
+          "comparison.judge.maintainer-actionability.evidence_to_action_traceability": 0.5,
+          "comparison.judge.maintainer-actionability.maintenance_actionability": 0.25,
+          "comparison.judge.maintainer-actionability.uncertainty_calibration": 0.5
         },
         "tool_calls": 2,
         "tools": [
@@ -312,10 +382,18 @@
         "runtime_lock_digest": "harbor-runtime-lock",
         "sanitized_answer_excerpt": "The candidate reconciled the exact direct children.",
         "score_explanations": {
-          "bounded_answer": "The answer stayed within the locked project."
+          "bounded_answer": "The answer stayed within the locked project.",
+          "comparison.judge.maintainer-actionability.bounded_next_step": "Blind judge score; no rationale or private truth is published.",
+          "comparison.judge.maintainer-actionability.evidence_to_action_traceability": "Blind judge score; no rationale or private truth is published.",
+          "comparison.judge.maintainer-actionability.maintenance_actionability": "Blind judge score; no rationale or private truth is published.",
+          "comparison.judge.maintainer-actionability.uncertainty_calibration": "Blind judge score; no rationale or private truth is published."
         },
         "scores": {
-          "bounded_answer": true
+          "bounded_answer": true,
+          "comparison.judge.maintainer-actionability.bounded_next_step": 0.7,
+          "comparison.judge.maintainer-actionability.evidence_to_action_traceability": 0.8,
+          "comparison.judge.maintainer-actionability.maintenance_actionability": 0.75,
+          "comparison.judge.maintainer-actionability.uncertainty_calibration": 0.8
         },
         "tool_calls": 2,
         "tools": [

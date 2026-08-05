@@ -1,12 +1,18 @@
 from __future__ import annotations
 
+import hashlib
 import json
 import os
 import subprocess
 import sys
 from io import BytesIO
 
-from fugue.mcp_proxy import _Recorder, _relay_requests, _sanitize
+from fugue.mcp_proxy import (
+    _Recorder,
+    _relay_requests,
+    _request_is_source_scoped,
+    _sanitize,
+)
 
 
 def test_mcp_telemetry_redacts_and_correlates_requests(tmp_path) -> None:
@@ -46,6 +52,31 @@ def test_mcp_telemetry_redacts_and_correlates_requests(tmp_path) -> None:
     assert [item["layer"] for item in events] == ["proxy", "upstream"]
     assert events[0]["elapsed_ms"] >= 0
     assert "large local value" not in path.read_text()
+
+
+def test_artifact_tools_require_qualified_locked_project_refs() -> None:
+    project = "wandb/fugue-mcp-release-source-v2"
+    assert _request_is_source_scoped(
+        tool="compare_artifact_versions_tool",
+        arguments={
+            "artifact_name_a": f"{project}/evidence-a:v0",
+            "artifact_name_b": f"{project}/evidence-b:v0",
+        },
+        source_project=project,
+    )
+    assert not _request_is_source_scoped(
+        tool="get_artifact_details_tool",
+        arguments={"artifact_name": "evidence-a:v0"},
+        source_project=project,
+    )
+    assert not _request_is_source_scoped(
+        tool="compare_artifact_versions_tool",
+        arguments={
+            "artifact_name_a": f"{project}/evidence-a:v0",
+            "artifact_name_b": "wandb/other-project/evidence-b:v0",
+        },
+        source_project=project,
+    )
 
 
 def test_mcp_response_telemetry_exports_only_safe_terminal_metadata(tmp_path) -> None:
@@ -148,7 +179,17 @@ def test_mcp_response_telemetry_exports_only_safe_terminal_metadata(tmp_path) ->
         "event": "mcp_tool_response",
         "has_more": False,
         "layer": "upstream",
+        "next_cursor_metadata_verified": True,
+        "next_cursor_present": False,
+        "pagination_metadata_verified": True,
         "project_exhaustive": True,
+        "returned_object_id_count": 2,
+        "returned_object_id_hashes": [
+            hashlib.sha256(value.encode()).hexdigest()
+            for value in ("private-run-a", "private-run-b")
+        ],
+        "returned_object_id_metadata_verified": True,
+        "returned_object_ids_unique": True,
         "returned_count": 2,
         "server": "wandb",
         "successful": True,
@@ -163,6 +204,119 @@ def test_mcp_response_telemetry_exports_only_safe_terminal_metadata(tmp_path) ->
     serialized = path.read_text()
     assert "private-run-a" not in serialized
     assert "abc123" not in serialized
+
+
+def test_mcp_response_telemetry_preserves_only_nested_artifact_digest(
+    tmp_path,
+) -> None:
+    path = tmp_path / "events.jsonl"
+    recorder = _Recorder(name="wandb", path=path)
+    recorder.request(
+        {
+            "jsonrpc": "2.0",
+            "id": 10,
+            "method": "tools/call",
+            "params": {
+                "name": "get_artifact_details_tool",
+                "arguments": {
+                    "artifact_name": (
+                        "wandb/fugue-mcp-release-source-v2/"
+                        "qualification-evidence-maint-r18-02:v0"
+                    ),
+                    "include_files": False,
+                },
+            },
+        },
+        100,
+    )
+    recorder.response(
+        {
+            "jsonrpc": "2.0",
+            "id": 10,
+            "result": {
+                "content": [
+                    {
+                        "type": "text",
+                        "text": json.dumps(
+                            {
+                                "artifact": {
+                                    "name": "private-artifact-name",
+                                    "digest": "sha256:" + "b" * 64,
+                                    "description": "private artifact description",
+                                }
+                            }
+                        ),
+                    }
+                ]
+            },
+        },
+        500,
+    )
+
+    response = next(
+        json.loads(line)
+        for line in path.read_text().splitlines()
+        if json.loads(line)["event"] == "mcp_tool_response"
+    )
+
+    assert response["artifact_digest"] == "sha256:" + "b" * 64
+    serialized = path.read_text()
+    assert "private-artifact-name" not in serialized
+    assert "private artifact description" not in serialized
+
+
+def test_mcp_response_telemetry_normalizes_probe_project_run_count(tmp_path) -> None:
+    path = tmp_path / "events.jsonl"
+    recorder = _Recorder(name="wandb", path=path)
+    recorder.request(
+        {
+            "jsonrpc": "2.0",
+            "id": 11,
+            "method": "tools/call",
+            "params": {
+                "name": "probe_project_tool",
+                "arguments": {
+                    "entity_name": "wandb",
+                    "project_name": "fugue-mcp-release-source-v2",
+                    "sample_runs": 4,
+                },
+            },
+        },
+        100,
+    )
+    recorder.response(
+        {
+            "jsonrpc": "2.0",
+            "id": 11,
+            "result": {
+                "content": [
+                    {
+                        "type": "text",
+                        "text": json.dumps(
+                            {
+                                "project": {
+                                    "run_count": 6,
+                                    "sampled_runs": [
+                                        {"name": "private-run-name"},
+                                    ],
+                                }
+                            }
+                        ),
+                    }
+                ]
+            },
+        },
+        500,
+    )
+
+    response = next(
+        json.loads(line)
+        for line in path.read_text().splitlines()
+        if json.loads(line)["event"] == "mcp_tool_response"
+    )
+
+    assert response["total_count"] == 6
+    assert "private-run-name" not in path.read_text()
 
 
 def test_mcp_response_telemetry_sums_safe_evaluation_prediction_counts(

@@ -33,6 +33,7 @@ from fugue.model_plane import (
     provider_api_key_env,
     provider_request_headers,
     resolve_model_route,
+    structured_assistant_options,
 )
 from fugue.redaction import redact_value
 
@@ -56,12 +57,39 @@ MAX_MCP_ITEMS = 50
 MAX_MCP_DISCOVERY_SECONDS = 30
 MAX_GENERATED_CASE_BYTES = 12_000
 MAX_GENERATED_RUBRIC_BYTES = 12_000
+JUDGE_JSON_REQUEST_POLICY_SCHEMA_VERSION = 1
+JUDGE_JSON_MAX_OUTPUT_TOKENS = 1_200
 
 EvaluationAssetKind = Literal[
     "evaluation_cases",
     "evaluation_rubric",
     "evaluation_manifest",
 ]
+
+
+class JudgeResponseError(ValueError):
+    """A safe, body-free description of a malformed judge response."""
+
+    def __init__(
+        self,
+        *,
+        stage: str,
+        code: str,
+        message: str,
+        response_sha256: str,
+        response_characters: int,
+        usage: Mapping[str, Any],
+    ) -> None:
+        super().__init__(message)
+        self.stage = stage
+        self.code = code
+        self.safe_message = message
+        self.response_sha256 = response_sha256
+        self.response_characters = response_characters
+        self.usage = {
+            "input_tokens": usage.get("input_tokens"),
+            "output_tokens": usage.get("output_tokens"),
+        }
 
 
 @dataclass(frozen=True)
@@ -734,7 +762,7 @@ def _post_judge(
             },
             json={
                 "model": route.model_id,
-                "max_tokens": 1_200,
+                "max_tokens": JUDGE_JSON_MAX_OUTPUT_TOKENS,
                 "messages": [{"role": "user", "content": prompt}],
             },
         )
@@ -760,7 +788,9 @@ def _post_judge(
             json={
                 "model": route.model_id,
                 "temperature": 0,
+                "max_tokens": JUDGE_JSON_MAX_OUTPUT_TOKENS,
                 "messages": [{"role": "user", "content": prompt}],
+                **structured_assistant_options(route),
             },
         )
         response.raise_for_status()
@@ -775,10 +805,34 @@ def _post_judge(
         }
     match = re.search(r"\{.*\}", content, flags=re.DOTALL)
     if not match:
-        raise ValueError("judge returned no JSON object")
-    payload = json.loads(match.group(0))
+        raise JudgeResponseError(
+            stage="response_extraction",
+            code="no_json_object",
+            message="judge returned no JSON object",
+            response_sha256=hashlib.sha256(content.encode()).hexdigest(),
+            response_characters=len(content),
+            usage=usage,
+        )
+    try:
+        payload = json.loads(match.group(0))
+    except json.JSONDecodeError as exc:
+        raise JudgeResponseError(
+            stage="response_parsing",
+            code="invalid_json",
+            message="judge returned malformed JSON",
+            response_sha256=hashlib.sha256(content.encode()).hexdigest(),
+            response_characters=len(content),
+            usage=usage,
+        ) from exc
     if not isinstance(payload, dict):
-        raise ValueError("judge response must be a JSON object")
+        raise JudgeResponseError(
+            stage="response_validation",
+            code="json_not_object",
+            message="judge response JSON must be an object",
+            response_sha256=hashlib.sha256(content.encode()).hexdigest(),
+            response_characters=len(content),
+            usage=usage,
+        )
     return payload, usage
 
 

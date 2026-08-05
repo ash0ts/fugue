@@ -21,8 +21,10 @@ from fugue.research.contracts import (
     study_update_from_dict,
 )
 from fugue.research.records import (
+    RESEARCH_LOG_MAX_BYTES,
     HttpResearchRecordSink,
     JsonlResearchRecordSink,
+    ResearchLogEventV1,
     ResearchRecordPublisher,
     public_evidence_selector,
     research_log_event_from_dict,
@@ -44,6 +46,31 @@ def _store(tmp_path: Path) -> StudyStore:
         operation_id="create-research",
     )
     return store
+
+
+def _event_with_encoded_size(
+    store: StudyStore,
+    *,
+    encoded_size: int,
+) -> ResearchLogEventV1:
+    event = replace(
+        store.research_log_events()[0],
+        summary={"public_note": ""},
+        event_digest="",
+    )
+    unsigned = event.to_dict()
+    unsigned.pop("event_digest", None)
+    encoded = json.dumps(unsigned, separators=(",", ":")).encode()
+    padding = encoded_size - len(encoded)
+    assert padding >= 0
+    event = replace(event, summary={"public_note": "x" * padding})
+    unsigned = event.to_dict()
+    unsigned.pop("event_digest", None)
+    assert (
+        len(json.dumps(unsigned, separators=(",", ":")).encode())
+        == encoded_size
+    )
+    return event
 
 
 def _preview(*, proposal_id: str = "proposal-1") -> ExperimentPreviewV1:
@@ -116,7 +143,12 @@ def test_research_log_contract_is_strict_and_content_addressed() -> None:
         research_log_event_from_dict({**event.to_dict(), "message": "changed"})
     with pytest.raises(ValueError, match="size limit"):
         research_log_event_from_dict(
-            {**raw, "summary": {"too_large": "x" * 70_000}},
+            {
+                **raw,
+                "summary": {
+                    "too_large": "x" * RESEARCH_LOG_MAX_BYTES,
+                },
+            },
             require_digest=False,
         )
     with pytest.raises(ValueError, match="private field"):
@@ -144,6 +176,24 @@ def test_research_log_contract_is_strict_and_content_addressed() -> None:
             {**raw, "timestamp": "2026-07-22T12:00:00"},
             require_digest=False,
         )
+
+
+def test_research_log_contract_accepts_512_kib_and_rejects_the_next_byte(
+    tmp_path: Path,
+) -> None:
+    store = _store(tmp_path)
+    accepted = _event_with_encoded_size(
+        store,
+        encoded_size=RESEARCH_LOG_MAX_BYTES,
+    )
+    rejected = _event_with_encoded_size(
+        store,
+        encoded_size=RESEARCH_LOG_MAX_BYTES + 1,
+    )
+
+    assert sign_research_log_event(accepted).event_digest
+    with pytest.raises(ValueError, match="publication size limit"):
+        sign_research_log_event(rejected)
 
 
 def test_public_evidence_selectors_keep_identities_not_private_material() -> None:

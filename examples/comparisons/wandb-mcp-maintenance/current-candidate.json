@@ -1,0 +1,18 @@
+{
+  "baseline": {
+    "commit": "53b199a5f4af29aa82077e2c7f1e2c5e5e0c2ca0",
+    "integration_id": "wandb-mcp-main",
+    "server": "wandb-main",
+    "version": "git:53b199a5f4af29aa82077e2c7f1e2c5e5e0c2ca0"
+  },
+  "candidate": {
+    "branch": "staging/0.4.0",
+    "commit": "5c6cc1c9a1079296daf6613ea6d12daebdd8bcba",
+    "integration_id": "wandb-mcp-0-4-current",
+    "server": "wandb-0-4-current",
+    "version": "git:5c6cc1c9a1079296daf6613ea6d12daebdd8bcba"
+  },
+  "release_notes_lock": "release-notes.current.lock.json",
+  "repository": "wandb/wandb-mcp-server",
+  "schema_version": 1
+}

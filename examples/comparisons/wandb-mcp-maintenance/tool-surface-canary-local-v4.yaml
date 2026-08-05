@@ -1,0 +1,146 @@
+schema_version: 3
+id: mcp-main-vs-0-4-tool-surface-canary-v4
+question: Does the exact current W&B MCP 0.4 staging head improve or preserve factual, bounded maintainer work across the release's structured-query, Evaluation-reconciliation, history-target, and missing-evidence behaviors relative to the exact main revision?
+taskset:
+  tasks: tool-surface-canary-tasks.jsonl
+  private_labels: tool-surface-canary-private.jsonl
+baseline:
+  label: W&B MCP main at 53b199a5
+  integrations: [wandb-mcp-main]
+candidate:
+  label: W&B MCP 0.4 staging at 5c6cc1c9
+  integrations: [wandb-mcp-0-4-current]
+changed: [integrations]
+evaluators:
+  - id: tool-surface
+    type: deterministic
+    required: true
+    scorer: tool_surface_scorer.py
+    runtime: python312-sandbox-v1
+    dimensions:
+      - answer_correct
+      - actual_query_scope
+      - reported_project_identity
+      - bounded_evidence
+      - evidence_honesty
+      - release_mechanism_used
+    dimension_roles:
+      answer_correct: outcome
+      actual_query_scope: safety_gate
+      reported_project_identity: safety_gate
+      bounded_evidence: safety_gate
+      evidence_honesty: outcome
+      release_mechanism_used: mechanism
+  - id: maintainer-actionability
+    type: llm_judge
+    required: false
+    profile: wandb/zai-org/GLM-5.2
+    calibration: maintainer-actionability-judge-calibration.json
+    rubric: >-
+      Judge only whether the maintainer memo turns the response's stated
+      evidence into a concrete maintain, advance, investigate, or block
+      recommendation; traces that recommendation to stated evidence; proposes
+      one bounded feasible next step with a success or stop condition; and
+      calibrates uncertainty to the locked cohort. Do not rescore factual
+      correctness, query scope, tool mechanics, revision identity, cost,
+      latency, or verbosity; the deterministic scorer owns those. Unsupported
+      causal, completeness, or release-wide claims are critical failures.
+    dimensions:
+      - maintenance_actionability
+      - evidence_to_action_traceability
+      - bounded_next_step
+      - uncertainty_calibration
+    dimension_roles:
+      maintenance_actionability: outcome
+      evidence_to_action_traceability: outcome
+      bounded_next_step: outcome
+      uncertainty_calibration: outcome
+    evidence: [tool_names]
+    timeout_sec: 300
+    reserve_cost_usd: 0.10
+execution:
+  source_evidence_project: wandb/fugue-mcp-release-source-v2
+  source_evidence_destination:
+    entity: wandb
+    project: fugue-mcp-release-source-v2
+    api_base_url: https://api.wandb.ai
+    trace_base_url: https://trace.wandb.ai
+    app_base_url: https://wandb.ai
+  evidence_project: wandb/fugue-mcp-release-qualification-v1
+  evidence_destination:
+    entity: wandb
+    project: fugue-mcp-release-qualification-v1
+    api_base_url: https://api.wandb.ai
+    trace_base_url: https://trace.wandb.ai
+    app_base_url: https://wandb.ai
+  evidence_lock: ../../../.fugue/qualification/mcp-release-source-v2/evidence.lock.json
+  source_conformance_receipt: ../../../.fugue/qualification/mcp-release-source-v2/current-source-conformance.json
+  release_notes_lock: release-notes.current.lock.json
+  mechanism_receipt: ../../../.fugue/qualification/mcp-release-mechanism-receipt.current.json
+  research_id: fugue-mcp-release-qualification-v1
+  model: anthropic/claude-sonnet-5
+  harnesses: [claude-code]
+  attempts: 1
+  concurrency: 1
+  evidence_checkpoint_cells: 1
+  max_cost_usd: 5
+  reserve_per_attempt_usd: 0.45
+  approval_required: true
+  preparation_required: true
+  trace_content: full
+  environment: {type: docker}
+decision_policy:
+  release_target: W&B MCP 0.4 tool-surface behavior; package release gates are separate
+  candidate_sha: 5c6cc1c9a1079296daf6613ea6d12daebdd8bcba
+  minimum_evidence_grade: A
+  human_signoff_required: true
+  gates:
+    - id: eight-terminal-cells
+      label: Eight unique terminal canary cells
+      category: integrity
+      source: matrix.terminal_rows
+      operator: gte
+      target: 8
+      critical: true
+    - id: candidate-passes-four-tasks
+      label: Candidate passes all four critical canary tasks
+      category: task
+      source: task.candidate_passed
+      operator: gte
+      target: 4
+      critical: true
+    - id: candidate-critical-dimensions
+      label: Candidate has no critical outcome or safety failure
+      category: task
+      source: task.candidate_critical_failures
+      operator: eq
+      target: 0
+      critical: true
+    - id: release-note-coverage
+      label: Every locked 0.4 behavior is mapped to task or conformance evidence
+      category: evidence
+      source: infrastructure.gate.release-note-coverage
+      operator: eq
+      target: true
+      critical: true
+    - id: no-source-project-writes
+      label: No experiment result writes entered the immutable source project
+      category: integrity
+      source: integrity.source_project_writes
+      operator: eq
+      target: 0
+      critical: true
+    - id: no-leaks
+      label: No credentials or private labels leaked
+      category: privacy
+      source: privacy.leaks
+      operator: eq
+      target: 0
+      critical: true
+    - id: no-harbor-orphans
+      label: No run-scoped Harbor resources remain
+      category: infrastructure
+      source: infrastructure.gate.no-harbor-orphans
+      operator: eq
+      target: true
+      critical: true

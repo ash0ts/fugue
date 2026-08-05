@@ -1121,6 +1121,15 @@ done
             "fugue.research_experiment_id": os.environ.get(
                 "FUGUE_RESEARCH_EXPERIMENT_ID", ""
             ),
+            "fugue.source_evidence_project": os.environ.get(
+                "FUGUE_SOURCE_EVIDENCE_PROJECT", ""
+            ),
+            "fugue.result_evidence_project": os.environ.get(
+                "FUGUE_RESULT_EVIDENCE_PROJECT", ""
+            ),
+            "fugue.study_console_backlink": os.environ.get(
+                "FUGUE_STUDY_CONSOLE_BACKLINK", ""
+            ),
             "fugue.workload_id": os.environ.get("FUGUE_WORKLOAD_ID", ""),
             "fugue.preset_id": os.environ.get("FUGUE_PRESET_ID", ""),
             "fugue.harness": harness,

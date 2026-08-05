@@ -930,6 +930,7 @@ def _agent_config(
         ),
         integration_binding.env,
     )
+    _bind_evidence_project_lineage(experiment, agent_env)
     if _needs_mcp_proxy(selected_mcp_servers):
         current_pythonpath = str(agent_env.get("PYTHONPATH") or "").strip()
         agent_env["PYTHONPATH"] = (
@@ -962,6 +963,27 @@ def _agent_config(
     else:
         config["name"] = harness.agent
     return _drop_empty(config)
+
+
+def _bind_evidence_project_lineage(
+    experiment: ExperimentSpec,
+    env: dict[str, str],
+) -> None:
+    """Bind canonical evidence projects and reject conflicting duplicates."""
+
+    for key, canonical in (
+        ("FUGUE_SOURCE_EVIDENCE_PROJECT", experiment.source_evidence_project),
+        ("FUGUE_RESULT_EVIDENCE_PROJECT", experiment.evidence_project),
+    ):
+        if canonical is None:
+            continue
+        duplicate = str(env.get(key) or "")
+        if duplicate and duplicate != canonical:
+            raise ValueError(
+                f"{key} disagrees with the experiment evidence topology "
+                f"({duplicate!r} != {canonical!r})"
+            )
+        env[key] = canonical
 
 
 def _agent_allowed_hosts(
@@ -1042,6 +1064,32 @@ def _job_env(
     sandbox_attestation: Mapping[str, Any] | None,
     expected_artifact_paths: list[str],
 ) -> dict[str, str]:
+    # Study lineage reaches both the host-side publisher and the in-container
+    # Agent. Evidence projects are canonical ExperimentSpec topology; the
+    # duplicated Agent environment values are only transport.
+    lineage_env = {
+        key: str(experiment.agent_env.get(key) or base_env.get(key) or "")
+        for key in (
+            "FUGUE_WANDB_RESEARCH_ID",
+            "FUGUE_WANDB_STUDY_ID",
+            "FUGUE_RESEARCH_EXPERIMENT_ID",
+            "FUGUE_STUDY_CONSOLE_BACKLINK",
+        )
+    }
+    project_lineage = {
+        "FUGUE_SOURCE_EVIDENCE_PROJECT": str(
+            experiment.agent_env.get("FUGUE_SOURCE_EVIDENCE_PROJECT")
+            or base_env.get("FUGUE_SOURCE_EVIDENCE_PROJECT")
+            or ""
+        ),
+        "FUGUE_RESULT_EVIDENCE_PROJECT": str(
+            experiment.agent_env.get("FUGUE_RESULT_EVIDENCE_PROJECT")
+            or base_env.get("FUGUE_RESULT_EVIDENCE_PROJECT")
+            or ""
+        ),
+    }
+    _bind_evidence_project_lineage(experiment, project_lineage)
+    lineage_env.update(project_lineage)
     prompt_ids = [variant.prompt_id] if variant.prompt_id else []
     hashes = _content_hashes(
         prompt_ids=prompt_ids,
@@ -1079,22 +1127,7 @@ def _job_env(
     env.update(
         {
             "FUGUE_EXPERIMENT_ID": experiment.id,
-            "FUGUE_WANDB_RESEARCH_ID": base_env.get(
-                "FUGUE_WANDB_RESEARCH_ID", ""
-            ),
-            "FUGUE_WANDB_STUDY_ID": base_env.get("FUGUE_WANDB_STUDY_ID", ""),
-            "FUGUE_RESEARCH_EXPERIMENT_ID": base_env.get(
-                "FUGUE_RESEARCH_EXPERIMENT_ID", ""
-            ),
-            "FUGUE_SOURCE_EVIDENCE_PROJECT": base_env.get(
-                "FUGUE_SOURCE_EVIDENCE_PROJECT", ""
-            ),
-            "FUGUE_RESULT_EVIDENCE_PROJECT": base_env.get(
-                "FUGUE_RESULT_EVIDENCE_PROJECT", ""
-            ),
-            "FUGUE_STUDY_CONSOLE_BACKLINK": base_env.get(
-                "FUGUE_STUDY_CONSOLE_BACKLINK", ""
-            ),
+            **lineage_env,
             "FUGUE_RUN_ID": run_id,
             "FUGUE_WORKLOAD_ID": workload_id,
             "FUGUE_PRESET_ID": preset_id or "",

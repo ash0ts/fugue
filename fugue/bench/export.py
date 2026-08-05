@@ -259,6 +259,7 @@ class LiveEvaluationCoordinator:
             if trace_timeout_sec is not None
             else float(configured_timeout or 45)
         )
+        self._weave_requires_reactivation = weave_module is None
         self.weave = weave_module or initialize_weave(project, env)
         self._agent_bridge_op = _eager_call_op(
             self.weave,
@@ -505,8 +506,7 @@ class LiveEvaluationCoordinator:
     ) -> tuple[Any, Any, str]:
         """Create the real Call bridge used to parent Claude's remote OTel root."""
 
-        get_client = getattr(self.weave, "get_client", None)
-        client = get_client() if callable(get_client) else None
+        client = self._activate_evidence_client()
         if client is None or not callable(getattr(client, "create_call", None)):
             raise RuntimeError(
                 "installed Weave runtime cannot create the Agent ancestry bridge"
@@ -601,12 +601,21 @@ class LiveEvaluationCoordinator:
                 project=self.project,
             )
             row["weave_agent_bridge_object_verified"] = True
+            self._flush_weave_client(client)
+            self._wait_for_authoritative_call_state(
+                row=row,
+                call_id=bridge_id,
+                terminal=False,
+                phase="Agent ancestry bridge start",
+            )
+            row["weave_agent_bridge_start_verified"] = True
         except Exception:
             try:
                 client.finish_call(
                     bridge,
                     output={"status": "start_failed"},
                 )
+                self._flush_weave_client(client)
             except Exception:
                 pass
             raise
@@ -616,8 +625,131 @@ class LiveEvaluationCoordinator:
             f"00-{otel_trace_id}-{bridge_id}-01",
         )
 
+    def _activate_evidence_client(self, client: Any | None = None) -> Any | None:
+        """Reactivate and validate the coordinator's immutable destination."""
+
+        # Object-constructed unit doubles predate destination activation. A
+        # real coordinator always owns both fields through ``__init__``.
+        if (
+            getattr(self, "_weave_requires_reactivation", False)
+            and hasattr(self, "_evidence_destination")
+            and hasattr(self, "env")
+        ):
+            weave_module = initialize_weave(self.project, self.env)
+            get_client = getattr(weave_module, "get_client", None)
+            active_client = get_client() if callable(get_client) else None
+            if active_client is None:
+                raise RuntimeError(
+                    "Weave evidence destination has no active client"
+                )
+            active_project = str(
+                getattr(active_client, "project_id", "") or ""
+            )
+            if active_project and active_project != self.project:
+                raise RuntimeError(
+                    "active Weave client disagrees with the evidence destination"
+                )
+            if client is None:
+                client = active_client
+        elif client is None:
+            get_client = getattr(self.weave, "get_client", None)
+            client = get_client() if callable(get_client) else None
+        if client is not None:
+            client_project = str(getattr(client, "project_id", "") or "")
+            if client_project and client_project != self.project:
+                raise RuntimeError(
+                    "Weave Call client disagrees with the evidence destination"
+                )
+        return client
+
     @staticmethod
+    def _flush_weave_client(client: Any) -> None:
+        flush = getattr(client, "flush", None)
+        if callable(flush):
+            flush()
+
+    def _wait_for_authoritative_call_state(
+        self,
+        *,
+        row: Mapping[str, Any],
+        call_id: str,
+        terminal: bool,
+        phase: str,
+        honor_cancellation: bool = True,
+    ) -> None:
+        """Require the exact remote Call state before advancing the lifecycle."""
+
+        summary_fetcher = getattr(self, "_summary_fetcher", None)
+        if not callable(summary_fetcher):
+            # Lightweight unit doubles validate local ordering separately.
+            return
+        deadline = time.monotonic() + max(
+            float(getattr(self, "trace_timeout_sec", 0.0)),
+            0.0,
+        )
+        run_key = str(row.get("run_key") or "")
+        if not run_key:
+            raise RuntimeError(f"{phase} has no canonical run key")
+        latest_error = "Call was not returned"
+        while True:
+            try:
+                values = summary_fetcher(
+                    run_keys=[run_key],
+                    conversation_ids_by_run={run_key: []},
+                    call_ids_by_run={run_key: [call_id]},
+                    project=self.project,
+                    timeout_sec=min(
+                        max(
+                            float(getattr(self, "trace_timeout_sec", 1.0)),
+                            1.0,
+                        ),
+                        10.0,
+                    ),
+                    env=self.env,
+                )
+            except httpx.TimeoutException as exc:
+                latest_error = f"{type(exc).__name__}: {exc}"
+            else:
+                graph = values.get(run_key, {}).get(
+                    "weave_authoritative_call_graph"
+                )
+                matches = [
+                    value
+                    for value in graph or ()
+                    if isinstance(value, Mapping)
+                    and str(value.get("call_id") or "") == call_id
+                ]
+                if len(matches) == 1:
+                    remote = matches[0]
+                    remote_project = str(remote.get("project_id") or "")
+                    if remote_project != self.project:
+                        raise RuntimeError(
+                            f"{phase} resolved in the wrong Weave project"
+                        )
+                    if remote.get("terminal") is terminal:
+                        return
+                    latest_error = (
+                        "terminal state was "
+                        f"{remote.get('terminal')!r}, expected {terminal!r}"
+                    )
+                elif len(matches) > 1:
+                    raise RuntimeError(
+                        f"{phase} returned duplicate Call identities"
+                    )
+            if time.monotonic() >= deadline:
+                raise RuntimeError(
+                    f"{phase} was not durably published: {latest_error}"
+                )
+            wait_sec = min(0.5, max(deadline - time.monotonic(), 0.0))
+            cancellation_event = getattr(self, "_cancellation_event", None)
+            if honor_cancellation and cancellation_event is not None:
+                if cancellation_event.wait(wait_sec):
+                    raise _TracePollingCancelled
+            else:
+                time.sleep(wait_sec)
+
     def _finish_agent_bridge(
+        self,
         active: _LivePrediction,
         *,
         status: str,
@@ -660,9 +792,27 @@ class LiveEvaluationCoordinator:
                 }
             )
         try:
-            active.bridge_client.finish_call(
+            client = self._activate_evidence_client(active.bridge_client)
+            if client is None:
+                raise RuntimeError("Weave Agent bridge client is unavailable")
+            call_project = str(
+                _live_call_value(active.bridge_call, "project_id") or ""
+            )
+            if call_project != self.project:
+                raise RuntimeError(
+                    "Weave Agent bridge Call changed evidence destination"
+                )
+            client.finish_call(
                 active.bridge_call,
                 output=output,
+            )
+            self._flush_weave_client(client)
+            self._wait_for_authoritative_call_state(
+                row=terminal_row or active.row,
+                call_id=str(_live_call_value(active.bridge_call, "id") or ""),
+                terminal=True,
+                phase="Agent ancestry bridge end",
+                honor_cancellation=False,
             )
         except Exception as exc:
             active.row["weave_agent_bridge_closed_verified"] = False
@@ -699,6 +849,13 @@ class LiveEvaluationCoordinator:
         ):
             raise RuntimeError(
                 "installed Weave runtime cannot materialize the native Agent Call"
+            )
+        client = self._activate_evidence_client(client)
+        if client is None:
+            raise RuntimeError("Weave native Agent Call client is unavailable")
+        if str(_live_call_value(bridge, "project_id") or "") != self.project:
+            raise RuntimeError(
+                "Weave Agent bridge changed evidence destination"
             )
         call_id = _native_agent_call_id(row, root)
         attributes = {
@@ -773,6 +930,21 @@ class LiveEvaluationCoordinator:
                 raise RuntimeError(
                     "native Agent Call did not preserve the Evaluation ancestry"
                 )
+        row.update(
+            {
+                "weave_agent_root_call_id": call_id,
+                "weave_agent_root_call_start_verified": False,
+                "weave_agent_root_call_terminal_verified": False,
+            }
+        )
+        self._flush_weave_client(client)
+        self._wait_for_authoritative_call_state(
+            row=row,
+            call_id=call_id,
+            terminal=False,
+            phase="native Agent Call start",
+        )
+        row["weave_agent_root_call_start_verified"] = True
         client.finish_call(
             call,
             output={
@@ -781,6 +953,14 @@ class LiveEvaluationCoordinator:
                 "native_otel_trace_id": str(root["trace_id"]),
                 "native_otel_span_id": str(root["span_id"]),
             },
+        )
+        self._flush_weave_client(client)
+        self._wait_for_authoritative_call_state(
+            row=row,
+            call_id=call_id,
+            terminal=True,
+            phase="native Agent Call end",
+            honor_cancellation=False,
         )
         row.update(
             {
@@ -791,6 +971,7 @@ class LiveEvaluationCoordinator:
                 "weave_agent_root_call_otel_trace_id": str(root["trace_id"]),
                 "weave_agent_root_call_otel_span_id": str(root["span_id"]),
                 "weave_agent_root_call_object_created": True,
+                "weave_agent_root_call_terminal_verified": True,
             }
         )
 
@@ -1817,6 +1998,35 @@ def _completed_evaluation_row(
     return row
 
 
+def _reconcile_authoritative_bridge_close(
+    row: dict[str, Any],
+    *,
+    bridge_terminal: bool,
+    graph_valid: bool,
+) -> None:
+    if (
+        not graph_valid
+        or not bridge_terminal
+        or row.get("weave_agent_bridge_closed_verified") is True
+    ):
+        return
+    # The close-path poll may time out even though the exact remote Call
+    # subsequently becomes terminal.  The authoritative graph is stronger
+    # evidence than that transient local poll: it proves the immutable bridge
+    # identity, project, trace, parent, and terminal state together.
+    poll_error = row.pop("weave_agent_bridge_close_error", None)
+    if poll_error:
+        row["weave_agent_bridge_close_poll_error"] = poll_error
+    row.update(
+        {
+            "weave_agent_bridge_closed_verified": True,
+            "weave_agent_bridge_close_verification_source": (
+                "authoritative_call_graph"
+            ),
+        }
+    )
+
+
 def _verify_authoritative_agent_graph(row: dict[str, Any]) -> None:
     """Verify Claude's complete Evaluation ancestry from fetched Weave Calls."""
 
@@ -1908,12 +2118,16 @@ def _verify_authoritative_agent_graph(row: dict[str, Any]) -> None:
             or str(call.get("trace_id") or "") != expected_trace
         ):
             failures.append(f"{name} trace")
-    if calls[expected["bridge"]].get("terminal") is not True:
+    bridge_terminal = calls[expected["bridge"]].get("terminal") is True
+    if not bridge_terminal:
         failures.append("bridge terminal state")
     if calls[expected["agent"]].get("terminal") is not True:
         failures.append("agent terminal state")
-    if row.get("weave_agent_bridge_closed_verified") is not True:
-        failures.append("bridge close receipt")
+    _reconcile_authoritative_bridge_close(
+        row,
+        bridge_terminal=bridge_terminal,
+        graph_valid=not failures,
+    )
     if failures:
         row.update(
             {
@@ -2188,6 +2402,16 @@ def _live_evidence_checkpoint_failures(
         failures.append("OTel span ID was misidentified as a Weave Call ID")
     if host_evaluator_required and row.get("host_evaluator_status") != "passed":
         failures.append("host evaluator did not complete successfully")
+    if row.get("comparison_judge_checkpoint_status") == "failed":
+        unavailable = sorted(
+            str(value)
+            for value in row.get("comparison_judge_checkpoint_unavailable") or ()
+            if str(value)
+        )
+        failures.append(
+            "configured first-cell judge did not score"
+            + (f": {', '.join(unavailable)}" if unavailable else "")
+        )
     conformance = row.get("local_cell_conformance")
     if not isinstance(conformance, Mapping) or conformance.get("status") != "passed":
         failures.append(
@@ -5083,21 +5307,42 @@ _REQUIRED_FUGUE_ATTRIBUTES = (
     "fugue.model",
 )
 
+_REQUIRED_COMPARISON_LINEAGE_ATTRIBUTES = (
+    "fugue.source_evidence_project",
+    "fugue.result_evidence_project",
+)
+
 
 def _fugue_attribute_summary(
     spans: list[dict[str, Any]],
 ) -> tuple[dict[str, Any], str, list[str]]:
     span_values: dict[str, Any] = {}
     resource_values: dict[str, Any] = {}
+    comparison_lineage_present = False
     for span in spans:
-        for key, value in _span_attributes(span).items():
+        span_attributes = _span_attributes(span)
+        resource_attributes = _resource_attributes(span)
+        if any(
+            attributes.get(key) not in (None, "")
+            for attributes in (span_attributes, resource_attributes)
+            for key in (
+                "wandb.research_id",
+                "wandb.study_id",
+                *_REQUIRED_COMPARISON_LINEAGE_ATTRIBUTES,
+            )
+        ):
+            comparison_lineage_present = True
+        for key, value in span_attributes.items():
             if key.startswith("fugue.") and value not in (None, ""):
                 span_values.setdefault(key, value)
-        for key, value in _resource_attributes(span).items():
+        for key, value in resource_attributes.items():
             if key.startswith("fugue.") and value not in (None, ""):
                 resource_values.setdefault(key, value)
     values = {**resource_values, **span_values}
-    missing = [key for key in _REQUIRED_FUGUE_ATTRIBUTES if key not in values]
+    required = list(_REQUIRED_FUGUE_ATTRIBUTES)
+    if comparison_lineage_present:
+        required.extend(_REQUIRED_COMPARISON_LINEAGE_ATTRIBUTES)
+    missing = [key for key in required if key not in values]
     if not values:
         status = "missing"
     elif not span_values:
@@ -6212,6 +6457,11 @@ _MCP_PROJECT_REF_KEYS = (
     "project_slug",
     "entity_project",
 )
+_MCP_ARTIFACT_REF_KEYS = (
+    "artifact_name",
+    "artifact_name_a",
+    "artifact_name_b",
+)
 _MCP_PROJECTION_KEYS = (
     "columns",
     "fields",
@@ -6220,7 +6470,14 @@ _MCP_PROJECTION_KEYS = (
     "config_keys",
     "summary_keys",
 )
-_MCP_BOUND_KEYS = ("limit", "max_items", "samples", "sample_size")
+_MCP_BOUND_KEYS = (
+    "limit",
+    "max_items",
+    "max_files",
+    "max_file_diff_entries",
+    "samples",
+    "sample_size",
+)
 _MCP_PARENT_ID_KEYS = (
     "parent_id",
     "parent_ids",
@@ -6234,12 +6491,24 @@ _MCP_OPERATION_FILTER_KEYS = (
     "operation_name_contains",
 )
 _MCP_SAFE_MECHANISM_KEYS = (
+    "artifact_name",
+    "artifact_name_a",
+    "artifact_name_b",
+    "collection_name",
+    "include_file_diff",
+    "include_files",
+    "include_history_overlap",
     "resource",
     "response_mode",
     "target_x",
     "x_axis",
     "max_evals",
     "run_id",
+    "run_id_a",
+    "run_id_b",
+    "sample_runs",
+    "top_n_values",
+    "trace_roots_only",
 )
 _MCP_TERMINAL_STATUSES = {
     "succeeded",
@@ -6271,6 +6540,7 @@ def _mcp_tool_call_evidence(
         limits: list[int] = []
         sample_counts: list[int] = []
         parent_ids: set[str] = set()
+        trace_ids = _mcp_trace_ids(arguments)
         operation_filters: dict[str, set[str]] = {
             key: set() for key in _MCP_OPERATION_FILTER_KEYS
         }
@@ -6393,9 +6663,14 @@ def _mcp_tool_call_evidence(
             },
             "parent_filter_digest": parent_filter_digest,
             "parent_filter_count": parent_filter_count,
+            "trace_ids_digest": (
+                _stable_digest(sorted(trace_ids)) if trace_ids else None
+            ),
+            "trace_ids_count": len(trace_ids) if trace_ids else None,
             "op_name_filter": normalized_operation_filters or None,
             **raw_graphql_shape,
         }
+        evidence.update(_normalized_opaque_cursor(event, prefix="cursor"))
         request_id = str(event.get("request_id") or "")
         response_matches = response_index.get(
             (str(event.get("server") or ""), request_id),
@@ -6404,6 +6679,17 @@ def _mcp_tool_call_evidence(
         evidence.update(_normalized_mcp_response(response_matches, tool=tool))
         result.append(evidence)
     return result
+
+
+def _mcp_trace_ids(arguments: Mapping[str, Any]) -> set[str]:
+    return {
+        str(item).strip()
+        for values in _nested_mappings(arguments)
+        for item in (
+            values.get("trace_ids") if isinstance(values.get("trace_ids"), list) else ()
+        )
+        if isinstance(item, str) and item.strip()
+    }
 
 
 def _normalized_mcp_response(
@@ -6441,6 +6727,7 @@ def _normalized_mcp_response(
         "successful": successful,
         "response_metadata_verified": True,
     }
+    result.update(_normalized_opaque_cursor(response, prefix="next_cursor"))
     for key in (
         "returned_count",
         "total_count",
@@ -6456,10 +6743,37 @@ def _normalized_mcp_response(
         "project_exhaustive",
         "truncation_applied",
         "returned_parent_filter_match",
+        "digest_match",
     ):
         value = response.get(key)
         if type(value) is bool:
             result[key] = value
+    pagination_verified = response.get("pagination_metadata_verified")
+    if (
+        type(pagination_verified) is bool
+        and type(result.get("next_cursor_metadata_verified")) is bool
+    ):
+        result["pagination_metadata_verified"] = bool(
+            pagination_verified
+            and result.get("next_cursor_metadata_verified") is True
+        )
+    artifact_digest = response.get("artifact_digest")
+    if isinstance(artifact_digest, str) and artifact_digest:
+        result["artifact_digest"] = artifact_digest
+    returned_trace_ids_digest = response.get("returned_trace_ids_digest")
+    if isinstance(returned_trace_ids_digest, str) and re.fullmatch(
+        r"[0-9a-f]{64}", returned_trace_ids_digest
+    ):
+        result["returned_trace_ids_digest"] = returned_trace_ids_digest
+    returned_trace_ids_count = response.get("returned_trace_ids_count")
+    if type(returned_trace_ids_count) is int and returned_trace_ids_count > 0:
+        result["returned_trace_ids_count"] = returned_trace_ids_count
+    result.update(
+        _normalized_returned_object_ids(
+            response,
+            returned_count=result.get("returned_count"),
+        )
+    )
     operation_counts = response.get("operation_counts")
     if isinstance(operation_counts, Mapping):
         normalized_operation_counts = {
@@ -6503,6 +6817,88 @@ def _normalized_mcp_response(
     return result
 
 
+def _normalized_opaque_cursor(
+    value: Mapping[str, Any],
+    *,
+    prefix: str,
+) -> dict[str, Any]:
+    present_key = f"{prefix}_present"
+    digest_key = f"{prefix}_digest"
+    verified_key = f"{prefix}_metadata_verified"
+    if not any(key in value for key in (present_key, digest_key, verified_key)):
+        return {}
+    present = value.get(present_key)
+    verified = value.get(verified_key)
+    digest = value.get(digest_key)
+    digest_valid = isinstance(digest, str) and bool(
+        re.fullmatch(r"[0-9a-f]{64}", digest)
+    )
+    consistent = (
+        type(present) is bool
+        and verified is True
+        and (
+            (present is True and digest_valid)
+            or (present is False and digest in (None, ""))
+        )
+    )
+    result: dict[str, Any] = {
+        verified_key: consistent,
+    }
+    if type(present) is bool:
+        result[present_key] = present
+    if consistent and present:
+        result[digest_key] = digest
+    return result
+
+
+def _normalized_returned_object_ids(
+    value: Mapping[str, Any],
+    *,
+    returned_count: Any = None,
+) -> dict[str, Any]:
+    keys = {
+        "returned_object_id_count",
+        "returned_object_id_hashes",
+        "returned_object_id_metadata_verified",
+        "returned_object_ids_unique",
+    }
+    if not keys.intersection(value):
+        return {}
+    hashes = value.get("returned_object_id_hashes")
+    count = value.get("returned_object_id_count")
+    unique = value.get("returned_object_ids_unique")
+    verified = value.get("returned_object_id_metadata_verified")
+    valid_hashes = (
+        isinstance(hashes, list)
+        and len(hashes) <= 50
+        and all(
+            isinstance(item, str) and re.fullmatch(r"[0-9a-f]{64}", item)
+            for item in hashes
+        )
+    )
+    consistent = (
+        verified is True
+        and valid_hashes
+        and type(count) is int
+        and 0 <= count <= 50
+        and count == len(hashes)
+        and (
+            type(returned_count) is not int
+            or returned_count == count
+        )
+        and type(unique) is bool
+        and unique is (len(set(hashes)) == len(hashes))
+    )
+    if not consistent:
+        return {"returned_object_id_metadata_verified": False}
+    return {
+        "returned_object_id_count": count,
+        "returned_object_id_hashes": list(hashes),
+        "returned_object_id_metadata_verified": True,
+        "returned_object_ids_unique": unique,
+    }
+
+
 def _raw_graphql_query_shape(arguments: Mapping[str, Any]) -> dict[str, Any]:
     recorded_shape = validated_graphql_query_shape(
         arguments.get("raw_graphql_shape")
@@ -6544,6 +6940,11 @@ def _mcp_queried_projects(events: list[dict[str, Any]]) -> list[str]:
                 reference = value.get(key)
                 if isinstance(reference, str) and reference.strip():
                     event_projects.add(reference.strip())
+            for key in _MCP_ARTIFACT_REF_KEYS:
+                reference = value.get(key)
+                project = _qualified_artifact_project(reference)
+                if project:
+                    event_projects.add(project)
         projects.update(event_projects or entity_scopes)
         tool = str(event.get("tool") or "")
         if not event_projects and tool == "list_entities_tool":
@@ -6555,6 +6956,19 @@ def _mcp_queried_projects(events: list[dict[str, Any]]) -> list[str]:
         ):
             projects.add("*/*")
     return sorted(projects)
+
+
+def _qualified_artifact_project(raw: Any) -> str | None:
+    if not isinstance(raw, str):
+        return None
+    parts = raw.strip().split("/")
+    if (
+        len(parts) != 3
+        or any(not part or part in {".", ".."} for part in parts)
+        or ":" not in parts[2]
+    ):
+        return None
+    return f"{parts[0]}/{parts[1]}"
 
 
 def _nested_mappings(value: Mapping[str, Any]) -> list[Mapping[str, Any]]:

@@ -76,7 +76,10 @@ _RELATIONSHIPS = {
     "uses_evidence",
     "supersedes",
 }
-RESEARCH_LOG_MAX_BYTES = 65_536
+# A reconciled 32-cell V3 qualification carries five verified evidence links
+# per attempt plus aligned cases and safe judge scores. Keep that canonical
+# view in one signed event while retaining a strict bounded-publication limit.
+RESEARCH_LOG_MAX_BYTES = 524_288
 _PRIVATE_KEYS = {
     "credential",
     "credentials",

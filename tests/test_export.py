@@ -5,6 +5,7 @@ from dataclasses import asdict, replace
 from pathlib import Path
 from types import SimpleNamespace
 
+import httpx
 import pytest
 
 from fugue.agent_tracing import agent_conversation_id
@@ -1626,6 +1627,316 @@ def test_claude_live_evaluation_opens_real_otel_parent_bridge() -> None:
     assert failed_row["weave_agent_bridge_close_error"] == "RuntimeError"
 
 
+class _OutOfOrderWeaveClient:
+    """Model Weave's async start/end queues with hostile flush ordering."""
+
+    def __init__(self, project: str, *, drop_ends: bool = False) -> None:
+        self.project_id = project
+        self.drop_ends = drop_ends
+        self.pending: list[tuple[str, object, object]] = []
+        self.remote: dict[str, dict[str, object]] = {}
+        self.events: list[str] = []
+
+    def create_call(
+        self,
+        op,
+        inputs,
+        parent=None,
+        attributes=None,
+        display_name=None,
+        *,
+        use_stack=True,
+        _call_id_override=None,
+    ):
+        call = SimpleNamespace(
+            id=_call_id_override,
+            parent_id=parent.id,
+            project_id=self.project_id,
+            trace_id=parent.trace_id,
+            op_name=str(op),
+            attributes=attributes or {},
+            inputs=inputs,
+        )
+        self.pending.append(("start", call, None))
+        self.events.append(f"start-scheduled:{call.id}")
+        return call
+
+    def finish_call(self, call, output=None):
+        self.pending.append(("end", call, output))
+        self.events.append(f"end-scheduled:{call.id}")
+
+    def flush(self) -> None:
+        pending, self.pending = self.pending, []
+        # If start and end are flushed together, process the end first. That
+        # reproduces the SDK race which dropped the V5 terminal update.
+        for kind, call, output in reversed(pending):
+            if kind == "start":
+                self.remote[call.id] = {
+                    "call_id": call.id,
+                    "parent_id": call.parent_id,
+                    "project_id": call.project_id,
+                    "trace_id": call.trace_id,
+                    "terminal": False,
+                }
+                self.events.append(f"start-published:{call.id}")
+            elif self.drop_ends or call.id not in self.remote:
+                self.events.append(f"end-dropped:{call.id}")
+            else:
+                self.remote[call.id]["terminal"] = True
+                self.remote[call.id]["output"] = output
+                self.events.append(f"end-published:{call.id}")
+
+
+def _out_of_order_summary_fetcher(client: _OutOfOrderWeaveClient):
+    def fetcher(
+        *,
+        run_keys,
+        conversation_ids_by_run,
+        call_ids_by_run,
+        project,
+        timeout_sec,
+        env,
+    ):
+        del conversation_ids_by_run, timeout_sec, env
+        assert project == client.project_id
+        result = {}
+        for run_key in run_keys:
+            call_ids = call_ids_by_run.get(run_key, [])
+            result[run_key] = {
+                "weave_authoritative_call_graph": [
+                    dict(client.remote[call_id])
+                    for call_id in call_ids
+                    if call_id in client.remote
+                ]
+            }
+        return result
+
+    return fetcher
+
+
+def test_weave_summary_exposes_an_open_call_as_nonterminal() -> None:
+    project = "entity/project"
+    call_id = "open-call"
+    summary = _summarize_spans(
+        [
+            {
+                "id": call_id,
+                "project_id": project,
+                "trace_id": "a" * 32,
+                "op_name": "fugue.agent_execution_bridge",
+                "_fugue_evidence_source": export._WEAVE_CALL_SOURCE,
+                "_fugue_query_project": project,
+            }
+        ],
+        project=project,
+        required_call_ids=[call_id],
+    )
+
+    assert summary["weave_authoritative_call_graph"] == [
+        {
+            "call_id": call_id,
+            "project_id": project,
+            "trace_id": "a" * 32,
+            "op_name": "fugue.agent_execution_bridge",
+            "terminal": False,
+        }
+    ]
+    assert summary["weave_authoritative_missing_call_ids"] == []
+
+
+def test_claude_call_lifecycle_flushes_start_before_end_across_a_b_a(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    project_a = "entity/project-a"
+    project_b = "entity/project-b"
+    client_a = _OutOfOrderWeaveClient(project_a)
+    client_b = _OutOfOrderWeaveClient(project_b)
+    clients = {project_a: client_a, project_b: client_b}
+    active = {"client": client_b}
+    activations: list[str] = []
+    weave_module = SimpleNamespace(get_client=lambda: active["client"])
+
+    def activate(project, env):
+        del env
+        activations.append(project)
+        active["client"] = clients[project]
+        return weave_module
+
+    monkeypatch.setattr(export, "initialize_weave", activate)
+    coordinator = object.__new__(LiveEvaluationCoordinator)
+    coordinator.project = project_a
+    coordinator.env = {}
+    coordinator.weave = weave_module
+    coordinator._weave_requires_reactivation = True
+    coordinator._evidence_destination = {"project_slug": project_a}
+    coordinator._summary_fetcher = _out_of_order_summary_fetcher(client_a)
+    coordinator.trace_timeout_sec = 0
+    coordinator._cancellation_event = threading.Event()
+    coordinator._agent_bridge_op = "fugue.agent_execution_bridge"
+    coordinator._native_agent_root_op = "fugue.claude_code_native_agent_root"
+    trace_id = "a" * 32
+    prediction_call = SimpleNamespace(
+        id="prediction-call",
+        project_id=project_a,
+        parent_id="predict-and-score",
+        trace_id=trace_id,
+    )
+    cell = PlannedCell(
+        id="cell-a",
+        run_id="run-a",
+        run_name="comparison-a",
+        workload_id="harbor",
+        task_id="task-a",
+        harness="claude-code",
+        context_system_id="none",
+        variant_id="candidate",
+        model_provider="anthropic",
+        model="anthropic/claude-sonnet-5",
+        trial_index=1,
+        comparison_example_id="example-a",
+        candidate_id="candidate-a",
+        execution_fingerprint="runtime-a",
+        config_path=Path("config.yaml"),
+        result_path=Path("jobs/result.json"),
+        command=("harbor", "run"),
+        env={},
+        n_attempts=1,
+    )
+    row = {
+        "run_id": "run-a",
+        "cell_id": "cell-a",
+        "run_key": "run-a:harbor:trial:task-a:claude-code:none:candidate:t001",
+        "harness": "claude-code",
+        "task_id": "task-a",
+        "candidate_id": "candidate-a",
+        "attempt_id": "b" * 64,
+        "execution_fingerprint": "e" * 64,
+        "comparison_example_id": "example-a",
+        "trial_index": 1,
+        "eval_predict_and_score_call_id": "predict-and-score",
+        "trace_project": project_a,
+        "status": "passed",
+        "agent_response_sha256": "f" * 64,
+    }
+
+    bridge, bridge_client, _ = coordinator._open_agent_bridge(
+        cell=cell,
+        row=row,
+        prediction=SimpleNamespace(predict_call=prediction_call),
+    )
+    assert row["weave_agent_bridge_start_verified"] is True
+    activate(project_b, {})
+    active_prediction = export._LivePrediction(
+        session=SimpleNamespace(),
+        prediction=SimpleNamespace(),
+        bridge_call=bridge,
+        bridge_client=bridge_client,
+        row=row,
+        opened_monotonic=0.0,
+    )
+    root = {
+        "conversation_id": "native-session",
+        "trace_id": trace_id,
+        "span_id": "c" * 16,
+    }
+
+    coordinator._materialize_native_agent_call(
+        active=active_prediction,
+        row=row,
+        root=root,
+    )
+    activate(project_b, {})
+    coordinator._finish_agent_bridge(
+        active_prediction,
+        status="agent_completed",
+        terminal_row=row,
+    )
+
+    native_id = str(row["weave_agent_root_call_id"])
+    assert activations == [
+        project_a,
+        project_b,
+        project_a,
+        project_b,
+        project_a,
+    ]
+    assert client_a.remote[native_id]["terminal"] is True
+    assert client_a.remote[bridge.id]["terminal"] is True
+    assert row["weave_agent_root_call_start_verified"] is True
+    assert row["weave_agent_root_call_terminal_verified"] is True
+    assert row["weave_agent_bridge_closed_verified"] is True
+    assert f"start-published:{native_id}" in client_a.events
+    assert client_a.events.index(f"start-published:{native_id}") < (
+        client_a.events.index(f"end-published:{native_id}")
+    )
+    assert f"end-dropped:{native_id}" not in client_a.events
+    assert client_b.remote == {}
+
+
+def test_claude_native_call_rejects_a_missing_remote_terminal_end() -> None:
+    project = "entity/project"
+    client = _OutOfOrderWeaveClient(project, drop_ends=True)
+    bridge = SimpleNamespace(
+        id="bridge123456789",
+        project_id=project,
+        parent_id="prediction",
+        trace_id="a" * 32,
+    )
+    coordinator = object.__new__(LiveEvaluationCoordinator)
+    coordinator.project = project
+    coordinator.weave = SimpleNamespace(get_client=lambda: client)
+    coordinator._weave_requires_reactivation = False
+    coordinator._summary_fetcher = _out_of_order_summary_fetcher(client)
+    coordinator.trace_timeout_sec = 0
+    coordinator.env = {}
+    coordinator._cancellation_event = threading.Event()
+    coordinator._native_agent_root_op = "fugue.claude_code_native_agent_root"
+    row = {
+        "run_id": "run-a",
+        "cell_id": "cell-a",
+        "run_key": "run-a:harbor:trial:task-a:claude-code:none:candidate:t001",
+        "harness": "claude-code",
+        "task_id": "task-a",
+        "candidate_id": "candidate-a",
+        "attempt_id": "b" * 64,
+        "execution_fingerprint": "e" * 64,
+        "comparison_example_id": "example-a",
+        "trial_index": 1,
+        "eval_predict_and_score_call_id": "predict-and-score",
+        "trace_project": project,
+        "status": "passed",
+    }
+    active_prediction = export._LivePrediction(
+        session=SimpleNamespace(),
+        prediction=SimpleNamespace(),
+        bridge_call=bridge,
+        bridge_client=client,
+        row=row,
+        opened_monotonic=0.0,
+    )
+
+    with pytest.raises(
+        RuntimeError,
+        match="native Agent Call end was not durably published",
+    ):
+        coordinator._materialize_native_agent_call(
+            active=active_prediction,
+            row=row,
+            root={
+                "conversation_id": "native-session",
+                "trace_id": "a" * 32,
+                "span_id": "c" * 16,
+            },
+        )
+
+    native_id = str(row["weave_agent_root_call_id"])
+    assert client.remote[native_id]["terminal"] is False
+    assert row["weave_agent_root_call_start_verified"] is True
+    assert row["weave_agent_root_call_terminal_verified"] is False
+    assert "weave_agent_root_call_object_created" not in row
+    assert f"end-dropped:{native_id}" in client.events
+
+
 def test_claude_live_evaluation_normalizes_weave_uuid_traceparent() -> None:
     project = "entity/project"
     weave_trace_id = "019fb117-8955-7662-8225-67228a32b976"
@@ -1892,7 +2203,10 @@ def test_claude_trace_is_remotely_verified_before_evaluation_output(
         prediction=SimpleNamespace(
             predict_and_score_call=SimpleNamespace(summary={})
         ),
-        bridge_call=SimpleNamespace(id="bridge"),
+        bridge_call=SimpleNamespace(
+            id="bridge",
+            project_id="entity/project",
+        ),
         bridge_client=FakeClient(),
         row=row,
         opened_monotonic=0.0,
@@ -2784,6 +3098,80 @@ def test_mcp_proxy_events_export_exact_tool_and_project_scope(
     ) == ["*/*", "other-team/*"]
 
 
+def test_mcp_artifact_refs_resolve_only_their_qualified_project() -> None:
+    project = "wandb/fugue-mcp-release-source-v2"
+    events = [
+        {
+            "tool": "get_artifact_details_tool",
+            "arguments": {
+                "artifact_name": (f"{project}/qualification-evidence-maint-r18-01:v0")
+            },
+        },
+        {
+            "tool": "compare_artifact_versions_tool",
+            "arguments": {
+                "artifact_name_a": (
+                    f"{project}/qualification-evidence-maint-r18-01:v0"
+                ),
+                "artifact_name_b": (
+                    f"{project}/qualification-evidence-maint-r18-02:v0"
+                ),
+            },
+        },
+    ]
+
+    assert export._mcp_queried_projects(events) == [project]
+    assert export._qualified_artifact_project("unqualified:v0") is None
+    assert export._qualified_artifact_project("../project/name:v0") is None
+
+
+def test_mcp_artifact_digest_survives_proxy_to_export_without_private_content(
+    tmp_path: Path,
+) -> None:
+    trial_dir = tmp_path / "trial"
+    event_log = trial_dir / "artifacts" / "fugue-context-events.jsonl"
+    event_log.parent.mkdir(parents=True)
+    project = "wandb/fugue-mcp-release-source-v2"
+    artifact = f"{project}/qualification-evidence-maint-r18-02:v0"
+    event_log.write_text(
+        "\n".join(
+            json.dumps(event)
+            for event in (
+                {
+                    "event": "mcp_tool_request",
+                    "layer": "proxy",
+                    "server": "staging",
+                    "tool": "get_artifact_details_tool",
+                    "request_id": "artifact-b",
+                    "arguments": {
+                        "artifact_name": artifact,
+                        "include_files": False,
+                    },
+                },
+                {
+                    "event": "mcp_tool_response",
+                    "layer": "upstream",
+                    "server": "staging",
+                    "tool": "get_artifact_details_tool",
+                    "request_id": "artifact-b",
+                    "terminal_status": "succeeded",
+                    "successful": True,
+                    "artifact_digest": "sha256:" + "b" * 64,
+                },
+            )
+        )
+        + "\n"
+    )
+
+    summary = export._context_event_summary(trial_dir)
+    call = summary["mcp_tool_calls"][0]
+
+    assert call["artifact_name"] == artifact
+    assert call["include_files"] is False
+    assert call["artifact_digest"] == "sha256:" + "b" * 64
+    assert summary["mcp_queried_projects"] == [project]
+
+
 def test_mcp_proxy_evidence_normalizes_raw_graphql_without_query_values(
     tmp_path: Path,
 ) -> None:
@@ -3406,6 +3794,108 @@ def test_first_cell_evidence_checkpoint_requires_real_graph_and_host_scorer() ->
             host_evaluator_required=True,
         )
     )
+    advisory_judge_unavailable = {
+        **valid,
+        "comparison_judge_checkpoint_status": "advisory_unavailable",
+        "comparison_judge_checkpoint_unavailable": [
+            "maintainer-actionability"
+        ],
+    }
+    assert (
+        export._live_evidence_checkpoint_failures(
+            advisory_judge_unavailable,
+            expected_destination=destination,
+            host_evaluator_required=True,
+        )
+        == []
+    )
+    required_judge_unavailable = {
+        **valid,
+        "comparison_judge_checkpoint_status": "failed",
+        "comparison_judge_checkpoint_unavailable": [
+            "maintainer-actionability"
+        ],
+        "comparison_judge_checkpoint_required_unavailable": [
+            "maintainer-actionability"
+        ],
+    }
+    assert (
+        "configured first-cell judge did not score: maintainer-actionability"
+        in export._live_evidence_checkpoint_failures(
+            required_judge_unavailable,
+            expected_destination=destination,
+            host_evaluator_required=True,
+        )
+    )
+
+
+def test_evidence_checkpoint_covers_every_planned_cell_and_cancels_after_late_failure(
+) -> None:
+    destination = export.trace_destination_identity(
+        {"FUGUE_WEAVE_PROJECT": "wandb/qualification"}
+    )
+    coordinator = object.__new__(LiveEvaluationCoordinator)
+    coordinator._evidence_checkpoint_cells = 3
+    coordinator._evidence_checkpoint_terminal = 0
+    coordinator._evidence_destination = destination
+    coordinator._host_evaluator = None
+    coordinator._cancellation_event = threading.Event()
+    coordinator._checkpoint_conformance = lambda cell: {
+        "status": "passed",
+        "docker_cleanup": {"status": "passed"},
+        "local_artifact_privacy_scan": {"status": "passed"},
+        "private_label_boundary": {"status": "passed"},
+    }
+    coordinator._negative_routing_receipt = lambda row: {"status": "passed"}
+    events: list[tuple[str, dict[str, object]]] = []
+    coordinator._append_event = (
+        lambda status, **values: events.append((status, values))
+    )
+    cell = SimpleNamespace(id="cell-a")
+    valid = {
+        "cell_id": "cell-a",
+        "candidate_id": "candidate-a",
+        "trace_receipt": destination,
+        "evaluation_root_object_verified": True,
+        "dataset_version_object_verified": True,
+        "eval_predict_and_score_object_verified": True,
+        "weave_prediction_object_verified": True,
+        "evaluation_prediction_graph_verified": True,
+        "agent_graph_verified": True,
+        "conversation_correlation_verified": True,
+        "trace_link_status": "linked",
+        "weave_agent_root_call_id": "agent-call",
+        "otel_root_span_id": "b" * 16,
+    }
+    rows = [
+        {**valid, "cell_id": "cell-a"},
+        {**valid, "cell_id": "cell-b"},
+        {
+            **valid,
+            "cell_id": "cell-c",
+            "trace_link_status": "failed",
+            "weave_agent_root_call_id": None,
+        },
+    ]
+
+    for row in rows:
+        coordinator._apply_evidence_checkpoint(cell, row)
+
+    assert [row["evidence_checkpoint_status"] for row in rows] == [
+        "passed",
+        "passed",
+        "failed",
+    ]
+    assert coordinator._evidence_checkpoint_terminal == 3
+    assert coordinator._cancellation_event.is_set()
+    assert [status for status, _ in events] == [
+        "evidence_checkpoint_passed",
+        "evidence_checkpoint_passed",
+        "evidence_checkpoint_failed",
+    ]
+    after_limit = {**valid, "cell_id": "cell-d"}
+    coordinator._apply_evidence_checkpoint(cell, after_limit)
+    assert "evidence_checkpoint_status" not in after_limit
 
 
 def test_evaluation_evidence_accepts_canonical_object_refs_not_python_identity() -> None:
@@ -3575,6 +4065,169 @@ def test_claude_native_agent_call_requires_verified_bridge_ancestry() -> None:
     row["weave_agent_bridge_parent_id"] = "other-prediction"
     assert export._verified_evaluation_root(row, "predict-and-score") is None
     assert row["trace_link_status"] == "ancestry_mismatch"
+
+
+def test_authoritative_graph_recovers_a_transient_bridge_close_poll_timeout() -> None:
+    bridge_id = "c" * 16
+    evaluation_trace_id = "d" * 32
+    row = {
+        "harness": "claude-code",
+        "trace_project": "entity/project",
+        "weave_evaluation_root_call_id": "evaluation",
+        "eval_predict_and_score_call_id": "predict-and-score",
+        "eval_predict_and_score_trace_id": evaluation_trace_id,
+        "weave_prediction_call_id": "prediction",
+        "weave_agent_bridge_call_id": bridge_id,
+        "weave_agent_root_call_id": "agent-root",
+        "weave_agent_bridge_closed_verified": False,
+        "weave_agent_bridge_close_error": "ReadTimeout",
+        "weave_authoritative_call_graph": [
+            {
+                "call_id": "evaluation",
+                "project_id": "entity/project",
+                "trace_id": evaluation_trace_id,
+                "terminal": True,
+            },
+            {
+                "call_id": "predict-and-score",
+                "parent_id": "evaluation",
+                "project_id": "entity/project",
+                "trace_id": evaluation_trace_id,
+                "terminal": True,
+            },
+            {
+                "call_id": "prediction",
+                "parent_id": "predict-and-score",
+                "project_id": "entity/project",
+                "trace_id": evaluation_trace_id,
+                "terminal": True,
+            },
+            {
+                "call_id": bridge_id,
+                "parent_id": "prediction",
+                "project_id": "entity/project",
+                "trace_id": evaluation_trace_id,
+                "terminal": True,
+            },
+            {
+                "call_id": "agent-root",
+                "parent_id": bridge_id,
+                "project_id": "entity/project",
+                "trace_id": evaluation_trace_id,
+                "terminal": True,
+            },
+        ],
+        "weave_authoritative_missing_call_ids": [],
+    }
+
+    export._verify_authoritative_agent_graph(row)
+
+    assert row["weave_authoritative_call_graph_verified"] is True
+    assert row["weave_agent_bridge_closed_verified"] is True
+    assert (
+        row["weave_agent_bridge_close_verification_source"]
+        == "authoritative_call_graph"
+    )
+    assert row["weave_agent_bridge_close_poll_error"] == "ReadTimeout"
+    assert "weave_agent_bridge_close_error" not in row
+
+
+def test_authoritative_call_state_retries_a_transient_read_timeout() -> None:
+    calls = 0
+
+    def summary_fetcher(**_kwargs):
+        nonlocal calls
+        calls += 1
+        if calls == 1:
+            raise httpx.ReadTimeout("temporary trace API timeout")
+        return {
+            "run-key": {
+                "weave_authoritative_call_graph": [
+                    {
+                        "call_id": "bridge",
+                        "project_id": "entity/project",
+                        "terminal": True,
+                    }
+                ]
+            }
+        }
+
+    coordinator = object.__new__(LiveEvaluationCoordinator)
+    coordinator.project = "entity/project"
+    coordinator.trace_timeout_sec = 1
+    coordinator.env = {}
+    coordinator._summary_fetcher = summary_fetcher
+    coordinator._cancellation_event = threading.Event()
+
+    coordinator._wait_for_authoritative_call_state(
+        row={"run_key": "run-key"},
+        call_id="bridge",
+        terminal=True,
+        phase="bridge close",
+    )
+
+    assert calls == 2
+
+
+def test_invalid_authoritative_graph_does_not_recover_bridge_close() -> None:
+    bridge_id = "c" * 16
+    evaluation_trace_id = "d" * 32
+    row = {
+        "harness": "claude-code",
+        "trace_project": "entity/project",
+        "weave_evaluation_root_call_id": "evaluation",
+        "eval_predict_and_score_call_id": "predict-and-score",
+        "eval_predict_and_score_trace_id": evaluation_trace_id,
+        "weave_prediction_call_id": "prediction",
+        "weave_agent_bridge_call_id": bridge_id,
+        "weave_agent_root_call_id": "agent-root",
+        "weave_agent_bridge_closed_verified": False,
+        "weave_agent_bridge_close_error": "ReadTimeout",
+        "weave_authoritative_call_graph": [
+            {
+                "call_id": "evaluation",
+                "project_id": "entity/project",
+                "trace_id": evaluation_trace_id,
+                "terminal": True,
+            },
+            {
+                "call_id": "predict-and-score",
+                "parent_id": "evaluation",
+                "project_id": "entity/project",
+                "trace_id": evaluation_trace_id,
+                "terminal": True,
+            },
+            {
+                "call_id": "prediction",
+                "parent_id": "predict-and-score",
+                "project_id": "entity/project",
+                "trace_id": evaluation_trace_id,
+                "terminal": True,
+            },
+            {
+                "call_id": bridge_id,
+                "parent_id": "wrong-prediction",
+                "project_id": "entity/project",
+                "trace_id": evaluation_trace_id,
+                "terminal": True,
+            },
+            {
+                "call_id": "agent-root",
+                "parent_id": bridge_id,
+                "project_id": "entity/project",
+                "trace_id": evaluation_trace_id,
+                "terminal": True,
+            },
+        ],
+        "weave_authoritative_missing_call_ids": [],
+    }
+
+    export._verify_authoritative_agent_graph(row)
+
+    assert row["weave_authoritative_call_graph_verified"] is False
+    assert row["weave_agent_bridge_closed_verified"] is False
+    assert row["weave_agent_bridge_close_error"] == "ReadTimeout"
+    assert "bridge parent" in row["weave_authoritative_call_graph_error"]
 
 
 @pytest.mark.parametrize(
@@ -4847,6 +5500,44 @@ def test_agent_span_summary_verifies_flat_fugue_attributes() -> None:
     assert summary["weave_attribute_status"] == "complete"
     assert summary["weave_missing_attributes"] == []
     assert summary["weave_fugue_attributes"] == fugue_attributes
+
+
+def test_agent_span_summary_requires_comparison_project_lineage() -> None:
+    fugue_attributes = {
+        "fugue.run_key": "run-key",
+        "fugue.run_id": "run-id",
+        "fugue.experiment_id": "memory-ab",
+        "fugue.workload_id": "coding",
+        "fugue.harness": "codex",
+        "fugue.variant_id": "rag-bm25",
+        "fugue.context_system_id": "rag-bm25",
+        "fugue.context_delivery": "portable",
+        "fugue.context_registration_status": "registered",
+        "fugue.task_id": "task-a",
+        "fugue.trial_index": "1",
+        "fugue.comparison_example_id": "example-a",
+        "fugue.candidate_id": "candidate-a",
+        "fugue.attempt_id": "a" * 64,
+        "fugue.execution_fingerprint": "e" * 64,
+        "fugue.model_provider": "wandb",
+        "fugue.model": "wandb/test-model",
+        "wandb.study_id": "study-a",
+    }
+    summary = _summarize_spans(
+        [
+            {
+                "span_id": "turn",
+                "operation_name": "invoke_agent",
+                "custom_attrs_string": fugue_attributes,
+            }
+        ]
+    )
+
+    assert summary["weave_attribute_status"] == "partial"
+    assert summary["weave_missing_attributes"] == [
+        "fugue.source_evidence_project",
+        "fugue.result_evidence_project",
+    ]
 
 
 def test_agent_spans_are_authoritative_when_calls_repeat_same_activity() -> None:
