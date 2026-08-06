@@ -911,6 +911,16 @@ def test_anthropic_judge_request_binds_native_output_schema() -> None:
     assert payload == {"conditions": []}
 
 
+def test_native_output_schema_rejects_unsupported_chat_route() -> None:
+    with pytest.raises(ValueError, match="Anthropic Messages"):
+        evaluations.request_json_judge(
+            model="wandb/zai-org/GLM-5.2",
+            env={"WANDB_API_KEY": "test-key"},
+            prompt="Return JSON.",
+            output_schema={"type": "object"},
+        )
+
+
 def test_strict_json_judge_rejects_fenced_or_surrounded_objects() -> None:
     client = _RecordingJudgeClient()
     route = resolve_model_route("anthropic/claude-sonnet-5", {})

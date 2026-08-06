@@ -743,6 +743,8 @@ def request_json_judge(
         raise RuntimeError(
             f"{provider_api_key_env(route)} is required for evaluation judging"
         )
+    if output_schema is not None and not route.messages_base_url:
+        raise ValueError("native judge output schemas require the Anthropic Messages route")
     with httpx.Client(timeout=120) as client:
         if strict_json_object or output_schema is not None:
             return _post_judge(

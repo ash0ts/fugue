@@ -91,7 +91,7 @@ def build_generation_preview(
         "packet_digest": packet.get("packet_digest"),
         "response_schema_digest": response_schema_digest(rubric),
         "prompt_set_digest": stable_digest(prompts),
-        "runner_source_sha256": hashlib.sha256(Path(__file__).read_bytes()).hexdigest(),
+        "generation_source_sha256": hashlib.sha256(Path(__file__).read_bytes() + Path(__file__).with_name("evaluations.py").read_bytes() + Path(__file__).with_name("judge_provider_contract.py").read_bytes()).hexdigest(),
         "profile": rubric.get("profile"),
         "request_count": CASE_COUNT,
         "maximum_cost_usd": CALIBRATION_MAX_USD,
@@ -109,7 +109,7 @@ def build_generation_preview(
 def validate_generation_preview(value: Mapping[str, Any]) -> None:
     fields = {
         "schema_version", "kind", "cases_digest", "rubric_digest", "packet_digest",
-        "response_schema_digest", "prompt_set_digest", "runner_source_sha256",
+        "response_schema_digest", "prompt_set_digest", "generation_source_sha256",
         "profile", "request_count",
         "maximum_cost_usd", "maximum_prompt_characters", "maximum_output_tokens",
         "automatic_retries", "human_review_automated", "claim_role", "preview_digest",
@@ -124,11 +124,11 @@ def validate_generation_preview(value: Mapping[str, Any]) -> None:
         and value["automatic_retries"] == 0
         and value["human_review_automated"] is False
         and value["claim_role"] == "advisory"
-        and isinstance(value["runner_source_sha256"], str)
-        and len(value["runner_source_sha256"]) == 64
+        and isinstance(value["generation_source_sha256"], str)
+        and len(value["generation_source_sha256"]) == 64
         and all(
             character in "0123456789abcdef"
-            for character in value["runner_source_sha256"]
+            for character in value["generation_source_sha256"]
         )
     )
     if not valid:

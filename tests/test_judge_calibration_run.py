@@ -13,6 +13,7 @@ from fugue.bench.judge_calibration_run import (
     _generation_state_path,
     _prompt,
     build_generation_preview,
+    default_requester,
     materialize_cases,
     run_generation,
     validate_generation_preview,
@@ -78,7 +79,7 @@ def test_preview_is_pure_exact_and_tamper_evident(tmp_path: Path) -> None:
     assert preview["maximum_cost_usd"] == 8
     assert preview["automatic_retries"] == 0
     assert preview["human_review_automated"] is False
-    assert len(preview["runner_source_sha256"]) == 64
+    assert len(preview["generation_source_sha256"]) == 64
     assert len(packet["cases"]) == 48
     assert not (tmp_path / ".fugue").exists()
 
@@ -103,6 +104,21 @@ def test_calibration_env_excludes_openai_but_keeps_required_routes(
     assert "OPENAI_API_KEY" not in loaded
     assert loaded["ANTHROPIC_API_KEY"] == "anthropic-test"
     assert loaded["WANDB_API_KEY"] == "wandb-test"
+
+
+def test_default_requester_forwards_the_locked_schema(monkeypatch: pytest.MonkeyPatch) -> None:
+    observed: dict[str, Any] = {}
+
+    def request_json_judge(**kwargs: Any):
+        observed.update(kwargs)
+        return {}, {}
+
+    monkeypatch.setattr("fugue.bench.evaluations.request_json_judge", request_json_judge)
+    schema = {"type": "object", "additionalProperties": False}
+    default_requester(model="anthropic/claude-sonnet-5", env={})("prompt", schema)
+
+    assert observed["output_schema"] is schema
+    assert observed["strict_json_object"] is True
 
 
 def test_operator_source_materializes_idempotently_inside_private_boundary(
