@@ -908,6 +908,7 @@ def test_anthropic_judge_request_binds_native_output_schema() -> None:
     assert client.request["json"]["output_config"] == {
         "format": {"type": "json_schema", "schema": schema}
     }
+    assert client.request["json"]["thinking"] == {"type": "disabled"}
     assert payload == {"conditions": []}
 
 

@@ -778,6 +778,7 @@ def _post_judge(
                 "messages": [{"role": "user", "content": prompt}],
                 **(
                     {
+                        "thinking": {"type": "disabled"},
                         "output_config": {
                             "format": {"type": "json_schema", "schema": output_schema}
                         }
