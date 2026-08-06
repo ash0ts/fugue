@@ -142,6 +142,14 @@ def _parser() -> FugueArgumentParser:
         metavar="CONTROLLER_ID",
         help="Resume the durable staged controller without rerunning valid cells",
     )
+    compare.add_argument(
+        "--host-finalize-only",
+        action="store_true",
+        help=(
+            "Finalize one eligible frozen stage from existing evidence only; "
+            "never admit an Agent cell or publish a new Evaluation"
+        ),
+    )
     compare.add_argument("--fetch-weave", action="store_true")
     _add_common_args(compare, json_output=True)
     compare.set_defaults(handler=_comparison_compare)
@@ -883,6 +891,40 @@ def _comparison_compare(args: argparse.Namespace) -> int:  # noqa: C901
     )
 
     root = args.repo_root.resolve()
+    if args.host_finalize_only:
+        if not (args.run and args.stage and args.resume and args.approval):
+            raise ValueError(
+                "--host-finalize-only requires --run, --stage, --resume, "
+                "and --approval"
+            )
+        from fugue.bench.staged_comparison import (
+            finalize_frozen_comparison_stage,
+            load_frozen_staged_preview,
+        )
+
+        frozen = load_frozen_staged_preview(args.resume, repo_root=root)
+        staged = finalize_frozen_comparison_stage(
+            frozen,
+            stage_id=args.stage,
+            approval_digest=args.approval,
+            controller_id=args.resume,
+            repo_root=root,
+            env_file=args.env_file,
+            fetch_weave=args.fetch_weave,
+        )
+        if args.json:
+            print(json.dumps(staged, indent=2, sort_keys=True))
+        else:
+            CONSOLE.print(
+                Panel(
+                    f"Controller: [bold]{staged['controller_id']}[/]\n"
+                    f"Stage: {staged['stage_id']} · {staged['status']}\n"
+                    "Host-only recovery: no Agent or Evaluation publication",
+                    title="Frozen staged finalization",
+                    border_style="fugue.cyan",
+                )
+            )
+        return 0 if staged["status"] in {"stage_complete", "complete"} else 3
     spec = load_comparison(args.comparison, repo_root=root)
     operator = OperatorService(root, args.env_file)
     if args.prepare:

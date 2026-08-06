@@ -19,9 +19,14 @@ from fugue.bench.analysis_contracts import (
 )
 from fugue.bench.campaign_accounting import BudgetLeaseLedger
 from fugue.bench.campaign_store import CampaignStore, read_json_object
-from fugue.bench.execution import ExecutionScheduleV1, StageSubsetReceiptV1
-from fugue.bench.files import latest_jsonl_records
+from fugue.bench.execution import (
+    ExecutionScheduleV1,
+    StageSubsetReceiptV1,
+    latest_cell_records,
+)
+from fugue.bench.files import atomic_write_json, latest_jsonl_records
 from fugue.bench.library import validate_id
+from fugue.bench.reproducibility import verify_snapshot
 from fugue.model_plane import trace_project_slug
 from fugue.research.approvals import ApprovalLedger
 from fugue.research.store import StudyStore
@@ -64,6 +69,551 @@ def _persist_controller(
         state.update(updates)
         runtime.write_json(state_path, state)
     return state
+
+
+_LIVE_SCOPE_FAILURE_SUFFIX = ": evaluation scope changed during execution"
+_LIVE_SCOPE_REQUIRED_RELATIONSHIPS = (
+    "evaluation_root_object_verified",
+    "dataset_version_object_verified",
+    "eval_predict_and_score_object_verified",
+    "weave_prediction_object_verified",
+    "evaluation_prediction_graph_verified",
+    "evaluation_root_dataset_relationship_verified",
+    "evaluation_root_prediction_relationship_verified",
+    "prediction_child_relationship_verified",
+    "agent_graph_verified",
+    "weave_authoritative_call_graph_verified",
+)
+_LIVE_SCOPE_IDENTITY_FIELDS = (
+    "cell_id",
+    "attempt_id",
+    "candidate_id",
+    "execution_fingerprint",
+    "comparison_example_id",
+    "task_id",
+    "variant_id",
+    "trial_index",
+)
+_LIVE_SCOPE_CALL_FIELDS = (
+    "weave_evaluation_root_call_id",
+    "eval_predict_and_score_call_id",
+    "weave_prediction_call_id",
+    "weave_agent_root_call_id",
+    "weave_dataset_id",
+)
+
+
+def reconcile_staged_live_scope_metadata(  # noqa: C901, PLR0912, PLR0915
+    preview: ComparisonPreviewV1,
+    *,
+    stage_id: str,
+    approval_digest: str,
+    controller_id: str,
+    repo_root: Path,
+) -> dict[str, Any]:
+    """Repair one proven host-only scorer-schema omission without republishing.
+
+    The recovery is deliberately narrower than ordinary resume. It accepts only
+    the historical failure where every selected Harbor cell and five-link graph
+    is terminal and valid, while the declared host scorer names were omitted
+    from the persisted terminal rows. The original rows and remote Weave Calls
+    remain immutable; a repaired copy and a digest-bound receipt are written for
+    staged host scoring.
+    """
+
+    comparison = _comparison_module()
+    comparison._verify_artifact(
+        preview.to_dict(), "preview_digest", "frozen comparison preview"
+    )
+    schedule = ExecutionScheduleV1.from_dict(preview.execution_schedule)
+    spec = comparison.comparison_from_dict(
+        preview.comparison,
+        repo_root=repo_root,
+        source=repo_root,
+    )
+    controller_id = validate_id(controller_id, kind="comparison controller id")
+    runtime = CampaignStore(
+        repo_root.resolve(), Path(".fugue/runtime/comparison-stages")
+    )
+    state_path = runtime.campaign_dir(spec.id) / f"{controller_id}.json"
+    with runtime.campaign_lock(spec.id):
+        state = read_json_object(state_path)
+    if (
+        state.get("preview_digest") != preview.preview_digest
+        or state.get("schedule_digest") != schedule.schedule_digest
+        or state.get("comparison_id") != spec.id
+        or state.get("controller_id") != controller_id
+    ):
+        raise ValueError("staged recovery does not match the frozen controller")
+    subset = comparison.comparison_stage_receipt(preview, stage_id)
+    stage = comparison._mapping(state["stages"].get(stage_id), "staged stage")
+    if stage.get("status") != "finalization_pending":
+        raise ValueError("scope recovery requires a finalization-pending stage")
+    if StageSubsetReceiptV1.from_dict(
+        comparison._mapping(stage.get("subset"), "stored stage subset")
+    ) != subset:
+        raise ValueError("stored stage subset changed before scope recovery")
+    subject_id = f"{controller_id}-{stage_id}"
+    authorization = comparison._verify_stage_authorization_receipt(
+        stage.get("authorization"),
+        subset=subset,
+        subject_id=subject_id,
+        approval_digest=approval_digest,
+    )
+    approval = ApprovalLedger(StudyStore(repo_root).path).require_claimed_by(
+        approval_digest=approval_digest,
+        subject_kind="experiment",
+        preview_digest=subset.subset_digest,
+        subject_id=subject_id,
+    )
+    if approval.to_dict() != authorization["approval"]:
+        raise ValueError("stored stage approval changed before scope recovery")
+
+    run_id = validate_id(str(stage.get("run_id") or ""), kind="run id")
+    run_dir = repo_root / ".fugue" / "runtime" / run_id
+    manifest_path = run_dir / "run.json"
+    manifest = read_json_object(manifest_path)
+    failures = tuple(str(value) for value in manifest.get("evaluation_failures") or ())
+    if (
+        manifest.get("status") != "failed"
+        or manifest.get("observability_status") != "failed"
+        or int(manifest.get("failed_cells") or 0) != 0
+        or not failures
+        or any(not value.endswith(_LIVE_SCOPE_FAILURE_SUFFIX) for value in failures)
+    ):
+        raise ValueError("run does not contain only the recoverable scope failure")
+    failed_candidates = {
+        value[: -len(_LIVE_SCOPE_FAILURE_SUFFIX)] for value in failures
+    }
+
+    cell_records = latest_cell_records(run_dir / "cells.jsonl")
+    if (
+        len(cell_records) != len(subset.attempt_ids)
+        or {str(row.get("attempt_id") or "") for row in cell_records}
+        != set(subset.attempt_ids)
+        or any(
+            row.get("status") != "passed" or row.get("terminal_kind") != "success"
+            for row in cell_records
+        )
+    ):
+        raise ValueError("scope recovery requires exact successful terminal cells")
+
+    input_lock_path = run_dir / "input-lock.json"
+    input_lock = read_json_object(input_lock_path)
+    if not verify_snapshot(input_lock) or input_lock.get("run_id") != run_id:
+        raise ValueError("scope recovery input lock did not verify")
+    planned = {
+        str(row.get("attempt_id") or ""): row
+        for row in input_lock.get("planned_matrix") or ()
+        if isinstance(row, Mapping)
+        and str(row.get("attempt_id") or "") in subset.attempt_ids
+    }
+    if set(planned) != set(subset.attempt_ids):
+        raise ValueError("input lock does not contain the exact stage attempts")
+
+    results_path = run_dir / "evaluation-results.jsonl"
+    original_rows = comparison._read_jsonl(results_path, "live evaluation results")
+    by_attempt = {
+        str(row.get("attempt_id") or ""): dict(row) for row in original_rows
+    }
+    if len(original_rows) != len(by_attempt) or set(by_attempt) != set(subset.attempt_ids):
+        raise ValueError("live results do not contain the exact unique stage attempts")
+    expected_project = str(preview.readiness.get("evidence_project") or "")
+    if not expected_project or expected_project != spec.execution.evidence_project:
+        raise ValueError("frozen preview evidence project is inconsistent")
+    for attempt, row in by_attempt.items():
+        locked = planned[attempt]
+        for field in _LIVE_SCOPE_IDENTITY_FIELDS:
+            if row.get(field) != locked.get(field):
+                raise ValueError(f"live result changed locked {field}")
+        if row.get("status") != "passed" or row.get("trace_project") != expected_project:
+            raise ValueError("live result status or project is not recoverable")
+        if row.get("trace_link_status") != "linked":
+            raise ValueError("live result does not have linked Agent evidence")
+        if any(row.get(field) is not True for field in _LIVE_SCOPE_REQUIRED_RELATIONSHIPS):
+            raise ValueError("live result five-link graph is not verified")
+        if any(not row.get(field) for field in _LIVE_SCOPE_CALL_FIELDS):
+            raise ValueError("live result is missing a required evidence identity")
+        if comparison._mapping_or_empty(row.get("negative_routing_receipt")).get(
+            "status"
+        ) != "passed":
+            raise ValueError("live result negative routing did not pass")
+        if row.get("evidence_checkpoint_status") != "passed":
+            raise ValueError("live result checkpoint evidence did not pass")
+        if int(row.get("local_artifact_privacy_match_count") or 0):
+            raise ValueError("live result contains protected local artifact content")
+
+    from fugue.bench.export import _evaluation_name, _publication_candidates
+
+    scorer_names = tuple(comparison._comparison_scorer_names(spec))
+    if not scorer_names:
+        raise ValueError("scope recovery requires declared comparison scorers")
+    for row in by_attempt.values():
+        recorded = tuple(str(value) for value in row.get("host_scorer_names") or ())
+        if recorded and recorded != scorer_names:
+            raise ValueError("terminal row contains conflicting host scorer names")
+    original_candidates = _publication_candidates(list(by_attempt.values()))
+    repaired_rows = []
+    for attempt in subset.attempt_ids:
+        row = dict(by_attempt[attempt])
+        row["host_scorer_names"] = list(scorer_names)
+        repaired_rows.append(row)
+    repaired_candidates = _publication_candidates(repaired_rows)
+    original_by_id = {str(item["candidate_id"]): item for item in original_candidates}
+    repaired_by_id = {str(item["candidate_id"]): item for item in repaired_candidates}
+    if set(original_by_id) != set(repaired_by_id) or set(repaired_by_id) != failed_candidates:
+        raise ValueError("scope recovery candidate identities do not reconcile")
+
+    candidate_receipts: list[dict[str, Any]] = []
+    for candidate_id in sorted(repaired_by_id):
+        original = original_by_id[candidate_id]
+        repaired = repaired_by_id[candidate_id]
+        candidate_rows = repaired["rows"]
+        stored_scopes = {
+            str(row.get("evaluation_scope_id") or "") for row in candidate_rows
+        }
+        if len(stored_scopes) != 1:
+            raise ValueError("terminal rows disagree on their frozen scope")
+        stored_scope = next(iter(stored_scopes))
+        if (
+            not stored_scope
+            or repaired["evaluation_scope_id"] != stored_scope
+            or original["evaluation_scope_id"] == stored_scope
+            or original["dataset_examples"] != repaired["dataset_examples"]
+        ):
+            raise ValueError("only the declared scorer schema may change in recovery")
+        roots = {str(row["weave_evaluation_root_call_id"]) for row in candidate_rows}
+        evaluation_refs = {str(row.get("weave_evaluation_id") or "") for row in candidate_rows}
+        evaluation_urls = {str(row.get("weave_evaluation_url") or "") for row in candidate_rows}
+        dataset_refs = {str(row["weave_dataset_id"]) for row in candidate_rows}
+        if any(len(values) != 1 or not next(iter(values)) for values in (roots, evaluation_refs, evaluation_urls, dataset_refs)):
+            raise ValueError("candidate rows disagree on Evaluation or Dataset identity")
+        attempts = [str(row["attempt_id"]) for row in candidate_rows]
+        call_ids = {
+            field: [str(row[field]) for row in candidate_rows]
+            for field in _LIVE_SCOPE_CALL_FIELDS
+        }
+        candidate_receipts.append(
+            {
+                "candidate_id": candidate_id,
+                "attempt_ids": attempts,
+                "original_scope_id": original["evaluation_scope_id"],
+                "reconciled_scope_id": repaired["evaluation_scope_id"],
+                "dataset_examples_digest": comparison.stable_digest(
+                    repaired["dataset_examples"]
+                ),
+                "publication_id": repaired["publication_id"],
+                "call_ids": call_ids,
+            }
+        )
+        candidate_receipts[-1]["evaluation_name"] = _evaluation_name(repaired)
+        candidate_receipts[-1]["evaluation_ref"] = next(iter(evaluation_refs))
+        candidate_receipts[-1]["evaluation_url"] = next(iter(evaluation_urls))
+        candidate_receipts[-1]["dataset_ref"] = next(iter(dataset_refs))
+
+    harbor_reference = comparison._mapping(
+        manifest.get("harbor_conformance"), "Harbor conformance reference"
+    )
+    harbor_path = repo_root / str(harbor_reference.get("path") or "")
+    from fugue.bench.run_conformance import read_harbor_run_conformance_receipt
+
+    harbor_receipt = read_harbor_run_conformance_receipt(
+        repo_root=repo_root,
+        run_id=run_id,
+    )
+    if (
+        harbor_reference.get("enforced") is not True
+        or harbor_reference.get("status") != "passed"
+        or harbor_receipt.get("receipt_sha256") != harbor_reference.get("sha256")
+    ):
+        raise ValueError("scope recovery requires passed exact Harbor conformance")
+    budget = BudgetLeaseLedger(
+        runtime.budget_ledger(spec.id, controller_id),
+        maximum_total_cost_usd=schedule.total_cost_usd,
+        maximum_in_flight_cost_usd=schedule.maximum_in_flight_cost_usd,
+        maximum_in_flight_executions=schedule.worker_limit,
+        maximum_physical_executions=schedule.maximum_physical_executions,
+    ).snapshot()
+    leases = comparison._mapping(budget.get("leases"), "budget leases")
+    if len(leases) != len(subset.attempt_ids) or any(
+        comparison._mapping(value, "budget lease").get("status") != "settled"
+        for value in leases.values()
+    ):
+        raise ValueError("scope recovery requires exact settled physical executions")
+
+    repaired_path = run_dir / "evaluation-results.scope-reconciled.jsonl"
+    repaired_text = comparison._jsonl(repaired_rows)
+    comparison._atomic_text(repaired_path, repaired_text)
+    receipt = {
+        "schema_version": 1,
+        "kind": "live_scope_metadata_recovery",
+        "comparison_id": spec.id,
+        "controller_id": controller_id,
+        "stage_id": stage_id,
+        "run_id": run_id,
+        "preview_digest": preview.preview_digest,
+        "schedule_digest": schedule.schedule_digest,
+        "subset_digest": subset.subset_digest,
+        "approval_digest": approval_digest,
+        "authorization_digest": authorization["authorization_digest"],
+        "input_lock_sha256": comparison._sha256_path(input_lock_path),
+        "input_lock_identity": input_lock["lock_sha256"],
+        "original_results_sha256": comparison._sha256_path(results_path),
+        "reconciled_results_path": repaired_path.relative_to(repo_root).as_posix(),
+        "reconciled_results_sha256": comparison._sha256_path(repaired_path),
+        "harbor_conformance_receipt_sha256": harbor_receipt["receipt_sha256"],
+        "harbor_conformance_file_sha256": comparison._sha256_path(harbor_path),
+        "budget_ledger_digest": budget["ledger_digest"],
+        "physical_execution_ids": sorted(leases),
+        "host_scorer_names": list(scorer_names),
+        "host_scorer_digest": comparison.stable_digest(list(scorer_names)),
+        "original_failures": list(failures),
+        "candidates": candidate_receipts,
+        "remote_publication_performed": False,
+        "agent_executions_performed": 0,
+        "receipt_digest": "",
+    }
+    receipt["receipt_digest"] = comparison.stable_digest(receipt)
+    receipt_path = run_dir / "live-scope-metadata-recovery.json"
+    if receipt_path.exists():
+        if read_json_object(receipt_path) != receipt:
+            raise ValueError("existing live scope recovery receipt changed")
+    else:
+        atomic_write_json(receipt_path, receipt)
+
+    return receipt
+
+
+def finalize_frozen_comparison_stage(
+    preview: ComparisonPreviewV1,
+    *,
+    stage_id: str,
+    approval_digest: str,
+    controller_id: str,
+    repo_root: Path,
+    env_file: Path | None = None,
+    fetch_weave: bool = True,
+) -> dict[str, Any]:
+    """Select a proven recovered row artifact without admitting Agent work."""
+
+    comparison = _comparison_module()
+    spec = comparison.comparison_from_dict(
+        preview.comparison,
+        repo_root=repo_root,
+        source=repo_root,
+    )
+    subset = comparison.comparison_stage_receipt(preview, stage_id)
+    runtime = CampaignStore(
+        repo_root.resolve(), Path(".fugue/runtime/comparison-stages")
+    )
+    state_path = runtime.campaign_dir(spec.id) / f"{controller_id}.json"
+    with runtime.campaign_lock(spec.id):
+        state = read_json_object(state_path)
+    stage = comparison._mapping(state["stages"].get(stage_id), "staged stage")
+    if stage.get("status") == "complete" and stage.get("host_recovery"):
+        recovery = comparison._mapping(
+            stage.get("host_recovery"), "stored host recovery"
+        )
+        receipt_path = repo_root / str(recovery.get("path") or "")
+        if comparison._sha256_path(receipt_path) != recovery.get("sha256"):
+            raise ValueError("stored host recovery artifact changed")
+        stored_receipt = read_json_object(receipt_path)
+        comparison._verify_artifact(
+            stored_receipt,
+            "receipt_digest",
+            "stored live scope metadata recovery receipt",
+        )
+        if (
+            stored_receipt.get("preview_digest") != preview.preview_digest
+            or stored_receipt.get("subset_digest") != subset.subset_digest
+            or stored_receipt.get("approval_digest") != approval_digest
+            or stored_receipt.get("controller_id") != controller_id
+            or stored_receipt.get("stage_id") != stage_id
+            or stored_receipt.get("agent_executions_performed") != 0
+            or stored_receipt.get("remote_publication_performed") is not False
+        ):
+            raise ValueError("stored host recovery does not match this request")
+        return comparison._staged_status(state, stage_id, state_path, repo_root)
+    receipt = reconcile_staged_live_scope_metadata(
+        preview,
+        stage_id=stage_id,
+        approval_digest=approval_digest,
+        controller_id=controller_id,
+        repo_root=repo_root,
+    )
+    comparison._verify_artifact(
+        receipt, "receipt_digest", "live scope metadata recovery receipt"
+    )
+    with runtime.campaign_lock(spec.id):
+        state = read_json_object(state_path)
+    stage = comparison._mapping(state["stages"].get(stage_id), "staged stage")
+    run_id = str(stage.get("run_id") or "")
+    service = comparison.OperatorService(repo_root, env_file)
+    run_dir = repo_root / ".fugue" / "runtime" / run_id
+    cells_before = comparison._sha256_path(run_dir / "cells.jsonl")
+    budget_path = runtime.budget_ledger(spec.id, controller_id)
+    budget_before = comparison._sha256_path(budget_path)
+    observed_path = (
+        runtime.campaign_dir(spec.id)
+        / "rows"
+        / f".{stage_id}.scope-recovery-observed.jsonl"
+    )
+    exported = service.export_run(
+        run_id,
+        out=observed_path,
+        fetch_weave=fetch_weave,
+        to_weave=False,
+    )
+    observed_rows = comparison._read_jsonl(
+        exported.path, "scope recovery observed rows"
+    )
+    repaired_path = repo_root / str(receipt["reconciled_results_path"])
+    if comparison._sha256_path(repaired_path) != receipt["reconciled_results_sha256"]:
+        raise ValueError("reconciled live rows changed after recovery")
+    repaired_rows = comparison._read_jsonl(repaired_path, "reconciled live rows")
+    repaired_by_attempt = {
+        str(row.get("attempt_id") or ""): row for row in repaired_rows
+    }
+    observed_by_attempt = {
+        str(row.get("attempt_id") or ""): dict(row) for row in observed_rows
+    }
+    if (
+        len(observed_rows) != len(observed_by_attempt)
+        or set(observed_by_attempt) != set(subset.attempt_ids)
+        or set(repaired_by_attempt) != set(subset.attempt_ids)
+    ):
+        raise ValueError("read-only export changed the frozen stage attempts")
+    scorer_names = list(receipt["host_scorer_names"])
+    selected_rows: list[dict[str, Any]] = []
+    for attempt in subset.attempt_ids:
+        observed = observed_by_attempt[attempt]
+        repaired = repaired_by_attempt[attempt]
+        for field in (*_LIVE_SCOPE_IDENTITY_FIELDS, *_LIVE_SCOPE_CALL_FIELDS):
+            if observed.get(field) != repaired.get(field):
+                raise ValueError(f"read-only export changed recovered {field}")
+        observed["host_scorer_names"] = scorer_names
+        selected_rows.append(observed)
+    from fugue.bench.export import _publication_candidates
+
+    recovered_scopes = {
+        str(item["candidate_id"]): str(item["evaluation_scope_id"])
+        for item in _publication_candidates(selected_rows)
+    }
+    expected_scopes = {
+        str(item["candidate_id"]): str(item["reconciled_scope_id"])
+        for item in receipt["candidates"]
+    }
+    if recovered_scopes != expected_scopes:
+        raise ValueError("exported recovery rows changed the frozen Evaluation scope")
+    comparison._apply_harbor_conformance(
+        selected_rows,
+        repo_root=repo_root,
+        run_id=run_id,
+    )
+    comparison._validate_staged_rows(
+        selected_rows,
+        expected_project=str(preview.readiness["evidence_project"]),
+    )
+    if (
+        comparison._sha256_path(run_dir / "cells.jsonl") != cells_before
+        or comparison._sha256_path(budget_path) != budget_before
+    ):
+        raise RuntimeError("host-only recovery admitted or changed a physical execution")
+
+    source_pre_run_drift = (
+        evidence_drift_check_from_dict(state["source_pre_run_drift"])
+        if isinstance(state.get("source_pre_run_drift"), Mapping)
+        else None
+    )
+    source_checkpoint_drift = None
+    if source_pre_run_drift is not None:
+        source_checkpoint_drift = comparison._verify_v3_source_drift(
+            spec,
+            readiness=preview.readiness,
+            repo_root=repo_root,
+            env=service.env,
+        )
+        if (
+            source_checkpoint_drift is None
+            or source_checkpoint_drift.status != "matched"
+        ):
+            raise ValueError("immutable source evidence changed during host recovery")
+    stage_rows = runtime.campaign_dir(spec.id) / "rows" / f"{stage_id}.jsonl"
+    comparison._atomic_text(stage_rows, comparison._jsonl(selected_rows))
+    recovery_path = run_dir / "live-scope-metadata-recovery.json"
+    state = _persist_controller(
+        runtime,
+        spec.id,
+        state_path,
+        stage_id=stage_id,
+        stage={
+            "status": "complete",
+            "rows_path": stage_rows.relative_to(repo_root).as_posix(),
+            "rows_digest": comparison._sha256_path(stage_rows),
+            "pending_reasons": [],
+            "source_checkpoint_drift": (
+                source_checkpoint_drift.to_dict()
+                if source_checkpoint_drift is not None
+                else None
+            ),
+            "host_recovery": {
+                "path": recovery_path.relative_to(repo_root).as_posix(),
+                "sha256": comparison._sha256_path(recovery_path),
+                "receipt_digest": receipt["receipt_digest"],
+                "original_run_status": "failed",
+                "agent_executions_performed": 0,
+                "remote_publication_performed": False,
+            },
+        },
+    )
+    return comparison._staged_status(state, stage_id, state_path, repo_root)
+
+
+def load_frozen_staged_preview(
+    controller_id: str,
+    *,
+    repo_root: Path,
+) -> ComparisonPreviewV1:
+    """Load the exact prepared preview named by one durable controller."""
+
+    from fugue.bench.comparison import ComparisonPreviewV1
+
+    comparison = _comparison_module()
+    controller_id = validate_id(controller_id, kind="comparison controller id")
+    controllers = list(
+        (repo_root / ".fugue/runtime/comparison-stages").glob(
+            f"*/{controller_id}.json"
+        )
+    )
+    if len(controllers) != 1:
+        raise ValueError("frozen controller must resolve to exactly one state file")
+    state = read_json_object(controllers[0])
+    digest = str(state.get("preview_digest") or "")
+    matches: list[ComparisonPreviewV1] = []
+    for path in (repo_root / ".fugue/runtime/comparisons").glob(
+        "*/*/prepared-preview.json"
+    ):
+        value = read_json_object(path)
+        if value.get("preview_digest") != digest:
+            continue
+        preview = ComparisonPreviewV1(
+            schema_version=int(value["schema_version"]),
+            comparison=dict(value["comparison"]),
+            readiness=dict(value["readiness"]),
+            matrix=dict(value["matrix"]),
+            experiment=dict(value["experiment"]),
+            manifest=dict(value["manifest"]),
+            execution_schedule=dict(value.get("execution_schedule") or {}),
+            host_capacity_receipt=dict(value.get("host_capacity_receipt") or {}),
+            preview_digest=str(value["preview_digest"]),
+        )
+        comparison._verify_artifact(
+            preview.to_dict(), "preview_digest", "prepared frozen preview"
+        )
+        matches.append(preview)
+    if len(matches) != 1:
+        raise ValueError("controller preview must resolve to one prepared artifact")
+    return matches[0]
 
 
 def finalize_staged_comparison(

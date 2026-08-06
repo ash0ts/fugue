@@ -248,6 +248,7 @@ class LiveEvaluationCoordinator:
         self._terminal_cells: set[str] = set()
         self._cancellation_event = cancellation_event or threading.Event()
         self._host_evaluator = host_evaluator
+        self._host_scorer_names = tuple(host_scorer_names)
         if evidence_checkpoint_cells < 0:
             raise ValueError("evidence checkpoint cells must be non-negative")
         self._evidence_checkpoint_cells = evidence_checkpoint_cells
@@ -271,17 +272,12 @@ class LiveEvaluationCoordinator:
             else nullcontext(weave_module)
         )
         with initialization_scope:
-            self._initialize_live_objects(
-                cells,
-                host_scorer_names=host_scorer_names,
-                weave_module=weave_module,
-            )
+            self._initialize_live_objects(cells, weave_module=weave_module)
 
     def _initialize_live_objects(
         self,
         cells: list[PlannedCell],
         *,
-        host_scorer_names: tuple[str, ...],
         weave_module: Any | None,
     ) -> None:
         """Create destination-bound Weave objects under the global SDK scope."""
@@ -300,12 +296,10 @@ class LiveEvaluationCoordinator:
             raise RuntimeError("installed weave package has no EvaluationLogger")
         dataset_cls = getattr(self.weave, "Dataset", None)
         planned = [
-            _planned_evaluation_row(cell)
+            self._planned_row(cell)
             for cell in cells
             if cell.applicable and cell.execution_kind == "agent"
         ]
-        for row in planned:
-            row["host_scorer_names"] = list(host_scorer_names)
         candidates = _publication_candidates(planned)
         datasets: dict[str, Any] = {}
         self._datasets = datasets
@@ -358,6 +352,13 @@ class LiveEvaluationCoordinator:
             {id(value): value for value in self._sessions_by_cell.values()}.values()
         )
 
+    def _planned_row(self, cell: PlannedCell) -> dict[str, Any]:
+        """Return the one frozen row shape used for scope and execution."""
+
+        row = _planned_evaluation_row(cell)
+        row["host_scorer_names"] = list(self._host_scorer_names)
+        return row
+
     @contextmanager
     def _destination_scope(self) -> Any:
         if not getattr(self, "_weave_requires_reactivation", False):
@@ -383,7 +384,7 @@ class LiveEvaluationCoordinator:
         session = self._sessions_by_cell.get(cell.id)
         if session is None:
             return None
-        row = _planned_evaluation_row(cell)
+        row = self._planned_row(cell)
         prediction = None
         prediction_entered = False
         bridge_call = None

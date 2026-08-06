@@ -1159,8 +1159,10 @@ def test_weave_publication_groups_repeated_trials_under_one_example(
     assert loggers[0].examples[0] == loggers[0].examples[1]
 
 
+@pytest.mark.parametrize("host_evaluator_enabled", (False, True))
 def test_live_evaluation_links_native_root_and_finalizes_cleanly(
     tmp_path: Path,
+    host_evaluator_enabled: bool,
 ) -> None:
     loggers = []
     predictions = []
@@ -1375,15 +1377,19 @@ def test_live_evaluation_links_native_root_and_finalizes_cleanly(
         weave_module=fake_weave,
         summary_fetcher=summaries,
         trace_timeout_sec=0,
-        host_evaluator=lambda row: row.update(
-            {
-                "comparison_evaluation_status": "scored",
-                "comparison_required_evaluation_complete": True,
-                "comparison_deterministic_scores": {
-                    "fact-correct": True,
-                    "citation-quality": 0.75,
-                },
-            }
+        host_evaluator=(
+            lambda row: row.update(
+                {
+                    "comparison_evaluation_status": "scored",
+                    "comparison_required_evaluation_complete": True,
+                    "comparison_deterministic_scores": {
+                        "fact-correct": True,
+                        "citation-quality": 0.75,
+                    },
+                }
+            )
+            if host_evaluator_enabled
+            else None
         ),
         host_scorer_names=(
             "comparison.deterministic.fact-correct",
@@ -1465,11 +1471,22 @@ def test_live_evaluation_links_native_root_and_finalizes_cleanly(
     assert live_row["evaluation_prediction_graph_verified"] is True
     assert live_row["agent_graph_verified"] is True
     assert live_row["evaluation_judge_status"] == "not_requested"
-    assert predictions[0].scores["comparison.deterministic.fact-correct"] is True
-    assert (
-        predictions[0].scores["comparison.deterministic.citation-quality"]
-        == 0.75
-    )
+    assert live_row["host_scorer_names"] == [
+        "comparison.deterministic.fact-correct",
+        "comparison.deterministic.citation-quality",
+    ]
+    if host_evaluator_enabled:
+        assert predictions[0].scores["comparison.deterministic.fact-correct"] is True
+        assert (
+            predictions[0].scores["comparison.deterministic.citation-quality"]
+            == 0.75
+        )
+    else:
+        assert "comparison.deterministic.fact-correct" not in predictions[0].scores
+        assert (
+            "comparison.deterministic.citation-quality"
+            not in predictions[0].scores
+        )
     assert live_row["adapter_outcome"]["rubric_evaluation"]["state"] == (
         "not_requested"
     )
