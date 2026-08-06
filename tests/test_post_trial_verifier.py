@@ -287,6 +287,7 @@ def test_public_source_lock_reconciles_frozen_inputs_and_detects_mutation(
         spec,  # type: ignore[arg-type]
         readiness=readiness,
         repo_root=tmp_path,
+        env={},
     )
     assert clean.status == "matched"
 
@@ -300,6 +301,7 @@ def test_public_source_lock_reconciles_frozen_inputs_and_detects_mutation(
         spec,  # type: ignore[arg-type]
         readiness=readiness,
         repo_root=tmp_path,
+        env={},
     )
     assert mutated.status == "drifted"
 

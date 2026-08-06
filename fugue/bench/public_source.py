@@ -12,6 +12,7 @@ from fugue.bench.candidates import stable_digest
 from fugue.model_plane import (
     EvidenceDestinationV1,
     evidence_destination_from_dict,
+    trace_api_key,
 )
 
 _SUMMARY_KEY = "fugue.public_task_source_publication_v1"
@@ -289,7 +290,17 @@ def verify_public_task_source_publication(
 class WandbPublicTaskSourceRemote:
     """Late-bound W&B adapter used only by trusted preparation and drift checks."""
 
-    def __init__(self, *, wandb_module: Any | None = None) -> None:
+    def __init__(
+        self,
+        *,
+        env: Mapping[str, str] | None = None,
+        wandb_module: Any | None = None,
+    ) -> None:
+        # Keep credentials in memory only.  ``--env-file`` is deliberately not
+        # exported into the host process environment, so trusted preparation
+        # must pass the scoped W&B key directly to the SDK.  Do not retain any
+        # unrelated model or Agent credentials from the operator environment.
+        self._api_key = trace_api_key(env or {})
         self._wandb_module = wandb_module
 
     def publish(
@@ -304,11 +315,16 @@ class WandbPublicTaskSourceRemote:
             raise PublicTaskSourceError(
                 "public task source publication requires destination-aware Settings"
             )
+        settings_options: dict[str, Any] = {
+            "base_url": destination.api_base_url,
+            "console": "off",
+            "disable_git": True,
+            "silent": True,
+        }
+        if self._api_key:
+            settings_options["api_key"] = self._api_key
         settings = settings_factory(
-            base_url=destination.api_base_url,
-            console="off",
-            disable_git=True,
-            silent=True,
+            **settings_options,
         )
         run = wandb.init(
             entity=destination.entity,
@@ -397,7 +413,12 @@ class WandbPublicTaskSourceRemote:
         api_factory = getattr(wandb, "Api", None)
         if not callable(api_factory):
             raise PublicTaskSourceError("public source resolution API is unavailable")
-        api = api_factory(overrides={"base_url": destination.api_base_url})
+        api_options: dict[str, Any] = {
+            "overrides": {"base_url": destination.api_base_url}
+        }
+        if self._api_key:
+            api_options["api_key"] = self._api_key
+        api = api_factory(**api_options)
         artifact = api.artifact(path, type=_ARTIFACT_TYPE)
         entity, project, name_version = path.split("/", 2)
         if f"{entity}/{project}" != destination.project_slug:
@@ -426,7 +447,12 @@ class WandbPublicTaskSourceRemote:
                 raise PublicTaskSourceError(
                     "public source recovery API is unavailable"
                 )
-            api = api_factory(overrides={"base_url": destination.api_base_url})
+            api_options: dict[str, Any] = {
+                "overrides": {"base_url": destination.api_base_url}
+            }
+            if self._api_key:
+                api_options["api_key"] = self._api_key
+            api = api_factory(**api_options)
             artifact = api.artifact(
                 f"{destination.project_slug}/{artifact_name}:locked",
                 type=_ARTIFACT_TYPE,

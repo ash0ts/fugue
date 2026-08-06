@@ -1356,6 +1356,7 @@ def _verify_v3_source_drift(
         spec,
         readiness=readiness,
         repo_root=repo_root,
+        env=env,
     )
 
 
@@ -1364,6 +1365,7 @@ def _verify_local_public_source_drift(
     *,
     readiness: Mapping[str, Any],
     repo_root: Path,
+    env: Mapping[str, str],
 ) -> EvidenceDriftCheckV1:
     expected = str(
         _mapping_or_empty(readiness.get("qualification_input_digests")).get(
@@ -1421,7 +1423,7 @@ def _verify_local_public_source_drift(
             verify_public_task_source_publication(
                 publication,
                 manifest=manifest,
-                remote=WandbPublicTaskSourceRemote(),
+                remote=WandbPublicTaskSourceRemote(env=env),
             )
     except (FileNotFoundError, ValueError, json.JSONDecodeError) as exc:
         return EvidenceDriftCheckV1(
@@ -3554,6 +3556,31 @@ def prepare_comparison(
         mode=0o444,
         label="prepared comparison manifest",
     )
+    # Refuse unrelated blockers before the first remote side effect.  A
+    # missing public-source receipt, local image, or comparison receipt is the
+    # expected state that this command resolves; judge calibration, private
+    # inputs, routing, or other policy failures are not.  The second preview
+    # below binds the newly published immutable source object.
+    prepublication = preview_comparison(
+        spec,
+        repo_root=repo_root,
+        operator=service,
+    )
+    prepublication_unexpected = [
+        str(item)
+        for item in prepublication.readiness.get("blockers") or ()
+        if not str(item).startswith("public task source is not published and locked")
+        and not str(item).startswith("local agent:")
+        and not str(item).startswith("local task:")
+        and not str(item).startswith(
+            "comparison preparation is missing or drifted"
+        )
+    ]
+    if prepublication_unexpected:
+        raise ValueError(
+            "comparison has non-preparation blockers:\n- "
+            + "\n- ".join(prepublication_unexpected)
+        )
     if _requires_public_source_publication(spec):
         source_manifest = _public_source_publication_manifest(
             spec,
@@ -3561,7 +3588,7 @@ def prepare_comparison(
         )
         source_receipt = publish_public_task_source(
             source_manifest,
-            remote=source_remote or WandbPublicTaskSourceRemote(),
+            remote=source_remote or WandbPublicTaskSourceRemote(env=service.env),
         )
         atomic_write_json(
             _public_source_publication_receipt_path(spec, repo_root=repo_root),

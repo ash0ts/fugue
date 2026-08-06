@@ -4,6 +4,7 @@ import copy
 import io
 from collections.abc import Mapping
 from pathlib import Path
+from types import SimpleNamespace
 from typing import Any
 
 import pytest
@@ -213,6 +214,7 @@ class _FakeWandb:
         self.artifacts: dict[str, _FakeArtifact] = {}
         self.log_count = 0
         self.init_calls: list[dict[str, Any]] = []
+        self.api_calls: list[dict[str, Any]] = []
 
     def Settings(self, **kwargs: Any) -> dict[str, Any]:
         return kwargs
@@ -230,13 +232,19 @@ class _FakeWandb:
         return _FakeArtifact(name, metadata)
 
     def Api(self, **kwargs: Any) -> _FakeApi:
-        assert kwargs == {"overrides": {"base_url": "https://api.wandb.ai"}}
+        self.api_calls.append(kwargs)
         return _FakeApi(self)
 
 
 def test_wandb_source_adapter_reuses_one_exact_artifact_version() -> None:
     wandb = _FakeWandb()
-    remote = WandbPublicTaskSourceRemote(wandb_module=wandb)
+    remote = WandbPublicTaskSourceRemote(
+        env={
+            "WANDB_API_KEY": "scoped-wandb-key",
+            "ANTHROPIC_API_KEY": "must-not-cross-publication-boundary",
+        },
+        wandb_module=wandb,
+    )
     manifest = _manifest()
 
     first = publish_public_task_source(manifest, remote=remote)
@@ -245,6 +253,19 @@ def test_wandb_source_adapter_reuses_one_exact_artifact_version() -> None:
     assert second == first
     assert wandb.log_count == 1
     assert all(call["project"] == "source-project" for call in wandb.init_calls)
+    assert all(
+        call["settings"]["api_key"] == "scoped-wandb-key"
+        for call in wandb.init_calls
+    )
+    assert all(
+        call == {
+            "overrides": {"base_url": "https://api.wandb.ai"},
+            "api_key": "scoped-wandb-key",
+        }
+        for call in wandb.api_calls
+    )
+    assert "must-not-cross-publication-boundary" not in repr(wandb.init_calls)
+    assert "must-not-cross-publication-boundary" not in repr(wandb.api_calls)
     assert all(
         call["config"]["fugue"]["excluded_from_task_inputs"] is True
         for call in wandb.init_calls
@@ -324,12 +345,13 @@ def test_comparison_preparation_binds_source_publication_into_preview(
 
     monkeypatch.setattr(
         "fugue.bench.comparison.WandbPublicTaskSourceRemote",
-        lambda: remote,
+        lambda **_kwargs: remote,
     )
     matched = _verify_local_public_source_drift(
         spec,
         readiness=preview.readiness,
         repo_root=root,
+        env={"WANDB_API_KEY": "scoped-wandb-key"},
     )
     assert matched.status == "matched"
 
@@ -341,6 +363,56 @@ def test_comparison_preparation_binds_source_publication_into_preview(
         spec,
         readiness=preview.readiness,
         repo_root=root,
+        env={"WANDB_API_KEY": "scoped-wandb-key"},
     )
     assert drifted.status == "unavailable"
     assert "public source verification" in str(drifted.reason)
+
+
+def test_comparison_preparation_rejects_policy_blocker_before_publication(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    comparison_path = scaffold_comparison(tmp_path / "comparison")
+    raw = yaml.safe_load(comparison_path.read_text())
+    raw["schema_version"] = 3
+    raw["execution"].update(
+        evidence_project="wandb/result-project",
+        evidence_destination={
+            "entity": "wandb",
+            "project": "result-project",
+            "api_base_url": "https://api.wandb.ai",
+            "trace_base_url": "https://trace.wandb.ai",
+            "app_base_url": "https://wandb.ai",
+        },
+        source_evidence_project="wandb/source-project",
+        source_evidence_destination={
+            "entity": "wandb",
+            "project": "source-project",
+            "api_base_url": "https://api.wandb.ai",
+            "trace_base_url": "https://trace.wandb.ai",
+            "app_base_url": "https://wandb.ai",
+        },
+        approval_required=False,
+        preparation_required=True,
+    )
+    comparison_path.write_text(yaml.safe_dump(raw, sort_keys=False))
+    root = comparison_path.parent
+    spec = load_comparison(comparison_path, repo_root=root)
+    monkeypatch.setattr(
+        "fugue.bench.comparison.preview_comparison",
+        lambda *_args, **_kwargs: SimpleNamespace(
+            readiness={"blockers": ["judge plan-usefulness calibration cannot be read"]}
+        ),
+    )
+    remote = _FakeRemote()
+
+    with pytest.raises(ValueError, match="judge plan-usefulness calibration"):
+        prepare_comparison(
+            spec,
+            repo_root=root,
+            operator=OperatorService(root),
+            source_remote=remote,
+        )
+
+    assert remote.publishes == 0
