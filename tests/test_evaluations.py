@@ -885,6 +885,38 @@ def test_anthropic_judge_request_omits_deprecated_temperature() -> None:
     assert usage == {"input_tokens": 8, "output_tokens": 4}
 
 
+def test_strict_json_judge_rejects_fenced_or_surrounded_objects() -> None:
+    client = _RecordingJudgeClient()
+    route = resolve_model_route("anthropic/claude-sonnet-5", {})
+
+    def fenced_response(url: str, **kwargs: Any) -> httpx.Response:
+        client.request = {"url": url, **kwargs}
+        return httpx.Response(
+            200,
+            json={
+                "content": [
+                    {"type": "text", "text": '```json\n{"label":"adequate"}\n```'}
+                ],
+                "usage": {"input_tokens": 8, "output_tokens": 4},
+            },
+            request=httpx.Request("POST", url),
+        )
+
+    client.post = fenced_response  # type: ignore[method-assign]
+    with pytest.raises(evaluations.JudgeResponseError) as caught:
+        evaluations._post_judge(
+            client,  # type: ignore[arg-type]
+            route,
+            "test-key",
+            {},
+            "Return JSON.",
+            strict_json_object=True,
+        )
+
+    assert caught.value.code == "invalid_json"
+    assert not hasattr(caught.value, "response_body")
+
+
 class _RecordingChatJudgeClient:
     def __init__(self) -> None:
         self.request: dict[str, Any] = {}

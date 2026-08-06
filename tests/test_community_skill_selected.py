@@ -805,6 +805,7 @@ def test_minimal_surface_stays_within_line_budgets() -> None:
     staged_product_paths = (
         "fugue/bench/host_capacity.py",
         "fugue/bench/judge_calibration.py",
+        "fugue/bench/judge_provider_contract.py",
         "fugue/bench/judge_calibration_review.py",
         "fugue/bench/judge_calibration_review_cli.py",
         "fugue/bench/judge_calibration_run.py",

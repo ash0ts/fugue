@@ -11,6 +11,7 @@ from typing import Any
 
 from fugue.bench.candidates import stable_digest
 from fugue.bench.files import atomic_write_json
+from fugue.bench.judge_provider_contract import response_schema_digest
 
 SCHEMA_VERSION = 1
 MODALITIES = ("code-change", "implementation-plan", "skill-package")
@@ -155,17 +156,6 @@ def build_blinded_packet(case_set: CalibrationCaseSetV1, rubric_digest: str) -> 
     }
     _public(packet, "blinded packet")
     return _signed(packet, "packet_digest")
-
-
-def response_schema_digest(rubric: Mapping[str, Any]) -> str:
-    modalities = _mapping(rubric.get("modalities"), "rubric modalities")
-    return stable_digest({
-        "schema_version": 1, "labels": list(LABELS),
-        "modalities": {name: list(_mapping(value, name)["dimensions"])
-                       for name, value in sorted(modalities.items())},
-        "fields": ["case_ref", "modality", "label", "dimension_labels",
-                   "reason", "missing_evidence"],
-    })
 
 
 def validate_model_output_row(value: Mapping[str, Any], case_set: CalibrationCaseSetV1, rubric: Mapping[str, Any]) -> dict[str, Any]:

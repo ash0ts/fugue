@@ -732,6 +732,7 @@ def request_json_judge(
     model: str,
     env: Mapping[str, str],
     prompt: str,
+    strict_json_object: bool = False,
 ) -> tuple[dict[str, Any], dict[str, Any]]:
     """Run one bounded JSON judge request through Fugue's model plane."""
 
@@ -742,6 +743,10 @@ def request_json_judge(
             f"{provider_api_key_env(route)} is required for evaluation judging"
         )
     with httpx.Client(timeout=120) as client:
+        if strict_json_object:
+            return _post_judge(
+                client, route, api_key, env, prompt, strict_json_object=True
+            )
         return _post_judge(client, route, api_key, env, prompt)
 
 
@@ -751,6 +756,8 @@ def _post_judge(
     api_key: str,
     env: Mapping[str, str],
     prompt: str,
+    *,
+    strict_json_object: bool = False,
 ) -> tuple[dict[str, Any], dict[str, Any]]:
     if route.messages_base_url:
         response = client.post(
@@ -803,8 +810,9 @@ def _post_judge(
             "input_tokens": raw_usage.get("prompt_tokens"),
             "output_tokens": raw_usage.get("completion_tokens"),
         }
-    match = re.search(r"\{.*\}", content, flags=re.DOTALL)
-    if not match:
+    selected = content.strip() if strict_json_object else None
+    match = None if strict_json_object else re.search(r"\{.*\}", content, flags=re.DOTALL)
+    if not selected and not match:
         raise JudgeResponseError(
             stage="response_extraction",
             code="no_json_object",
@@ -814,7 +822,7 @@ def _post_judge(
             usage=usage,
         )
     try:
-        payload = json.loads(match.group(0))
+        payload = json.loads(selected if selected is not None else match.group(0))
     except json.JSONDecodeError as exc:
         raise JudgeResponseError(
             stage="response_parsing",

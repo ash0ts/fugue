@@ -10,10 +10,17 @@ import pytest
 
 from fugue.bench.judge_calibration import build_blinded_packet, validate_rubric
 from fugue.bench.judge_calibration_run import (
+    _generation_state_path,
+    _prompt,
     build_generation_preview,
     materialize_cases,
     run_generation,
     validate_generation_preview,
+)
+from fugue.bench.judge_provider_contract import (
+    ProviderOutputValidationError,
+    provider_response_schema,
+    validate_provider_output,
 )
 from fugue.research.approvals import ApprovalLedger
 from fugue.research.store import StudyStore
@@ -146,7 +153,10 @@ def test_approved_generation_runs_48_once_and_stops_before_human_review(
         assert "authored_reference" not in prompt
         selected = output_rows[calls]
         calls += 1
-        return selected, {"input_tokens": 100, "output_tokens": 20}
+        return {
+            key: value for key, value in selected.items()
+            if key not in {"case_ref", "modality"}
+        }, {"input_tokens": 100, "output_tokens": 20}
 
     result = run_generation(
         repo_root=tmp_path,
@@ -169,7 +179,9 @@ def test_approved_generation_runs_48_once_and_stops_before_human_review(
     output = tmp_path / ".fugue/private/campaign/model-outputs.jsonl"
     assert len(output.read_text().splitlines()) == 48
     state = json.loads(
-        output.with_suffix(".jsonl.partial.json").read_text(encoding="utf-8")
+        _generation_state_path(output, preview["preview_digest"]).read_text(
+            encoding="utf-8"
+        )
     )
     assert state["status"] == "completed"
     assert state["accounted_cost_usd"] == 8
@@ -210,7 +222,10 @@ def test_uncertain_provider_failure_is_never_replayed(tmp_path: Path) -> None:
         calls += 1
         if calls == 2:
             raise RuntimeError("provider connection ended after admission")
-        return output_rows[calls - 1], {"input_tokens": None, "output_tokens": None}
+        return {
+            key: value for key, value in output_rows[calls - 1].items()
+            if key not in {"case_ref", "modality"}
+        }, {"input_tokens": None, "output_tokens": None}
 
     kwargs = {
         "repo_root": tmp_path,
@@ -229,6 +244,91 @@ def test_uncertain_provider_failure_is_never_replayed(tmp_path: Path) -> None:
     with pytest.raises(RuntimeError, match="automatic replay is forbidden"):
         run_generation(**kwargs)
     assert calls == 2
+
+
+def test_prompt_uses_exact_schema_without_host_or_private_identity(tmp_path: Path) -> None:
+    _cases_value, rubric, _digest, packet, _rows, _preview = _bundle(tmp_path)
+    selected = packet["cases"][0]
+    prompt = _prompt(selected, rubric)
+
+    assert "required_output_schema" in prompt
+    assert '"additionalProperties":false' in prompt
+    assert selected["case_ref"] not in prompt
+    assert "authored_reference" not in prompt
+    assert "source_commit" not in prompt
+    assert "case_ref or modality" in prompt
+
+
+def test_provider_schema_is_exact_and_never_coerces(tmp_path: Path) -> None:
+    cases, rubric, _digest_value, _packet, output_rows, _preview = _bundle(tmp_path)
+    case, final = cases.cases[0], output_rows[0]
+    valid = {key: value for key, value in final.items() if key not in {"case_ref", "modality"}}
+    schema = provider_response_schema(rubric, case.modality)
+    assert schema["additionalProperties"] is False
+    assert set(schema["required"]) == set(valid)
+    assert validate_provider_output(valid, rubric, case.modality) == valid
+    mutations = (
+        ({**valid, "case_ref": "model-owned"}, "field_set_mismatch"),
+        ({key: value for key, value in valid.items() if key != "reason"}, "field_set_mismatch"),
+        ({**valid, "label": "Adequate"}, "label_value_invalid"),
+        ({**valid, "missing_evidence": "false"}, "missing_evidence_not_boolean"),
+        ({**valid, "dimension_labels": {}}, "dimension_set_mismatch"),
+        ({**valid, "reason": ""}, "reason_invalid"),
+    )
+    for value, code in mutations:
+        with pytest.raises(ProviderOutputValidationError) as caught:
+            validate_provider_output(value, rubric, case.modality)
+        assert caught.value.code == code
+
+
+def test_completed_malformed_provider_output_is_terminal_and_audited(
+    tmp_path: Path,
+) -> None:
+    cases, rubric, rubric_digest, packet, _rows, preview = _bundle(tmp_path)
+    approval = _approve(tmp_path, preview)
+    calls = 0
+
+    def request(_prompt_value: str):
+        nonlocal calls
+        calls += 1
+        return {
+            "label": "adequate",
+            "dimension_labels": {},
+            "reason": "missing required dimensions",
+            "missing_evidence": False,
+            "case_ref": "provider-must-not-own-this-identity",
+        }, {"input_tokens": 100, "output_tokens": 20}
+
+    output = Path(".fugue/private/campaign/model-outputs.jsonl")
+    kwargs = {
+        "repo_root": tmp_path, "case_set": cases, "rubric": rubric,
+        "rubric_digest": rubric_digest, "packet": packet,
+        "approval_digest": approval, "output_path": output,
+        "receipt_path": Path(".fugue/private/campaign/generation-receipt.json"),
+        "requester": request,
+    }
+    with pytest.raises(ValueError, match="locked judge schema"):
+        run_generation(**kwargs)
+    assert calls == 1
+
+    state_path = _generation_state_path(
+        tmp_path / output, preview["preview_digest"]
+    )
+    state = json.loads(state_path.read_text(encoding="utf-8"))
+    assert state["status"] == "provider_output_invalid"
+    assert state["in_flight_case_ref"] is None
+    assert state["attempted_requests"] == 1
+    assert state["results"] == []
+    assert state["terminal_failure"]["failure_code"] == "field_set_mismatch"
+    assert state["terminal_failure"]["unexpected_fields"] == ["case_ref"]
+    assert state["terminal_failure"]["usage"] == {
+        "input_tokens": 100, "output_tokens": 20,
+    }
+    assert "reason" not in state["terminal_failure"]
+
+    with pytest.raises(RuntimeError, match="new preview and approval"):
+        run_generation(**kwargs)
+    assert calls == 1
 
 
 def test_outputs_cannot_escape_operator_private_boundary(tmp_path: Path) -> None:
