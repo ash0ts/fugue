@@ -32,7 +32,9 @@ from fugue.research.store import StudyStore
 CALIBRATION_MAX_USD = 8.0
 MAX_PROMPT_CHARACTERS = 12_000
 MAX_OUTPUT_TOKENS = 1_200
-Requester = Callable[[str], tuple[Mapping[str, Any], Mapping[str, Any]]]
+Requester = Callable[
+    [str, Mapping[str, Any]], tuple[Mapping[str, Any], Mapping[str, Any]]
+]
 _PROVIDER_OUTPUT_FIELDS = {
     "label", "dimension_labels", "reason", "missing_evidence",
 }
@@ -205,7 +207,9 @@ def run_generation(
         )
         atomic_write_json(state_path, state)
         try:
-            raw, raw_usage = requester(_prompt(case, rubric))
+            raw, raw_usage = requester(
+                _prompt(case, rubric), provider_response_schema(rubric, str(case["modality"]))
+            )
         except JudgeResponseError as exc:
             state = _state(
                 preview, approval_digest, results, usage, attempted, None,
@@ -329,9 +333,12 @@ def default_requester(*, model: str, env: Mapping[str, str]) -> Requester:
     """Create the production request function; construction itself makes no call."""
     from fugue.bench.evaluations import request_json_judge
 
-    def request(prompt: str) -> tuple[Mapping[str, Any], Mapping[str, Any]]:
+    def request(
+        prompt: str, schema: Mapping[str, Any]
+    ) -> tuple[Mapping[str, Any], Mapping[str, Any]]:
         return request_json_judge(
-            model=model, env=env, prompt=prompt, strict_json_object=True
+            model=model, env=env, prompt=prompt, strict_json_object=True,
+            output_schema=schema,
         )
 
     return request

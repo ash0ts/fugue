@@ -34,7 +34,10 @@ def provider_response_schema(
                     for dimension in dimensions
                 },
             },
-            "reason": {"type": "string", "minLength": 1, "maxLength": 2000},
+            "reason": {
+                "type": "string",
+                "description": "Non-empty evidence reason; at most 2000 characters.",
+            },
             "missing_evidence": {"type": "boolean"},
         },
     }
@@ -49,6 +52,7 @@ def response_schema_digest(rubric: Mapping[str, Any]) -> str:
         },
         "host_bound_fields": ["case_ref", "modality"],
         "normalization": "strict-no-coercion",
+        "local_constraints": {"reason_nonempty": True, "reason_max_characters": 2000},
     })
 
 

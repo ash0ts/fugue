@@ -148,10 +148,11 @@ def test_approved_generation_runs_48_once_and_stops_before_human_review(
     approval = _approve(tmp_path, preview)
     calls = 0
 
-    def request(prompt: str):
+    def request(prompt: str, schema: dict[str, Any]):
         nonlocal calls
         assert "authored_reference" not in prompt
         selected = output_rows[calls]
+        assert schema == provider_response_schema(rubric, selected["modality"])
         calls += 1
         return {
             key: value for key, value in selected.items()
@@ -192,7 +193,7 @@ def test_underfunded_approval_cannot_start_provider_calls(tmp_path: Path) -> Non
     approval = _approve(tmp_path, preview, cost=7.99)
     calls = 0
 
-    def request(_prompt: str):
+    def request(_prompt: str, _schema: dict[str, Any]):
         nonlocal calls
         calls += 1
         raise AssertionError("provider must not be called")
@@ -217,7 +218,7 @@ def test_uncertain_provider_failure_is_never_replayed(tmp_path: Path) -> None:
     approval = _approve(tmp_path, preview)
     calls = 0
 
-    def request(_prompt: str):
+    def request(_prompt: str, _schema: dict[str, Any]):
         nonlocal calls
         calls += 1
         if calls == 2:
@@ -288,7 +289,7 @@ def test_completed_malformed_provider_output_is_terminal_and_audited(
     approval = _approve(tmp_path, preview)
     calls = 0
 
-    def request(_prompt_value: str):
+    def request(_prompt_value: str, _schema: dict[str, Any]):
         nonlocal calls
         calls += 1
         return {
@@ -344,5 +345,5 @@ def test_outputs_cannot_escape_operator_private_boundary(tmp_path: Path) -> None
             approval_digest=approval,
             output_path=Path("public/model-outputs.jsonl"),
             receipt_path=Path(".fugue/private/campaign/receipt.json"),
-            requester=lambda _prompt: ({}, {}),
+            requester=lambda _prompt, _schema: ({}, {}),
         )

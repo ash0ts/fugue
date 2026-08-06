@@ -733,6 +733,7 @@ def request_json_judge(
     env: Mapping[str, str],
     prompt: str,
     strict_json_object: bool = False,
+    output_schema: Mapping[str, Any] | None = None,
 ) -> tuple[dict[str, Any], dict[str, Any]]:
     """Run one bounded JSON judge request through Fugue's model plane."""
 
@@ -743,9 +744,10 @@ def request_json_judge(
             f"{provider_api_key_env(route)} is required for evaluation judging"
         )
     with httpx.Client(timeout=120) as client:
-        if strict_json_object:
+        if strict_json_object or output_schema is not None:
             return _post_judge(
-                client, route, api_key, env, prompt, strict_json_object=True
+                client, route, api_key, env, prompt, strict_json_object=True,
+                output_schema=output_schema,
             )
         return _post_judge(client, route, api_key, env, prompt)
 
@@ -758,6 +760,7 @@ def _post_judge(
     prompt: str,
     *,
     strict_json_object: bool = False,
+    output_schema: Mapping[str, Any] | None = None,
 ) -> tuple[dict[str, Any], dict[str, Any]]:
     if route.messages_base_url:
         response = client.post(
@@ -771,6 +774,15 @@ def _post_judge(
                 "model": route.model_id,
                 "max_tokens": JUDGE_JSON_MAX_OUTPUT_TOKENS,
                 "messages": [{"role": "user", "content": prompt}],
+                **(
+                    {
+                        "output_config": {
+                            "format": {"type": "json_schema", "schema": output_schema}
+                        }
+                    }
+                    if output_schema is not None
+                    else {}
+                ),
             },
         )
         response.raise_for_status()
