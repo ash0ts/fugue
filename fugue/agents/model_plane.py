@@ -837,6 +837,7 @@ done
             "evaluation_scope_id": os.environ.get("FUGUE_EVALUATION_SCOPE_ID"),
             "trace_content": self.trace_content,
             "runtime_fingerprints": getattr(self, "_runtime_fingerprints", {}),
+            "provider_invocation": {"schema_version": 1, "status": "not_started"},
             "context_registration": getattr(
                 self, "_context_registration_meta", {"status": "unavailable"}
             ),
@@ -846,6 +847,17 @@ done
         if getattr(self, "_context_artifact_meta", None):
             meta["context_artifact"] = self._context_artifact_meta
         self.logs_dir.mkdir(parents=True, exist_ok=True)
+        self._meta_path().write_text(json.dumps(meta, indent=2) + "\n")
+
+    def _mark_provider_invocation_started(self) -> None:
+        """Persist the trusted boundary immediately before a model process starts."""
+
+        meta = json.loads(self._meta_path().read_text())
+        meta["provider_invocation"] = {
+            "schema_version": 1,
+            "status": "started",
+            "started_at": datetime.now(UTC).isoformat(),
+        }
         self._meta_path().write_text(json.dumps(meta, indent=2) + "\n")
 
     async def _finish_trial(self, environment: BaseEnvironment) -> None:
@@ -1662,6 +1674,7 @@ class FugueHermes(_TrialMetaMixin, Hermes):
         )
 
         try:
+            self._mark_provider_invocation_started()
             result = await self.exec_as_agent(environment, command=run_cmd, env=env)
             interaction.observe_agent(
                 result.stdout or result.stderr or "No response text captured."
@@ -2092,6 +2105,7 @@ class FugueOpenClaw(_TrialMetaMixin, OpenClaw):
                 f"--message {escaped_instruction} "
                 f"2>&1 </dev/null | stdbuf -oL tee /logs/agent/openclaw.txt"
             )
+            self._mark_provider_invocation_started()
             result = await self.exec_as_agent(environment, command, env=env)
             interaction.observe_agent(
                 result.stdout or result.stderr or "No response text captured."
@@ -2372,6 +2386,7 @@ class FugueClaudeCode(_TrialMetaMixin, ClaudeCode):
                     }
                 )
             await self._lock_trial_mutators(environment)
+            self._mark_provider_invocation_started()
             await super().run(instruction, environment, context)
             captured = await self.exec_as_agent(
                 environment,
@@ -2711,6 +2726,7 @@ class FugueCodex(_TrialMetaMixin, Codex):
 
         try:
             try:
+                self._mark_provider_invocation_started()
                 result = await self.exec_as_agent(
                     environment,
                     command=(

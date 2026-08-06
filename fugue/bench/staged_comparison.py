@@ -9,6 +9,7 @@ resolved lazily at execution time to avoid a second comparison path.
 from __future__ import annotations
 
 from collections.abc import Mapping, Sequence
+from functools import partial
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
@@ -45,6 +46,24 @@ def _comparison_module() -> Any:
     from fugue.bench import comparison
 
     return comparison
+
+
+def _persist_controller(
+    runtime: CampaignStore,
+    comparison_id: str,
+    state_path: Path,
+    *,
+    stage_id: str | None = None,
+    stage: Mapping[str, Any] | None = None,
+    **updates: Any,
+) -> dict[str, Any]:
+    with runtime.campaign_lock(comparison_id):
+        state = read_json_object(state_path)
+        if stage is not None:
+            state["stages"][stage_id].update(stage)
+        state.update(updates)
+        runtime.write_json(state_path, state)
+    return state
 
 
 def finalize_staged_comparison(
@@ -259,6 +278,9 @@ def execute_comparison_stage(  # noqa: C901 - durable stage transaction
         repo_root.resolve(), Path(".fugue/runtime/comparison-stages")
     )
     state_path = runtime.campaign_dir(spec.id) / f"{controller_id}.json"
+    persist = partial(
+        _persist_controller, runtime, spec.id, state_path, stage_id=stage_id
+    )
     with runtime.campaign_lock(spec.id):
         state = (
             read_json_object(state_path)
@@ -296,6 +318,7 @@ def execute_comparison_stage(  # noqa: C901 - durable stage transaction
             if value.get("status") not in {
                 "pending",
                 "running",
+                "admission_paused",
                 "finalization_pending",
                 "complete",
                 "fatal",
@@ -402,6 +425,22 @@ def execute_comparison_stage(  # noqa: C901 - durable stage transaction
         # The per-cell lock keeps the unchanged full-preview identity.
         approval_digest="",
     )
+    finalize = partial(
+        finalize_staged_controller,
+        preview=preview,
+        spec=spec,
+        service=service,
+        request=request,
+        schedule=schedule,
+        runtime=runtime,
+        state_path=state_path,
+        stage_id=stage_id,
+        repo_root=repo_root,
+        readiness=current.readiness,
+        source_pre_run_drift=source_pre_run_drift,
+        fetch_weave=fetch_weave,
+        publish_research=publish_research,
+    )
     budget = BudgetLeaseLedger(
         runtime.budget_ledger(spec.id, controller_id),
         maximum_total_cost_usd=schedule.total_cost_usd,
@@ -437,11 +476,7 @@ def execute_comparison_stage(  # noqa: C901 - durable stage transaction
         else ([], [])
     )
     if prior_fatal:
-        with runtime.campaign_lock(spec.id):
-            state = read_json_object(state_path)
-            state["stages"][stage_id]["status"] = "fatal"
-            state["fatal_blockers"] = prior_fatal
-            runtime.write_json(state_path, state)
+        state = persist(stage={"status": "fatal"}, fatal_blockers=prior_fatal)
         return comparison._staged_status(state, stage_id, state_path, repo_root)
     if not finalization_only and (
         existing_run is None
@@ -465,29 +500,21 @@ def execute_comparison_stage(  # noqa: C901 - durable stage transaction
             evidence_checkpoint_cells_override=len(subset.attempt_ids),
         )
     if finalization_only:
-        return finalize_staged_controller(
-            preview=preview,
-            spec=spec,
-            service=service,
-            request=request,
-            schedule=schedule,
-            runtime=runtime,
-            state_path=state_path,
-            stage_id=stage_id,
-            repo_root=repo_root,
-            readiness=current.readiness,
-            source_pre_run_drift=source_pre_run_drift,
-            fetch_weave=fetch_weave,
-            publish_research=publish_research,
-        )
+        return finalize()
     assert existing_run is not None
     fatal, pending = comparison._staged_run_gate(existing_run, repo_root=repo_root)
     if fatal:
-        with runtime.campaign_lock(spec.id):
-            state = read_json_object(state_path)
-            state["stages"][stage_id]["status"] = "fatal"
-            state["fatal_blockers"] = fatal
-            runtime.write_json(state_path, state)
+        state = persist(stage={"status": "fatal"}, fatal_blockers=fatal)
+        return comparison._staged_status(state, stage_id, state_path, repo_root)
+    if pending:
+        stage_status = (
+            "admission_paused"
+            if any("budget admission" in reason for reason in pending)
+            else "finalization_pending"
+        )
+        state = persist(
+            stage={"status": stage_status, "pending_reasons": pending},
+        )
         return comparison._staged_status(state, stage_id, state_path, repo_root)
 
     stage_rows = runtime.campaign_dir(spec.id) / "rows" / f"{stage_id}.jsonl"
@@ -497,10 +524,13 @@ def execute_comparison_stage(  # noqa: C901 - durable stage transaction
         fetch_weave=fetch_weave,
         to_weave=False,
     )
-    rows = comparison._read_jsonl(exported.path, "staged comparison rows")
-    comparison._apply_harbor_conformance(
-        rows, repo_root=repo_root, run_id=child_run_id
-    )
+    try:
+        rows = comparison._read_jsonl(exported.path, "staged comparison rows")
+    except (FileNotFoundError, ValueError) as exc:
+        blocker = f"staged child export is invalid: {type(exc).__name__}: {exc}"
+        state = persist(stage={"status": "fatal"}, fatal_blockers=[blocker])
+        return comparison._staged_status(state, stage_id, state_path, repo_root)
+    comparison._apply_harbor_conformance(rows, repo_root=repo_root, run_id=child_run_id)
     observed_attempts = {str(row.get("attempt_id") or "") for row in rows}
     if len(rows) != len(observed_attempts) or observed_attempts != set(
         subset.attempt_ids
@@ -517,11 +547,10 @@ def execute_comparison_stage(  # noqa: C901 - durable stage transaction
     except StagedFinalizationPending as exc:
         pending.append(str(exc))
     except Exception as exc:
-        with runtime.campaign_lock(spec.id):
-            state = read_json_object(state_path)
-            state["stages"][stage_id]["status"] = "fatal"
-            state["fatal_blockers"] = [f"{type(exc).__name__}: {exc}"]
-            runtime.write_json(state_path, state)
+        state = persist(
+            stage={"status": "fatal"},
+            fatal_blockers=[f"{type(exc).__name__}: {exc}"],
+        )
         return comparison._staged_status(state, stage_id, state_path, repo_root)
     source_checkpoint_drift = None
     if source_pre_run_drift is not None:
@@ -535,49 +564,29 @@ def execute_comparison_stage(  # noqa: C901 - durable stage transaction
             source_checkpoint_drift is None
             or source_checkpoint_drift.status != "matched"
         ):
-            with runtime.campaign_lock(spec.id):
-                state = read_json_object(state_path)
-                state["stages"][stage_id]["status"] = "fatal"
-                state["fatal_blockers"] = [
+            state = persist(
+                stage={"status": "fatal"},
+                fatal_blockers=[
                     "immutable source evidence changed at the stage checkpoint"
-                ]
-                runtime.write_json(state_path, state)
-            return comparison._staged_status(
-                state, stage_id, state_path, repo_root
+                ],
             )
-    with runtime.campaign_lock(spec.id):
-        state = read_json_object(state_path)
-        state["stages"][stage_id].update(
-            {
-                "status": "finalization_pending" if pending else "complete",
-                "rows_path": stage_rows.relative_to(repo_root).as_posix(),
-                "rows_digest": comparison._sha256_path(stage_rows),
-                "pending_reasons": pending,
-                "source_checkpoint_drift": (
-                    source_checkpoint_drift.to_dict()
-                    if source_checkpoint_drift is not None
-                    else None
-                ),
-            }
-        )
-        runtime.write_json(state_path, state)
+            return comparison._staged_status(state, stage_id, state_path, repo_root)
+    state = persist(
+        stage={
+            "status": "finalization_pending" if pending else "complete",
+            "rows_path": stage_rows.relative_to(repo_root).as_posix(),
+            "rows_digest": comparison._sha256_path(stage_rows),
+            "pending_reasons": pending,
+            "source_checkpoint_drift": (
+                source_checkpoint_drift.to_dict()
+                if source_checkpoint_drift is not None
+                else None
+            ),
+        },
+    )
     if pending:
         return comparison._staged_status(state, stage_id, state_path, repo_root)
-    return finalize_staged_controller(
-        preview=preview,
-        spec=spec,
-        service=service,
-        request=request,
-        schedule=schedule,
-        runtime=runtime,
-        state_path=state_path,
-        stage_id=stage_id,
-        repo_root=repo_root,
-        readiness=current.readiness,
-        source_pre_run_drift=source_pre_run_drift,
-        fetch_weave=fetch_weave,
-        publish_research=publish_research,
-    )
+    return finalize()
 
 
 def staged_run_gate(run: Any, *, repo_root: Path) -> tuple[list[str], list[str]]:
@@ -628,9 +637,7 @@ def staged_run_gate(run: Any, *, repo_root: Path) -> tuple[list[str], list[str]]
         ):
             fatal.append(f"{row.get('cell_id')}: fatal evidence mismatch")
         else:
-            pending.append(
-                f"{row.get('cell_id')}: host evidence finalization pending"
-            )
+            pending.append(f"{row.get('cell_id')}: host evidence finalization pending")
     for failure in getattr(run, "evaluation_failures", ()):
         message = str(failure).lower()
         if any(
@@ -700,6 +707,7 @@ def finalize_staged_controller(  # noqa: PLR0913
     """Assemble exact stage rows and resume host-only finalization safely."""
 
     comparison = _comparison_module()
+    persist = partial(_persist_controller, runtime, spec.id, state_path)
     with runtime.campaign_lock(spec.id):
         state = read_json_object(state_path)
     if not all(
@@ -716,9 +724,7 @@ def finalize_staged_controller(  # noqa: PLR0913
     by_attempt: dict[str, dict[str, Any]] = {}
     source_checkpoint_drift: EvidenceDriftCheckV1 | None = None
     for current_stage in schedule.stages:
-        stage = comparison._mapping(
-            state["stages"].get(current_stage), "staged state"
-        )
+        stage = comparison._mapping(state["stages"].get(current_stage), "staged state")
         raw_checkpoint = stage.get("source_checkpoint_drift")
         if source_pre_run_drift is not None:
             if not isinstance(raw_checkpoint, Mapping):
@@ -762,32 +768,25 @@ def finalize_staged_controller(  # noqa: PLR0913
             publish_research=publish_research,
         )
     except (comparison.ComparisonPublicationError, StagedFinalizationPending) as exc:
-        with runtime.campaign_lock(spec.id):
-            state = read_json_object(state_path)
-            state["finalization"] = {
+        state = persist(
+            finalization={
                 "status": "pending",
                 "reason": f"{type(exc).__name__}: {exc}",
-            }
-            runtime.write_json(state_path, state)
+            },
+        )
         return comparison._staged_status(state, stage_id, state_path, repo_root)
     except Exception as exc:
-        with runtime.campaign_lock(spec.id):
-            state = read_json_object(state_path)
-            state["fatal_blockers"] = [f"{type(exc).__name__}: {exc}"]
-            state["finalization"] = {"status": "fatal"}
-            runtime.write_json(state_path, state)
-        return comparison._staged_status(state, stage_id, state_path, repo_root)
-    with runtime.campaign_lock(spec.id):
-        state = read_json_object(state_path)
-        state.update(
-            {
-                "result_digest": result.result_digest,
-                "result_path": result_path.relative_to(repo_root).as_posix(),
-                "markdown_path": markdown_path.relative_to(repo_root).as_posix(),
-                "finalization": {"status": "complete"},
-            }
+        state = persist(
+            fatal_blockers=[f"{type(exc).__name__}: {exc}"],
+            finalization={"status": "fatal"},
         )
-        runtime.write_json(state_path, state)
+        return comparison._staged_status(state, stage_id, state_path, repo_root)
+    state = persist(
+        result_digest=result.result_digest,
+        result_path=result_path.relative_to(repo_root).as_posix(),
+        markdown_path=markdown_path.relative_to(repo_root).as_posix(),
+        finalization={"status": "complete"},
+    )
     return comparison._staged_status(state, stage_id, state_path, repo_root)
 
 
@@ -807,9 +806,7 @@ def verify_staged_controller_authorizations(
     stages = comparison._mapping(state.get("stages"), "staged controller stages")
     ledger = ApprovalLedger(StudyStore(repo_root).path)
     for stage_id in schedule.stages:
-        stage = comparison._mapping(
-            stages.get(stage_id), "staged controller stage"
-        )
+        stage = comparison._mapping(stages.get(stage_id), "staged controller stage")
         subset = comparison.comparison_stage_receipt(preview, stage_id)
         subject_id = f"{controller_id}-{stage_id}"
         approval_digest = str(stage.get("approval_digest") or "")
@@ -819,9 +816,12 @@ def verify_staged_controller_authorizations(
             subject_id=subject_id,
             approval_digest=approval_digest,
         )
-        if StageSubsetReceiptV1.from_dict(
-            comparison._mapping(stage.get("subset"), "stored stage subset")
-        ) != subset:
+        if (
+            StageSubsetReceiptV1.from_dict(
+                comparison._mapping(stage.get("subset"), "stored stage subset")
+            )
+            != subset
+        ):
             raise ValueError("stored stage subset changed before finalization")
         approval = ledger.require_claimed_by(
             approval_digest=approval_digest,

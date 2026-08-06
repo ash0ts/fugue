@@ -446,8 +446,9 @@ def test_ambiguous_controller_loss_blocks_resume_before_admission(
         )
 
 
+@pytest.mark.parametrize("terminal_kind", ["runner_start_failure", "pre_provider_failure"])
 def test_prestart_failure_retains_zero_cost_budget_record_for_replacement(
-    tmp_path: Path,
+    tmp_path: Path, terminal_kind: str,
 ) -> None:
     ledger = BudgetLeaseLedger(
         tmp_path / "leases.json",
@@ -461,7 +462,7 @@ def test_prestart_failure_retains_zero_cost_budget_record_for_replacement(
     settle_execution_budget_leases(
         (ledger,),
         physical_execution_id="physical-0",
-        terminal_kind="runner_start_failure",
+        terminal_kind=terminal_kind,
         runtime_outcome="not_started",
         actual_cost_usd=None,
     )
@@ -1364,3 +1365,154 @@ def test_staged_controller_runs_192_cells_in_order_and_resumes(  # noqa: PLR0915
         )
     assert len({str(item["attempt_id"]) for item in all_records}) == 192
     assert max(wave_sizes) <= 4
+
+
+@pytest.mark.parametrize(
+    ("admission_paused", "expected_status"),
+    [(False, "fatal"), (True, "admission_paused")],
+)
+def test_staged_export_handles_empty_and_resumable_states(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    admission_paused: bool,
+    expected_status: str,
+) -> None:
+    from fugue.bench import comparison as comparison_module
+
+    attempt_id = "a" * 64
+    schedule = ExecutionScheduleV1.create(
+        stages={"checkpoint": [attempt_id]},
+        stage_cost_usd={"checkpoint": 1.0},
+        stage_admission={
+            "checkpoint": {
+                "worker_limit": 1,
+                "wave_size": 1,
+                "pair_complete": False,
+            }
+        },
+        worker_limit=1,
+        wave_size=1,
+        maximum_physical_executions=1,
+        infrastructure_retry_limit=0,
+        total_cost_usd=1.0,
+        maximum_in_flight_cost_usd=1.0,
+    )
+    draft = ComparisonPreviewV1(
+        schema_version=3,
+        comparison={"schema_version": 3, "id": "empty-export"},
+        readiness={"status": "ready"},
+        matrix={"estimated_trials": 1},
+        experiment={},
+        manifest={},
+        execution_schedule=schedule.to_dict(),
+    )
+    preview = replace(
+        draft,
+        preview_digest=_artifact_digest(draft.to_dict(), "preview_digest"),
+    )
+    spec = SimpleNamespace(
+        id="empty-export",
+        schema_version=3,
+        evaluators=(),
+        execution=SimpleNamespace(source_evidence_project=None),
+    )
+    executed: set[str] = set()
+    export_calls = 0
+
+    class EmptyExportOperator:
+        def __init__(self, repo_root: Path, _env_file: Path | None = None) -> None:
+            self.repo_root = repo_root
+            self.env = {}
+
+        def run_summary(self, run_id: str) -> SimpleNamespace:
+            if run_id not in executed:
+                raise FileNotFoundError(run_id)
+            return SimpleNamespace(
+                run_id=run_id,
+                status="passed",
+                evaluation_failures=(),
+            )
+
+        def execute_run(
+            self, _request: object, *, run_id: str, **_kwargs: object
+        ) -> SimpleNamespace:
+            executed.add(run_id)
+            if admission_paused:
+                run_dir = self.repo_root / ".fugue/runtime" / run_id
+                run_dir.mkdir(parents=True, exist_ok=True)
+                (run_dir / "cells.jsonl").write_text(
+                    json.dumps(
+                        {
+                            "cell_id": "cell-paused",
+                            "status": "interrupted",
+                            "terminal_kind": "admission_paused",
+                        }
+                    )
+                    + "\n",
+                    encoding="utf-8",
+                )
+            return self.run_summary(run_id)
+
+        def export_run(
+            self, _run_id: str, *, out: Path, **_kwargs: object
+        ) -> SimpleNamespace:
+            nonlocal export_calls
+            export_calls += 1
+            out.parent.mkdir(parents=True, exist_ok=True)
+            out.write_text("", encoding="utf-8")
+            return SimpleNamespace(path=out)
+
+    monkeypatch.setattr(comparison_module, "OperatorService", EmptyExportOperator)
+    monkeypatch.setattr(
+        comparison_module,
+        "comparison_from_dict",
+        lambda *_args, **_kwargs: spec,
+    )
+    monkeypatch.setattr(
+        comparison_module,
+        "preview_comparison",
+        lambda *_args, **_kwargs: preview,
+    )
+    monkeypatch.setattr(
+        comparison_module,
+        "materialize_comparison",
+        lambda *_args, **_kwargs: (object(), SimpleNamespace()),
+    )
+    monkeypatch.setattr(
+        comparison_module,
+        "_verify_v3_source_drift",
+        lambda *_args, **_kwargs: None,
+    )
+
+    subset = comparison_stage_receipt(preview, "checkpoint")
+    approval = ApprovalLedger(StudyStore(tmp_path).path).approve(
+        subject_kind="experiment",
+        preview_digest=subset.subset_digest,
+        maximum_cost_usd=subset.maximum_cost_usd,
+        maximum_cells=subset.maximum_cells,
+        approved_by="empty-export-test",
+        operation_id="approve-empty-export",
+    )
+    status = execute_comparison_stage(
+        preview,
+        stage_id="checkpoint",
+        approval_digest=approval.approval_digest,
+        repo_root=tmp_path,
+        fetch_weave=False,
+    )
+
+    assert status["status"] == expected_status
+    controller = json.loads(
+        (tmp_path / status["controller_path"]).read_text(encoding="utf-8")
+    )
+    assert controller["stages"]["checkpoint"]["status"] == expected_status
+    if admission_paused:
+        assert export_calls == 0
+        assert controller["stages"]["checkpoint"]["pending_reasons"] == [
+            "cell-paused: budget admission awaits measured cost"
+        ]
+        assert status["fatal_blockers"] == []
+    else:
+        assert export_calls == 1
+        assert len(status["fatal_blockers"]) == 1
+        assert "must contain at least one row" in status["fatal_blockers"][0]

@@ -14,6 +14,7 @@ from fugue.bench.run_conformance import (
     _required_conversation_ids,
     capture_local_cell_conformance,
     capture_local_docker_inventory,
+    capture_local_pre_execution_conformance,
     read_harbor_run_conformance_receipt,
     read_hosted_evidence_privacy_receipt,
     write_harbor_run_conformance_receipt,
@@ -22,14 +23,20 @@ from fugue.bench.run_conformance import (
 from fugue.bench.sandbox_policy import attest_harbor_job
 
 
-def _local_job(repo_root: Path, run_id: str) -> SimpleNamespace:
+def _local_job(
+    repo_root: Path,
+    run_id: str,
+    *,
+    materialize_results: bool = True,
+) -> SimpleNamespace:
     run_dir = repo_root / ".fugue/runtime" / run_id
     jobs_dir = repo_root / ".fugue/runtime/jobs/demo" / run_id
     config_path = run_dir / "job-configs/job.json"
     result_path = jobs_dir / "job/result.json"
     config_path.parent.mkdir(parents=True)
-    result_path.parent.mkdir(parents=True)
-    (result_path.parent / "task__AbC123").mkdir()
+    if materialize_results:
+        result_path.parent.mkdir(parents=True)
+        (result_path.parent / "task__AbC123").mkdir()
     candidate_id = "c" * 64
     execution_definition = {
         "identity_schema_version": 1,
@@ -68,7 +75,8 @@ def _local_job(repo_root: Path, run_id: str) -> SimpleNamespace:
         require_files=True,
     ).to_dict()
     config_path.write_text(json.dumps(config))
-    result_path.write_text('{"status": "passed"}\n')
+    if materialize_results:
+        result_path.write_text('{"status": "passed"}\n')
     evaluation_assets = run_dir / "evaluation-assets.json"
     evaluation_assets.write_text('{"schema_version": 1}\n')
     evaluation_assets.chmod(0o600)
@@ -475,6 +483,53 @@ def test_first_cell_conformance_proves_cleanup_and_private_boundary(
     assert receipt["docker_cleanup"]["matched_networks"] == []
     assert len(receipt["receipt_sha256"]) == 64
     assert "wandb-secret-value" not in json.dumps(receipt)
+
+
+def test_pre_execution_conformance_defers_result_and_cleanup_evidence(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    run_id = "run-pre-execution"
+    job = _local_job(tmp_path, run_id, materialize_results=False)
+    monkeypatch.setattr(
+        conformance_module.subprocess,
+        "run",
+        lambda command, **kwargs: subprocess.CompletedProcess(
+            command,
+            0,
+            stdout="",
+            stderr="",
+        ),
+    )
+
+    pre_execution = capture_local_pre_execution_conformance(
+        repo_root=tmp_path,
+        run_id=run_id,
+        jobs=[job],
+        host_scorer_names=("comparison.deterministic.answer",),
+    )
+    post_run = write_harbor_run_conformance_receipt(
+        repo_root=tmp_path,
+        run_id=run_id,
+        jobs=[job],
+        env={"WANDB_API_KEY": "wandb-secret-value"},
+        host_scorer_names=("comparison.deterministic.answer",),
+        pre_execution_inventory=_inventory(),
+    )
+    post_run_value = json.loads(post_run.path.read_text())
+
+    assert pre_execution["phase"] == "pre_execution"
+    assert pre_execution["status"] == "passed"
+    assert pre_execution["execution_identity"]["status"] == "passed"
+    assert pre_execution["private_label_boundary"]["status"] == "passed"
+    assert pre_execution["deferred_checks"] == [
+        "local_artifact_privacy_scan",
+        "docker_cleanup",
+    ]
+    assert post_run.status == "unavailable"
+    assert post_run_value["local_artifact_privacy_scan"]["status"] == (
+        "unavailable"
+    )
+    assert post_run_value["docker_cleanup"]["status"] == "unavailable"
 
 
 def test_harbor_cleanup_attributes_new_container_from_exact_run_environment(

@@ -125,6 +125,80 @@ def capture_local_docker_inventory(
     }
 
 
+def capture_local_pre_execution_conformance(
+    *,
+    repo_root: Path,
+    run_id: str,
+    jobs: Sequence[RenderedJob],
+    host_scorer_names: Sequence[str] = (),
+    enforce: bool = True,
+) -> dict[str, Any]:
+    """Validate immutable Harbor inputs before any physical execution.
+
+    Result directories and cleanup evidence do not exist at this boundary.
+    They remain mandatory in the post-run receipt and per-cell checkpoint.
+    """
+
+    root = repo_root.resolve()
+    run_dir = root / ".fugue" / "runtime" / run_id
+    local_jobs, backend = _local_agent_jobs(jobs)
+    if backend != "local_harbor_docker" or not enforce:
+        payload = {
+            "schema_version": PRIVACY_CONTRACT_VERSION,
+            "phase": "pre_execution",
+            "run_id": run_id,
+            "backend": backend,
+            "status": "not_applicable",
+            "enforced": False,
+            "reason": (
+                "pre-execution receipt applies only to native local "
+                "Docker/Harbor Agent runs"
+                if enforce
+                else "an injected cell runner did not establish local Docker execution"
+            ),
+            "receipt_sha256": "",
+        }
+        payload["receipt_sha256"] = _stable_digest(payload)
+        return payload
+
+    identity = _execution_identity(run_id, local_jobs, repo_root=root)
+    private_boundary = _private_label_boundary(
+        run_dir=run_dir,
+        jobs=local_jobs,
+        host_scorer_names=host_scorer_names,
+    )
+    statuses = {
+        str(identity.get("status") or ""),
+        str(private_boundary.get("status") or ""),
+    }
+    status: ReceiptStatus
+    if "failed" in statuses:
+        status = "failed"
+    elif "unavailable" in statuses:
+        status = "unavailable"
+    elif statuses <= {"passed", "not_applicable"}:
+        status = "passed"
+    else:
+        status = "unavailable"
+    payload = {
+        "schema_version": PRIVACY_CONTRACT_VERSION,
+        "phase": "pre_execution",
+        "run_id": run_id,
+        "backend": backend,
+        "status": status,
+        "enforced": True,
+        "execution_identity": identity,
+        "private_label_boundary": private_boundary,
+        "deferred_checks": [
+            "local_artifact_privacy_scan",
+            "docker_cleanup",
+        ],
+        "receipt_sha256": "",
+    }
+    payload["receipt_sha256"] = _stable_digest(payload)
+    return payload
+
+
 def capture_local_cell_conformance(
     *,
     repo_root: Path,

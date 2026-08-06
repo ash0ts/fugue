@@ -5664,6 +5664,23 @@ def test_failed_context_registration_is_not_reported_as_available(
     assert row["context_available"] is False
 
 
+def test_export_preserves_structured_provider_invocation_boundary(
+    tmp_path: Path,
+) -> None:
+    jobs = _write_export_fixture(tmp_path)
+    meta_path = next(jobs.rglob("fugue-meta.json"))
+    meta = json.loads(meta_path.read_text())
+    meta["provider_invocation"] = {"schema_version": 1, "status": "not_started"}
+    meta_path.write_text(json.dumps(meta))
+
+    [row] = export_rows([jobs])
+
+    assert row["provider_invocation"] == {
+        "schema_version": 1,
+        "status": "not_started",
+    }
+
+
 def test_trajectory_errors_and_evidence_are_collected_without_agent_artifact(
     tmp_path: Path,
 ) -> None:

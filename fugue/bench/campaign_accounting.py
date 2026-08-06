@@ -279,6 +279,7 @@ def settle_execution_budget_leases(
         "runner_start_failure",
         "evidence_initialization_failure",
         "prestart_cancelled",
+        "pre_provider_failure",
     }
     if terminal_kind in zero_cost_prestart_kinds and runtime_outcome == "not_started":
         for ledger in ledgers:

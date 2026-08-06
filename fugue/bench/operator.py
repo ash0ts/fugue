@@ -110,6 +110,7 @@ from fugue.bench.reproducibility import (
 from fugue.bench.run_conformance import (
     capture_local_cell_conformance,
     capture_local_docker_inventory,
+    capture_local_pre_execution_conformance,
     write_harbor_run_conformance_receipt,
 )
 from fugue.bench.runtime_manager import prepare_runtime, runtime_ready, runtime_spec
@@ -2256,14 +2257,54 @@ class OperatorService:
                 cell_runner is None
                 and execute_cells is _DEFAULT_EXECUTE_CELLS
             )
-            pre_execution_inventory = (
-                capture_local_docker_inventory(rendered)
-                if conformance_enforced
-                else None
-            )
             rendered_by_config = {
                 Path(job.config_path).resolve(): job for job in rendered
             }
+            selected_rendered: list[RenderedJob] = []
+            selected_configs: set[Path] = set()
+            for cell in cells:
+                if not cell.applicable or cell.execution_kind != "agent":
+                    continue
+                config_path = Path(cell.config_path).resolve()
+                job = rendered_by_config.get(config_path)
+                if job is None:
+                    raise RuntimeError(
+                        "selected cell has no exact rendered Harbor job"
+                    )
+                if config_path not in selected_configs:
+                    selected_configs.add(config_path)
+                    selected_rendered.append(job)
+            pre_execution_conformance = (
+                capture_local_pre_execution_conformance(
+                    repo_root=self.repo_root,
+                    run_id=run_id,
+                    jobs=selected_rendered,
+                    host_scorer_names=host_scorer_names,
+                    enforce=conformance_enforced,
+                )
+            )
+            write_run_manifest(
+                self.repo_root,
+                run_id,
+                {
+                    "harbor_pre_execution_conformance": (
+                        pre_execution_conformance
+                    ),
+                },
+            )
+            if (
+                pre_execution_conformance.get("enforced") is True
+                and pre_execution_conformance.get("status") != "passed"
+            ):
+                raise RuntimeError(
+                    "Local Harbor pre-execution conformance did not pass: "
+                    f"{pre_execution_conformance.get('status')}"
+                )
+            pre_execution_inventory = (
+                capture_local_docker_inventory(selected_rendered)
+                if conformance_enforced
+                else None
+            )
 
             def checkpoint_conformance(cell: PlannedCell) -> Mapping[str, Any]:
                 job = rendered_by_config.get(Path(cell.config_path).resolve())
@@ -2407,11 +2448,25 @@ class OperatorService:
                     None,
                 ) if result_path is not None and result_path.exists() else None
                 cost = measured_row_cost(row) if row is not None else None
+                provider_not_started = bool(
+                    row is not None
+                    and isinstance(row.get("provider_invocation"), Mapping)
+                    and row["provider_invocation"].get("status") == "not_started"
+                    and getattr(outcome, "status", None) == "failed"
+                )
                 settle_execution_budget_leases(
                     budget_ledgers,
                     physical_execution_id=physical.physical_execution_id,
-                    terminal_kind=getattr(outcome, "terminal_kind", None),
-                    runtime_outcome=getattr(outcome, "runtime_outcome", None),
+                    terminal_kind=(
+                        "pre_provider_failure"
+                        if provider_not_started
+                        else getattr(outcome, "terminal_kind", None)
+                    ),
+                    runtime_outcome=(
+                        "not_started"
+                        if provider_not_started
+                        else getattr(outcome, "runtime_outcome", None)
+                    ),
                     actual_cost_usd=cost,
                 )
 
@@ -2480,7 +2535,7 @@ class OperatorService:
             harbor_conformance = write_harbor_run_conformance_receipt(
                 repo_root=self.repo_root,
                 run_id=run_id,
-                jobs=rendered,
+                jobs=selected_rendered,
                 env=run_env,
                 host_scorer_names=host_scorer_names,
                 pre_execution_inventory=pre_execution_inventory,

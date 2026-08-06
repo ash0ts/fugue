@@ -5937,6 +5937,9 @@ def _row_from_trial(result_path: Path) -> dict[str, Any]:
         "skip_reason": meta.get("skip_reason"),
         "agent_execution_status": agent_execution_status,
         "agent_runtime_completed": agent_runtime_completed,
+        "provider_invocation": meta.get(
+            "provider_invocation", {"schema_version": 1, "status": "unknown"}
+        ),
         "identity_schema_version": meta.get("identity_schema_version"),
         "evaluation_scope_id": meta.get("evaluation_scope_id"),
         "job_name": meta.get("job_name") or trial_dir.parent.name,
