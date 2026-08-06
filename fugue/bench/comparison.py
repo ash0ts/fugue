@@ -2734,6 +2734,11 @@ def _local_runtime_readiness(
         runtime_spec,
     )
     from fugue.bench.manifest import load_manifest
+    from fugue.bench.scorer_runtime import (
+        read_scorer_runtime_lock,
+        scorer_runtime_lock_digest,
+        scorer_runtime_ready,
+    )
     from fugue.bench.task_runtime import (
         read_task_runtime_lock,
         task_architecture,
@@ -2782,7 +2787,45 @@ def _local_runtime_readiness(
                 )
             except ValueError as exc:
                 blockers.append(f"local {key} lock is not portable: {exc}")
+    try:
+        scorer_profiles = _comparison_scorer_runtime_profiles(spec, repo_root=repo_root)
+    except (FileNotFoundError, ValueError) as exc:
+        blockers.append(f"local scorer runtimes cannot be resolved: {exc}")
+        scorer_profiles = ()
+    for profile in scorer_profiles:
+        architecture = profile.platform.rsplit("/", 1)[-1]
+        ready, detail = scorer_runtime_ready(profile, repo_root=repo_root)
+        lock = read_scorer_runtime_lock(profile, repo_root=repo_root)
+        key = f"scorer:{profile.id}:{architecture}"
+        if not ready or lock is None:
+            blockers.append(f"local {key} is not prepared and locked: {detail}")
+        else:
+            digests[key] = scorer_runtime_lock_digest(lock)
     return dict(sorted(digests.items())), blockers
+
+
+def _comparison_scorer_runtime_profiles(
+    spec: ComparisonSpecV1,
+    *,
+    repo_root: Path,
+) -> tuple[Any, ...]:
+    """Return every isolated scorer/verifier runtime selected by a comparison."""
+
+    from fugue.bench.task_authoring import load_task_profiles
+
+    runtime_ids = {
+        runtime_id
+        for evaluator in spec.evaluators
+        for runtime_id in (
+            evaluator.runtime if evaluator.scorer else None,
+            evaluator.verifier.runtime if evaluator.verifier is not None else None,
+        )
+        if runtime_id
+    }
+    if not runtime_ids:
+        return ()
+    profiles = load_task_profiles(repo_root)
+    return tuple(profiles.scorer_runtime(item) for item in sorted(runtime_ids))
 
 
 def _comparison_preparation_receipt_path(
@@ -3581,6 +3624,10 @@ def prepare_comparison(
             "comparison has non-preparation blockers:\n- "
             + "\n- ".join(prepublication_unexpected)
         )
+    from fugue.bench.scorer_runtime import prepare_scorer_runtime
+
+    for profile in _comparison_scorer_runtime_profiles(spec, repo_root=repo_root):
+        prepare_scorer_runtime(profile, repo_root=repo_root)
     if _requires_public_source_publication(spec):
         source_manifest = _public_source_publication_manifest(
             spec,
@@ -3715,11 +3762,12 @@ def _unexpected_preparation_blockers(
         for value in values
         if value.startswith("local task:") and value.count(":") >= 2
     }
+    missing_scorer_runtime = any(value.startswith("local scorer:") for value in values)
     unexpected: list[str] = []
     for value in values:
-        if value.startswith(("local agent:", "local task:")) or value.startswith(
-            "comparison preparation is missing or drifted"
-        ):
+        if value.startswith(
+            ("local agent:", "local task:", "local scorer:")
+        ) or value.startswith("comparison preparation is missing or drifted"):
             continue
         if allow_missing_public_source and value.startswith(
             "public task source is not published and locked"
@@ -3728,7 +3776,7 @@ def _unexpected_preparation_blockers(
         task_id, separator, detail = value.partition(": ")
         if (
             separator
-            and task_id in missing_task_images
+            and (task_id in missing_task_images or missing_scorer_runtime)
             and detail == "evaluator qualification failed: RuntimeError"
         ):
             continue

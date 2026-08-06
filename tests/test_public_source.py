@@ -311,6 +311,10 @@ def test_comparison_preparation_binds_source_publication_into_preview(
             [],
         ),
     )
+    monkeypatch.setattr(
+        "fugue.bench.scorer_runtime.prepare_scorer_runtime",
+        lambda *_args, **_kwargs: None,
+    )
     monkeypatch.setattr(OperatorService, "prepare", lambda *_args, **_kwargs: None)
     remote = _FakeRemote()
 

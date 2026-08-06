@@ -566,6 +566,9 @@ def test_inline_scorer_runs_with_a_locked_isolated_docker_contract(
     assert payload["score"] == 1
     command = observed["command"]
     assert isinstance(command, list)
+    pull_index = command.index("--pull")
+    assert command[pull_index : pull_index + 2] == ["--pull", "never"]
+    assert profile.image in command
     for expected in (
         "--network",
         "none",

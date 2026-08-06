@@ -21,6 +21,7 @@ from fugue.bench.comparison import (
     _comparison_mechanism,
     _comparison_qualification_digest,
     _comparison_result_digest,
+    _comparison_scorer_runtime_profiles,
     _comparison_study_intent,
     _comparison_trial_output,
     _efficiency_regressions,
@@ -3578,6 +3579,18 @@ def test_preparation_allows_only_runtime_error_for_a_missing_task_image() -> Non
         [*common, "task-a: evaluator qualification failed: ValueError"],
         allow_missing_public_source=False,
     ) == ["task-a: evaluator qualification failed: ValueError"]
+    missing_scorer = [
+        "local scorer:python312-sandbox-v1:amd64 is not prepared and locked",
+        "task-b: evaluator qualification failed: RuntimeError",
+    ]
+    assert _unexpected_preparation_blockers(
+        missing_scorer,
+        allow_missing_public_source=False,
+    ) == []
+    assert _unexpected_preparation_blockers(
+        ["task-b: evaluator qualification failed: RuntimeError"],
+        allow_missing_public_source=False,
+    ) == ["task-b: evaluator qualification failed: RuntimeError"]
 
 
 def test_prepare_then_preview_is_stable_and_runtime_drift_invalidates_it(
@@ -3602,6 +3615,10 @@ def test_prepare_then_preview_is_stable_and_runtime_drift_invalidates_it(
     monkeypatch.setattr(
         "fugue.bench.comparison._runtime_readiness",
         runtime_readiness,
+    )
+    monkeypatch.setattr(
+        "fugue.bench.scorer_runtime.prepare_scorer_runtime",
+        lambda *_args, **_kwargs: None,
     )
     monkeypatch.setattr(OperatorService, "prepare", lambda *_args, **_kwargs: None)
     operator = OperatorService(root)
@@ -3636,6 +3653,21 @@ def test_prepare_then_preview_is_stable_and_runtime_drift_invalidates_it(
         "runtime locks do not match" in blocker
         for blocker in drifted.readiness["blockers"]
     )
+
+
+def test_comparison_resolves_the_selected_scorer_runtime_once() -> None:
+    root = Path.cwd()
+    spec = load_comparison(
+        Path("examples/comparisons/community-skill-selected-v1")
+        / "superpowers-writing-plans/comparison.yaml",
+        repo_root=root,
+    )
+
+    profiles = _comparison_scorer_runtime_profiles(spec, repo_root=root)
+
+    assert [(profile.id, profile.platform) for profile in profiles] == [
+        ("python312-sandbox-v1", "linux/amd64")
+    ]
 
 
 def test_execute_comparison_never_prepares_after_preview(
