@@ -976,6 +976,155 @@ def test_execute_run_uses_preset_concurrency_for_the_operator_pool(
     assert manifest["max_workers"] == 4
 
 
+def test_execute_run_attributes_only_active_concurrent_harbor_siblings(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    service = make_operator_repo(tmp_path)
+    experiment = replace(
+        service.experiment("demo"),
+        require_live_evidence=True,
+        evidence_checkpoint_cells=2,
+        n_attempts=2,
+        n_concurrent=2,
+    )
+    monkeypatch.setattr(operator_module, "agent_runtime_spec", lambda harness: None)
+    monkeypatch.setattr(operator_module, "_verify_rendered_setup", lambda jobs: None)
+    monkeypatch.setattr(
+        operator_module, "validate_harbor_job_configs", lambda paths: None
+    )
+    monkeypatch.setattr(
+        operator_module,
+        "capture_local_pre_execution_conformance",
+        lambda **kwargs: {"status": "passed", "enforced": True},
+    )
+    monkeypatch.setattr(
+        operator_module,
+        "capture_local_docker_inventory",
+        lambda jobs: {
+            "schema_version": 1,
+            "status": "passed",
+            "backend": "local_harbor_docker",
+            "container_ids": [],
+        },
+    )
+    final_receipt = SimpleNamespace(
+        enforced=True,
+        status="passed",
+        manifest_reference=lambda _root: {
+            "schema_version": 1,
+            "path": ".fugue/runtime/concurrent/harbor-conformance.json",
+            "sha256": "a" * 64,
+            "status": "passed",
+            "enforced": True,
+        },
+    )
+    final_conformance_calls: list[dict[str, object]] = []
+    observed_current: list[Path] = []
+    observed_siblings: list[tuple[Path, ...]] = []
+    finished_physical_executions: list[str] = []
+
+    def write_final_conformance(**kwargs):
+        # Run-level cleanup is intentionally strict: it receives the complete
+        # selected job set only after every physical execution has finished,
+        # with no active-sibling exclusion carried over from cell checkpoints.
+        assert finished_physical_executions == ["physical-a", "physical-b"]
+        assert "active_sibling_jobs" not in kwargs
+        final_conformance_calls.append(dict(kwargs))
+        return final_receipt
+
+    monkeypatch.setattr(
+        operator_module,
+        "write_harbor_run_conformance_receipt",
+        write_final_conformance,
+    )
+
+    def capture_cell(**kwargs):
+        observed_current.append(kwargs["job"].config_path)
+        observed_siblings.append(
+            tuple(job.config_path for job in kwargs["active_sibling_jobs"])
+        )
+        return {"status": "passed"}
+
+    monkeypatch.setattr(
+        operator_module, "capture_local_cell_conformance", capture_cell
+    )
+
+    class FakeLiveEvaluation:
+        def __init__(self, *args, checkpoint_conformance=None, **kwargs) -> None:
+            self.checkpoint_conformance = checkpoint_conformance
+
+        def begin_cell(self, cell):
+            return {}
+
+        def finish_cell(self, cell, outcome) -> None:
+            assert self.checkpoint_conformance is not None
+            self.checkpoint_conformance(cell)
+
+        def finalize(self, **kwargs) -> PublicationResult:
+            return PublicationResult(published=0, skipped=2)
+
+    monkeypatch.setattr(
+        operator_module, "LiveEvaluationCoordinator", FakeLiveEvaluation
+    )
+
+    def execute(cells, **kwargs):
+        assert len(cells) == 2
+        assert kwargs["max_workers"] == 2
+        physical_started = kwargs["physical_started"]
+        physical_finished = kwargs["physical_finished"]
+        cell_finished = kwargs["cell_finished"]
+        assert physical_started is not None
+        assert physical_finished is not None
+        assert cell_finished is not None
+        first = replace(cells[0], physical_execution_id="physical-a")
+        second = replace(cells[1], physical_execution_id="physical-b")
+        first_physical = SimpleNamespace(physical_execution_id="physical-a")
+        second_physical = SimpleNamespace(physical_execution_id="physical-b")
+        first_outcome = CellOutcome(
+            first.id,
+            "passed",
+            returncode=0,
+            runtime_outcome="completed",
+            terminal_kind="success",
+        )
+        second_outcome = CellOutcome(
+            second.id,
+            "passed",
+            returncode=0,
+            runtime_outcome="completed",
+            terminal_kind="success",
+        )
+
+        physical_started(first, first_physical)
+        physical_started(second, second_physical)
+        cell_finished(first, first_outcome)
+        physical_finished(first, first_physical, first_outcome)
+        finished_physical_executions.append(first_physical.physical_execution_id)
+        cell_finished(second, second_outcome)
+        physical_finished(second, second_physical, second_outcome)
+        finished_physical_executions.append(second_physical.physical_execution_id)
+        return [first_outcome, second_outcome]
+
+    monkeypatch.setattr(operator_module, "execute_cells", execute)
+    monkeypatch.setattr(operator_module, "_DEFAULT_EXECUTE_CELLS", execute)
+
+    result = service.execute_run(
+        ExperimentRequest(experiment_id="demo"),
+        experiment=experiment,
+        run_id="concurrent-harbor-attribution",
+    )
+
+    assert result.status == "passed"
+    assert len(observed_current) == 2
+    assert len(observed_siblings) == 2
+    assert observed_siblings[0] == (observed_current[1],)
+    assert observed_siblings[1] == ()
+    assert len(final_conformance_calls) == 1
+    assert tuple(
+        job.config_path for job in final_conformance_calls[0]["jobs"]
+    ) == tuple(observed_current)
+
+
 def test_execute_run_only_validates_agent_job_configs(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:

@@ -10887,10 +10887,14 @@ def _comparison_output(row: Mapping[str, Any]) -> Any:
     return None
 
 
-def _comparison_trial_output(row: Mapping[str, Any]) -> Any:
+def _comparison_trial_output(
+    row: Mapping[str, Any], *, repo_root: Path | None = None
+) -> Any:
     raw_trial_dir = row.get("trial_dir")
     if isinstance(raw_trial_dir, str) and raw_trial_dir:
         trial_dir = Path(raw_trial_dir)
+        if not trial_dir.is_absolute() and repo_root is not None:
+            trial_dir = repo_root.resolve() / trial_dir
         if trial_dir.is_dir():
             answers = sorted(trial_dir.rglob("fugue-answer.md"))
             if answers:
@@ -10904,6 +10908,40 @@ def _comparison_trial_output(row: Mapping[str, Any]) -> Any:
                     if value:
                         return value[:16_000]
     return _comparison_output(row)
+
+
+def _score_comparison_attempt(
+    spec: ComparisonSpecV1,
+    row: Mapping[str, Any],
+    *,
+    repo_root: Path,
+    env: Mapping[str, str] | None,
+    approved_comparison: Mapping[str, Any],
+    provenance: str,
+    checkpoint_index: int | None = None,
+) -> dict[str, Any]:
+    """Score one locked attempt without persisting its ephemeral output alias."""
+
+    evaluation_row = dict(row)
+    evaluation_row["final_output"] = _comparison_trial_output(
+        row, repo_root=repo_root
+    )
+    scored = score_comparison_rows(
+        spec,
+        [evaluation_row],
+        repo_root=repo_root,
+        env=env,
+        approved_comparison=approved_comparison,
+    )[0]
+    scored.pop("final_output", None)
+    scored["comparison_scoring_provenance"] = provenance
+    if checkpoint_index is not None:
+        _require_checkpoint_judges(
+            spec,
+            scored,
+            checkpoint_index=checkpoint_index,
+        )
+    return scored
 
 
 def _validate_comparison_judge_payload(
@@ -11683,13 +11721,17 @@ def _score_and_bind_exported_comparison_rows(
             "scored",
             "unavailable",
         }:
-            row = score_comparison_rows(
+            # Legacy staged rows closed before host scoring was attached. Recover
+            # their locked deterministic result without an unleased provider
+            # request; optional judges remain explicitly unavailable.
+            row = _score_comparison_attempt(
                 spec,
-                [row],
+                row,
                 repo_root=repo_root,
-                env=env,
+                env=None,
                 approved_comparison=approved_comparison,
-            )[0]
+                provenance="host_only_recovery",
+            )
         scored.append(row)
     for row in scored:
         for field_name, check in (
@@ -11936,22 +11978,16 @@ def execute_comparison(
 
     def evaluate_attempt(row: dict[str, Any]) -> None:
         nonlocal evaluated_cells, source_checkpoint_drift
-        evaluation_row = dict(row)
-        evaluation_row["final_output"] = _comparison_trial_output(row)
-        scored = score_comparison_rows(
+        scored = _score_comparison_attempt(
             spec,
-            [evaluation_row],
+            row,
             repo_root=repo_root,
             env=service.env,
             approved_comparison=request.approved_comparison,
-        )[0]
-        scored.pop("final_output", None)
-        row.update(scored)
-        _require_checkpoint_judges(
-            spec,
-            row,
+            provenance="live_preclose",
             checkpoint_index=evaluated_cells,
         )
+        row.update(scored)
         if source_pre_run_drift is not None:
             row["source_pre_run_drift"] = source_pre_run_drift.to_dict()
         evaluated_cells += 1

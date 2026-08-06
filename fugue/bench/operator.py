@@ -2305,12 +2305,28 @@ class OperatorService:
                 if conformance_enforced
                 else None
             )
+            active_harbor_jobs: dict[str, tuple[str, RenderedJob]] = {}
+            active_harbor_jobs_lock = threading.Lock()
 
             def checkpoint_conformance(cell: PlannedCell) -> Mapping[str, Any]:
                 job = rendered_by_config.get(Path(cell.config_path).resolve())
                 if job is None:
                     raise RuntimeError(
                         "checkpoint cell has no exact rendered Harbor job"
+                    )
+                with active_harbor_jobs_lock:
+                    current = active_harbor_jobs.get(cell.physical_execution_id)
+                    if current is None or current[0] != cell.id:
+                        raise RuntimeError(
+                            "checkpoint cell has no exact active Harbor execution"
+                        )
+                    active_sibling_jobs = tuple(
+                        sibling_job
+                        for physical_execution_id, (cell_id, sibling_job) in sorted(
+                            active_harbor_jobs.items()
+                        )
+                        if physical_execution_id != cell.physical_execution_id
+                        and cell_id != cell.id
                     )
                 return capture_local_cell_conformance(
                     repo_root=self.repo_root,
@@ -2319,6 +2335,7 @@ class OperatorService:
                     env=run_env,
                     host_scorer_names=host_scorer_names,
                     pre_execution_inventory=pre_execution_inventory,
+                    active_sibling_jobs=active_sibling_jobs,
                 )
 
             observability_error = None
@@ -2412,8 +2429,11 @@ class OperatorService:
                     result_rows=result_rows,
                 )
 
-            def admit_physical_execution(_cell: PlannedCell, physical: Any) -> dict[str, str]:
+            def admit_physical_execution(
+                cell: PlannedCell, physical: Any
+            ) -> dict[str, str]:
                 acquired: list[BudgetLeaseLedger] = []
+                active_registered = False
                 try:
                     for ledger in budget_ledgers:
                         ledger.acquire(
@@ -2421,7 +2441,28 @@ class OperatorService:
                             reserved_cost_usd=reserved_cost_per_execution_usd,
                         )
                         acquired.append(ledger)
+                    if conformance_enforced and cell.execution_kind == "agent":
+                        job = rendered_by_config.get(Path(cell.config_path).resolve())
+                        if job is None:
+                            raise RuntimeError(
+                                "active cell has no exact rendered Harbor job"
+                            )
+                        with active_harbor_jobs_lock:
+                            if physical.physical_execution_id in active_harbor_jobs:
+                                raise RuntimeError(
+                                    "physical Harbor execution is already active"
+                                )
+                            active_harbor_jobs[physical.physical_execution_id] = (
+                                cell.id,
+                                job,
+                            )
+                            active_registered = True
                 except Exception:
+                    if active_registered:
+                        with active_harbor_jobs_lock:
+                            active_harbor_jobs.pop(
+                                physical.physical_execution_id, None
+                            )
                     for ledger in reversed(acquired):
                         ledger.release_unstarted(physical.physical_execution_id)
                     raise
@@ -2430,45 +2471,55 @@ class OperatorService:
             def settle_physical_execution(
                 cell: PlannedCell, physical: Any, outcome: Any
             ) -> None:
-                if not budget_ledgers:
-                    return
-                result_path = (
-                    live.results_path
-                    if live is not None
-                    else local.path
-                    if local is not None
-                    else None
-                )
-                row = next(
-                    (
-                        item
-                        for item in latest_cell_records(result_path)
-                        if item.get("cell_id") == cell.id
-                    ),
-                    None,
-                ) if result_path is not None and result_path.exists() else None
-                cost = measured_row_cost(row) if row is not None else None
-                provider_not_started = bool(
-                    row is not None
-                    and isinstance(row.get("provider_invocation"), Mapping)
-                    and row["provider_invocation"].get("status") == "not_started"
-                    and getattr(outcome, "status", None) == "failed"
-                )
-                settle_execution_budget_leases(
-                    budget_ledgers,
-                    physical_execution_id=physical.physical_execution_id,
-                    terminal_kind=(
-                        "pre_provider_failure"
-                        if provider_not_started
-                        else getattr(outcome, "terminal_kind", None)
-                    ),
-                    runtime_outcome=(
-                        "not_started"
-                        if provider_not_started
-                        else getattr(outcome, "runtime_outcome", None)
-                    ),
-                    actual_cost_usd=cost,
-                )
+                try:
+                    if budget_ledgers:
+                        result_path = (
+                            live.results_path
+                            if live is not None
+                            else local.path
+                            if local is not None
+                            else None
+                        )
+                        row = next(
+                            (
+                                item
+                                for item in latest_cell_records(result_path)
+                                if item.get("cell_id") == cell.id
+                            ),
+                            None,
+                        ) if result_path is not None and result_path.exists() else None
+                        cost = measured_row_cost(row) if row is not None else None
+                        provider_not_started = bool(
+                            row is not None
+                            and isinstance(row.get("provider_invocation"), Mapping)
+                            and row["provider_invocation"].get("status") == "not_started"
+                            and getattr(outcome, "status", None) == "failed"
+                        )
+                        settle_execution_budget_leases(
+                            budget_ledgers,
+                            physical_execution_id=physical.physical_execution_id,
+                            terminal_kind=(
+                                "pre_provider_failure"
+                                if provider_not_started
+                                else getattr(outcome, "terminal_kind", None)
+                            ),
+                            runtime_outcome=(
+                                "not_started"
+                                if provider_not_started
+                                else getattr(outcome, "runtime_outcome", None)
+                            ),
+                            actual_cost_usd=cost,
+                        )
+                finally:
+                    if conformance_enforced and cell.execution_kind == "agent":
+                        with active_harbor_jobs_lock:
+                            active = active_harbor_jobs.pop(
+                                physical.physical_execution_id, None
+                            )
+                        if active is None or active[0] != cell.id:
+                            raise RuntimeError(
+                                "physical Harbor execution was not active at finish"
+                            )
 
             outcomes = execute_cells(
                 cells,
@@ -2502,11 +2553,13 @@ class OperatorService:
                     else frozenset()
                 ),
                 physical_started=(
-                    admit_physical_execution if budget_ledgers else None
+                    admit_physical_execution
+                    if budget_ledgers or conformance_enforced
+                    else None
                 ),
                 physical_finished=(
                     settle_physical_execution
-                    if budget_ledgers
+                    if budget_ledgers or conformance_enforced
                     else None
                 ),
             )

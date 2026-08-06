@@ -57,6 +57,20 @@
       "wandb_project_url": "https://wandb.ai/wandb/fugue-superpowers-writing-plans-measurement-pilot-v1"
     },
     {
+      "invalidation_digest": "8928c89bd3e98c5a11593da1171625adca22dad8bebafb231db07cbd13d196c0",
+      "pooled": false,
+      "preview_digest": "ca999d7cc06a46ce370ef5d67a8c375a88e922d37a1eaff207618759cbd12f3f",
+      "project": "wandb/fugue-superpowers-writing-plans-measurement-pilot-v2",
+      "reason": "The staged V2 checkpoint completed, but the next aligned pair hit a false fatal Harbor cleanup attribution when one concurrent cell observed its active sibling; it produced no complete scored cohort.",
+      "record_digest": "fdb89f9df7c4a26558ded9a79d43c6abc54124dffd3c653bb77d07fcb785c8af",
+      "relationship": "superseded-concurrent-cleanup-repair",
+      "result_digest": null,
+      "status": "invalid",
+      "study_console_query": "?research_id=superpowers-writing-plans-measurement-pilot-v2&study_id=superpowers-writing-plans-measurement-pilot-v2",
+      "study_id": "superpowers-writing-plans-measurement-pilot-v2",
+      "wandb_project_url": "https://wandb.ai/wandb/fugue-superpowers-writing-plans-measurement-pilot-v2"
+    },
+    {
       "invalidation_digest": "0693551789db6c00a23a19a14cf576e154a544fb1aed9d01db9bc533bab0572c",
       "pooled": false,
       "preview_digest": null,
@@ -72,6 +86,6 @@
     }
   ],
   "kind": "community_skill_supersession_registry",
-  "registry_digest": "ee6c92f69eb67e10ffca7ee050270fa0e75660ae778772cecec385680ae23dd7",
+  "registry_digest": "3eaa1a5f1fe71b6a1280f5e04e9a2fb1a366745845bcf0a37ef9d2804d419d7f",
   "schema_version": 2
 }

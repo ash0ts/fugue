@@ -207,6 +207,7 @@ def capture_local_cell_conformance(
     env: Mapping[str, str],
     host_scorer_names: Sequence[str] = (),
     pre_execution_inventory: Mapping[str, Any] | None,
+    active_sibling_jobs: Sequence[RenderedJob] = (),
 ) -> dict[str, Any]:
     """Prove the first Harbor cell is clean before releasing a queued cell."""
 
@@ -234,6 +235,7 @@ def capture_local_cell_conformance(
         run_id=cell.run_id,
         jobs=[job],
         pre_execution_inventory=pre_execution_inventory,
+        active_sibling_jobs=active_sibling_jobs,
     )
     components = {
         "execution_identity": execution_identity,
@@ -1463,26 +1465,45 @@ def _docker_cleanup_audit(
     run_id: str,
     jobs: Sequence[RenderedJob],
     pre_execution_inventory: Mapping[str, Any] | None,
+    active_sibling_jobs: Sequence[RenderedJob] = (),
 ) -> dict[str, Any]:
     projects, derivation_errors = _compose_projects_for_jobs(
         repo_root=repo_root,
         run_id=run_id,
         jobs=jobs,
     )
+    active_sibling_projects, sibling_derivation_errors = _compose_projects_for_jobs(
+        repo_root=repo_root,
+        run_id=run_id,
+        jobs=active_sibling_jobs,
+        require_projects=False,
+    )
+    # A project cannot be both the cell under audit and an excluded sibling.
+    # Keeping the current cell authoritative preserves fail-closed cleanup.
+    active_sibling_projects = sorted(set(active_sibling_projects) - set(projects))
+    derivation_errors = [
+        *derivation_errors,
+        *(f"active sibling: {error}" for error in sibling_derivation_errors),
+    ]
     base = {
         "matched_containers": [],
         "matched_networks": [],
+        "active_sibling_containers": [],
         "mutations_performed": False,
         "scope": {
             "kind": "exact_run_compose_projects",
             "run_id": run_id,
             "run_directory": run_dir.resolve().as_posix(),
             "compose_projects": projects,
+            "temporarily_excluded_active_sibling_compose_projects": (
+                active_sibling_projects
+            ),
             "resource_types": ["container", "network"],
             "selector": "com.docker.compose.project=<exact project>",
             "excluded": [
                 "other Compose projects",
                 "non-Docker resources",
+                "explicitly active same-run sibling Compose projects",
             ],
         },
     }
@@ -1550,6 +1571,7 @@ def _docker_cleanup_audit(
     )
     matched_containers: list[dict[str, str]] = []
     matched_networks: list[dict[str, str]] = []
+    active_sibling_containers: list[dict[str, str]] = []
     unattributed_new_containers: list[str] = []
     for container_id in new_container_ids:
         attribution, inspect_error = _container_run_attribution(
@@ -1558,6 +1580,7 @@ def _docker_cleanup_audit(
             run_directory=run_dir.resolve().as_posix(),
             job_directories=job_directories,
             compose_projects=projects,
+            active_sibling_compose_projects=active_sibling_projects,
         )
         if inspect_error is not None:
             return {
@@ -1569,7 +1592,15 @@ def _docker_cleanup_audit(
                 "errors": [],
                 "pre_execution_inventory_status": "passed",
             }
-        if attribution:
+        if attribution.get("active_sibling") is True:
+            active_sibling_containers.append(
+                {
+                    "container_id": container_id[:12],
+                    "compose_project": str(attribution["compose_project"]),
+                    "attribution": "exact_active_sibling_compose_project_label",
+                }
+            )
+        elif attribution:
             matched_containers.append(
                 {
                     "container_id": container_id[:12],
@@ -1649,6 +1680,7 @@ def _docker_cleanup_audit(
         "status": status,
         "matched_containers": matched_containers,
         "matched_networks": matched_networks,
+        "active_sibling_containers": active_sibling_containers,
         "pre_execution_inventory_status": "passed",
         "new_remaining_container_count": len(new_container_ids),
         "unattributed_new_containers": unattributed_new_containers,
@@ -1661,6 +1693,7 @@ def _compose_projects_for_jobs(
     repo_root: Path,
     run_id: str,
     jobs: Sequence[RenderedJob],
+    require_projects: bool = True,
 ) -> tuple[list[str], list[str]]:
     allowed_roots = (
         (repo_root / "jobs").resolve(),
@@ -1694,7 +1727,7 @@ def _compose_projects_for_jobs(
                 project,
             )
         }
-        if not valid:
+        if not valid and require_projects:
             errors.append(
                 f"{job.job_name}: no exact Harbor Compose project was recorded"
             )
@@ -1730,6 +1763,7 @@ def _container_run_attribution(
     run_directory: str,
     job_directories: Sequence[str],
     compose_projects: Sequence[str],
+    active_sibling_compose_projects: Sequence[str] = (),
 ) -> tuple[dict[str, Any], str | None]:
     try:
         inspected = subprocess.run(
@@ -1756,6 +1790,15 @@ def _container_run_attribution(
     mounts = value.get("Mounts") if isinstance(value.get("Mounts"), list) else []
     reasons: list[str] = []
     compose_project = str(labels.get("com.docker.compose.project") or "")
+    if compose_project in active_sibling_compose_projects:
+        return (
+            {
+                "active_sibling": True,
+                "compose_project": compose_project,
+                "reasons": ["exact_active_sibling_compose_project_label"],
+            },
+            None,
+        )
     if compose_project in compose_projects:
         reasons.append("exact_compose_project_label")
     if any(

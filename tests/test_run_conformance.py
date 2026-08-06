@@ -28,15 +28,17 @@ def _local_job(
     run_id: str,
     *,
     materialize_results: bool = True,
+    job_name: str = "job",
+    trial_directory: str = "task__AbC123",
 ) -> SimpleNamespace:
     run_dir = repo_root / ".fugue/runtime" / run_id
     jobs_dir = repo_root / ".fugue/runtime/jobs/demo" / run_id
-    config_path = run_dir / "job-configs/job.json"
-    result_path = jobs_dir / "job/result.json"
-    config_path.parent.mkdir(parents=True)
+    config_path = run_dir / f"job-configs/{job_name}.json"
+    result_path = jobs_dir / job_name / "result.json"
+    config_path.parent.mkdir(parents=True, exist_ok=True)
     if materialize_results:
         result_path.parent.mkdir(parents=True)
-        (result_path.parent / "task__AbC123").mkdir()
+        (result_path.parent / trial_directory).mkdir()
     candidate_id = "c" * 64
     execution_definition = {
         "identity_schema_version": 1,
@@ -45,7 +47,7 @@ def _local_job(
     }
     execution_fingerprint = stable_digest(execution_definition)
     config = {
-        "job_name": "job",
+        "job_name": job_name,
         "jobs_dir": jobs_dir.relative_to(repo_root).as_posix(),
         "fugue": {
             "run_id": run_id,
@@ -87,7 +89,7 @@ def _local_job(
         config=config,
         config_path=config_path,
         result_path=result_path,
-        job_name="job",
+        job_name=job_name,
         run_id=run_id,
         resolved_candidate=SimpleNamespace(
             candidate_id=candidate_id,
@@ -483,6 +485,198 @@ def test_first_cell_conformance_proves_cleanup_and_private_boundary(
     assert receipt["docker_cleanup"]["matched_networks"] == []
     assert len(receipt["receipt_sha256"]) == 64
     assert "wandb-secret-value" not in json.dumps(receipt)
+
+
+def test_cell_cleanup_excludes_only_exact_active_sibling_project(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    run_id = "run-concurrent-cells"
+    job = _local_job(tmp_path, run_id)
+    sibling = _local_job(
+        tmp_path,
+        run_id,
+        job_name="sibling",
+        trial_directory="sibling__Def456",
+    )
+    sibling_project = "sibling__def456__env"
+
+    def run(command, **kwargs):
+        if command == ["docker", "container", "ls", "--all", "--quiet"]:
+            return subprocess.CompletedProcess(
+                command, 0, stdout="sibling-container\n", stderr=""
+            )
+        if command == ["docker", "container", "inspect", "sibling-container"]:
+            return subprocess.CompletedProcess(
+                command,
+                0,
+                stdout=json.dumps(
+                    [
+                        {
+                            "Config": {
+                                "Labels": {
+                                    "com.docker.compose.project": sibling_project,
+                                },
+                                "Env": [f"FUGUE_RUN_ID={run_id}"],
+                            },
+                            "Mounts": [],
+                        }
+                    ]
+                ),
+                stderr="",
+            )
+        if command[1:3] == ["container", "ls"]:
+            stdout = "sibling-container\n" if command[-1].endswith(sibling_project) else ""
+            return subprocess.CompletedProcess(command, 0, stdout=stdout, stderr="")
+        if command[1:3] == ["network", "ls"]:
+            return subprocess.CompletedProcess(command, 0, stdout="", stderr="")
+        raise AssertionError(command)
+
+    monkeypatch.setattr(conformance_module.subprocess, "run", run)
+    cell = SimpleNamespace(
+        id="cell-current",
+        run_id=run_id,
+        attempt_id="a" * 64,
+        config_path=job.config_path,
+    )
+
+    receipt = capture_local_cell_conformance(
+        repo_root=tmp_path,
+        cell=cell,
+        job=job,
+        env={"WANDB_API_KEY": "wandb-secret-value"},
+        pre_execution_inventory=_inventory(),
+        active_sibling_jobs=(sibling,),
+    )
+
+    assert receipt["status"] == "passed"
+    cleanup = receipt["docker_cleanup"]
+    assert cleanup["status"] == "passed"
+    assert cleanup["matched_containers"] == []
+    assert cleanup["unattributed_new_containers"] == []
+    assert cleanup["active_sibling_containers"] == [
+        {
+            "attribution": "exact_active_sibling_compose_project_label",
+            "compose_project": sibling_project,
+            "container_id": "sibling-cont",
+        }
+    ]
+    assert cleanup["scope"][
+        "temporarily_excluded_active_sibling_compose_projects"
+    ] == [sibling_project]
+
+    # The end-of-run receipt receives no active-sibling exemption. The same
+    # remaining project is therefore a strict cleanup failure.
+    final = write_harbor_run_conformance_receipt(
+        repo_root=tmp_path,
+        run_id=run_id,
+        jobs=[job, sibling],
+        env={"WANDB_API_KEY": "wandb-secret-value"},
+        pre_execution_inventory=_inventory(),
+    )
+    final_value = json.loads(final.path.read_text())
+    assert final.status == "failed"
+    assert final_value["docker_cleanup"]["matched_containers"] == [
+        {
+            "attribution": (
+                "exact_compose_project_label,exact_fugue_run_environment"
+            ),
+            "compose_project": sibling_project,
+            "container_id": "sibling-cont",
+        }
+    ]
+    assert final_value["docker_cleanup"]["scope"][
+        "temporarily_excluded_active_sibling_compose_projects"
+    ] == []
+
+
+def test_cell_cleanup_does_not_exempt_stale_same_run_retry_container(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    run_id = "run-concurrent-retry"
+    job = _local_job(tmp_path, run_id)
+    active_sibling = _local_job(
+        tmp_path,
+        run_id,
+        job_name="sibling",
+        trial_directory="sibling__Def456",
+    )
+    active_project = "sibling__def456__env"
+    stale_retry_project = "sibling__retry0__env"
+
+    def run(command, **kwargs):
+        if command == ["docker", "container", "ls", "--all", "--quiet"]:
+            return subprocess.CompletedProcess(
+                command,
+                0,
+                stdout="active123456\nstale1234567\n",
+                stderr="",
+            )
+        if command[:3] == ["docker", "container", "inspect"]:
+            container_id = command[-1]
+            compose_project = (
+                active_project
+                if container_id == "active123456"
+                else stale_retry_project
+            )
+            return subprocess.CompletedProcess(
+                command,
+                0,
+                stdout=json.dumps(
+                    [
+                        {
+                            "Config": {
+                                "Labels": {
+                                    "com.docker.compose.project": compose_project,
+                                },
+                                "Env": [f"FUGUE_RUN_ID={run_id}"],
+                            },
+                            "Mounts": [],
+                        }
+                    ]
+                ),
+                stderr="",
+            )
+        if command[1:3] in (["container", "ls"], ["network", "ls"]):
+            return subprocess.CompletedProcess(command, 0, stdout="", stderr="")
+        raise AssertionError(command)
+
+    monkeypatch.setattr(conformance_module.subprocess, "run", run)
+    cell = SimpleNamespace(
+        id="cell-current",
+        run_id=run_id,
+        attempt_id="a" * 64,
+        config_path=job.config_path,
+    )
+
+    receipt = capture_local_cell_conformance(
+        repo_root=tmp_path,
+        cell=cell,
+        job=job,
+        env={"WANDB_API_KEY": "wandb-secret-value"},
+        pre_execution_inventory=_inventory(),
+        active_sibling_jobs=(active_sibling,),
+    )
+
+    cleanup = receipt["docker_cleanup"]
+    assert receipt["status"] == "failed"
+    assert cleanup["status"] == "failed"
+    assert cleanup["active_sibling_containers"] == [
+        {
+            "attribution": "exact_active_sibling_compose_project_label",
+            "compose_project": active_project,
+            "container_id": "active123456",
+        }
+    ]
+    assert cleanup["matched_containers"] == [
+        {
+            "attribution": "exact_fugue_run_environment",
+            "compose_project": stale_retry_project,
+            "container_id": "stale1234567",
+        }
+    ]
+    assert cleanup["scope"][
+        "temporarily_excluded_active_sibling_compose_projects"
+    ] == [active_project]
 
 
 def test_pre_execution_conformance_defers_result_and_cleanup_evidence(

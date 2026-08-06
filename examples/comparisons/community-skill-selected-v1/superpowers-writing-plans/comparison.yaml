@@ -1,5 +1,5 @@
 schema_version: 3
-id: superpowers-writing-plans-measurement-pilot-v2
+id: superpowers-writing-plans-measurement-pilot-v3
 question: Does exact Superpowers writing-plans revision 8e1262a3 improve public development-task outcomes relative to de4672b1 under fixed conditions?
 taskset:
   tasks: tasks.jsonl
@@ -52,11 +52,11 @@ execution:
     api_base_url: https://api.wandb.ai
     trace_base_url: https://trace.wandb.ai
     app_base_url: https://wandb.ai
-  evidence_project: wandb/fugue-superpowers-writing-plans-measurement-pilot-v2
+  evidence_project: wandb/fugue-superpowers-writing-plans-measurement-pilot-v3
   evidence_destination:
     <<: *public_cloud
-    project: fugue-superpowers-writing-plans-measurement-pilot-v2
-  research_id: fugue-superpowers-writing-plans-measurement-pilot-v2
+    project: fugue-superpowers-writing-plans-measurement-pilot-v3
+  research_id: fugue-superpowers-writing-plans-measurement-pilot-v3
   model: anthropic/claude-sonnet-5
   harnesses: [claude-code]
   attempts: 2
@@ -89,10 +89,10 @@ execution:
     maximum_physical_executions: 17
     maximum_in_flight_cost_usd: 5.2
     coordination:
-      group_id: community-skill-selected-rollover-v1
+      group_id: community-skill-selected-rollover-v2
       worker_limit: 3
-      maximum_physical_executions: 93
-      total_cost_usd: 258.24301870078546
+      maximum_physical_executions: 87
+      total_cost_usd: 249.93342020078546
       maximum_in_flight_cost_usd: 7.8
   trace_content: full
   environment: {type: docker}

@@ -1056,6 +1056,7 @@ def test_staged_controller_runs_192_cells_in_order_and_resumes(  # noqa: PLR0915
     statuses: dict[str, str] = {}
     selected_by_run: dict[str, tuple[str, ...]] = {}
     policy_calls: list[tuple[str, int, int, bool, int | None]] = []
+    host_evaluators: list[bool] = []
     runner_calls: list[str] = []
     interrupted = False
 
@@ -1086,6 +1087,7 @@ def test_staged_controller_runs_192_cells_in_order_and_resumes(  # noqa: PLR0915
             **_kwargs: object,
         ) -> SimpleNamespace:
             nonlocal interrupted
+            host_evaluators.append(callable(_kwargs.get("host_evaluator")))
             selected_by_run[run_id] = tuple(selected_attempt_ids)
             stage = next(
                 key
@@ -1327,6 +1329,7 @@ def test_staged_controller_runs_192_cells_in_order_and_resumes(  # noqa: PLR0915
     assert complete["result_digest"] == "f" * 64
     assert len(runner_calls) == calls_before_host_resume == 192
     assert len(set(runner_calls)) == 192
+    assert host_evaluators and all(host_evaluators)
     assert policy_calls[0][:3] == ("checkpoint", 1, 2)
     assert policy_calls[0][4] == 4
     assert all(
@@ -1365,6 +1368,182 @@ def test_staged_controller_runs_192_cells_in_order_and_resumes(  # noqa: PLR0915
         )
     assert len({str(item["attempt_id"]) for item in all_records}) == 192
     assert max(wave_sizes) <= 4
+
+
+def test_staged_host_evaluator_persists_live_scores_before_prediction_close(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from fugue.bench import comparison as comparison_module
+
+    attempt_id = "a" * 64
+    schedule = ExecutionScheduleV1.create(
+        stages={"checkpoint": (attempt_id,)},
+        stage_cost_usd={"checkpoint": 1.0},
+        worker_limit=1,
+        wave_size=1,
+        maximum_physical_executions=1,
+        infrastructure_retry_limit=0,
+        total_cost_usd=1.0,
+        maximum_in_flight_cost_usd=1.0,
+    )
+    draft = ComparisonPreviewV1(
+        schema_version=3,
+        comparison={"schema_version": 3, "id": "live-staged-scoring"},
+        readiness={"status": "ready"},
+        matrix={"estimated_trials": 1},
+        experiment={},
+        manifest={},
+        execution_schedule=schedule.to_dict(),
+    )
+    preview = replace(
+        draft,
+        preview_digest=_artifact_digest(draft.to_dict(), "preview_digest"),
+    )
+    spec = SimpleNamespace(
+        id="live-staged-scoring",
+        schema_version=3,
+        evaluators=(),
+        decision_policy=None,
+        supersedes=(),
+        execution=SimpleNamespace(
+            reserve_per_attempt_usd=1.0,
+            max_cost_usd=1.0,
+            evidence_project="wandb/live-staged-scoring",
+            source_evidence_project=None,
+            evidence_checkpoint_cells=1,
+            research_id=None,
+        ),
+    )
+    published_rows: list[dict[str, object]] = []
+    finalized_rows: list[dict[str, object]] = []
+
+    class FakeOperatorService:
+        def __init__(self, repo_root: Path, _env_file: Path | None = None) -> None:
+            self.repo_root = repo_root
+            self.env: dict[str, str] = {}
+            self.row: dict[str, object] | None = None
+
+        def run_summary(self, run_id: str) -> SimpleNamespace:
+            if self.row is None:
+                raise FileNotFoundError(run_id)
+            return SimpleNamespace(
+                run_id=run_id,
+                status="passed",
+                evaluation_failures=(),
+            )
+
+        def execute_run(
+            self,
+            _request: object,
+            *,
+            run_id: str,
+            selected_attempt_ids: tuple[str, ...],
+            host_evaluator: object,
+            **_kwargs: object,
+        ) -> SimpleNamespace:
+            assert selected_attempt_ids == (attempt_id,)
+            assert callable(host_evaluator)
+            row: dict[str, object] = {
+                "attempt_id": attempt_id,
+                "trace_project": "wandb/live-staged-scoring",
+                "agent_response": "locked answer",
+            }
+            host_evaluator(row)
+            # This snapshot stands in for the row attached to the still-open
+            # prediction. Scoring must already be present before close/publish.
+            assert row["comparison_scoring_provenance"] == "live_preclose"
+            assert row["comparison_deterministic_scores"] == {
+                "artifact-valid": True
+            }
+            published_rows.append(dict(row))
+            self.row = row
+            return SimpleNamespace(
+                run_id=run_id,
+                status="passed",
+                evaluation_failures=(),
+            )
+
+        def export_run(
+            self, _run_id: str, *, out: Path, **_kwargs: object
+        ) -> SimpleNamespace:
+            assert self.row is not None
+            out.parent.mkdir(parents=True, exist_ok=True)
+            out.write_text(json.dumps(self.row, sort_keys=True) + "\n", encoding="utf-8")
+            return SimpleNamespace(path=out)
+
+    def fake_score(
+        _spec: object,
+        rows: list[dict[str, object]],
+        **_kwargs: object,
+    ) -> list[dict[str, object]]:
+        return [
+            {
+                **rows[0],
+                "comparison_evaluation_status": "scored",
+                "comparison_required_evaluation_complete": True,
+                "comparison_deterministic_scores": {"artifact-valid": True},
+                "comparison_deterministic_criticality": {"artifact-valid": True},
+                "pass": True,
+            }
+        ]
+
+    def fake_finalize(**kwargs: object) -> tuple[object, Path, Path]:
+        finalized_rows.extend(dict(row) for row in kwargs["rows"])  # type: ignore[index]
+        result_path = tmp_path / "result.json"
+        markdown_path = tmp_path / "result.md"
+        result_path.write_text("{}", encoding="utf-8")
+        markdown_path.write_text("complete", encoding="utf-8")
+        return SimpleNamespace(result_digest="f" * 64), result_path, markdown_path
+
+    monkeypatch.setattr(comparison_module, "OperatorService", FakeOperatorService)
+    monkeypatch.setattr(comparison_module, "comparison_from_dict", lambda *_a, **_k: spec)
+    monkeypatch.setattr(comparison_module, "preview_comparison", lambda *_a, **_k: preview)
+    monkeypatch.setattr(
+        comparison_module,
+        "materialize_comparison",
+        lambda *_a, **_k: (object(), SimpleNamespace(approved_comparison={})),
+    )
+    monkeypatch.setattr(comparison_module, "score_comparison_rows", fake_score)
+    monkeypatch.setattr(comparison_module, "_verify_v3_source_drift", lambda *_a, **_k: None)
+    monkeypatch.setattr(comparison_module, "_staged_run_gate", lambda *_a, **_k: ([], []))
+    monkeypatch.setattr(comparison_module, "_apply_harbor_conformance", lambda *_a, **_k: None)
+    monkeypatch.setattr(comparison_module, "_validate_staged_rows", lambda *_a, **_k: None)
+    monkeypatch.setattr(comparison_module, "_finalize_staged_comparison", fake_finalize)
+    monkeypatch.setattr(
+        comparison_module,
+        "trace_project_slug",
+        lambda _env: "wandb/live-staged-scoring",
+    )
+    monkeypatch.setattr(
+        comparison_module,
+        "_comparison_evidence_environment",
+        lambda *_a, **_k: {},
+    )
+
+    subset = comparison_stage_receipt(preview, "checkpoint")
+    approval = ApprovalLedger(StudyStore(tmp_path).path).approve(
+        subject_kind="experiment",
+        preview_digest=subset.subset_digest,
+        maximum_cost_usd=subset.maximum_cost_usd,
+        maximum_cells=subset.maximum_cells,
+        approved_by="staged-live-scoring-test",
+        operation_id="approve-staged-live-scoring-test",
+    )
+    status = execute_comparison_stage(
+        preview,
+        stage_id="checkpoint",
+        approval_digest=approval.approval_digest,
+        repo_root=tmp_path,
+        fetch_weave=False,
+        publish_research=False,
+    )
+
+    assert status["status"] == "complete"
+    assert published_rows == finalized_rows
+    assert finalized_rows[0]["comparison_scoring_provenance"] == "live_preclose"
+    assert finalized_rows[0]["comparison_deterministic_scores"] == {
+        "artifact-valid": True
+    }
 
 
 @pytest.mark.parametrize(

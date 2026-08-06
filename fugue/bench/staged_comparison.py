@@ -8,6 +8,7 @@ resolved lazily at execution time to avoid a second comparison path.
 
 from __future__ import annotations
 
+import threading
 from collections.abc import Mapping, Sequence
 from functools import partial
 from pathlib import Path
@@ -1015,6 +1016,27 @@ def execute_comparison_stage(  # noqa: C901 - durable stage transaction
             ),
         )
     reserve = schedule.per_execution_cost_usd["total"]
+    evaluation_lock = threading.Lock()
+    evaluated_cells = 0
+
+    def evaluate_attempt(row: dict[str, Any]) -> None:
+        nonlocal evaluated_cells
+        # The live coordinator may close concurrent cells together. Serialize
+        # host scoring so checkpoint indices and judge reservations remain
+        # deterministic while Agent execution itself stays parallel.
+        with evaluation_lock:
+            scored = comparison._score_comparison_attempt(
+                spec,
+                row,
+                repo_root=repo_root,
+                env=service.env,
+                approved_comparison=request.approved_comparison,
+                provenance="live_preclose",
+                checkpoint_index=evaluated_cells,
+            )
+            row.update(scored)
+            evaluated_cells += 1
+
     existing_run = None
     try:
         existing_run = service.run_summary(child_run_id)
@@ -1044,6 +1066,7 @@ def execute_comparison_stage(  # noqa: C901 - durable stage transaction
             budget_ledger=budget,
             coordination_budget_ledger=coordination_budget,
             reserved_cost_per_execution_usd=reserve,
+            host_evaluator=evaluate_attempt,
             host_scorer_names=comparison._comparison_scorer_names(spec),
             execution_worker_limit=int(admission["worker_limit"]),
             execution_wave_size=int(admission["wave_size"]),

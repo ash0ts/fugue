@@ -32,6 +32,7 @@ from fugue.bench.comparison import (
     _paired_attempt_view_v3,
     _require_checkpoint_judges,
     _sanitized_answer_excerpt,
+    _score_comparison_attempt,
     _unexpected_preparation_blockers,
     analyze_comparison_rows,
     check_comparison,
@@ -2325,6 +2326,45 @@ def test_comparison_scoring_prefers_locked_answer_artifact(
     assert _comparison_trial_output({"agent_response": "terminal answer"}) == (
         "terminal answer"
     )
+
+    relative = trial_dir.relative_to(tmp_path)
+    assert (
+        _comparison_trial_output(
+            {
+                "trial_dir": relative.as_posix(),
+                "agent_response": "The answer was written to the artifact.",
+            },
+            repo_root=tmp_path,
+        )
+        == '{"answer": 42}'
+    )
+
+
+def test_host_recovery_scores_the_locked_relative_answer_without_persisting_alias(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    answer = tmp_path / "trial/artifacts/fugue-answer.md"
+    answer.parent.mkdir(parents=True)
+    answer.write_text("locked answer", encoding="utf-8")
+    observed: list[object] = []
+
+    def score(_spec: object, rows: list[dict[str, object]], **_kwargs: object):
+        observed.append(rows[0]["final_output"])
+        return [{**rows[0], "comparison_evaluation_status": "scored"}]
+
+    monkeypatch.setattr("fugue.bench.comparison.score_comparison_rows", score)
+    scored = _score_comparison_attempt(
+        object(),  # type: ignore[arg-type]
+        {"trial_dir": "trial", "agent_response": "fallback"},
+        repo_root=tmp_path,
+        env=None,
+        approved_comparison={},
+        provenance="host_only_recovery",
+    )
+
+    assert observed == ["locked answer"]
+    assert "final_output" not in scored
+    assert scored["comparison_scoring_provenance"] == "host_only_recovery"
 
 
 def test_source_use_demo_uses_packaged_assets_outside_checkout(
