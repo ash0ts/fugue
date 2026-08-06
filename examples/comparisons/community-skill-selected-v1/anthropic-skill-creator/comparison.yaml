@@ -95,10 +95,10 @@ execution:
     maximum_physical_executions: 17
     maximum_in_flight_cost_usd: 5.2
     coordination:
-      group_id: community-skill-selected-v1
+      group_id: community-skill-selected-rollover-v1
       worker_limit: 3
-      maximum_physical_executions: 100
-      total_cost_usd: 270
+      maximum_physical_executions: 93
+      total_cost_usd: 258.24301870078546
       maximum_in_flight_cost_usd: 7.8
   trace_content: full
   environment: {type: docker}

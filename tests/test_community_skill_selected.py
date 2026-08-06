@@ -127,10 +127,10 @@ def test_specs_bind_exact_revisions_and_only_public_development_tasks() -> None:
         }
         assert spec.candidate.agent_kwargs == spec.baseline.agent_kwargs
         assert spec.execution.schedule["coordination"] == {
-            "group_id": "community-skill-selected-v1",
+            "group_id": "community-skill-selected-rollover-v1",
             "worker_limit": 3,
-            "maximum_physical_executions": 100,
-            "total_cost_usd": 270,
+            "maximum_physical_executions": 93,
+            "total_cost_usd": 258.24301870078546,
             "maximum_in_flight_cost_usd": 7.8,
         }
         assert spec.execution.schedule["stages"][0]["trial_indexes"] == [0]
