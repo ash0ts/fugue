@@ -1079,7 +1079,20 @@ done
                 }
             )
             return
-        command = skill_registration_probe_command(directory, assigned)
+        provenance = _json_env("FUGUE_SKILL_PROVENANCE")
+        registration_names = {
+            str(item.get("id") or ""): str(item.get("declared_name") or "")
+            for item in provenance
+            if isinstance(provenance, list)
+            and isinstance(item, dict)
+            and str(item.get("id") or "") in assigned
+            and str(item.get("declared_name") or "")
+        }
+        command = skill_registration_probe_command(
+            directory,
+            assigned,
+            registration_names,
+        )
         result = await self.exec_as_agent(
             environment,
             command=command,
@@ -1094,6 +1107,7 @@ done
             "status": "registered" if result.return_code == 0 else "failed",
             "skills_assigned": assigned,
             "skills_registered": payload.get("skills_registered", []),
+            "registered_skill_names": payload.get("registered_skill_names", []),
             "registration_digest": payload.get("registration_digest"),
             "directory": payload.get("directory", directory),
         }

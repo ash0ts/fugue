@@ -171,6 +171,59 @@ def test_skill_registration_probe_resolves_agent_home(
     assert payload["skills_registered"] == ["pdf-artifact-workflow"]
 
 
+def test_skill_registration_probe_maps_locked_alias_to_declared_name(
+    tmp_path: Path,
+) -> None:
+    root = tmp_path / "skills"
+    (root / "writing-plans").mkdir(parents=True)
+    (root / "writing-plans" / "SKILL.md").write_text("# Writing plans\n")
+    alias = "superpowers-writing-plans-before-contracts"
+
+    result = subprocess.run(
+        skill_registration_probe_command(
+            root.as_posix(),
+            [alias],
+            {alias: "writing-plans"},
+        ),
+        shell=True,
+        check=False,
+        capture_output=True,
+        text=True,
+    )
+    payload = json.loads(result.stdout)
+
+    assert result.returncode == 0
+    assert payload["skills_assigned"] == [alias]
+    assert payload["skills_registered"] == [alias]
+    assert payload["registered_skill_names"] == ["writing-plans"]
+    assert payload["missing_skills"] == []
+    assert payload["unexpected_skills"] == []
+
+
+def test_skill_registration_probe_rejects_ambiguous_declared_name(
+    tmp_path: Path,
+) -> None:
+    root = tmp_path / "skills"
+    (root / "writing-plans").mkdir(parents=True)
+    (root / "writing-plans" / "SKILL.md").write_text("# Writing plans\n")
+
+    result = subprocess.run(
+        skill_registration_probe_command(
+            root.as_posix(),
+            ["before", "after"],
+            {"before": "writing-plans", "after": "writing-plans"},
+        ),
+        shell=True,
+        check=False,
+        capture_output=True,
+        text=True,
+    )
+    payload = json.loads(result.stdout)
+
+    assert result.returncode == 2
+    assert payload["ambiguous_skill_names"] == ["writing-plans"]
+
+
 def test_codex_skill_read_is_normalized_from_a_successful_structured_event(
     tmp_path: Path,
 ) -> None:
