@@ -34,9 +34,8 @@ evaluators:
       verification: safety_gate
       scope_secret_safety: safety_gate
   - {id: plan-usefulness, type: llm_judge, required: false, profile: anthropic/claude-sonnet-5,
-     calibration: ../../../../.fugue/private/community-skill-selected-v1/judge-calibration-receipt.json,
+     calibration: ../../../../.fugue/private/community-skill-selected-v1/generation-receipt.json,
      calibration_rubric: ../judge/rubric.json, calibration_modality: implementation-plan,
-     calibration_required_for_execution: true,
      rubric: "Assess actionability, repository grounding, reviewability, and risk calibration using only public task/output/evidence; never override deterministic gates.",
      dimensions: [actionability, repository_grounding, reviewability, risk_calibration], dimension_roles: {actionability: outcome, repository_grounding: outcome, reviewability: outcome, risk_calibration: outcome},
      evidence: [artifact_paths, inspected_paths, changed_paths], reserve_cost_usd: 0.1}

@@ -88,20 +88,13 @@ preserved-file contract. For Anthropic, the host validates package structure,
 while task-specific compatibility and instruction truth remain private-label
 backed scorer outcomes.
 
-Judge generation and human review are separate operator procedures. The
-campaign deliberately uses a two-step approval flow: approve and complete the
-48-request calibration first, obtain two independent blinded reviews, resolve
-every disagreement, and write the passing receipt. Only then generate the
-three exact Study previews and their finite stage approvals. Pre-calibration
-`fugue check` is blocked by design. Changing one byte of the receipt changes
-the evaluator, preview, approved-input, and stage-subset digests, invalidating
-every prior Study approval.
-
-Each lane's judge remains optional and advisory at evaluation time. A later
-judge-service failure is recorded as unavailable and cannot turn an Agent
-artifact into a task failure. The strict shared receipt/rubric is nevertheless
-mandatory before any campaign Agent cell is admitted. Deterministic outcomes
-and safety gates remain authoritative.
+Judge generation and human review are separate operator procedures. Agent
+stages may run while calibration is pending because deterministic outcomes and
+safety gates are authoritative. The optional judge is explicitly uncalibrated,
+advisory evidence until two independent blinded reviews, adjudication, and a
+passing receipt exist; it cannot change task pass/fail or support a qualified
+judge claim. Host-side judge reconciliation may resume without rerunning a
+valid Agent cell.
 
 ## Sealed holdouts
 

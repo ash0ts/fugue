@@ -38,9 +38,8 @@ evaluators:
       verification_passed: outcome
       scope_safety: safety_gate
   - {id: code-change-usefulness, type: llm_judge, required: false, profile: anthropic/claude-sonnet-5,
-     calibration: ../../../../.fugue/private/community-skill-selected-v1/judge-calibration-receipt.json,
+     calibration: ../../../../.fugue/private/community-skill-selected-v1/generation-receipt.json,
      calibration_rubric: ../judge/rubric.json, calibration_modality: code-change,
-     calibration_required_for_execution: true,
      rubric: "Assess reviewability, evidence use, bounded scope, and risk communication using only public task/output/evidence; never override deterministic gates.",
      dimensions: [reviewability, evidence_use, bounded_scope, risk_communication], dimension_roles: {reviewability: outcome, evidence_use: outcome, bounded_scope: outcome, risk_communication: outcome},
      evidence: [artifact_paths, inspected_paths, changed_paths], reserve_cost_usd: 0.1}

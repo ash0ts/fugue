@@ -54,8 +54,8 @@
     "minimum_tpr_tnr": 0.85,
     "critical_false_passes_max": 0,
     "generation": "external_operator_procedure",
-    "study_evaluator_binding": "optional advisory evaluator whose strict shared receipt, exact rubric artifact, lane modality, and profile are mandatory execution prerequisites",
-    "approval_order": "Generate and approve the calibration preview first. After 48 model outputs, two independent blinded human reviews, adjudication, and a passing final receipt, generate new exact Study previews and stage approvals."
+    "study_evaluator_binding": "optional advisory evaluator, uncalibrated while human review is pending; deterministic outcomes and safety gates remain authoritative",
+    "approval_order": "Agent stages may run under exact approvals while human calibration review is pending. Judge-qualified claims require two independent blinded reviews, adjudication, and a passing final receipt."
   },
   "lanes": [
     {

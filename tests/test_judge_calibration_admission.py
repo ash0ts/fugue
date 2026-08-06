@@ -180,7 +180,7 @@ def test_execution_calibration_rejects_legacy_and_per_modality_failure(
         _require_execution_judge_calibrations(_spec(judge), repo_root=tmp_path)
 
 
-def test_campaign_judges_are_advisory_but_calibration_gates_execution() -> None:
+def test_campaign_judges_are_advisory_while_human_calibration_is_pending() -> None:
     for lane in (
         "superpowers-writing-plans",
         "anthropic-skill-creator",
@@ -189,7 +189,7 @@ def test_campaign_judges_are_advisory_but_calibration_gates_execution() -> None:
         spec = load_comparison(EXAMPLE / lane / "comparison.yaml", repo_root=Path.cwd())
         judge = next(item for item in spec.evaluators if item.type == "llm_judge")
         assert judge.required is False
-        assert judge.calibration_required_for_execution is True
+        assert judge.calibration_required_for_execution is False
 
 
 def test_execution_calibration_flag_is_strictly_typed_and_judge_only() -> None:

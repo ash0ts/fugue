@@ -159,7 +159,9 @@ def test_specs_bind_exact_revisions_and_only_public_development_tasks() -> None:
         judge = next(
             evaluator for evaluator in spec.evaluators if evaluator.type == "llm_judge"
         )
-        assert judge.calibration == campaign["judge"]["receipt"]
+        assert judge.calibration == ".fugue/private/community-skill-selected-v1/generation-receipt.json"
+        assert judge.calibration_required_for_execution is False
+        assert campaign["judge"]["role"] == "advisory"
         if lane in {
             "anthropic-skill-creator",
             "vercel-react-best-practices",
