@@ -31,6 +31,7 @@ from fugue.bench.comparison import (
     _paired_attempt_view_v3,
     _require_checkpoint_judges,
     _sanitized_answer_excerpt,
+    _unexpected_preparation_blockers,
     analyze_comparison_rows,
     check_comparison,
     claim_comparison_approval,
@@ -3556,6 +3557,27 @@ def test_local_comparison_requires_exact_preparation_receipt(
         "comparison preparation is missing or drifted" in blocker
         for blocker in readiness.blockers
     )
+
+
+def test_preparation_allows_only_runtime_error_for_a_missing_task_image() -> None:
+    common = [
+        "local task:task-a:amd64 is not prepared and locked",
+        "task-a: evaluator qualification failed: RuntimeError",
+        "comparison preparation is missing or drifted; run prepare",
+    ]
+
+    assert _unexpected_preparation_blockers(
+        common,
+        allow_missing_public_source=False,
+    ) == []
+    assert _unexpected_preparation_blockers(
+        [*common, "task-b: evaluator qualification failed: RuntimeError"],
+        allow_missing_public_source=False,
+    ) == ["task-b: evaluator qualification failed: RuntimeError"]
+    assert _unexpected_preparation_blockers(
+        [*common, "task-a: evaluator qualification failed: ValueError"],
+        allow_missing_public_source=False,
+    ) == ["task-a: evaluator qualification failed: ValueError"]
 
 
 def test_prepare_then_preview_is_stable_and_runtime_drift_invalidates_it(

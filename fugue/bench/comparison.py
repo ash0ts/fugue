@@ -3572,16 +3572,10 @@ def prepare_comparison(
         repo_root=repo_root,
         operator=service,
     )
-    prepublication_unexpected = [
-        str(item)
-        for item in prepublication.readiness.get("blockers") or ()
-        if not str(item).startswith("public task source is not published and locked")
-        and not str(item).startswith("local agent:")
-        and not str(item).startswith("local task:")
-        and not str(item).startswith(
-            "comparison preparation is missing or drifted"
-        )
-    ]
+    prepublication_unexpected = _unexpected_preparation_blockers(
+        prepublication.readiness.get("blockers") or (),
+        allow_missing_public_source=True,
+    )
     if prepublication_unexpected:
         raise ValueError(
             "comparison has non-preparation blockers:\n- "
@@ -3609,13 +3603,10 @@ def prepare_comparison(
         repo_root=repo_root,
         operator=service,
     )
-    unexpected_blockers = [
-        str(item)
-        for item in provisional.readiness.get("blockers") or ()
-        if not str(item).startswith("local agent:")
-        and not str(item).startswith("local task:")
-        and not str(item).startswith("comparison preparation is missing or drifted")
-    ]
+    unexpected_blockers = _unexpected_preparation_blockers(
+        provisional.readiness.get("blockers") or (),
+        allow_missing_public_source=False,
+    )
     if unexpected_blockers:
         raise ValueError(
             "comparison has non-preparation blockers:\n- "
@@ -3709,6 +3700,40 @@ def prepare_comparison(
         raise RuntimeError("comparison preview changed while freezing prepared inputs")
     atomic_write_json(runtime_root / "prepared-preview.json", stable_preview.to_dict())
     return receipt, stable_preview, receipt_path
+
+
+def _unexpected_preparation_blockers(
+    blockers: Sequence[Any],
+    *,
+    allow_missing_public_source: bool,
+) -> list[str]:
+    """Keep genuine scorer failures while allowing a missing local image build."""
+
+    values = [str(item) for item in blockers]
+    missing_task_images = {
+        value.split(":", maxsplit=2)[1]
+        for value in values
+        if value.startswith("local task:") and value.count(":") >= 2
+    }
+    unexpected: list[str] = []
+    for value in values:
+        if value.startswith(("local agent:", "local task:")) or value.startswith(
+            "comparison preparation is missing or drifted"
+        ):
+            continue
+        if allow_missing_public_source and value.startswith(
+            "public task source is not published and locked"
+        ):
+            continue
+        task_id, separator, detail = value.partition(": ")
+        if (
+            separator
+            and task_id in missing_task_images
+            and detail == "evaluator qualification failed: RuntimeError"
+        ):
+            continue
+        unexpected.append(value)
+    return unexpected
 
 
 def materialize_comparison(
