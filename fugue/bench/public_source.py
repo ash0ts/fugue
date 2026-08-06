@@ -382,13 +382,17 @@ class WandbPublicTaskSourceRemote:
                     waited = artifact.wait()
                     if waited is not None:
                         artifact = waited
+            version = str(getattr(artifact, "version", "") or "")
+            if not re.fullmatch(r"v[0-9]+", version):
+                raise PublicTaskSourceError("W&B did not return an immutable artifact version")
+            artifact_ref = (
+                f"wandb-artifact://{destination.project_slug}/{artifact_name}:{version}"
+            )
             response = {
                 "publication_run_id": str(run.id),
-                "source_object": _wandb_source_object(
-                    artifact,
-                    destination=destination,
-                    artifact_name=artifact_name,
-                ).to_dict(),
+                "source_object": dict(self.resolve(
+                    artifact_ref=artifact_ref, destination=destination,
+                )),
             }
             run.summary.update(
                 {

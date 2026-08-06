@@ -165,8 +165,10 @@ class _FakeArtifact:
         assert mode == "w"
         return io.StringIO()
 
-    def wait(self) -> None:
-        return None
+    def wait(self) -> Any:
+        # The SDK's logged-artifact handle may not carry the canonical
+        # qualified name even after wait; publication must resolve the exact vN.
+        return SimpleNamespace(version=self.version)
 
 
 class _FakeApi:
