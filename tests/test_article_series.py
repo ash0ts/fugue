@@ -69,13 +69,42 @@ def test_every_article_is_standalone_and_content_locked() -> None:
 
 
 def test_research_articles_are_unaccepted_draft_preregistrations() -> None:
-    research = {"fugue-2a", "fugue-2b", "fugue-3", "fugue-4b"}
+    research = {"fugue-2a", "fugue-2b", "fugue-4b"}
     for entry in MANIFEST["entries"]:
         if entry["id"] in research:
             assert entry["evidence_state"] == "draft_preregistration"
+        if entry["id"] == "fugue-3":
+            assert entry["evidence_state"] == "reviewed_result"
         assert entry["accepted_digest"] is None
         assert entry["accepted_at"] is None
         assert entry["preview_digest"] is None
+
+
+def test_result_codas_are_packaged_and_digest_locked() -> None:
+    by_id = {entry["id"]: entry for entry in MANIFEST["entries"]}
+    assert {
+        entry_id: len(by_id[entry_id]["results_appendices"])
+        for entry_id in ("fugue-3", "fugue-4b")
+    } == {"fugue-3": 1, "fugue-4b": 1}
+
+    for entry_id in ("fugue-3", "fugue-4b"):
+        entry = by_id[entry_id]
+        package = SERIES_ROOT / entry["slug"]
+        appendix = entry["results_appendices"][0]
+        result = package / appendix["result"]
+        assert appendix["result_digest"] == (
+            f"sha256:{hashlib.sha256(result.read_bytes()).hexdigest()}"
+        )
+        film = appendix["film"]
+        receipt = json.loads((package / film["receipt"]).read_text())
+        assert receipt["video"]["frames"] == 720
+        assert receipt["video"]["duration"] == film["duration_seconds"] == 48
+        assert receipt["video"]["audio"] is False
+        assert set(receipt["checkpoint_frame_digests"]) == set(
+            film["checkpoints"]
+        )
+        for key in ("html", "mp4", "poster", "transcript"):
+            assert (package / film[key]).is_file()
 
 
 def test_every_article_has_a_local_deterministic_film_package() -> None:

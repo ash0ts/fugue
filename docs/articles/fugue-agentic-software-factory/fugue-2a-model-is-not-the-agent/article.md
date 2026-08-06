@@ -513,10 +513,21 @@ not predict these candidates, tasks, or runtime. Historical Fugue smoke runs
 show that harness cells can reach terminal evidence; they are not results for
 this dedicated canary.
 
-## Results appendix — intentionally empty
+## Readiness appendix — still unrun
 
-No results are recorded here. A future section named `Update YYYY-MM-DD:
-Results` must include:
+No result is recorded for the new eight-cell harness Study. Current `main`
+contains its dedicated experiment, project, task lane, deterministic
+preflight, and no-spend preparation checks, but no approved run ID or
+behavioral rows. That is runtime readiness, not a harness result.
+
+Two older records remain useful but separate: Kimi K2.7 Code resolved 8/32
+cells in its four-harness baseline, and the Opus 4.8 routing canary resolved
+3/4. They qualify their exact historical candidates and denominators; neither
+is evidence for the unrun two-task GLM-5.2 canary. The reviewed
+[Atlas inventory](https://ash0ts.github.io/fugue/inventory.html) preserves
+that separation.
+
+A future section named `Update YYYY-MM-DD: Results` must include:
 
 ```text
 source commit/tree:

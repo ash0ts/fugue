@@ -1,0 +1,155 @@
+schema_version: 1
+entries:
+  - id: historical-skill-canary-011
+    label: 0.1.1 Skill canary
+    category: historical
+    lifecycle_state: complete
+    publication_level: inventory_only
+    run_ids: [20260715T104414-5303745cbc]
+    study_ids: []
+    source_reference: https://github.com/ash0ts/fugue/blob/a358999a31e5f93300ba7b4aec495f6411deacb9/docs/releases/0.1.1.md
+    claim_boundary: Historical release evidence records 8/8 completed cells; no reviewed public task rows are published in the Atlas.
+  - id: historical-memory-canary-011
+    label: 0.1.1 memory canary
+    category: historical
+    lifecycle_state: complete
+    publication_level: inventory_only
+    run_ids: [20260715T111045-a01b23ef65]
+    study_ids: []
+    source_reference: https://github.com/ash0ts/fugue/blob/a358999a31e5f93300ba7b4aec495f6411deacb9/docs/releases/0.1.1.md
+    claim_boundary: Historical release evidence records 8/8 completed cells; it is not a result for the new planned memory study.
+  - id: historical-agent-link-canary-011
+    label: 0.1.1 Agent-link canary
+    category: historical
+    lifecycle_state: complete
+    publication_level: inventory_only
+    run_ids: [20260715T121732-7e631821f9]
+    study_ids: []
+    source_reference: https://github.com/ash0ts/fugue/blob/a358999a31e5f93300ba7b4aec495f6411deacb9/docs/releases/0.1.1.md
+    claim_boundary: Historical release evidence verifies 2/2 links; it is an evidence-plumbing result, not an Agent-quality result.
+  - id: historical-memory-matrix-011
+    label: 0.1.1 memory matrix
+    category: historical
+    lifecycle_state: partial
+    publication_level: inventory_only
+    run_ids: [20260715T122152-d560d559e8]
+    study_ids: []
+    source_reference: https://github.com/ash0ts/fugue/blob/a358999a31e5f93300ba7b4aec495f6411deacb9/docs/releases/0.1.1.md
+    claim_boundary: The historical matrix was 63/64 initially with 48/48 Agent predictions linked; duplicate-attempt caveats prevent promotion to a current memory claim.
+  - id: historical-mem0-remediation-011
+    label: 0.1.1 Mem0 remediation
+    category: historical
+    lifecycle_state: complete
+    publication_level: inventory_only
+    run_ids: [20260715T131242-18f1f066af]
+    study_ids: []
+    source_reference: https://github.com/ash0ts/fugue/blob/a358999a31e5f93300ba7b4aec495f6411deacb9/docs/releases/0.1.1.md
+    claim_boundary: This run completed a missing coordinate; it does not independently establish memory lift.
+  - id: historical-pdf-skill-ab-011
+    label: 0.1.1 PDF Skill A/B
+    category: historical
+    lifecycle_state: complete
+    publication_level: inventory_only
+    run_ids: [20260715T132650-f360b63908]
+    study_ids: []
+    source_reference: https://github.com/ash0ts/fugue/blob/a358999a31e5f93300ba7b4aec495f6411deacb9/docs/releases/0.1.1.md
+    claim_boundary: Historical evidence records 24/24 operational cells and 15/24 deterministic passes without a reviewed public row export.
+  - id: glm-memory-pilot
+    label: Cancelled GLM-5.2 memory pilot
+    category: cancelled_partial
+    lifecycle_state: cancelled
+    publication_level: summary
+    run_ids: [20260716T230402-2af3e4e7cd]
+    study_ids: [glm-memory-pilot]
+    source_reference: https://github.com/ash0ts/fugue/blob/a358999a31e5f93300ba7b4aec495f6411deacb9/atlas/editorial/glm-memory-pilot.yaml
+    claim_boundary: The cancelled pilot is useful as failure and lifecycle evidence; it supports no memory-effect estimate.
+  - id: kimi-k2-7-code-baseline
+    label: Kimi K2.7 Code × harness baseline
+    category: result
+    lifecycle_state: complete
+    publication_level: full
+    run_ids: [20260717T074244-1f613bd948]
+    study_ids: [kimi-k2-7-code-baseline]
+    source_reference: https://github.com/ash0ts/fugue/blob/a358999a31e5f93300ba7b4aec495f6411deacb9/atlas/editorial/kimi-k2-7-code-baseline.yaml
+    claim_boundary: The detailed record supports 8/32 resolutions for this fixed model, taskset, and four-harness cohort only.
+  - id: opus-4-8-routing-canary
+    label: Claude Opus 4.8 routing canary
+    category: contract
+    lifecycle_state: complete
+    publication_level: full
+    run_ids: [20260717T092057-3b6f0eba4d]
+    study_ids: [opus-4-8-contract]
+    source_reference: https://github.com/ash0ts/fugue/blob/a358999a31e5f93300ba7b4aec495f6411deacb9/atlas/editorial/opus-4-8-contract.yaml
+    claim_boundary: The 3/4 canary qualifies a direct-route contract on one task; it is not a universal model or harness ranking.
+  - id: frontier-harness-campaign
+    label: Frontier model × harness campaign
+    category: cancelled_partial
+    lifecycle_state: partial
+    publication_level: summary
+    run_ids: []
+    study_ids: [frontier-swe-v1]
+    source_reference: https://github.com/ash0ts/fugue/blob/a358999a31e5f93300ba7b4aec495f6411deacb9/atlas/editorial/frontier-swe-v1.yaml
+    claim_boundary: The campaign remains partial and unranked; completed Kimi and Opus cohorts have separate bounded records.
+  - id: action-gate-72-cell-campaign
+    label: Prompt-injection action-gate campaign
+    category: result
+    lifecycle_state: complete
+    publication_level: inventory_only
+    run_ids: [20260721T165054-b3901c8ced]
+    study_ids: []
+    source_reference: https://github.com/ash0ts/fugue/blob/a358999a31e5f93300ba7b4aec495f6411deacb9/examples/research/prompt-injection-action-gate/README.md
+    claim_boundary: The public README supports aggregate safety, telemetry, and sensitivity findings across 72 cells; private task truth is not exposed as Atlas rows.
+  - id: support-data-authority-v1-canary
+    label: Six-cell 0.1.2 support qualification
+    category: result
+    lifecycle_state: complete
+    publication_level: full
+    run_ids: [20260723T153449-dd8eaaee65]
+    study_ids: [support-data-authority-v1-canary]
+    source_reference: https://github.com/ash0ts/fugue/blob/a358999a31e5f93300ba7b4aec495f6411deacb9/configs/fugue/public-exports/b1baf2a99e596b78d3465718656cf29aa8499f71185e1f36d9871e54e5b54c98.json
+    claim_boundary: The checked public export supports the six task-level safe-and-useful outcomes; the one-task canary is not a general safety claim.
+  - id: mcp-v9-cancelled
+    label: MCP V9 cancelled run
+    category: cancelled_partial
+    lifecycle_state: cancelled
+    publication_level: inventory_only
+    run_ids: [20260731T055251-1e8d9fff4b]
+    study_ids: []
+    source_reference: https://github.com/ash0ts/fugue/blob/a358999a31e5f93300ba7b4aec495f6411deacb9/examples/comparisons/wandb-mcp-maintenance/tool-surface-confirmation-local-v10.yaml
+    claim_boundary: V9 was cancelled after a transient Weave failure and supplies no behavioral result.
+  - id: mcp-main-vs-0-4-v10
+    label: MCP main versus 0.4 V10
+    category: result
+    lifecycle_state: complete
+    publication_level: summary
+    run_ids: [20260731T063856-2fe747cab6]
+    study_ids: [mcp-main-vs-0-4-v10]
+    source_reference: https://github.com/ash0ts/fugue/blob/a358999a31e5f93300ba7b4aec495f6411deacb9/examples/comparisons/wandb-mcp-maintenance/README.md
+    claim_boundary: The reviewed aggregate and exact result digest support REGRESSED and HOLD; task rows are not reconstructed without the authoritative V3 artifact.
+  - id: planned-skill-mcp-loop
+    label: Skill × MCP repair loop
+    category: planned
+    lifecycle_state: planned_unrun
+    publication_level: planned
+    run_ids: []
+    study_ids: [claude-loop-skill-mcp-v1]
+    source_reference: https://github.com/ash0ts/fugue/blob/a358999a31e5f93300ba7b4aec495f6411deacb9/examples/loop-engineering/wandb-evidence-loop/README.md
+    claim_boundary: Failure locking and preparation are complete; no intervention cells or behavioral result exist.
+  - id: planned-real-harness-study
+    label: Real harness behavior canary
+    category: planned
+    lifecycle_state: planned_unrun
+    publication_level: planned
+    run_ids: []
+    study_ids: [real-harness-study-v1]
+    source_reference: https://github.com/ash0ts/fugue/blob/a358999a31e5f93300ba7b4aec495f6411deacb9/configs/fugue/experiments/real-harness-study.yaml
+    claim_boundary: Offline preparation and preflight are complete; no eight-cell behavioral result or harness ranking exists.
+  - id: planned-real-memory-study
+    label: Real memory behavior canary
+    category: planned
+    lifecycle_state: planned_unrun
+    publication_level: planned
+    run_ids: []
+    study_ids: [real-memory-study-v1]
+    source_reference: https://github.com/ash0ts/fugue/blob/a358999a31e5f93300ba7b4aec495f6411deacb9/configs/fugue/experiments/real-memory-study.yaml
+    claim_boundary: Offline preparation and preflight are complete; no eight-cell memory result or memory-lift claim exists.

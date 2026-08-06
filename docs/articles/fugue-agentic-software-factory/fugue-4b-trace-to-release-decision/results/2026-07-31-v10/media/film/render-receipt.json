@@ -1,0 +1,29 @@
+{
+  "schema_version": 1,
+  "slug": "fugue-4b-v10-diagnosis-coda",
+  "html_digest": "sha256:da7d2a641f82589c31d53c79808dc8c3e596bc3a3c963f1c8c26757559189dcf",
+  "mp4_digest": "sha256:8f7c736098b7fbe76b48de879fae104e7002567ede0ddb2a542ccbb3e761435a",
+  "poster_digest": "sha256:e56dac4cb0eb20ac691f657481fda442f73bb84d7874413bc75b43189e9abdcc",
+  "contact_sheet_digest": "sha256:48068cd64ed9ca9af15290aa29997aa2464269c67fd6b5d275a4a9c3dca94f6a",
+  "deterministic_poster_digest": "sha256:e56dac4cb0eb20ac691f657481fda442f73bb84d7874413bc75b43189e9abdcc",
+  "checkpoint_frame_digests": {
+    "observed-failure": "sha256:a48e85b7bae03b179230230f6618c9531166d0e1a62673bb65c2aafa2421ec66",
+    "reviewed-lock": "sha256:ceaef069bfe47f7b1534b42d384fe75c783746631bd1b922c19745446f0ad474",
+    "authority-boundary": "sha256:d923dc8ae1a4741ede5731b2f4f1abcc2a56dedfb1ec446e12d7d17a1591bdb0",
+    "unrun-repair": "sha256:e56dac4cb0eb20ac691f657481fda442f73bb84d7874413bc75b43189e9abdcc"
+  },
+  "responsive": [640, 360],
+  "reduced_motion": {"time": 39, "label": "Play animation"},
+  "video": {
+    "codec_name": "h264",
+    "profile": "High",
+    "width": 1280,
+    "height": 720,
+    "pix_fmt": "yuv420p",
+    "color_range": "tv",
+    "r_frame_rate": "15/1",
+    "frames": 720,
+    "duration": 48,
+    "audio": false
+  }
+}

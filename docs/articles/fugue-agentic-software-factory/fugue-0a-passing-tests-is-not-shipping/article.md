@@ -327,6 +327,27 @@ the required behavior. A branch is not dead because it is old. It is dead
 because its required behavior has a verified successor or has been explicitly
 abandoned.
 
+### Current-main implementation update — 2026-08-06
+
+The implementation sequence described here is no longer a draft stack. Fugue
+merged the generic evaluation-provider contract, V3 evidence and analysis,
+source-isolated MCP qualification, dedicated loop/harness/memory studies,
+dead-code cleanup, judge qualification, and trace-demo readiness in PRs
+[#48](https://github.com/ash0ts/fugue/pull/48),
+[#49](https://github.com/ash0ts/fugue/pull/49),
+[#50](https://github.com/ash0ts/fugue/pull/50),
+[#51](https://github.com/ash0ts/fugue/pull/51),
+[#52](https://github.com/ash0ts/fugue/pull/52),
+[#54](https://github.com/ash0ts/fugue/pull/54), and
+[#55](https://github.com/ash0ts/fugue/pull/55). The missing #53 is not a hidden
+layer.
+
+That history is implementation evidence: reviewable contracts, tests, and
+cleanup landed on `main`. It is not behavioral qualification. MCP V10 later
+produced a real `REGRESSED`/`HOLD` result, while the new harness, memory, and
+repair-loop lanes remain unrun. Passing the repository gates made those
+questions runnable; it did not answer them.
+
 ## Try this in 15 minutes
 
 Pick one recently merged patch. Fill three columns: behavior added,

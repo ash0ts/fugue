@@ -38,35 +38,19 @@
     {
       "id": "public-stack",
       "scene": "public-stack",
-      "claim": "Four public heads record distinct integration layers.",
+      "claim": "Seven merged PRs record the current integration layers.",
       "support": [
-        "#42 cleanup; #43 control; #44 qualification; #45 Serverless.",
-        "The stack is process evidence, not evaluator validation."
+        "#48–#52, #54, and #55 are now on main.",
+        "Merge state is process evidence, not evaluator validation."
       ],
       "kind": "audited Fugue observation",
       "source": "article.md#the-stack-as-research-evidence",
       "visual_relationship": "pr_stack",
       "displayed_values": [
-        "#42",
-        "04152c2",
-        "20",
-        "350",
-        "91",
-        "#43",
-        "397b918",
-        "14",
-        "2298",
-        "12",
-        "#44",
-        "68c8b9d",
-        "24",
-        "2020",
-        "196",
-        "#45",
-        "2f6453e",
-        "32",
-        "3047",
-        "117"
+        "#48–#52",
+        "#54",
+        "#55",
+        "a358999"
       ],
       "caveat": "Agent productivity and PR volume do not validate the evaluator."
     },

@@ -437,10 +437,18 @@ stylistic cue. A 0.85 calibration threshold does not make a judge correct on
 new examples, and 48 examples do not establish performance on all maintenance
 decisions. A complete evidence graph can faithfully document a bad task.
 
-Nor have we shown a Fugue treatment win. The Claude Code–Fugue flagship has
-not run, and the separate MCP decision remains pending its source-isolated
-staging comparison. This essay describes the contract that must hold before
-either result can be interpreted—and that contract is itself testable: if
+Nor have we shown a general Fugue treatment win. The Claude Code–Fugue repair
+loop has not run. The separate MCP decision, however, is no longer pending:
+V10 completed 16/16 cells for exact `main` versus exact 0.4 at an observed
+cost of `$7.331252`. Evidence integrity passed; Evaluation reconciliation and
+bounded inventory improved; exact-history correctness regressed; the
+candidate passed all required deterministic dimensions in only 1/8 attempts;
+and the release remained `HOLD`. The blind judge stayed advisory. The
+[reviewed V10 record](https://github.com/ash0ts/fugue/blob/a358999a31e5f93300ba7b4aec495f6411deacb9/examples/comparisons/wandb-mcp-maintenance/README.md)
+is the concrete reason four ledgers cannot collapse into “more green.”
+
+This essay describes the contract that must hold before either result can be
+interpreted—and that contract is itself testable: if
 readers cannot reconstruct a decision from its four ledgers without private
 oral context, the result is not ready to publish.
 

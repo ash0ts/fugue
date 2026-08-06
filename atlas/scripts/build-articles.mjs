@@ -193,6 +193,7 @@ const renderSiteHeader = (current) => `
     <nav aria-label="Primary navigation">
       <a href="/fugue/">Product</a>
       <a href="/fugue/experiments.html">Studies</a>
+      <a href="/fugue/inventory.html">Inventory</a>
       <a${current === "articles" ? ' aria-current="page"' : ""} href="/fugue/articles/">Articles</a>
       <a href="https://github.com/ash0ts/fugue" target="_blank" rel="noreferrer">GitHub</a>
     </nav>
@@ -253,15 +254,46 @@ const renderSeriesIndex = () => {
 };
 
 const resultFiles = (entry) => {
-  const root = join(sourceRoot, entry.slug, "results");
-  if (!existsSync(root)) return [];
-  return readdirSync(root)
-    .filter((name) => name.endsWith(".md") && name !== "README.md")
-    .sort()
-    .map((name) => ({
-      name,
-      content: readFileSync(join(root, name), "utf8"),
-    }));
+  return (entry.results_appendices ?? []).map((appendix) => ({
+    ...appendix,
+    content: readFileSync(join(sourceRoot, entry.slug, appendix.result), "utf8"),
+  }));
+};
+
+const renderResultAppendix = (entry, appendix) => {
+  const film = appendix.film;
+  const checkpoints = film.checkpoints
+    .map((name) => `<li>${escapeHtml(chapterLabel(name))}</li>`)
+    .join("");
+  const videoId = `result-film-${escapeHtml(entry.id)}-${escapeHtml(appendix.id)}`;
+  return `
+    <section class="result-appendix" data-result-file="${escapeHtml(appendix.result)}" aria-labelledby="${videoId}-heading">
+      ${md.render(appendix.content, { diagramCount: 0, figures: [], headings: [] })}
+      <div class="result-coda">
+        <div>
+          <p class="eyebrow">Dated result coda / ${escapeHtml(appendix.date)} / ${film.duration_seconds} seconds</p>
+          <h3 id="${videoId}-heading">Evidence coda</h3>
+          <p>The film visualizes only the reviewed appendix above. It does not add task truth or expand the claim boundary.</p>
+          <p class="film-links">
+            <a href="${escapeHtml(film.html)}">Open interactive timeline</a>
+            <a href="${escapeHtml(film.transcript)}">Read transcript</a>
+          </p>
+          <ol class="result-coda-chapters">${checkpoints}</ol>
+        </div>
+        <div class="film-player result-coda-player" data-film-player>
+          <video id="${videoId}" preload="metadata" muted playsinline tabindex="0" aria-label="Result coda for ${escapeHtml(entry.title)}" poster="${escapeHtml(film.poster)}">
+            <source src="${escapeHtml(film.mp4)}" type="video/mp4">
+          </video>
+          <div class="film-player-controls" aria-label="Result coda playback controls">
+            <button type="button" data-film-toggle>Play</button>
+            <button type="button" data-film-restart>Restart</button>
+            <label class="film-scrub-label"><span class="sr-only">Film position</span><input data-film-scrub type="range" min="0" max="${film.duration_seconds}" step="0.01" value="0"></label>
+            <output data-film-clock>0:00 / 0:${String(film.duration_seconds).padStart(2, "0")}</output>
+            <button type="button" data-film-screen>Fullscreen</button>
+          </div>
+        </div>
+      </div>
+    </section>`;
 };
 
 const loadFilmSpec = (entry) => {
@@ -400,10 +432,7 @@ const renderArticle = (entry, source, digest) => {
   );
   body = insertFilmAfterSection(entry, body, bodyEnvironment.headings);
   const results = resultFiles(entry)
-    .map(({ name, content }) => `
-      <section class="result-appendix" data-result-file="${escapeHtml(name)}">
-        ${md.render(content, { diagramCount: 0, figures: [], headings: [] })}
-      </section>`)
+    .map((appendix) => renderResultAppendix(entry, appendix))
     .join("");
   const previousLink = isVisible(previous)
     ? `<a href="${articleUrl(previous)}">← Fugue ${escapeHtml(previous.part)}: ${escapeHtml(previous.title)}</a>`
@@ -421,7 +450,9 @@ const renderArticle = (entry, source, digest) => {
       ? "Draft preregistration — no result"
       : "Working draft";
   const bannerBoundary = draftDesign
-    ? "The design remains mutable and has no accepted preview or result. Nothing on this page is a treatment conclusion."
+    ? entry.results_appendices.length
+      ? "The intervention design remains mutable and has no accepted preview or behavioral result. Reviewed diagnosis evidence does not turn it into a treatment conclusion."
+      : "The design remains mutable and has no accepted preview or result. Nothing on this page is a treatment conclusion."
     : isReleased(entry)
       ? "This essay is released. Any later empirical result must arrive as a dated appendix."
       : "This public review draft is mutable, search-excluded, and must not be cited as a released Fugue result.";
@@ -576,6 +607,13 @@ for (const entry of manifest.entries) {
     throw new Error(`published article ${entry.id} is missing its film package`);
   }
   cpSync(filmSource, join(articleOutput, "media", "film"), { recursive: true });
+  if ((entry.results_appendices ?? []).length) {
+    cpSync(
+      join(sourceRoot, entry.slug, "results"),
+      join(articleOutput, "results"),
+      { recursive: true },
+    );
+  }
 }
 
 writeFileSync(

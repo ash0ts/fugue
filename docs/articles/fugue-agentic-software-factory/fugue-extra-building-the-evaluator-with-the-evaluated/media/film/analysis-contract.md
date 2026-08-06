@@ -24,7 +24,7 @@ pending study contains no implied result.
 
 | Scene | Read time | Takeaway | Evidence | Visual relationship |
 | --- | ---: | --- | --- | --- |
-| public-stack | 10s | Four public heads record distinct integration layers. | article.md#the-stack-as-research-evidence | pr stack |
+| public-stack | 10s | Seven merged PRs record the current integration layers. | article.md#the-stack-as-research-evidence | pr stack |
 | identity-case | 13s | A label stopped standing in for candidate identity. | article.md#case-study-1-identity-became-code | pipeline |
 | qualification-defect | 14s | Qualification found a runtime defect before the claim shipped. | article.md#case-study-2-exact-tree-preparation-found-a-real-runtime-defect | state machine |
 | cleanup-case | 13s | Static findings became an adjudication queue, not a delete command. | article.md#case-study-3-garbage-collection-needed-judgment | state machine |

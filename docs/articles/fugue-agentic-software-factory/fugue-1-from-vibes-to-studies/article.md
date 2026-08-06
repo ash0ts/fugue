@@ -331,12 +331,24 @@ mutable. Even a stable object ID can point to content whose meaning depends
 on another, unrecorded object. The lock closes enough of that graph to make
 drift detectable.
 
-For the pending MCP qualification, immutable task evidence and experiment
+For the completed MCP V10 qualification, immutable task evidence and experiment
 results use separate projects. The source lock names the dedicated
 non-sensitive source cohort; Agent traces, Evaluations, and result
 projections go to the qualification result project. Genuine SDK and Weave
 objects are prior task evidence, not the comparison result, and result rows
 must never become new source evidence.
+
+V10 is the concrete public lifecycle. The governed preview expanded four
+tasks × two exact MCP revisions × two attempts into 16 cells. Human approval
+bound that matrix before local-Harbor execution. The result reconciled 16/16
+cells and 80/80 required evidence links, then still returned `REGRESSED` and
+`HOLD` because one aligned exact-history pair regressed and seven candidate
+attempts retained critical failures. Its exact result digest is
+`e062f5b392a36d9ebd97adc3ab58b6e253cdd9dd943381342d51d76303bbcf38`.
+The [reviewed summary](https://github.com/ash0ts/fugue/blob/a358999a31e5f93300ba7b4aec495f6411deacb9/examples/comparisons/wandb-mcp-maintenance/README.md)
+is a better preview → approval → execution → result example than an
+illustrative success because the governance path preserved an inconvenient
+decision.
 
 The preparation tool is idempotent. An existing lock must validate exactly or
 fail. It never “fixes” changed evidence by editing private labels: drift
@@ -468,8 +480,8 @@ lock can faithfully preserve synthetic or irrelevant evidence. Interface
 parity can make the same mistake everywhere.
 
 The no-key replay proves installation and deterministic projection only. It
-is not live MCP evidence. The W&B MCP decision remains pending a
-source-isolated `main` versus final-staging comparison at the time of writing.
+is not live MCP evidence. The W&B MCP V10 decision is complete and remains
+`HOLD`; the replay neither caused nor substitutes for that live result.
 
 ## Next: the model is not the candidate
 

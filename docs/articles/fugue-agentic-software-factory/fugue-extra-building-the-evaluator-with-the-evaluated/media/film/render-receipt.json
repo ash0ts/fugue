@@ -1,12 +1,12 @@
 {
   "schema_version": 1,
   "slug": "fugue-extra-building-the-evaluator-with-the-evaluated",
-  "html_digest": "sha256:371447962b0b38c1bd08bdf2d0c592edfa02eed9eb7cddf602a7063624bd124e",
-  "mp4_digest": "sha256:61a61cdbe2826aab63c00afdaaba68d46778e15562f4c268cec42f1e8c053437",
-  "poster_digest": "sha256:fe61de34a98022ad7988a2c386faef02c2ee583a6370cc47844f46db37be180a",
-  "contact_sheet_digest": "sha256:c1b934dab22e25fd9b12098e3847ca41d643f7a4a7cf755d9ba29bb84c28fde7",
+  "html_digest": "sha256:c0df066bd515d9acbeaaff27804d97f4709e531fc2afc51c27d66bf25f62d696",
+  "mp4_digest": "sha256:83087404e543eb38f3264f71cdda4943818bca9b0638b46b8ad7439160269b04",
+  "poster_digest": "sha256:bcda59180365e5e9a68f33b02a87cdbb380b8eba194f4e8a87dab1ad530c8a0f",
+  "contact_sheet_digest": "sha256:ac69fb8b0b06565fe3b40c00d5f33cdc6eb27a7a196a35120bb5b0202f0e7896",
   "checkpoint_frame_digests": {
-    "public-stack": "sha256:fe61de34a98022ad7988a2c386faef02c2ee583a6370cc47844f46db37be180a",
+    "public-stack": "sha256:bcda59180365e5e9a68f33b02a87cdbb380b8eba194f4e8a87dab1ad530c8a0f",
     "identity-case": "sha256:c3c952756560706b5ad331ada834b57109887f2cd0b6060d31b1496397959b99",
     "qualification-defect": "sha256:c2683c4f20f659f6453063aaffbe02161e7b66a42edb70a79c28a7d9c99045e0",
     "cleanup-case": "sha256:1bd7e18c01fb7d66fdda76f29377f27aaf747fdc7d4e9ef3ac215d5e52eccbd9",

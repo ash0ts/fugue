@@ -12,6 +12,7 @@ from urllib.parse import unquote, urlsplit
 PAGES = {
     "index.html",
     "experiments.html",
+    "inventory.html",
     "experiment.html",
     "compare.html",
     "methods.html",
@@ -109,7 +110,9 @@ def check_build(root: Path) -> None:
                 )
         if not is_film:
             nav_labels = [label for label, _ in parser.nav_links]
-            if nav_labels != ["Product", "Studies", "Articles", "GitHub"]:
+            if nav_labels != [
+                "Product", "Studies", "Inventory", "Articles", "GitHub"
+            ]:
                 raise ValueError(
                     f"{path.relative_to(root)} has inconsistent primary navigation: "
                     f"{nav_labels}"

@@ -58,20 +58,20 @@
     {
       "id": "mcp-final-staging",
       "author": "Weights & Biases",
-      "title": "W&B MCP final staging head",
-      "publication": "GitHub commit on staging/0.4.0",
-      "date": "2026-07-30",
-      "url": "https://github.com/wandb/wandb-mcp-server/commit/29cc1b5b5cf4061afa1faa712021fa1b68ad0bf7",
-      "supports": "Exact final staging source identity for preparation; a repository commit does not establish an accepted Fugue preview, live canary, behavioral result, or package decision."
+      "title": "W&B MCP exact 0.4 V10 candidate",
+      "publication": "GitHub commit",
+      "date": "2026-07-31",
+      "url": "https://github.com/wandb/wandb-mcp-server/commit/5c6cc1c9a1079296daf6613ea6d12daebdd8bcba",
+      "supports": "Exact 0.4 candidate source identity used by the completed V10 Study and reviewed failure lock."
     },
     {
       "id": "fugue-mcp-qualification-draft",
       "author": "Fugue maintainers",
       "title": "Source-isolated MCP maintainer qualification",
-      "publication": "GitHub draft pull request #50",
+      "publication": "GitHub pull request #50, merged",
       "date": "2026-07-30",
       "url": "https://github.com/ash0ts/fugue/pull/50",
-      "supports": "Review-visible source-isolated MCP qualification implementation; it does not establish a launched canary, live result, or final staging decision."
+      "supports": "Merged source-isolated MCP qualification implementation, completed V10 result, and exact failure-lock boundary."
     },
     {
       "id": "fugue-real-studies-draft",

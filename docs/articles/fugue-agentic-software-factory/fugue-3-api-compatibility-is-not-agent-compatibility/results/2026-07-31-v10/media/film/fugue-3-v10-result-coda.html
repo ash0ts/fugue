@@ -1,0 +1,362 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>MCP V10: Clean Evidence, HOLD Decision</title>
+  <style>
+    @font-face {
+      font-family: "Source Serif Pro";
+      src: url("fonts/source-serif-pro-latin-400-normal.woff2") format("woff2");
+      font-weight: 400;
+      font-display: block;
+    }
+    @font-face {
+      font-family: "Source Sans 3";
+      src: url("fonts/source-sans-3-latin-400-normal.woff2") format("woff2");
+      font-weight: 400;
+      font-display: block;
+    }
+    @font-face {
+      font-family: "Source Sans 3";
+      src: url("fonts/source-sans-3-latin-600-normal.woff2") format("woff2");
+      font-weight: 600;
+      font-display: block;
+    }
+    @font-face {
+      font-family: "IBM Plex Mono";
+      src: url("fonts/ibm-plex-mono-latin-400-normal.woff2") format("woff2");
+      font-weight: 400;
+      font-display: block;
+    }
+    @font-face {
+      font-family: "IBM Plex Mono";
+      src: url("fonts/ibm-plex-mono-latin-600-normal.woff2") format("woff2");
+      font-weight: 600;
+      font-display: block;
+    }
+    :root {
+      color-scheme: light;
+      --paper: #FCFCFD;
+      --ink: #171A1F;
+      --focus: #315EFB;
+    }
+    * { box-sizing: border-box; }
+    html, body { height: 100%; }
+    body {
+      margin: 0;
+      display: grid;
+      place-items: center;
+      overflow: hidden;
+      background: var(--ink);
+      color: var(--paper);
+      font-family: "Source Sans 3", sans-serif;
+    }
+    main {
+      width: min(100vw, 177.777vh);
+      aspect-ratio: 16 / 9;
+      position: relative;
+      background: var(--paper);
+      box-shadow: 0 32px 90px rgb(0 0 0 / 42%);
+    }
+    canvas {
+      display: block;
+      width: 100%;
+      height: 100%;
+      image-rendering: pixelated;
+    }
+    .controls {
+      position: absolute;
+      z-index: 2;
+      left: 3.4%;
+      right: 3.4%;
+      bottom: 2.4%;
+      display: grid;
+      grid-template-columns: auto 1fr auto;
+      align-items: center;
+      gap: 14px;
+      opacity: 0;
+      transform: translateY(8px);
+      transition: opacity .18s ease, transform .18s ease;
+    }
+    main:hover .controls,
+    main:focus-within .controls {
+      opacity: 1;
+      transform: none;
+    }
+    button {
+      min-width: 40px;
+      height: 30px;
+      padding: 0 10px;
+      border: 1px solid var(--ink);
+      color: var(--ink);
+      background: var(--paper);
+      font: 600 11px/1 "Source Sans 3", sans-serif;
+      text-transform: uppercase;
+      letter-spacing: .06em;
+      cursor: pointer;
+    }
+    button:focus-visible,
+    input:focus-visible {
+      outline: 3px solid var(--focus);
+      outline-offset: 2px;
+    }
+    input[type="range"] { width: 100%; accent-color: var(--focus); cursor: pointer; }
+    output {
+      min-width: 94px;
+      padding: 7px 9px;
+      color: var(--ink);
+      background: var(--paper);
+      font-size: 10px;
+      text-align: center;
+    }
+    @media (prefers-reduced-motion: reduce) {
+      .controls { transition: none; }
+    }
+  </style>
+</head>
+<body>
+  <main aria-label="Interactive animation: MCP V10: Clean Evidence, HOLD Decision">
+    <canvas id="film" width="1280" height="720" role="img" aria-label="Animated analytical film titled MCP V10: Clean Evidence, HOLD Decision"></canvas>
+    <div class="controls">
+      <button id="toggle" type="button" aria-label="Pause animation">Pause</button>
+      <input id="scrub" type="range" min="0" max="48" step="0.01" value="0" aria-label="Animation timeline">
+      <output id="clock" for="scrub">00:00 / 00:48</output>
+    </div>
+  </main>
+  <script>
+    const FILM = Object.freeze({
+      slug: "fugue-3-v10-result-coda",
+      title: "MCP V10: Clean Evidence, HOLD Decision",
+      width: 1280,
+      height: 720,
+      duration: 48,
+      fps: 15,
+      posterTime: 39,
+      reducedMotionTime: 39,
+      silent: true,
+      checkpoints: Object.freeze([
+        Object.freeze({ name: 'locked-study', time: 6 }),
+        Object.freeze({ name: 'separate-ledgers', time: 17 }),
+        Object.freeze({ name: 'behavioral-regression', time: 29 }),
+        Object.freeze({ name: 'hold-decision', time: 39 })
+      ])
+    });
+    window.__filmSpec = FILM;
+
+    const canvas = document.querySelector('#film');
+    const ctx = canvas.getContext('2d', { alpha: false });
+    const toggle = document.querySelector('#toggle');
+    const scrub = document.querySelector('#scrub');
+    const clock = document.querySelector('#clock');
+    const C = Object.freeze({
+      paper: '#FCFCFD', surface: '#F3F5F7', ink: '#171A1F', muted: '#77808D',
+      line: '#DDE1E7', input: '#AFCBFF', task: '#AFE0C7', control: '#FFD39C',
+      evidence: '#DCC8F3', caveat: '#FFB8AA'
+    });
+
+    let playing = true;
+    let manualTime = 0;
+    let anchorTime = performance.now();
+    let anchorFilm = 0;
+    let renderMode = false;
+
+    const clamp = (value, minimum = 0, maximum = 1) => Math.max(minimum, Math.min(maximum, value));
+    const easeOut = value => 1 - Math.pow(1 - clamp(value), 3);
+    const formatTime = seconds => {
+      const value = Math.max(0, Math.floor(seconds));
+      return `${String(Math.floor(value / 60)).padStart(2, '0')}:${String(value % 60).padStart(2, '0')}`;
+    };
+    function sceneAlpha(time, start, end, fade = .55) {
+      return clamp((time - start) / fade) * clamp((end - time) / fade);
+    }
+    function withAlpha(alpha, draw) {
+      if (alpha <= 0) return;
+      ctx.save();
+      ctx.globalAlpha *= clamp(alpha);
+      draw();
+      ctx.restore();
+    }
+    function font(size, family = 'sans', weight = 400) {
+      const face = family === 'serif' ? '"Source Serif Pro"' : family === 'mono' ? '"IBM Plex Mono"' : '"Source Sans 3"';
+      return `${weight} ${size}px ${face}`;
+    }
+    function text(value, x, y, size = 20, color = C.ink, family = 'sans', weight = 400, align = 'left') {
+      ctx.fillStyle = color;
+      ctx.font = font(size, family, weight);
+      ctx.textAlign = align;
+      ctx.textBaseline = 'alphabetic';
+      ctx.fillText(value, x, y);
+    }
+    function rect(x, y, width, height, fill, stroke = null, lineWidth = 1) {
+      ctx.fillStyle = fill;
+      ctx.fillRect(x, y, width, height);
+      if (stroke) {
+        ctx.strokeStyle = stroke;
+        ctx.lineWidth = lineWidth;
+        ctx.strokeRect(x, y, width, height);
+      }
+    }
+    function line(x1, y1, x2, y2, color = C.line, width = 1) {
+      ctx.beginPath();
+      ctx.moveTo(x1, y1);
+      ctx.lineTo(x2, y2);
+      ctx.strokeStyle = color;
+      ctx.lineWidth = width;
+      ctx.stroke();
+    }
+    function background() {
+      rect(0, 0, FILM.width, FILM.height, C.paper);
+      for (let x = 0; x <= FILM.width; x += 40) line(x, 0, x, FILM.height, C.line, 1);
+      for (let y = 0; y <= FILM.height; y += 40) line(0, y, FILM.width, y, C.line, 1);
+      rect(0, 0, FILM.width, 10, C.ink);
+    }
+    function progress(time) {
+      const chapters = [0, 12, 24, 36, 48];
+      const width = 275;
+      const gap = 14;
+      for (let index = 0; index < 4; index += 1) {
+        const start = chapters[index];
+        const end = chapters[index + 1];
+        const amount = clamp((time - start) / (end - start));
+        const x = 54 + index * (width + gap);
+        rect(x, 674, width, 4, C.line);
+        rect(x, 674, width * amount, 4, C.ink);
+      }
+    }
+    function panel(label, value, note, x, y, width, fill) {
+      rect(x, y, width, 150, fill, C.ink, 2);
+      text(label, x + 20, y + 35, 15, C.ink, 'mono', 600);
+      text(value, x + 20, y + 88, 34, C.ink, 'sans', 600);
+      text(note, x + 20, y + 122, 16, C.ink, 'sans', 400);
+    }
+    function drawLockedStudy(time) {
+      withAlpha(sceneAlpha(time, 0, 12.35), () => {
+        text('REVIEWED RESULT · 2026-07-31', 54, 84, 17, C.muted, 'mono', 600);
+        text('MCP V10 ran the whole governed matrix.', 54, 150, 49, C.ink, 'serif');
+        text('Exact revisions, one approved digest, sixteen terminal cells.', 54, 194, 22, C.ink, 'sans', 600);
+        panel('BASELINE', 'main @ 53b199a', '8 cells', 54, 280, 350, C.input);
+        panel('CANDIDATE', '0.4 @ 5c6cc1', '8 cells', 430, 280, 350, C.control);
+        panel('EXECUTION', '16 / 16', '$7.331252 observed', 806, 280, 392, C.task);
+        text('result digest  e062f5b392a3…cf38', 54, 515, 20, C.ink, 'mono', 600);
+        text('Four tasks × two revisions × two attempts', 54, 558, 20, C.muted, 'mono');
+      });
+    }
+    function drawLedgers(time) {
+      withAlpha(sceneAlpha(time, 11.65, 24.35), () => {
+        text('SEPARATE LEDGERS', 54, 84, 17, C.muted, 'mono', 600);
+        text('Clean evidence did not imply a good release.', 54, 150, 49, C.ink, 'serif');
+        const rows = [
+          ['EVIDENCE INTEGRITY', 'PASS', '16 attempts · 80/80 links · no leaks', C.task],
+          ['MECHANISM', 'MIXED', 'reconciliation + bounded inventory improved', C.evidence],
+          ['DETERMINISTIC', 'FAIL', 'candidate passed 1 of 8 tasks', C.caveat],
+          ['JUDGE', 'ADVISORY', 'human calibration remained incomplete', C.control]
+        ];
+        rows.forEach((row, index) => {
+          const y = 232 + index * 92;
+          rect(54, y, 1144, 72, row[3], C.ink, 2);
+          text(row[0], 78, y + 44, 17, C.ink, 'mono', 600);
+          text(row[1], 470, y + 45, 26, C.ink, 'sans', 600);
+          text(row[2], 660, y + 44, 18, C.ink, 'sans');
+        });
+      });
+    }
+    function drawRegression(time) {
+      withAlpha(sceneAlpha(time, 23.65, 36.35), () => {
+        text('BEHAVIORAL OUTCOME', 54, 84, 17, C.muted, 'mono', 600);
+        text('The candidate regressed on the locked tasks.', 54, 150, 49, C.ink, 'serif');
+        const pairs = [['IMPROVED', '0', C.task], ['REGRESSED', '1', C.caveat], ['UNCHANGED', '7', C.surface]];
+        pairs.forEach((item, index) => panel(item[0], item[1], 'aligned pairs', 54 + index * 382, 245, 350, item[2]));
+        rect(54, 445, 1144, 112, C.ink);
+        text('7 critical candidate failures', 82, 493, 29, C.paper, 'sans', 600);
+        text('Exact-history behavior did not improve; one answer became factually worse.', 82, 532, 18, C.paper, 'sans');
+      });
+    }
+    function drawDecision(time) {
+      withAlpha(sceneAlpha(time, 35.65, 48.05), () => {
+        text('DECISION', 54, 84, 17, C.muted, 'mono', 600);
+        text('Evidence integrity passed. The package stayed on hold.', 54, 150, 47, C.ink, 'serif');
+        rect(54, 232, 1144, 190, C.caveat, C.ink, 3);
+        text('REGRESSED', 86, 304, 28, C.ink, 'mono', 600);
+        text('HOLD', 86, 382, 70, C.ink, 'sans', 600);
+        text('Observed on this exact main-versus-0.4 matrix only.', 54, 492, 22, C.ink, 'sans', 600);
+        text('No single feature receives causal credit. Judge output stays advisory.', 54, 533, 20, C.muted, 'sans');
+        text('e062f5b392a36d9e…d51d76303bbcf38', 54, 590, 18, C.ink, 'mono');
+      });
+    }
+    function render(time) {
+      const t = ((time % FILM.duration) + FILM.duration) % FILM.duration;
+      ctx.imageSmoothingEnabled = false;
+      background();
+      drawLockedStudy(t);
+      drawLedgers(t);
+      drawRegression(t);
+      drawDecision(t);
+      progress(t);
+      clock.value = `${formatTime(t)} / ${formatTime(FILM.duration)}`;
+      if (!renderMode) scrub.value = String(t);
+    }
+    function currentTime(now = performance.now()) {
+      return playing ? (anchorFilm + (now - anchorTime) / 1000) % FILM.duration : manualTime;
+    }
+    function loop(now) {
+      if (!renderMode) render(currentTime(now));
+      requestAnimationFrame(loop);
+    }
+
+    toggle.addEventListener('click', () => {
+      if (playing) {
+        manualTime = currentTime();
+        playing = false;
+        toggle.textContent = 'Play';
+        toggle.setAttribute('aria-label', 'Play animation');
+      } else {
+        anchorFilm = manualTime;
+        anchorTime = performance.now();
+        playing = true;
+        toggle.textContent = 'Pause';
+        toggle.setAttribute('aria-label', 'Pause animation');
+      }
+    });
+    scrub.addEventListener('input', () => {
+      manualTime = Number(scrub.value);
+      anchorFilm = manualTime;
+      anchorTime = performance.now();
+      render(manualTime);
+    });
+    window.setAnimationTime = seconds => {
+      renderMode = true;
+      playing = false;
+      manualTime = Number(seconds) || 0;
+      render(manualTime);
+      return true;
+    };
+    window.releaseAnimation = () => {
+      renderMode = false;
+      anchorFilm = manualTime;
+      anchorTime = performance.now();
+      playing = true;
+      toggle.textContent = 'Pause';
+      toggle.setAttribute('aria-label', 'Pause animation');
+      return true;
+    };
+
+    Promise.all([
+      document.fonts.load('400 58px "Source Serif Pro"'),
+      document.fonts.load('600 24px "Source Sans 3"'),
+      document.fonts.load('600 18px "IBM Plex Mono"')
+    ]).then(() => {
+      const reduced = matchMedia('(prefers-reduced-motion: reduce)').matches;
+      if (reduced) {
+        playing = false;
+        manualTime = FILM.reducedMotionTime;
+        toggle.textContent = 'Play';
+        toggle.setAttribute('aria-label', 'Play animation');
+      }
+      render(reduced ? FILM.reducedMotionTime : 0);
+      window.__animationReady = true;
+      requestAnimationFrame(loop);
+    });
+  </script>
+</body>
+</html>

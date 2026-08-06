@@ -1,0 +1,363 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>V10 Diagnosis: Real Failure, Unrun Repair</title>
+  <style>
+    @font-face {
+      font-family: "Source Serif Pro";
+      src: url("fonts/source-serif-pro-latin-400-normal.woff2") format("woff2");
+      font-weight: 400;
+      font-display: block;
+    }
+    @font-face {
+      font-family: "Source Sans 3";
+      src: url("fonts/source-sans-3-latin-400-normal.woff2") format("woff2");
+      font-weight: 400;
+      font-display: block;
+    }
+    @font-face {
+      font-family: "Source Sans 3";
+      src: url("fonts/source-sans-3-latin-600-normal.woff2") format("woff2");
+      font-weight: 600;
+      font-display: block;
+    }
+    @font-face {
+      font-family: "IBM Plex Mono";
+      src: url("fonts/ibm-plex-mono-latin-400-normal.woff2") format("woff2");
+      font-weight: 400;
+      font-display: block;
+    }
+    @font-face {
+      font-family: "IBM Plex Mono";
+      src: url("fonts/ibm-plex-mono-latin-600-normal.woff2") format("woff2");
+      font-weight: 600;
+      font-display: block;
+    }
+    :root {
+      color-scheme: light;
+      --paper: #FCFCFD;
+      --ink: #171A1F;
+      --focus: #315EFB;
+    }
+    * { box-sizing: border-box; }
+    html, body { height: 100%; }
+    body {
+      margin: 0;
+      display: grid;
+      place-items: center;
+      overflow: hidden;
+      background: var(--ink);
+      color: var(--paper);
+      font-family: "Source Sans 3", sans-serif;
+    }
+    main {
+      width: min(100vw, 177.777vh);
+      aspect-ratio: 16 / 9;
+      position: relative;
+      background: var(--paper);
+      box-shadow: 0 32px 90px rgb(0 0 0 / 42%);
+    }
+    canvas {
+      display: block;
+      width: 100%;
+      height: 100%;
+      image-rendering: pixelated;
+    }
+    .controls {
+      position: absolute;
+      z-index: 2;
+      left: 3.4%;
+      right: 3.4%;
+      bottom: 2.4%;
+      display: grid;
+      grid-template-columns: auto 1fr auto;
+      align-items: center;
+      gap: 14px;
+      opacity: 0;
+      transform: translateY(8px);
+      transition: opacity .18s ease, transform .18s ease;
+    }
+    main:hover .controls,
+    main:focus-within .controls {
+      opacity: 1;
+      transform: none;
+    }
+    button {
+      min-width: 40px;
+      height: 30px;
+      padding: 0 10px;
+      border: 1px solid var(--ink);
+      color: var(--ink);
+      background: var(--paper);
+      font: 600 11px/1 "Source Sans 3", sans-serif;
+      text-transform: uppercase;
+      letter-spacing: .06em;
+      cursor: pointer;
+    }
+    button:focus-visible,
+    input:focus-visible {
+      outline: 3px solid var(--focus);
+      outline-offset: 2px;
+    }
+    input[type="range"] { width: 100%; accent-color: var(--focus); cursor: pointer; }
+    output {
+      min-width: 94px;
+      padding: 7px 9px;
+      color: var(--ink);
+      background: var(--paper);
+      font-size: 10px;
+      text-align: center;
+    }
+    @media (prefers-reduced-motion: reduce) {
+      .controls { transition: none; }
+    }
+  </style>
+</head>
+<body>
+  <main aria-label="Interactive animation: V10 Diagnosis: Real Failure, Unrun Repair">
+    <canvas id="film" width="1280" height="720" role="img" aria-label="Animated analytical film titled V10 Diagnosis: Real Failure, Unrun Repair"></canvas>
+    <div class="controls">
+      <button id="toggle" type="button" aria-label="Pause animation">Pause</button>
+      <input id="scrub" type="range" min="0" max="48" step="0.01" value="0" aria-label="Animation timeline">
+      <output id="clock" for="scrub">00:00 / 00:48</output>
+    </div>
+  </main>
+  <script>
+    const FILM = Object.freeze({
+      slug: "fugue-4b-v10-diagnosis-coda",
+      title: "V10 Diagnosis: Real Failure, Unrun Repair",
+      width: 1280,
+      height: 720,
+      duration: 48,
+      fps: 15,
+      posterTime: 39,
+      reducedMotionTime: 39,
+      silent: true,
+      checkpoints: Object.freeze([
+        Object.freeze({ name: 'observed-failure', time: 6 }),
+        Object.freeze({ name: 'reviewed-lock', time: 17 }),
+        Object.freeze({ name: 'authority-boundary', time: 29 }),
+        Object.freeze({ name: 'unrun-repair', time: 39 })
+      ])
+    });
+    window.__filmSpec = FILM;
+
+    const canvas = document.querySelector('#film');
+    const ctx = canvas.getContext('2d', { alpha: false });
+    const toggle = document.querySelector('#toggle');
+    const scrub = document.querySelector('#scrub');
+    const clock = document.querySelector('#clock');
+    const C = Object.freeze({
+      paper: '#FCFCFD', surface: '#F3F5F7', ink: '#171A1F', muted: '#77808D',
+      line: '#DDE1E7', input: '#AFCBFF', task: '#AFE0C7', control: '#FFD39C',
+      evidence: '#DCC8F3', caveat: '#FFB8AA'
+    });
+
+    let playing = true;
+    let manualTime = 0;
+    let anchorTime = performance.now();
+    let anchorFilm = 0;
+    let renderMode = false;
+
+    const clamp = (value, minimum = 0, maximum = 1) => Math.max(minimum, Math.min(maximum, value));
+    const easeOut = value => 1 - Math.pow(1 - clamp(value), 3);
+    const formatTime = seconds => {
+      const value = Math.max(0, Math.floor(seconds));
+      return `${String(Math.floor(value / 60)).padStart(2, '0')}:${String(value % 60).padStart(2, '0')}`;
+    };
+    function sceneAlpha(time, start, end, fade = .55) {
+      return clamp((time - start) / fade) * clamp((end - time) / fade);
+    }
+    function withAlpha(alpha, draw) {
+      if (alpha <= 0) return;
+      ctx.save();
+      ctx.globalAlpha *= clamp(alpha);
+      draw();
+      ctx.restore();
+    }
+    function font(size, family = 'sans', weight = 400) {
+      const face = family === 'serif' ? '"Source Serif Pro"' : family === 'mono' ? '"IBM Plex Mono"' : '"Source Sans 3"';
+      return `${weight} ${size}px ${face}`;
+    }
+    function text(value, x, y, size = 20, color = C.ink, family = 'sans', weight = 400, align = 'left') {
+      ctx.fillStyle = color;
+      ctx.font = font(size, family, weight);
+      ctx.textAlign = align;
+      ctx.textBaseline = 'alphabetic';
+      ctx.fillText(value, x, y);
+    }
+    function rect(x, y, width, height, fill, stroke = null, lineWidth = 1) {
+      ctx.fillStyle = fill;
+      ctx.fillRect(x, y, width, height);
+      if (stroke) {
+        ctx.strokeStyle = stroke;
+        ctx.lineWidth = lineWidth;
+        ctx.strokeRect(x, y, width, height);
+      }
+    }
+    function line(x1, y1, x2, y2, color = C.line, width = 1) {
+      ctx.beginPath();
+      ctx.moveTo(x1, y1);
+      ctx.lineTo(x2, y2);
+      ctx.strokeStyle = color;
+      ctx.lineWidth = width;
+      ctx.stroke();
+    }
+    function background() {
+      rect(0, 0, FILM.width, FILM.height, C.paper);
+      for (let x = 0; x <= FILM.width; x += 40) line(x, 0, x, FILM.height, C.line, 1);
+      for (let y = 0; y <= FILM.height; y += 40) line(0, y, FILM.width, y, C.line, 1);
+      rect(0, 0, FILM.width, 10, C.ink);
+    }
+    function progress(time) {
+      const chapters = [0, 12, 24, 36, 48];
+      const width = 275;
+      const gap = 14;
+      for (let index = 0; index < 4; index += 1) {
+        const start = chapters[index];
+        const end = chapters[index + 1];
+        const amount = clamp((time - start) / (end - start));
+        const x = 54 + index * (width + gap);
+        rect(x, 674, width, 4, C.line);
+        rect(x, 674, width * amount, 4, C.ink);
+      }
+    }
+    function card(label, title, note, x, y, width, fill) {
+      rect(x, y, width, 154, fill, C.ink, 2);
+      text(label, x + 20, y + 36, 16, C.ink, 'mono', 600);
+      text(title, x + 20, y + 87, 29, C.ink, 'sans', 600);
+      text(note, x + 20, y + 123, 16, C.ink, 'sans');
+    }
+    function drawObservedFailure(time) {
+      withAlpha(sceneAlpha(time, 0, 12.35), () => {
+        text('V10 OBSERVATION · 2026-07-31', 54, 84, 17, C.muted, 'mono', 600);
+        text('One real regression became the loop input.', 54, 150, 49, C.ink, 'serif');
+        text('Not a synthetic counter. Not a placeholder trace.', 54, 193, 22, C.ink, 'sans', 600);
+        card('LOCKED STUDY', '16 / 16 cells', 'result e062f5…cf38', 54, 270, 350, C.input);
+        card('ALIGNED OUTCOME', '1 regressed pair', '7 unchanged · 0 improved', 430, 270, 350, C.caveat);
+        card('FAILURE SURFACE', 'exact history', 'one factual answer worsened', 806, 270, 392, C.evidence);
+        text('Diagnosis begins from reviewed evidence; it does not begin from a desired fix.', 54, 526, 22, C.ink, 'sans', 600);
+      });
+    }
+    function drawReviewedLock(time) {
+      withAlpha(sceneAlpha(time, 11.65, 24.35), () => {
+        text('REVIEWED FAILURE LOCK', 54, 84, 17, C.muted, 'mono', 600);
+        text('The failure is frozen before intervention design.', 54, 150, 49, C.ink, 'serif');
+        const rows = [
+          ['TRACE', 'immutable Weave call reference'],
+          ['AUDIT', 'signed review digest and bounded facts'],
+          ['TASK', 'sanitized public brief; private truth stays host-only'],
+          ['COVERAGE', 'reuse an existing eval before drafting a new one']
+        ];
+        rows.forEach((row, index) => {
+          const y = 225 + index * 86;
+          rect(54, y, 1144, 68, index === 1 ? C.evidence : C.surface, C.ink, 2);
+          text(row[0], 78, y + 42, 17, C.ink, 'mono', 600);
+          text(row[1], 306, y + 42, 20, C.ink, 'sans');
+        });
+        text('Trace content remains evidence, never executable instructions.', 54, 592, 19, C.muted, 'mono');
+      });
+    }
+    function drawBoundary(time) {
+      withAlpha(sceneAlpha(time, 23.65, 36.35), () => {
+        text('AUTHORITY BOUNDARY', 54, 84, 17, C.muted, 'mono', 600);
+        text('A completed diagnosis is not a completed repair.', 54, 150, 49, C.ink, 'serif');
+        card('COMPLETED', 'failure diagnosis', 'reviewed V10 evidence', 54, 250, 350, C.task);
+        card('PROPOSED', 'Skill × MCP', 'four-arm discovery design', 430, 250, 350, C.control);
+        card('REQUIRES HUMAN', 'preview + approval', 'exact cells, cost, runtime', 806, 250, 392, C.evidence);
+        line(404, 327, 430, 327, C.ink, 4);
+        line(780, 327, 806, 327, C.ink, 4);
+        rect(54, 476, 1144, 80, C.ink);
+        text('Aria may propose. Aria may not approve, retry, or select its own winner.', 626, 526, 21, C.paper, 'mono', 600, 'center');
+      });
+    }
+    function drawUnrun(time) {
+      withAlpha(sceneAlpha(time, 35.65, 48.05), () => {
+        text('REPAIR LOOP STATUS', 54, 84, 17, C.muted, 'mono', 600);
+        text('Prepared, but deliberately not run.', 54, 150, 49, C.ink, 'serif');
+        rect(54, 230, 1144, 190, C.control, C.ink, 3);
+        text('PLANNED_UNRUN', 86, 308, 28, C.ink, 'mono', 600);
+        text('NO BEHAVIORAL RESULT', 86, 382, 54, C.ink, 'sans', 600);
+        const facts = ['0 approved cells', '0 model attempts', '0 selected winner'];
+        facts.forEach((fact, index) => text(fact, 54 + index * 382, 500, 20, C.ink, 'mono', 600));
+        text('The valid claim is diagnosis readiness—not a Skill or MCP improvement.', 54, 560, 21, C.muted, 'sans', 600);
+      });
+    }
+    function render(time) {
+      const t = ((time % FILM.duration) + FILM.duration) % FILM.duration;
+      ctx.imageSmoothingEnabled = false;
+      background();
+      drawObservedFailure(t);
+      drawReviewedLock(t);
+      drawBoundary(t);
+      drawUnrun(t);
+      progress(t);
+      clock.value = `${formatTime(t)} / ${formatTime(FILM.duration)}`;
+      if (!renderMode) scrub.value = String(t);
+    }
+    function currentTime(now = performance.now()) {
+      return playing ? (anchorFilm + (now - anchorTime) / 1000) % FILM.duration : manualTime;
+    }
+    function loop(now) {
+      if (!renderMode) render(currentTime(now));
+      requestAnimationFrame(loop);
+    }
+
+    toggle.addEventListener('click', () => {
+      if (playing) {
+        manualTime = currentTime();
+        playing = false;
+        toggle.textContent = 'Play';
+        toggle.setAttribute('aria-label', 'Play animation');
+      } else {
+        anchorFilm = manualTime;
+        anchorTime = performance.now();
+        playing = true;
+        toggle.textContent = 'Pause';
+        toggle.setAttribute('aria-label', 'Pause animation');
+      }
+    });
+    scrub.addEventListener('input', () => {
+      manualTime = Number(scrub.value);
+      anchorFilm = manualTime;
+      anchorTime = performance.now();
+      render(manualTime);
+    });
+    window.setAnimationTime = seconds => {
+      renderMode = true;
+      playing = false;
+      manualTime = Number(seconds) || 0;
+      render(manualTime);
+      return true;
+    };
+    window.releaseAnimation = () => {
+      renderMode = false;
+      anchorFilm = manualTime;
+      anchorTime = performance.now();
+      playing = true;
+      toggle.textContent = 'Pause';
+      toggle.setAttribute('aria-label', 'Pause animation');
+      return true;
+    };
+
+    Promise.all([
+      document.fonts.load('400 58px "Source Serif Pro"'),
+      document.fonts.load('600 24px "Source Sans 3"'),
+      document.fonts.load('600 18px "IBM Plex Mono"')
+    ]).then(() => {
+      const reduced = matchMedia('(prefers-reduced-motion: reduce)').matches;
+      if (reduced) {
+        playing = false;
+        manualTime = FILM.reducedMotionTime;
+        toggle.textContent = 'Play';
+        toggle.setAttribute('aria-label', 'Play animation');
+      }
+      render(reduced ? FILM.reducedMotionTime : 0);
+      window.__animationReady = true;
+      requestAnimationFrame(loop);
+    });
+  </script>
+</body>
+</html>

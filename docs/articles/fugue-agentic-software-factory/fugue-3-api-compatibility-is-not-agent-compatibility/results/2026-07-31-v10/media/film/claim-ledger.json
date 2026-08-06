@@ -1,0 +1,50 @@
+{
+  "schema_version": 2,
+  "slug": "fugue-3-v10-result-coda",
+  "audience": "Agent and MCP maintainers",
+  "question": "What did the governed V10 comparison establish?",
+  "intended_takeaway": "Evidence integrity passed while deterministic behavior regressed, so the correct decision was HOLD.",
+  "out_of_scope": "The result does not identify a causal 0.4 feature or validate the advisory judge.",
+  "claims": [
+    {
+      "id": "locked-study",
+      "scene": "locked-study",
+      "claim": "The exact main and 0.4 revisions completed all 16 approved cells.",
+      "support": ["4 tasks × 2 revisions × 2 attempts", "$7.331252 observed cost"],
+      "kind": "audited Fugue observation",
+      "source": "article.md#behavioral-results-appendix-v10",
+      "visual_relationship": "locked matrix",
+      "displayed_values": ["53b199a", "5c6cc1", "16/16", "$7.331252"]
+    },
+    {
+      "id": "separate-ledgers",
+      "scene": "separate-ledgers",
+      "claim": "Evidence integrity, mechanism, deterministic outcome, and judge readiness remained separate.",
+      "support": ["80/80 required links", "Judge remained advisory"],
+      "kind": "audited Fugue observation",
+      "source": "article.md#four-outcome-layers",
+      "visual_relationship": "parallel ledgers",
+      "displayed_values": ["80/80", "1/8"]
+    },
+    {
+      "id": "behavioral-regression",
+      "scene": "behavioral-regression",
+      "claim": "The candidate produced one regressed pair and seven unchanged pairs.",
+      "support": ["Zero aligned pairs improved", "Seven candidate rows had critical failures"],
+      "kind": "audited Fugue observation",
+      "source": "article.md#behavioral-results-appendix-v10",
+      "visual_relationship": "aligned pair comparison",
+      "displayed_values": ["0 improved", "1 regressed", "7 unchanged", "7 critical failures"]
+    },
+    {
+      "id": "hold-decision",
+      "scene": "hold-decision",
+      "claim": "A clean evidence ledger supported a REGRESSED verdict and HOLD decision.",
+      "support": ["Result digest e062f5b392a36d9ebd97adc3ab58b6e253cdd9dd943381342d51d76303bbcf38", "The claim is bounded to the exact matrix"],
+      "kind": "audited Fugue observation",
+      "source": "article.md#behavioral-results-appendix-v10",
+      "visual_relationship": "decision gate",
+      "displayed_values": ["REGRESSED", "HOLD"]
+    }
+  ]
+}

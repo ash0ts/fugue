@@ -49,7 +49,12 @@ ALLOWED_EVIDENCE_STATES = {
     "concept",
     "draft_preregistration",
     "preregistered",
+    "reviewed_result",
     "results_appended",
+}
+ALLOWED_APPENDIX_KINDS = {
+    "reviewed_result",
+    "reviewed_diagnosis_unrun_intervention",
 }
 ALLOWED_CLAIM_KINDS = {
     "cited background",
@@ -400,6 +405,104 @@ def _check_film_receipt(entry: dict[str, Any], film_path: Path) -> None:
             _fail(f"{entry['id']} video receipt {field} must equal {value!r}")
 
 
+def _safe_package_path(package: Path, relative: object, label: str) -> Path:
+    value = str(relative or "")
+    candidate = (package / value).resolve()
+    try:
+        candidate.relative_to(package.resolve())
+    except ValueError:
+        _fail(f"{label} escapes its article package")
+    if not value or value.startswith("/") or not candidate.is_file():
+        _fail(f"{label} does not resolve to a packaged file")
+    return candidate
+
+
+def _check_results_appendices(entry: dict[str, Any], package: Path) -> None:
+    appendices = entry["results_appendices"]
+    if not isinstance(appendices, list):
+        _fail(f"{entry['id']} results_appendices must be a list")
+    ids: set[str] = set()
+    for appendix in appendices:
+        required = {"id", "date", "kind", "result", "result_digest", "film"}
+        if not isinstance(appendix, dict) or set(appendix) != required:
+            _fail(f"{entry['id']} result appendix fields do not match V1")
+        appendix_id = str(appendix["id"])
+        if not re.fullmatch(r"[a-z0-9]+(?:-[a-z0-9]+)*", appendix_id):
+            _fail(f"{entry['id']} result appendix has an unsafe ID")
+        if appendix_id in ids:
+            _fail(f"{entry['id']} repeats result appendix {appendix_id}")
+        ids.add(appendix_id)
+        if appendix["kind"] not in ALLOWED_APPENDIX_KINDS:
+            _fail(f"{entry['id']} result appendix has an unsupported kind")
+        if not re.fullmatch(r"20\d\d-\d\d-\d\d", str(appendix["date"])):
+            _fail(f"{entry['id']} result appendix date is malformed")
+        result_path = _safe_package_path(
+            package, appendix["result"], f"{entry['id']} result appendix"
+        )
+        if _sha256(result_path.read_bytes()) != appendix["result_digest"]:
+            _fail(f"{entry['id']} result appendix digest drifted")
+
+        film = appendix["film"]
+        required_film = {
+            "html", "mp4", "poster", "transcript", "receipt",
+            "duration_seconds", "checkpoints",
+        }
+        if not isinstance(film, dict) or set(film) != required_film:
+            _fail(f"{entry['id']} result-coda fields do not match V1")
+        paths = {
+            name: _safe_package_path(
+                package, film[name], f"{entry['id']} result-coda {name}"
+            )
+            for name in ("html", "mp4", "poster", "transcript", "receipt")
+        }
+        receipt = _read_json(paths["receipt"])
+        html_slug = Path(str(film["html"])).stem
+        if receipt.get("slug") != html_slug:
+            _fail(f"{entry['id']} result-coda receipt has the wrong slug")
+        if receipt.get("html_digest") != _sha256(paths["html"].read_bytes()):
+            _fail(f"{entry['id']} result-coda HTML digest drifted")
+        if receipt.get("mp4_digest") != _sha256(paths["mp4"].read_bytes()):
+            _fail(f"{entry['id']} result-coda MP4 digest drifted")
+        if receipt.get("poster_digest") != _sha256(paths["poster"].read_bytes()):
+            _fail(f"{entry['id']} result-coda poster digest drifted")
+        checkpoints = film["checkpoints"]
+        if (
+            not isinstance(checkpoints, list)
+            or not checkpoints
+            or len(set(checkpoints)) != len(checkpoints)
+            or set(receipt.get("checkpoint_frame_digests", {})) != set(checkpoints)
+        ):
+            _fail(f"{entry['id']} result-coda checkpoints do not reconcile")
+        film_dir = paths["html"].parent
+        for name, digest in receipt["checkpoint_frame_digests"].items():
+            frame = _safe_package_path(
+                package,
+                film_dir.relative_to(package) / f"{name}.png",
+                f"{entry['id']} result-coda checkpoint",
+            )
+            if digest != _sha256(frame.read_bytes()):
+                _fail(f"{entry['id']} result-coda checkpoint drifted: {name}")
+        video = receipt.get("video", {})
+        expected_video = {
+            "codec_name": "h264",
+            "profile": "High",
+            "width": 1280,
+            "height": 720,
+            "pix_fmt": "yuv420p",
+            "color_range": "tv",
+            "r_frame_rate": "15/1",
+            "audio": False,
+        }
+        for field, expected in expected_video.items():
+            if video.get(field) != expected:
+                _fail(
+                    f"{entry['id']} result-coda video {field} "
+                    f"must equal {expected!r}"
+                )
+        if video.get("duration") != film["duration_seconds"]:
+            _fail(f"{entry['id']} result-coda duration drifted")
+
+
 def _check_output_state(
     entry: dict[str, Any],
     output_root: Path,
@@ -494,6 +597,7 @@ def _check_entry(
     _check_claim_ledger(entry, film_path, article_path)
     _check_film_runtime(entry, film_path)
     _check_film_receipt(entry, film_path)
+    _check_results_appendices(entry, package)
     _check_output_state(entry, output_root)
 
 

@@ -50,13 +50,13 @@ function renderStudy(study) {
         incomplete ? "exact cells" : "predictions"
       ),
       metric(
-        "Resolved",
+        study.primary_outcome.label,
         metrics.scored_predictions
           ? `${metrics.passed_predictions}/${metrics.scored_predictions}`
           : "Unavailable",
-        "official verifier"
+        study.primary_outcome.success_label
       ),
-      metric("Pass rate", formatPercent(metrics.pass_rate), "not a composite"),
+      metric("Outcome rate", formatPercent(metrics.pass_rate), "named outcome only"),
       metric("Agent links", metrics.agent_links ? formatNumber(metrics.agent_links) : "Unavailable", "verified")
     ])
   ]);
@@ -101,7 +101,7 @@ function renderStudy(study) {
         ["Tasks", `${study.matrix.tasks.length} locked cases`],
         ["Attempts", String(study.matrix.attempts)],
         ["Workload", study.matrix.workload_id],
-        ["Route proof", routingSummary(study.cells)]
+        ["Evidence form", study.schema_version === 2 ? publicationSummary(study) : routingSummary(study.cells)]
       ]),
       definitionGroup("Varied", [
         ["Models", study.matrix.models.join(", ")],
@@ -109,7 +109,7 @@ function renderStudy(study) {
         ["Treatments", study.matrix.treatments.join(", ")]
       ]),
       definitionGroup("Measured", [
-        ["Deterministic", "Official task outcome"],
+        ["Primary", study.primary_outcome.label],
         ["Operational", "Completion, errors, latency, usage, cost"],
         ["Mechanism", "Turns, tool calls, retrieval when available"],
         ["Evidence", "Run, prediction, evaluation, and Agent links"]
@@ -134,7 +134,7 @@ function renderStudy(study) {
           el("strong", { text: "Unavailable" }),
           el("span", { text: "No supported winner or pass-rate conclusion." })
         ])
-      : resultLedgers(metrics)
+      : resultLedgers(study)
   ]);
 
   const analysisRoot = el("div", { id: "study-analysis-results" });
@@ -191,15 +191,21 @@ function renderStudy(study) {
 
   root.append(hero, navigation, decision, question, design, results, analysis, evidence, limitations);
 
-  const selected = renderStudyAnalysis(analysisRoot, study, requestedCohort);
+  const selected = study.schema_version === 2
+    ? renderV2Analysis(analysisRoot, study)
+    : renderStudyAnalysis(analysisRoot, study, requestedCohort);
   if (selected) {
     cohortSelect.value = selected;
     updateCohortUrl(selected, false);
   }
-  cohortSelect.addEventListener("change", () => {
-    renderStudyAnalysis(analysisRoot, study, cohortSelect.value);
-    updateCohortUrl(cohortSelect.value, true);
-  });
+  if (study.schema_version === 1) {
+    cohortSelect.addEventListener("change", () => {
+      renderStudyAnalysis(analysisRoot, study, cohortSelect.value);
+      updateCohortUrl(cohortSelect.value, true);
+    });
+  } else {
+    cohortSelect.disabled = true;
+  }
 }
 
 function supportedDecision(study) {
@@ -229,7 +235,13 @@ function unresolvedDecision(study) {
   ]);
 }
 
-function resultLedgers(metrics) {
+function resultLedgers(study) {
+  const metrics = study.metrics;
+  if (study.schema_version === 2) {
+    return el("div", { className: "ledger-grid ledger-grid-v2" }, Object.entries(study.ledgers).map(([name, ledger]) =>
+      metric(name.replaceAll("_", " "), ledger.status.replaceAll("_", " "), ledger.summary)
+    ));
+  }
   return el("div", { className: "ledger-grid" }, [
     metric("Infrastructure", `${metrics.predictions}/${metrics.expected_predictions}`, "published attempts"),
     metric(
@@ -266,6 +278,25 @@ function resultLedgers(metrics) {
   ]);
 }
 
+function renderV2Analysis(root, study) {
+  const grid = el("div", { className: "v2-group-grid" });
+  for (const group of study.groups) {
+    const rows = Object.entries(group)
+      .filter(([key]) => !["id", "label"].includes(key))
+      .map(([key, value]) => [key.replaceAll("_", " "), String(value)]);
+    grid.append(el("article", { className: "design-group" }, [
+      el("h3", { text: group.label }),
+      definitionList(rows)
+    ]));
+  }
+  root.replaceChildren(
+    study.groups.length
+      ? grid
+      : el("p", { className: "empty-copy", text: "No subgroup result was promoted from this evidence level." })
+  );
+  return study.matrix.cohorts[0]?.id || "";
+}
+
 function definitionGroup(title, rows) {
   return el("article", { className: "design-group" }, [
     el("h3", { text: title }),
@@ -295,6 +326,7 @@ function listSection(title, values, empty) {
 }
 
 function taskEvidence(cells) {
+  if (cells[0]?.cell_id) return taskEvidenceV2(cells);
   const details = el("details", { className: "task-evidence" });
   details.append(el("summary", { text: `Inspect ${cells.length} task-level predictions` }));
   const table = el("table", { className: "evidence-table" });
@@ -338,6 +370,40 @@ function taskEvidence(cells) {
   table.append(body);
   details.append(el("div", { className: "table-scroll" }, table));
   return details;
+}
+
+function taskEvidenceV2(cells) {
+  const details = el("details", { className: "task-evidence" });
+  details.append(el("summary", { text: `Inspect ${cells.length} reviewed public cells` }));
+  const table = el("table", { className: "evidence-table" });
+  table.append(el("caption", { text: "Public-safe cell outcomes; private truth and raw Agent content are excluded" }));
+  table.append(el("thead", {}, el("tr", {}, [
+    "Task", "Harness", "Treatment", "Attempt", "Outcome", "Cost", "Evidence"
+  ].map((text) => el("th", { scope: "col", text })))));
+  const body = el("tbody");
+  for (const cell of cells) {
+    body.append(el("tr", {}, [
+      el("td", { text: cell.task_id }),
+      el("td", { text: cell.harness }),
+      el("td", { text: cell.treatment }),
+      el("td", { text: String(cell.attempt) }),
+      el("td", { text: cell.outcome === true ? "Met" : cell.outcome === false ? "Did not meet" : "Unavailable" }),
+      el("td", { text: cell.cost_usd === null ? "Unavailable" : `$${formatNumber(cell.cost_usd)}` }),
+      el("td", {}, cell.evidence_link
+        ? safeExternalLink("Evaluation — sign-in required", cell.evidence_link)
+        : el("span", { text: "Unavailable" }))
+    ]));
+  }
+  table.append(body);
+  details.append(el("div", { className: "table-scroll" }, table));
+  return details;
+}
+
+function publicationSummary(study) {
+  if (study.publication_level === "summary") {
+    return "Reviewed aggregate only; no reconstructed task rows";
+  }
+  return `${study.cells.length} reviewed public cells`;
 }
 
 function provenanceLinks(study) {

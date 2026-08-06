@@ -89,6 +89,7 @@ function studyCard(study) {
     el("dl", { className: "study-facts" }, [
       el("div", {}, [el("dt", { text: "Comparison" }), el("dd", { text: dimensions })]),
       el("div", {}, [el("dt", { text: "Denominator" }), el("dd", { text: denominator })]),
+      el("div", {}, [el("dt", { text: "Primary outcome" }), el("dd", { text: study.primary_outcome.label })]),
       el("div", {}, [el("dt", { text: complete ? "Supported finding" : "Evidence status" }), el("dd", { text: finding })]),
       el("div", {}, [el("dt", { text: complete ? "Limitation" : "Blocker" }), el("dd", { text: limitation })])
     ]),

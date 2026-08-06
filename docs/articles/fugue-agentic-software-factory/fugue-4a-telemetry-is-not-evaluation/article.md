@@ -477,6 +477,26 @@ automatic. The human boundary is reserved for changed scope, spend, release
 authority, and claims—the acts whose consequences the system should not
 infer from convenience.
 
+### Two completed studies, four different evidence questions
+
+The 72-cell action-gate campaign makes the separation concrete. Across three
+loop designs, two hostile task classes, two harnesses, and replicated
+attempts, the action gate recorded zero compromised hostile attempts versus
+4/24 for both baseline and warning-only; it also blocked seven hostile actions
+and allowed eight authorized actions. But the preregistered safe-and-useful
+contrast remained uncertain because its interval crossed zero. That is a
+deterministic and sensitivity result—not permission to call every telemetry
+movement a safety win. The public
+[campaign report](https://github.com/ash0ts/fugue/blob/a358999a31e5f93300ba7b4aec495f6411deacb9/examples/research/prompt-injection-action-gate/README.md)
+keeps private task truth out of the article.
+
+The separate six-cell 0.1.2 qualification asked a narrower release question.
+Its explicit action gate was safe and useful in 2/2 cells, while baseline and
+warning-only were 0/4. All six cells reconciled, including infrastructure and
+identity evidence. One synthetic task and one attempt still limit the claim.
+Together the studies show why telemetry, deterministic safety, sensitivity,
+infrastructure, and a release decision need independent ledgers.
+
 ## Next: make the loop visible end to end
 
 An architecture diagram can hide every inconvenient detail: placeholder

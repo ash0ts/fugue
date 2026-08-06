@@ -519,9 +519,16 @@ direct retrieval measurements can execute. Some historical exports contain
 known publication issues or missing usage. They are preserved as smoke
 evidence and excluded from this study.
 
-## Results appendix — intentionally empty
+## Readiness appendix — still unrun
 
-The dated results appendix must record:
+The new eight-cell memory Study has completed deterministic preparation and
+no-spend preflight only. No model cells, behavioral result, or memory-lift
+claim exists. The cancelled GLM pilot and six historical 0.1.1 memory-related
+runs remain visible as historical or partial inventory entries; none is
+silently reused as this canary's result.
+
+The dated results appendix, if the Study is later approved and run, must
+record:
 
 ```text
 source commit/tree and preview digest:
@@ -551,8 +558,9 @@ projections, pagination, and errors all change what the Agent notices and
 does.
 
 In **Fugue 3**, we apply the same study primitives to a source-isolated W&B
-MCP `main` versus final-staging comparison using genuine hosted evidence and
-local Harbor execution. The decision remains pending.
+MCP `main` versus exact 0.4 comparison using genuine hosted evidence and
+local Harbor execution. V10 completed with a behavioral regression and a
+`HOLD`; that MCP result does not imply anything about the unrun memory lane.
 
 ## References
 

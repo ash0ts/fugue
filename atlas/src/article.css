@@ -733,6 +733,13 @@ dt,
   padding: 0.08rem 0.3rem;
   background: var(--paper-deep);
   color: var(--ink);
+  overflow-wrap: anywhere;
+  word-break: break-word;
+}
+
+.article-prose a {
+  overflow-wrap: anywhere;
+  word-break: break-word;
 }
 
 .article-prose table {
@@ -814,6 +821,32 @@ dt,
   padding: 2rem;
   border: 2px solid var(--moss);
   background: rgba(228, 236, 232, 0.7);
+}
+
+.result-coda {
+  display: grid;
+  grid-template-columns: minmax(0, 0.8fr) minmax(320px, 1.2fr);
+  gap: 1.5rem;
+  align-items: start;
+  margin-top: 2.5rem;
+  padding-top: 2rem;
+  border-top: 1px solid var(--moss);
+}
+
+.article-prose .result-coda h3 {
+  margin-top: 0;
+}
+
+.result-coda-player {
+  width: 100%;
+  margin: 0;
+}
+
+.result-coda-chapters {
+  margin: 1.25rem 0 0;
+  padding-left: 1.25rem;
+  color: var(--muted);
+  font: 0.76rem/1.6 "IBM Plex Mono", monospace;
 }
 
 .footnotes {
@@ -972,6 +1005,14 @@ dt,
     --film-gutter: 1.25rem;
     padding: 1.25rem;
     box-shadow: 6px 6px 0 rgba(170, 187, 182, 0.52);
+  }
+
+  .result-appendix {
+    padding: 1.25rem;
+  }
+
+  .result-coda {
+    grid-template-columns: 1fr;
   }
 
   .film-chapters ol {

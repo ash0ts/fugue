@@ -28,19 +28,19 @@ Auditable co-development improves the process; external boundaries establish eva
 
 Agent productivity and PR volume do not validate the evaluator.
 
-## 01 — Four public heads record distinct integration layers.
+## 01 — Seven merged PRs record the current integration layers.
 
 **Time:** 00:00–00:10
 
 **Visual relationship:** pr stack
 
-**On-screen support:** #42 cleanup; #43 control; #44 qualification; #45 Serverless. The stack is process evidence, not evaluator validation.
+**On-screen support:** #48–#52, #54, and #55 are now on main. Merge state is process evidence, not evaluator validation.
 
 **Evidence status:** audited Fugue observation
 
 **Source:** `article.md#the-stack-as-research-evidence`
 
-**Displayed values:** #42; 04152c2; 20; 350; 91; #43; 397b918; 14; 2298; 12; #44; 68c8b9d; 24; 2020; 196; #45; 2f6453e; 32; 3047; 117
+**Displayed values:** #48–#52; #54; #55; a358999
 
 ## 02 — A label stopped standing in for candidate identity.
 

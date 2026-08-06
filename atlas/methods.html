@@ -10,7 +10,7 @@
     <a class="skip-link" href="#main">Skip to Evidence policy</a>
     <header class="site-header">
       <a class="wordmark" href="./">Fugue <span>Evidence Atlas</span></a>
-      <nav aria-label="Primary navigation"><a href="./">Product</a><a href="./experiments.html">Studies</a><a href="./articles/">Articles</a><a href="https://github.com/ash0ts/fugue" target="_blank" rel="noreferrer">GitHub</a></nav>
+      <nav aria-label="Primary navigation"><a href="./">Product</a><a href="./experiments.html">Studies</a><a href="./inventory.html">Inventory</a><a href="./articles/">Articles</a><a href="https://github.com/ash0ts/fugue" target="_blank" rel="noreferrer">GitHub</a></nav>
     </header>
     <main id="main">
       <section class="page-intro ruled"><p class="eyebrow">Rules before results</p><h1>Evidence policy.</h1><p class="lede">The Atlas recomputes metrics from canonical normalized rows. Editorial text can explain a decision; it cannot change the denominator, arithmetic, or evidence state.</p></section>
@@ -40,7 +40,7 @@
         <section class="policy-group" aria-labelledby="eligibility-title">
           <div class="policy-group-heading"><p class="eyebrow">Eligibility</p><h2 id="eligibility-title">Study eligibility and evidence tiers</h2><p>A study earns stronger language by completing stronger evidence—not by receiving a larger editorial score.</p></div>
           <div class="policy-cards">
-            <article><h3>Primary outcome</h3><p>For SWE-bench, resolution is the official deterministic verifier result. Pass rate is <code>accepted repairs ÷ scored predictions</code>. Complete SWE studies require every planned, applicable prediction to reconcile and score; operational completion is reported separately.</p></article>
+            <article><h3>Named primary outcome</h3><p>Every V2 study declares its kind, outcome, success meaning, and denominator. SWE-bench uses official verifier resolution; safety and comparison studies use their declared deterministic rule. Operational completion is always reported separately.</p></article>
             <article><h3>Evidence tiers</h3><dl class="tier-list"><div><dt>Confirmed</dt><dd>Complete replicated holdout with deterministic paired bootstrap.</dd></div><div><dt>Directional</dt><dd>Complete one-attempt controlled grid; raw numerator and denominator only.</dd></div><div><dt>Baseline benchmark</dt><dd>Complete capability matrix with no intervention.</dd></div><div><dt>Contract evidence</dt><dd>Routing, tool-use or observability canary.</dd></div><div><dt>Active / blocked</dt><dd>Visible for context, never ranked and never assigned a winner.</dd></div></dl></article>
             <article><h3>Hard task lock</h3><p>The discovery partition was frozen before execution. Eligible tasks require production and test changes, two to eight touched files, repository diversity, and either lexical mismatch or cross-directory production work.</p></article>
           </div>
@@ -66,7 +66,7 @@
           <div class="policy-cards">
             <article><h3>Agent-link contract</h3><p>Every Agent prediction must reconcile to exactly one native conversation and one <code>invoke_agent</code> root. Public links appear only after Fugue verifies the evaluation relationship. They open authenticated Weave; raw content is never copied here.</p></article>
             <article><h3>Candidate identity</h3><p>Model, provider route, harness, treatment, task, trial, runtime, and evaluator identity are fixed coordinates. A change to any coordinate creates a different candidate or Study rather than mutating accepted evidence.</p></article>
-            <article><h3>Public projection</h3><p>Source, dataset, snapshot, run, evaluation, prediction, and Agent-root identities reconcile before a result is public. When a receipt is missing, the corresponding evidence stays unavailable.</p></article>
+            <article><h3>Public projection</h3><p>Source, dataset, snapshot, run, evaluation, prediction, and Agent-root identities reconcile before a result is public. Summary-only evidence can publish bounded aggregates and exact digests, but never reconstructed task rows. When a receipt is missing, the corresponding evidence stays unavailable.</p></article>
           </div>
         </section>
       </div>

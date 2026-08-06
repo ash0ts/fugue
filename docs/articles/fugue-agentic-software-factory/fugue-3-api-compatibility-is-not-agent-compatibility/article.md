@@ -1,11 +1,11 @@
 # Fugue 3 — API Compatibility Is Not Agent Compatibility: Qualifying an MCP Release
 
 > **Fugue: Evals for the Agentic Software Factory · Part 3**  
-> A standalone preregistration for MCP maintainers and Agent-integration
-> teams. **Status:** draft preregistration; package release is `HOLD`.
-> Source-isolated zero-model conformance has passed for final staging revision
-> `29cc1b5b5cf4061afa1faa712021fa1b68ad0bf7`. No result is claimed for
-> Agent behavior, and there is no paid Study or human-signed package decision.
+> A standalone design-and-result review for MCP maintainers and
+> Agent-integration teams. **Status:** reviewed V10 behavioral result; package
+> release is `HOLD`. Exact `main` versus exact 0.4 completed 16/16 local-Harbor
+> cells; the verdict was `REGRESSED`. Independent package sign-off remains
+> separate.
 > **Reading time:** about 11 minutes.
 
 This article defines the current evidence boundary, candidates, staged local
@@ -28,17 +28,17 @@ The current package decision is deliberately `HOLD`. Historical 0.3.7 and
 early 0.4 candidate commits remain useful source evidence, but they are not
 the active comparison and cannot authorize a current release. [@mcp-baseline]
 [@mcp-candidate] The active design compares exact reviewed `main` revision
-`53b199a5f4af29aa82077e2c7f1e2c5e5e0c2ca0` with final staging revision
-`29cc1b5b5cf4061afa1faa712021fa1b68ad0bf7`. [@mcp-main-final]
-[@mcp-final-staging] Zero-model preparation locked those identities. No human
-has approved the paid Agent preview, so a source change still requires new
-locks and a new preview.
+`53b199a5f4af29aa82077e2c7f1e2c5e5e0c2ca0` with exact 0.4 revision
+`5c6cc1c9a1079296daf6613ea6d12daebdd8bcba`. [@mcp-main-final]
+[@mcp-final-staging] V10 locked those identities and completed its approved
+Agent matrix. A source change still requires new locks, preview, approval,
+and Study identity.
 
 No behavioral result is carried forward from a deterministic replay, a
 direct MCP probe, an earlier mixed-project canary, or a future remote-runtime
-plan. The release stays `HOLD` while it waits for the source-isolated local
-Harbor canary and confirmation described below, followed by a separate
-human-signed package receipt. Release PR #117 therefore remains a draft.
+plan. V10 is the source-isolated local-Harbor result. The release stays `HOLD`
+because V10 regressed and because package authority remains independent.
+Release PR #117 therefore remains a draft.
 [@mcp-release-pr]
 
 ## Scope and terms
@@ -107,9 +107,10 @@ outside Agent execution, initializes each server, captures its exact manifest,
 and locks the result. Agent cells never clone an MCP repository or install
 dependencies.
 
-The review-visible Fugue provider, V3 evidence, and source-isolated MCP
-qualification pull requests remain preparation source, not evidence for the
-paid behavioral decision. [@fugue-provider-draft] [@fugue-mcp-draft]
+The Fugue provider, V3 evidence, and source-isolated MCP qualification pull
+requests are merged implementation history. They made V10 possible; the
+approved V10 Study, not merge state, supplies the behavioral evidence.
+[@fugue-provider-draft] [@fugue-mcp-draft]
 [@fugue-mcp-qualification-draft]
 
 ## Genuine evidence, deliberately seeded
@@ -158,13 +159,36 @@ locks and both revisions read the locked source project. The mechanism
 receipt digest is
 `d91a6ae7a513f9015fd52db6443bd42f44a5c9fa2481190049a1a842a75abc19`.
 
-These receipts support one narrow statement: the repaired staging revision
-fixes the direct-child reconciliation mechanism on this immutable source
-graph. They do not show how Claude Code uses the change, whether the
-maintainer memo improves, whether another task regresses, or whether the
-Python package should ship. The receipts remain operator evidence rather than
-a public sanitized Result, which is why this article stays draft and
-`noindex`.
+These receipts supported one narrow statement at the time: the repaired
+staging revision fixed the direct-child reconciliation mechanism on this
+immutable source graph. They did not show how Claude Code used the change,
+whether another task regressed, or whether the Python package should ship.
+V10 subsequently answered the bounded behavioral question below; the article
+remains a draft and `noindex` pending editorial review.
+
+### Result update — 2026-07-31
+
+The governed Study `mcp-main-vs-0-4-tool-surface-confirmation-v10` compared
+exact `main` at `53b199a5f4af29aa82077e2c7f1e2c5e5e0c2ca0` with exact 0.4 at
+`5c6cc1c9a1079296daf6613ea6d12daebdd8bcba`. Claude Code ran four locked
+maintenance tasks for two attempts per revision through local Docker and
+Harbor: 16/16 planned cells completed for `$7.331252`.
+
+The four ledgers disagreed in a useful way. Evidence integrity passed: all 16
+attempts and 80 required links reconciled with grade A lineage and privacy
+integrity. Mechanism and behavioral dimensions were mixed: direct Evaluation
+reconciliation improved from 0/2 to 2/2 and bounded inventory from 0/2 to 2/2,
+but exact-history behavior did not improve and one candidate attempt lost
+factual correctness. Deterministically, the candidate passed every required
+dimension in only 1/8 attempts, retained seven critical failures, and produced
+one regressed plus seven unchanged aligned pairs. The blind maintainer judge
+remained advisory pending calibration and could not rescue those failures.
+
+The behavioral verdict was `REGRESSED`; the package decision remained `HOLD`.
+The exact result digest is
+`e062f5b392a36d9ebd97adc3ab58b6e253cdd9dd943381342d51d76303bbcf38`.
+This is a whole-release result on the locked tasks, not evidence that one 0.4
+feature caused the outcome. [@fugue-mcp-qualification-draft]
 
 ## Tasks that need investigation
 
@@ -284,14 +308,13 @@ a new preview.
 
 ## Lock the two MCP candidates
 
-The active candidates are the reviewed `main` head and final staging head
-`29cc1b5b5cf4061afa1faa712021fa1b68ad0bf7`. The latter is the exact
-`staging/0.4.0` source selected for this preparation pass.
-[@mcp-final-staging] Recording it establishes a candidate source identity
-plus a completed zero-model mechanism receipt. No approved paid preview,
-canary, confirmation, behavioral result, or signed package decision exists.
-The paid preview must independently resolve and lock both candidates; a later
-source change makes this draft stale.
+The completed V10 candidates are the reviewed `main` head
+`53b199a5f4af29aa82077e2c7f1e2c5e5e0c2ca0` and exact 0.4 head
+`5c6cc1c9a1079296daf6613ea6d12daebdd8bcba`. [@mcp-main-final]
+[@mcp-final-staging] Those exact sources, their runtime locks, the taskset,
+scorer, source project, result project, preview, and approval belong to V10's
+immutable identity. A later source change requires a new Study; it cannot
+inherit V10's result.
 
 The trusted operator sequence is:
 
@@ -356,19 +379,19 @@ immediate no-go regardless of task scores.
 ## Preview, approve, execute
 
 Source preparation and direct MCP mechanism checks happen before the final
-preview. They do not run a model and cannot supply a behavioral result.
+preview. They do not run a model and did not supply V10's behavioral result.
 
 The active local canary then follows Fugue’s normal immutable path:
 
 ```bash
-SPEC=examples/comparisons/wandb-mcp-maintenance/natural-maintainer-canary-local-v3.yaml
+SPEC=examples/comparisons/wandb-mcp-maintenance/tool-surface-confirmation-local-v10.yaml
 
 uv run fugue compare "$SPEC" --prepare --json
 uv run fugue check "$SPEC" --json
 uv run fugue compare "$SPEC" --preview --json
 
 uv run fugue approve PREVIEW_DIGEST \
-  --max-cells 8 \
+  --max-cells 16 \
   --max-usd APPROVED_CAP \
   --approved-by HUMAN_OPERATOR
 
@@ -377,10 +400,10 @@ uv run fugue compare "$SPEC" \
   --approval APPROVAL_ID
 ```
 
-The spec name is a planned contract until the V3 comparison lands on a clean
-reviewed tree. Do not execute a similarly named draft or substitute an older
-preview. The 16-cell confirmation requires its own accepted spec, preview,
-approval, and budget.
+These commands show the governed lifecycle V10 used; its approval and result
+must not be reused. Do not execute a similarly named draft or substitute an
+older preview. A repair requires a new accepted spec, preview, approval, and
+budget.
 
 ## Reconciliation and decision rules
 
@@ -401,10 +424,10 @@ The Study may report `improved`, `regressed`, `mixed`, `unchanged`,
 `incomplete`, or `invalid` behavior. `Incomplete` and `invalid` suppress a
 behavioral recommendation.
 
-The Python-package decision remains `HOLD` until the paid behavioral stages
-reconcile and a separate human-signed package receipt proves the final
-staging identity and the package, CI, security, compatibility, and release
-requirements. Local behavioral evidence cannot issue package `GO` by itself.
+The Python-package decision remains `HOLD`: V10 reconciled and regressed, and
+a separate human-signed package receipt must still prove the final identity,
+CI, security, compatibility, and release requirements. Local behavioral
+evidence cannot issue package `GO` by itself.
 
 The supported behavioral claim is whole-release and local:
 
@@ -473,31 +496,31 @@ Serverless isolation or complete security. A basic Claude Code comparison
 does not establish behavior for OpenClaw, Codex, Hermes, Aria, or another
 model. No Skill or memory effect is in scope.
 
-Most importantly, no Agent behavioral result exists yet. The no-spend
-receipts expose a real reconciliation difference; they do not resolve whether
-that difference is useful enough, safe enough, or efficient enough to release.
-The package decision remains `HOLD` pending the paid source-isolated staging
-comparison and separate package sign-off.
+Most importantly, a real Agent behavioral result now exists, and it is not a
+win. V10 supports a bounded regression on the locked maintenance tasks despite
+clean evidence and two improved dimensions. The package decision remains
+`HOLD`; infrastructure release gates and final package sign-off remain
+separate.
 
-## Behavioral results appendix — intentionally empty
+## Behavioral results appendix — V10
 
-A future dated appendix must contain:
+The dated V10 appendix contains:
 
 ```text
-qualified Fugue commit and tree:
-immutable source project and source-conformance receipt:
-result project:
-main and final-staging revisions, runtime locks, and tool manifests:
-canary preview, approval, run, and result:
-confirmation preview, approval, run, and result:
-planned/admitted/started/completed/excluded/missing cells:
-deterministic results:
-mechanism observations:
-local Harbor policy, privacy, cleanup, and zero-orphan receipts:
-Weave Agent, prediction, Dataset, and Evaluation reconciliation:
-behavioral summary:
-independent package receipt and human decision:
-limitations:
+observed: 2026-07-31
+study: mcp-main-vs-0-4-tool-surface-confirmation-v10
+baseline: 53b199a5f4af29aa82077e2c7f1e2c5e5e0c2ca0
+candidate: 5c6cc1c9a1079296daf6613ea6d12daebdd8bcba
+matrix: 4 tasks × 2 revisions × 2 attempts = 16/16 terminal
+result digest: e062f5b392a36d9ebd97adc3ab58b6e253cdd9dd943381342d51d76303bbcf38
+deterministic: candidate 1/8 full passes; 7 critical failures
+aligned pairs: 0 improved; 1 regressed; 7 unchanged
+mechanism: evaluation reconciliation and bounded inventory improved
+evidence: 80/80 required links; grade A lineage/privacy integrity
+judge: advisory pending human calibration
+behavioral verdict: REGRESSED
+package decision: HOLD
+limitation: exact V3 task rows were unavailable to this article build, so the Atlas publishes the reviewed aggregate without reconstructing rows
 ```
 
 The final tree and candidate heads must be the qualified identities. If review

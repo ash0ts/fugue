@@ -1,0 +1,17 @@
+{
+  "slug": "fugue-4b-v10-diagnosis-coda",
+  "title": "V10 Diagnosis: Real Failure, Unrun Repair",
+  "width": 1280,
+  "height": 720,
+  "duration": 48,
+  "fps": 15,
+  "posterTime": 39,
+  "reducedMotionTime": 39,
+  "silent": true,
+  "checkpoints": [
+    {"name": "observed-failure", "time": 6},
+    {"name": "reviewed-lock", "time": 17},
+    {"name": "authority-boundary", "time": 29},
+    {"name": "unrun-repair", "time": 39}
+  ]
+}

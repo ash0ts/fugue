@@ -238,10 +238,10 @@ rather than an unrecorded hunch.
 
 ## The stack as research evidence
 
-The dependent review stack is not one 33,000-line change. Its foundation is
-five separately reviewable draft pull requests:
+The dependent review stack did not land as one opaque change. Its foundation
+was five separately reviewable pull requests, now merged:
 
-| Draft source identity | Review-visible layer |
+| Merged source identity | Review-visible layer |
 | --- | --- |
 | #34 [@fugue-pr34] | Canonical comparison façade |
 | #35 [@fugue-pr35] | Governed MCP and Skill imports |
@@ -264,23 +264,27 @@ against `main`. [@fugue-pr44] They are not productivity metrics. Insertions
 can be duplication; deletions can be damage. The table exists so a reviewer
 can open the exact public head and inspect the layer.
 
-A newer five-layer stack is also review-visible, but remains draft:
+A later mainline stack is also merged:
 
-| Draft source identity | Review-visible layer |
+| Merged source identity | Review-visible layer |
 | --- | --- |
 | #48 [@fugue-pr48] | Generic Evaluation provider contract |
 | #49 [@fugue-pr49] | Source-aware V3 evidence and analysis |
 | #50 [@fugue-pr50] | Source-isolated MCP maintainer qualification |
 | #51 [@fugue-pr51] | Dedicated loop, harness, and memory Studies |
 | #52 [@fugue-pr52] | Removal of obsolete shared-demo routing |
+| #54 [@fugue-pr54] | Judge and release-decision qualification |
+| #55 [@fugue-pr55] | Trace-demo readiness and real-evidence routing |
 
-Together, the active dependency set is #34–#38, #42–#45, and #48–#52; the
-missing numbers are not hidden integration layers. These tables record exact
-review URLs, not completion. None of these draft pull requests supplies an
-approved paid preview, live Agent qualification, Study result, package
-decision, merge, or release. The exact W&B MCP staging source
-`29cc1b5b5cf4061afa1faa712021fa1b68ad0bf7` and the zero-model conformance
-receipts are preparation evidence, not a behavioral result.
+Together, #34–#38, #42–#45, #48–#52, #54, and #55 describe the implementation
+history now present on `main`; #53 is not a hidden integration layer. Merge
+history proves integration and review state, not behavioral success.
+
+The distinction became concrete after merge. MCP V10 compared exact `main`
+with exact 0.4 at `5c6cc1c9a1079296daf6613ea6d12daebdd8bcba`, completed
+16/16 cells and 80/80 evidence links, and still returned `REGRESSED` plus
+`HOLD`. The harness, memory, and Skill × MCP repair lanes remained unrun. The
+evaluator's implementation could pass while its evaluated candidate failed.
 
 The more important sequence is dependency:
 
@@ -316,9 +320,10 @@ quality. A clean clone can reproduce a broken workflow. A final-head run can
 use an unrepresentative task. Quantification narrows the audit surface; it
 does not finish the audit.
 
-At the time of writing we can audit the commits and their tests. We cannot
-honestly count successful full MCP cohorts, presentation rehearsals, or
-unfamiliar-user reproductions, because those gates remain pending.
+At the time of writing we can audit the merged commits and their tests, and we
+can count the bounded MCP V10 result. We still cannot honestly count a
+successful repair loop, harness comparison, memory comparison, presentation
+rehearsal, or unfamiliar-user reproduction because those gates remain unrun.
 
 ## Separation despite shared agents
 

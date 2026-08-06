@@ -58,10 +58,10 @@ The flagship and adjacent Studies have dedicated planned W&B/Weave projects:
 These project names are destinations in planned contracts, not evidence that
 the Studies ran. No lane writes result rows into another lane’s project.
 
-The current Fugue implementation stack is reviewable at five exact draft pull
-requests:
+The Fugue implementation stack is present on `main` through the merged pull
+requests below:
 
-| Draft source identity | Review-visible layer |
+| Merged source identity | Review-visible layer |
 | --- | --- |
 | #48 [@fugue-provider-draft] | Generic Evaluation provider contract |
 | #49 [@fugue-evidence-v3-draft] | Source-aware V3 evidence and analysis |
@@ -69,9 +69,9 @@ requests:
 | #51 [@fugue-real-studies-draft] | Dedicated loop, harness, and memory Studies |
 | #52 [@fugue-routing-cleanup-draft] | Removal of obsolete shared-demo routing |
 
-These pull requests establish source availability for review, not an accepted
-preview, prepared runtime, launched cell, selected intervention, live
-qualification, or qualified tree.
+These merges establish implementation availability, not an accepted repair
+preview, launched intervention cell, selected treatment, holdout result, or
+qualified repair tree.
 
 ## What the audience should believe
 
@@ -253,13 +253,11 @@ First lock the reviewed failure, then prepare public discovery tasks,
 host-private holdouts, both reviewed Skills, and both exact MCP runtimes.
 
 The active identities are intentionally resolved by the reviewed repository
-configuration. The final MCP staging source selected for preparation is
-`staging/0.4.0` at
-`29cc1b5b5cf4061afa1faa712021fa1b68ad0bf7`. [@mcp-final-staging] This exact
-repository identity is not an accepted preview, prepared runtime, launched
-canary, behavioral result, or package decision. If the candidate source
-changes, the Skill or MCP lock changes and every affected preview becomes
-stale.
+configuration. The exact MCP 0.4 source used by V10 is
+`5c6cc1c9a1079296daf6613ea6d12daebdd8bcba`. [@mcp-final-staging] V10 binds
+that source to its accepted preview and result. A repair changes the Skill or
+MCP lock, makes every affected preview stale, and requires a new Study rather
+than inheriting V10's outcome.
 
 Preparation is the only boundary allowed to build task images, Claude Code
 runtime assets, context, or MCP packages. Active cells receive those assets
@@ -510,9 +508,22 @@ Before calling the flagship decision-ready:
 - Aria, if present, remains read-only and optional.
 
 The MCP package-release decision is separate. Its current status is `HOLD`:
-the source-isolated zero-model checks have run, but the paid `main` versus
-final-staging Agent Study and independent package sign-off described in
-Fugue 3 have not.
+the source-isolated V10 Agent Study completed 16/16 cells and returned a
+behavioral regression. Independent package and infrastructure gates remain
+separate.
+
+### Diagnosis completed; intervention still unrun — 2026-08-03
+
+V10's reviewed failure lock turns the result into a real loop input. It binds
+the repeated `exact-history-target` failure, both exact candidate identities,
+eight runtime locks, scorer revisions, source/result projects, preview,
+result digest, and five authoritative evidence links per attempt. The lock
+rejects placeholder or mutable evidence.
+
+That completes diagnosis, not repair. The Skill × MCP discovery and holdout
+Studies described by this runbook remain `planned_unrun`: there is no
+intervention approval, selected winner, holdout result, or behavioral claim
+for the proposed fix.
 
 ## Try this in 15 minutes
 
@@ -551,18 +562,31 @@ Serverless isolation or complete security. The optional Aria shell is a
 presentation and navigation aid, not autonomous release authority and not an
 evaluated treatment.
 
-The MCP release decision is not this flagship result. It remains `HOLD`
-pending its own paid source-isolated staging comparison and package gates.
+The MCP release decision is not this flagship result. Its V10 behavioral
+comparison is complete and `HOLD`; package and infrastructure gates remain
+separate.
 The harness and repository-memory lanes also remain separate planned Studies
 in dedicated projects.
 
-At the time of writing, no loop-engineering Agent result exists. That
-limitation is the consequence of the same evidence contract the flagship is
-meant to demonstrate.
+At the time of writing, no loop-engineering intervention result exists. The
+reviewed V10 failure diagnosis is real, but the repair loop is still unrun.
+That limitation is the consequence of the same evidence contract the
+flagship is meant to demonstrate.
 
-## Results appendix — intentionally empty
+## Results appendix — diagnosis only
 
-A future dated appendix must link:
+The completed diagnostic appendix records:
+
+```text
+source Study: mcp-main-vs-0-4-tool-surface-confirmation-v10
+source Run: 20260731T063856-2fe747cab6
+result digest: e062f5b392a36d9ebd97adc3ab58b6e253cdd9dd943381342d51d76303bbcf38
+reviewed failure lock: mcp-v10-exact-history-baseline.failure-lock.json
+diagnosis: repeated exact-history boundedness and evidence-honesty failure
+repair status: planned_unrun
+```
+
+A future intervention appendix must add:
 
 ```text
 qualified Fugue and candidate tree identities:
