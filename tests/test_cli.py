@@ -142,6 +142,117 @@ def test_local_preview_without_required_credentials_is_not_approvable(
 
 
 @pytest.mark.parametrize(
+    ("stage_status", "expected_exit"),
+    (
+        ("stage_complete", 0),
+        ("complete", 0),
+        ("finalization_pending", 3),
+        ("fatal", 3),
+    ),
+)
+def test_compare_run_stage_passes_resume_and_maps_controller_status(
+    stage_status: str,
+    expected_exit: int,
+    capsys: pytest.CaptureFixture[str],
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    from fugue.bench import cli, comparison
+
+    preview = SimpleNamespace(
+        preview_digest="a" * 64,
+        matrix={"applicable_cells": 2, "estimated_trials": 2},
+        readiness={"estimated_cells": 2},
+        execution_schedule={"stages": {"checkpoint": ["b" * 64]}},
+    )
+    captured: dict[str, object] = {}
+
+    monkeypatch.setattr(comparison, "load_comparison", lambda *_a, **_k: object())
+    monkeypatch.setattr(
+        comparison,
+        "check_comparison",
+        lambda *_a, **_k: SimpleNamespace(
+            status="ready", to_dict=lambda: {"status": "ready"}
+        ),
+    )
+    monkeypatch.setattr(comparison, "preview_comparison", lambda *_a, **_k: preview)
+    monkeypatch.setattr(cli, "OperatorService", lambda *_a, **_k: object())
+
+    def execute_stage(*_args: object, **kwargs: object) -> dict[str, object]:
+        captured.update(kwargs)
+        return {
+            "controller_id": "controller-1",
+            "stage_id": "checkpoint",
+            "status": stage_status,
+        }
+
+    monkeypatch.setattr(comparison, "execute_comparison_stage", execute_stage)
+
+    assert (
+        main(
+            [
+                "compare",
+                "comparison.yaml",
+                "--run",
+                "--stage",
+                "checkpoint",
+                "--resume",
+                "controller-1",
+                "--approval",
+                "c" * 64,
+                "--json",
+                "--repo-root",
+                tmp_path.as_posix(),
+            ]
+        )
+        == expected_exit
+    )
+    assert captured["stage_id"] == "checkpoint"
+    assert captured["controller_id"] == "controller-1"
+    assert captured["approval_digest"] == "c" * 64
+    assert json.loads(capsys.readouterr().out)["status"] == stage_status
+
+
+def test_compare_resume_requires_a_stage(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    from fugue.bench import cli, comparison
+
+    preview = SimpleNamespace(
+        preview_digest="a" * 64,
+        matrix={"applicable_cells": 2, "estimated_trials": 2},
+        readiness={"estimated_cells": 2},
+        execution_schedule={"stages": {"checkpoint": ["b" * 64]}},
+    )
+    monkeypatch.setattr(comparison, "load_comparison", lambda *_a, **_k: object())
+    monkeypatch.setattr(
+        comparison,
+        "check_comparison",
+        lambda *_a, **_k: SimpleNamespace(
+            status="ready", to_dict=lambda: {"status": "ready"}
+        ),
+    )
+    monkeypatch.setattr(comparison, "preview_comparison", lambda *_a, **_k: preview)
+    monkeypatch.setattr(cli, "OperatorService", lambda *_a, **_k: object())
+
+    with pytest.raises(ValueError, match="--resume requires --stage"):
+        main(
+            [
+                "compare",
+                "comparison.yaml",
+                "--run",
+                "--resume",
+                "controller-1",
+                "--approval",
+                "c" * 64,
+                "--repo-root",
+                tmp_path.as_posix(),
+            ]
+        )
+
+
+@pytest.mark.parametrize(
     ("flag", "method", "ready", "state"),
     (
         ("--start-services", "start_services", True, "healthy"),

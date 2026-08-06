@@ -42,6 +42,14 @@ class CampaignStore:
         root.mkdir(parents=True, exist_ok=True)
         return FileLock((root / f"{run_id}.lock").as_posix())
 
+    def budget_ledger(self, campaign_id: str, scope_id: str) -> Path:
+        """Return the durable lease ledger for one admitted execution scope."""
+
+        validate_id(scope_id, kind="budget scope id")
+        root = self.campaign_dir(campaign_id) / "budgets"
+        root.mkdir(parents=True, exist_ok=True)
+        return root / f"{scope_id}.json"
+
     def write_json(self, path: Path, value: Mapping[str, Any]) -> None:
         atomic_write_json(path, value)
 

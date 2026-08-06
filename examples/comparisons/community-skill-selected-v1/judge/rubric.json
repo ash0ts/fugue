@@ -1,0 +1,31 @@
+{
+  "schema_version": 2,
+  "id": "community-usefulness",
+  "profile": "anthropic/claude-sonnet-5",
+  "role": "advisory",
+  "rubric": "Judge usefulness for the stated repository task using only the public task, sanitized Agent output, and permitted evidence. Do not infer quality from fluency, treatment identity, repository popularity, or Skill assignment. Deterministic scorers own correctness and safety gates, which qualitative judgment cannot override.",
+  "labels": {
+    "unusable": "No safe actionable result, or a critical claim conflicts with supplied evidence.",
+    "weak": "Some relevant content, but materially generic, ungrounded, unsafe, or not reviewable.",
+    "adequate": "Minimum acceptable: plausible, bounded, and reviewable, with explicit limitations.",
+    "strong": "Actionable, repository-grounded, reviewable, and appropriately calibrated, with minor omissions.",
+    "exceptional": "Strong on every dimension and unusually clear about evidence, tradeoffs, verification, and limits."
+  },
+  "passing_labels": ["adequate", "strong", "exceptional"],
+  "modalities": {
+    "implementation-plan": {
+      "dimensions": ["actionability", "repository_grounding", "reviewability", "risk_calibration"],
+      "guidance": "Assess sequencing, concrete repository grounding, reviewable dependency contracts, verification, rollback, and calibrated risk."
+    },
+    "skill-package": {
+      "dimensions": ["instruction_usefulness", "compatibility_guidance", "boundedness", "maintainability"],
+      "guidance": "Assess instruction usefulness, accurate compatibility guidance, bounded operation, missing-evidence handling, and maintainability."
+    },
+    "code-change": {
+      "dimensions": ["reviewability", "evidence_use", "bounded_scope", "risk_communication"],
+      "guidance": "Assess reviewability, use of repository evidence, bounded scope, and risk communication without rescoring tests or security."
+    }
+  },
+  "blinded_fields": ["variant_id", "variant_label", "candidate_id", "skill_revision", "source_commit"],
+  "missing_evidence_policy": "unavailable"
+}

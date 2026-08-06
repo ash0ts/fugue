@@ -1,0 +1,95 @@
+{
+  "schema_version": 1,
+  "id": "community-skill-selected-v1",
+  "question": "Do exact public Skill revisions measurably change a fixed agent's performance on task-relevant work?",
+  "claim_boundary": "Each repository is an independent authored case study; results are never pooled or used as a universal Skill ranking.",
+  "report_membership_lock": "campaign-membership.lock.json",
+  "fixed_conditions": {
+    "harness": "claude-code",
+    "model": "anthropic/claude-sonnet-5",
+    "environment": "docker",
+    "attempts": 2,
+    "global_active_cells_max": 3,
+    "study_active_cells_max": 2,
+    "wave_size": 4
+  },
+  "public_schedule": [
+    {
+      "id": "checkpoint",
+      "selector": "two preregistered tasks per lane, baseline and candidate, attempt 0",
+      "cells": 12,
+      "pair_complete": true
+    },
+    {
+      "id": "complete-development-attempt-0",
+      "selector": "remaining two development tasks per lane, baseline and candidate, attempt 0",
+      "cells": 12,
+      "cumulative_cells": 24
+    },
+    {
+      "id": "repeat-development",
+      "selector": "all four development tasks per lane, baseline and candidate, attempt 1",
+      "cells": 24,
+      "cumulative_cells": 48
+    }
+  ],
+  "budget": {
+    "agent_physical_execution_max_usd": 2.5,
+    "judge_per_valid_artifact_max_usd": 0.1,
+    "public_development_agent_max_usd": 120,
+    "public_development_judge_max_usd": 4.8,
+    "public_development_combined_max_usd": 124.8,
+    "primary_campaign_max_usd": 270,
+    "judge_calibration_max_usd": 8,
+    "total_campaign_max_usd": 278,
+    "infrastructure_replacement_executions_max": 4,
+    "infrastructure_replacement_contingency_max_usd": 10,
+    "maximum_primary_spend_if_all_96_logical_cells_and_four_replacements_run_usd": 259.6
+  },
+  "judge": {
+    "role": "advisory",
+    "rubric": "judge/rubric.json",
+    "case_set": "judge/case-set-manifest.json",
+    "receipt": ".fugue/private/community-skill-selected-v1/judge-calibration-receipt.json",
+    "minimum_tpr_tnr": 0.85,
+    "critical_false_passes_max": 0,
+    "generation": "external_operator_procedure",
+    "study_evaluator_binding": "optional advisory evaluator whose strict shared receipt, exact rubric artifact, lane modality, and profile are mandatory execution prerequisites",
+    "approval_order": "Generate and approve the calibration preview first. After 48 model outputs, two independent blinded human reviews, adjudication, and a passing final receipt, generate new exact Study previews and stage approvals."
+  },
+  "lanes": [
+    {
+      "id": "superpowers-writing-plans",
+      "spec": "superpowers-writing-plans/comparison.yaml",
+      "tasks": "superpowers-writing-plans/tasks.jsonl",
+      "revision_lock": "superpowers-writing-plans/skill-revisions.lock.json",
+      "checkpoint_task_ids": [
+        "sp-dev-credential-rotation",
+        "sp-dev-single-file-validation-fix"
+      ]
+    },
+    {
+      "id": "anthropic-skill-creator",
+      "spec": "anthropic-skill-creator/comparison.yaml",
+      "tasks": "anthropic-skill-creator/tasks.jsonl",
+      "revision_lock": "anthropic-skill-creator/skill-revisions.lock.json",
+      "checkpoint_task_ids": [
+        "as-dev-create-platform-bound-skill",
+        "as-dev-no-platform-requirement"
+      ],
+      "public_verifier": "anthropic-skill-creator/host_skill_package_verifier.cjs"
+    },
+    {
+      "id": "vercel-react-best-practices",
+      "spec": "vercel-react-best-practices/comparison.yaml",
+      "tasks": "vercel-react-best-practices/tasks.jsonl",
+      "revision_lock": "vercel-react-best-practices/skill-revisions.lock.json",
+      "checkpoint_task_ids": [
+        "vr-dev-signed-in-nonmember-action",
+        "vr-dev-layout-interleaved-measurement"
+      ],
+      "public_verifier": "vercel-react-best-practices/host_node_verifier.cjs"
+    }
+  ],
+  "sealed_holdout_policy": "Holdouts and private truth are prepared outside Git after development review and require a new immutable preview and approval."
+}

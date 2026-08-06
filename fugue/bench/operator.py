@@ -3,13 +3,14 @@ from __future__ import annotations
 import asyncio
 import hashlib
 import json
+import math
 import os
 import shutil
 import signal
 import sys
 import threading
 import time
-from collections.abc import Callable, Mapping
+from collections.abc import Callable, Mapping, Sequence
 from dataclasses import asdict, dataclass, field, replace
 from datetime import UTC, datetime
 from pathlib import Path
@@ -20,6 +21,11 @@ from fugue.bench.agent_runtime import (
 )
 from fugue.bench.agent_runtime import runtime_ready as agent_runtime_ready
 from fugue.bench.agent_runtime import runtime_spec as agent_runtime_spec
+from fugue.bench.campaign_accounting import (
+    BudgetLeaseLedger,
+    measured_row_cost,
+    settle_execution_budget_leases,
+)
 from fugue.bench.candidates import (
     CANDIDATE_IDENTITY_SCHEMA_VERSION,
     attempt_id,
@@ -55,6 +61,7 @@ from fugue.bench.execution import (
     latest_cell_records,
     mark_unfinished_cells,
     new_run_id,
+    physical_resume_replacement_cost,
     plan_cells,
     read_run_manifest,
     update_run_manifest,
@@ -2004,7 +2011,7 @@ class OperatorService:
 
         return await ExperimentAnalyst(self).execute(preview, model=model)
 
-    def execute_run(
+    def execute_run(  # noqa: C901 - snapshot and execution are one transaction
         self,
         request: ExperimentRequest,
         *,
@@ -2014,6 +2021,15 @@ class OperatorService:
         cancellation_event: threading.Event | None = None,
         host_evaluator: Callable[[dict[str, Any]], None] | None = None,
         host_scorer_names: tuple[str, ...] = (),
+        selected_attempt_ids: Sequence[str] | None = None,
+        resume: bool = False,
+        infrastructure_retries: int = 0,
+        budget_ledger: BudgetLeaseLedger | None = None,
+        coordination_budget_ledger: BudgetLeaseLedger | None = None,
+        reserved_cost_per_execution_usd: float = 0.0,
+        execution_worker_limit: int | None = None,
+        execution_wave_size: int | None = None,
+        evidence_checkpoint_cells_override: int | None = None,
     ) -> RunSummary:
         """Own the complete snapshot-before-execution run transaction."""
         run_dir = self.repo_root / ".fugue" / "runtime" / run_id
@@ -2137,6 +2153,30 @@ class OperatorService:
                 for cell in cells
             ]
             write_run_input_lock(self.repo_root, run_snapshot)
+            if selected_attempt_ids is not None:
+                selected_order = {
+                    attempt: index for index, attempt in enumerate(selected_attempt_ids)
+                }
+                if len(selected_order) != len(selected_attempt_ids):
+                    raise RuntimeError("staged execution selected duplicate attempts")
+                selected = set(selected_order)
+                available = {cell.attempt_id for cell in cells if cell.applicable}
+                unknown = sorted(selected - available)
+                if unknown:
+                    raise RuntimeError(
+                        "staged execution selected unknown logical attempts: "
+                        + ", ".join(unknown)
+                    )
+                cells = [cell for cell in cells if cell.attempt_id in selected]
+                if len(cells) != len(selected):
+                    raise RuntimeError("staged execution logical subset is incomplete")
+                cells.sort(key=lambda cell: selected_order[cell.attempt_id])
+            if execution_worker_limit is not None:
+                if execution_worker_limit < 1 or execution_worker_limit > max_workers:
+                    raise RuntimeError(
+                        "staged worker limit exceeds the immutable run plan"
+                    )
+                max_workers = execution_worker_limit
             if cancel_event.is_set():
                 raise _RunCancellation
             job_dirs = sorted(
@@ -2168,12 +2208,15 @@ class OperatorService:
                         rendered[0].env if rendered else execution_env
                     ),
                     "cell_count": len(cells),
+                    "full_plan_cell_count": len(run_snapshot.planned_matrix),
+                    "selected_attempt_ids": [cell.attempt_id for cell in cells],
                     "jobs_dirs": job_dirs,
                     "job_paths": job_paths,
                     "input_lock": "input-lock.json",
                     "snapshot_sha256": run_snapshot.snapshot_sha256,
                     "scheduling_seed": selected_preset.scheduling_seed,
                     "max_workers": max_workers,
+                    "wave_size": execution_wave_size or max_workers,
                 },
             )
             running = True
@@ -2193,6 +2236,9 @@ class OperatorService:
                     "execution"
                 )
             evidence_checkpoint_cells = int(
+                evidence_checkpoint_cells_override
+                if evidence_checkpoint_cells_override is not None
+                else
                 request.approved_comparison.get(
                     "evidence_checkpoint_cells",
                     resolved.evidence_checkpoint_cells,
@@ -2200,10 +2246,12 @@ class OperatorService:
                 if request.approved_comparison
                 else resolved.evidence_checkpoint_cells
             )
-            if evidence_checkpoint_cells and max_workers != 1:
-                raise RuntimeError(
-                    "evidence-checkpoint comparisons require cell concurrency 1"
-                )
+            if evidence_checkpoint_cells < 0 or evidence_checkpoint_cells > len(cells):
+                raise RuntimeError("evidence checkpoint exceeds the staged cell subset")
+            # Per-cell checkpoint validation is thread-safe. Concurrent cells
+            # already admitted in one batch may finish, but a fatal result
+            # stops the next batch/wave; checkpoints therefore do not force a
+            # serial Agent runtime.
             conformance_enforced = (
                 cell_runner is None
                 and execute_cells is _DEFAULT_EXECUTE_CELLS
@@ -2298,10 +2346,80 @@ class OperatorService:
                 )
                 else None
             )
+
+            budget_ledgers = tuple(
+                item
+                for item in (budget_ledger, coordination_budget_ledger)
+                if item is not None
+            )
+            if budget_ledgers and resume:
+                result_path = (
+                    live.results_path
+                    if live is not None
+                    else local.path
+                    if local is not None
+                    else None
+                )
+                result_rows = (
+                    latest_cell_records(result_path)
+                    if result_path is not None and result_path.exists()
+                    else []
+                )
+                _reconcile_resume_budget_leases(
+                    budget_ledgers,
+                    records=latest_cell_records(run_dir / "cells.jsonl"),
+                    result_rows=result_rows,
+                )
+
+            def admit_physical_execution(_cell: PlannedCell, physical: Any) -> dict[str, str]:
+                acquired: list[BudgetLeaseLedger] = []
+                try:
+                    for ledger in budget_ledgers:
+                        ledger.acquire(
+                            physical.physical_execution_id,
+                            reserved_cost_usd=reserved_cost_per_execution_usd,
+                        )
+                        acquired.append(ledger)
+                except Exception:
+                    for ledger in reversed(acquired):
+                        ledger.release_unstarted(physical.physical_execution_id)
+                    raise
+                return {}
+
+            def settle_physical_execution(
+                cell: PlannedCell, physical: Any, outcome: Any
+            ) -> None:
+                if not budget_ledgers:
+                    return
+                result_path = (
+                    live.results_path
+                    if live is not None
+                    else local.path
+                    if local is not None
+                    else None
+                )
+                row = next(
+                    (
+                        item
+                        for item in latest_cell_records(result_path)
+                        if item.get("cell_id") == cell.id
+                    ),
+                    None,
+                ) if result_path is not None and result_path.exists() else None
+                cost = measured_row_cost(row) if row is not None else None
+                settle_execution_budget_leases(
+                    budget_ledgers,
+                    physical_execution_id=physical.physical_execution_id,
+                    terminal_kind=getattr(outcome, "terminal_kind", None),
+                    runtime_outcome=getattr(outcome, "runtime_outcome", None),
+                    actual_cost_usd=cost,
+                )
+
             outcomes = execute_cells(
                 cells,
                 repo_root=self.repo_root,
                 max_workers=max_workers,
+                wave_size=execution_wave_size,
                 runner=cell_runner,
                 cell_started=live.begin_cell if live is not None else None,
                 require_cell_started_success=live is not None,
@@ -2313,6 +2431,29 @@ class OperatorService:
                     else None
                 ),
                 cancellation_event=cancel_event,
+                infrastructure_retries=infrastructure_retries,
+                resume=resume,
+                abort_on_terminal_kinds=(
+                    frozenset(
+                        {
+                            "configuration_failure",
+                            "evidence_failure",
+                            "evidence_initialization_failure",
+                            "prestart_cancelled",
+                            "admission_paused",
+                        }
+                    )
+                    if selected_attempt_ids is not None
+                    else frozenset()
+                ),
+                physical_started=(
+                    admit_physical_execution if budget_ledgers else None
+                ),
+                physical_finished=(
+                    settle_physical_execution
+                    if budget_ledgers
+                    else None
+                ),
             )
             cancelled = cancel_event.is_set() or any(
                 item.status == "cancelled" for item in outcomes
@@ -3473,7 +3614,7 @@ def _experiment_with_request_overrides(
     )
 
 
-def load_env(path: Path) -> dict[str, str]:
+def load_env(path: Path, *, override: bool = False) -> dict[str, str]:
     env = os.environ.copy()
     if not path.exists():
         return env
@@ -3483,7 +3624,7 @@ def load_env(path: Path) -> dict[str, str]:
             continue
         key, value = stripped.split("=", 1)
         key = key.strip()
-        if key not in env:
+        if override or key not in env:
             env[key] = value.strip().strip("'\"")
     return env
 
@@ -3659,6 +3800,54 @@ def _cancel_live_evaluation(
         return
     live.cancel_open_predictions(message)
     live.finalize(cancelled=True)
+
+
+def _reconcile_resume_budget_leases(
+    ledgers: Sequence[BudgetLeaseLedger],
+    *,
+    records: Sequence[Mapping[str, Any]],
+    result_rows: Sequence[Mapping[str, Any]],
+) -> None:
+    """Settle a proven terminal prior launch before admitting a replacement."""
+
+    result_by_cell = {
+        str(item.get("cell_id") or ""): item for item in result_rows
+    }
+    record_by_physical = {
+        str(item.get("physical_execution_id") or ""): item
+        for item in records
+        if item.get("physical_execution_id")
+    }
+    for ledger in ledgers:
+        for physical_id, lease in (ledger.snapshot().get("leases") or {}).items():
+            if not isinstance(lease, Mapping) or lease.get("status") not in {
+                "active",
+                "missing_cost",
+            }:
+                continue
+            record = record_by_physical.get(str(physical_id))
+            row = (
+                result_by_cell.get(str(record.get("cell_id") or ""))
+                if record is not None
+                else None
+            )
+            try:
+                recovery_cost = physical_resume_replacement_cost(record or {})
+            except ValueError as exc:
+                raise RuntimeError(
+                    "resume is blocked by an active or ambiguous prior "
+                    f"physical execution: {physical_id}"
+                ) from exc
+            measured_cost = measured_row_cost(row) if row is not None else None
+            if measured_cost is not None and not math.isclose(
+                measured_cost, recovery_cost, abs_tol=1e-9
+            ):
+                raise RuntimeError(
+                    "recovered physical execution cost disagrees with its result "
+                    f"evidence: {physical_id}"
+                )
+            cost = measured_cost if measured_cost is not None else recovery_cost
+            ledger.settle(str(physical_id), actual_cost_usd=cost)
 
 
 def _finalize_run(

@@ -1,0 +1,94 @@
+schema_version: 3
+id: superpowers-writing-plans-measurement-pilot-v1
+question: Does exact Superpowers writing-plans revision 8e1262a3 improve public development-task outcomes relative to de4672b1 under fixed conditions?
+taskset:
+  tasks: tasks.jsonl
+  private_labels: ../../../../.fugue/private/community-skill-selected-v1/superpowers-writing-plans/private-labels.jsonl
+baseline:
+  label: Superpowers writing-plans at de4672b1
+  skills: [superpowers-writing-plans-before-contracts]
+candidate:
+  label: Superpowers writing-plans at 8e1262a3
+  skills: [superpowers-writing-plans-contracts]
+changed: [skills]
+evaluators:
+  - id: plan-quality
+    type: deterministic
+    required: true
+    scorer: scorer.py
+    runtime: python312-sandbox-v1
+    dimensions:
+      - artifact_validity
+      - constraint_fidelity
+      - interface_consistency
+      - decomposition
+      - repository_grounding
+      - verification
+      - scope_secret_safety
+    dimension_roles:
+      artifact_validity: safety_gate
+      constraint_fidelity: outcome
+      interface_consistency: outcome
+      decomposition: outcome
+      repository_grounding: outcome
+      verification: safety_gate
+      scope_secret_safety: safety_gate
+  - {id: plan-usefulness, type: llm_judge, required: false, profile: anthropic/claude-sonnet-5,
+     calibration: ../../../../.fugue/private/community-skill-selected-v1/judge-calibration-receipt.json,
+     calibration_rubric: ../judge/rubric.json, calibration_modality: implementation-plan,
+     calibration_required_for_execution: true,
+     rubric: "Assess actionability, repository grounding, reviewability, and risk calibration using only public task/output/evidence; never override deterministic gates.",
+     dimensions: [actionability, repository_grounding, reviewability, risk_calibration], dimension_roles: {actionability: outcome, repository_grounding: outcome, reviewability: outcome, risk_calibration: outcome},
+     evidence: [artifact_paths, inspected_paths, changed_paths], reserve_cost_usd: 0.1}
+execution:
+  source_evidence_project: wandb/fugue-superpowers-writing-plans-source-v1
+  source_evidence_destination: &public_cloud
+    entity: wandb
+    project: fugue-superpowers-writing-plans-source-v1
+    api_base_url: https://api.wandb.ai
+    trace_base_url: https://trace.wandb.ai
+    app_base_url: https://wandb.ai
+  evidence_project: wandb/fugue-superpowers-writing-plans-measurement-pilot-v1
+  evidence_destination:
+    <<: *public_cloud
+    project: fugue-superpowers-writing-plans-measurement-pilot-v1
+  research_id: fugue-superpowers-writing-plans-measurement-pilot-v1
+  model: anthropic/claude-sonnet-5
+  harnesses: [claude-code]
+  attempts: 2
+  concurrency: 2
+  # 16 logical Agent+judge reservations ($41.60) plus one predeclared
+  # infrastructure replacement ($2.50, no judge on the invalid execution).
+  max_cost_usd: 44.1
+  reserve_per_attempt_usd: 2.5
+  approval_required: true
+  preparation_required: true
+  schedule:
+    stages:
+      - id: checkpoint
+        pair_complete: true
+        task_ids:
+          - sp-dev-credential-rotation
+          - sp-dev-single-file-validation-fix
+        trial_indexes: [0]
+      - id: complete-development-attempt-0
+        task_ids:
+          - sp-dev-evidence-destination
+          - sp-dev-package-tree-qualification
+        trial_indexes: [0]
+      - id: repeat-development
+        partitions: [qualification]
+        trial_indexes: [1]
+    worker_limit: 2
+    wave_size: 4
+    infrastructure_retry_limit: 1
+    maximum_physical_executions: 17
+    maximum_in_flight_cost_usd: 5.2
+    coordination:
+      group_id: community-skill-selected-v1
+      worker_limit: 3
+      maximum_physical_executions: 100
+      total_cost_usd: 270
+      maximum_in_flight_cost_usd: 7.8
+  trace_content: full
+  environment: {type: docker}

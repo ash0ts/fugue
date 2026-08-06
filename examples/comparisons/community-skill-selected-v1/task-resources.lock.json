@@ -1,0 +1,120 @@
+{
+  "generator": "community-skill-public-resources-v1",
+  "lanes": {
+    "anthropic-skill-creator": [
+      {
+        "file_count": 1,
+        "path": ".fugue/comparison-resources/community-skill-selected-v1/anthropic/as-dev-create-platform-bound-skill.tar",
+        "paths_digest": "b335630551682c19a781afebcf4d07bf978fb1f8ac04c6bf87428ed5106870f5",
+        "sha256": "813d559cac6d5ffe5cc97317ebf0161d5fb37ffd0c7a6a79deb8e4ab37dfecf4",
+        "size_bytes": 10240,
+        "task_id": "as-dev-create-platform-bound-skill"
+      },
+      {
+        "file_count": 2,
+        "path": ".fugue/comparison-resources/community-skill-selected-v1/anthropic/as-dev-repair-runtime-metadata.tar",
+        "paths_digest": "37631810bfc94819ede11464557c3e664075e203cb1ac51db56a9adbc34ff267",
+        "sha256": "0a927ba92bc3446e97c29314382994f4cd5dd4087b8d5bccba6bdefd69e0d27d",
+        "size_bytes": 10240,
+        "task_id": "as-dev-repair-runtime-metadata"
+      },
+      {
+        "file_count": 3,
+        "path": ".fugue/comparison-resources/community-skill-selected-v1/anthropic/as-dev-preserve-runtime-metadata.tar",
+        "paths_digest": "e4b2bf75cfa86a2985b19af6f01ac6ace20bee748648f385b58d2d7a14e9e90b",
+        "sha256": "8563c92c0fd0a250af3f17866b8c02d4cc897ba1a5b6b0e067004bcd06113471",
+        "size_bytes": 10240,
+        "task_id": "as-dev-preserve-runtime-metadata"
+      },
+      {
+        "file_count": 1,
+        "path": ".fugue/comparison-resources/community-skill-selected-v1/anthropic/as-dev-no-platform-requirement.tar",
+        "paths_digest": "b335630551682c19a781afebcf4d07bf978fb1f8ac04c6bf87428ed5106870f5",
+        "sha256": "53c972022deee7fecdf0f3cb1527d04dd9848e6e71dccfc9557792fa64245430",
+        "size_bytes": 10240,
+        "task_id": "as-dev-no-platform-requirement"
+      }
+    ],
+    "superpowers-writing-plans": [
+      {
+        "file_count": 324,
+        "path": ".fugue/comparison-resources/community-skill-selected-v1/superpowers/fugue-source-faa60280.tar",
+        "paths_digest": "f34d7bba06bbf4ed82e8eb548166564d320ba50a1cc416264d4914d2d8613e5c",
+        "sha256": "85f29212363af03e7f4f97430768806bd110e507fd4f10b115b55744649b7ff7",
+        "size_bytes": 7710720,
+        "task_id": "sp-dev-credential-rotation"
+      },
+      {
+        "file_count": 324,
+        "path": ".fugue/comparison-resources/community-skill-selected-v1/superpowers/fugue-source-faa60280.tar",
+        "paths_digest": "f34d7bba06bbf4ed82e8eb548166564d320ba50a1cc416264d4914d2d8613e5c",
+        "sha256": "85f29212363af03e7f4f97430768806bd110e507fd4f10b115b55744649b7ff7",
+        "size_bytes": 7710720,
+        "task_id": "sp-dev-evidence-destination"
+      },
+      {
+        "file_count": 324,
+        "path": ".fugue/comparison-resources/community-skill-selected-v1/superpowers/fugue-source-faa60280.tar",
+        "paths_digest": "f34d7bba06bbf4ed82e8eb548166564d320ba50a1cc416264d4914d2d8613e5c",
+        "sha256": "85f29212363af03e7f4f97430768806bd110e507fd4f10b115b55744649b7ff7",
+        "size_bytes": 7710720,
+        "task_id": "sp-dev-package-tree-qualification"
+      },
+      {
+        "file_count": 324,
+        "path": ".fugue/comparison-resources/community-skill-selected-v1/superpowers/fugue-source-faa60280.tar",
+        "paths_digest": "f34d7bba06bbf4ed82e8eb548166564d320ba50a1cc416264d4914d2d8613e5c",
+        "sha256": "85f29212363af03e7f4f97430768806bd110e507fd4f10b115b55744649b7ff7",
+        "size_bytes": 7710720,
+        "task_id": "sp-dev-single-file-validation-fix"
+      }
+    ],
+    "vercel-react-best-practices": [
+      {
+        "file_count": 4,
+        "path": ".fugue/comparison-resources/community-skill-selected-v1/vercel/vr-dev-signed-in-nonmember-action.tar",
+        "paths_digest": "fd7e07c41759f728b52e7a2d15c6580e7b544de43f9bf971331fc2de774ba80b",
+        "sha256": "11c7eece3f4535620a9760e72ac69c9edc153aa23bc159f4790c78a9b9d934ad",
+        "size_bytes": 10240,
+        "task_id": "vr-dev-signed-in-nonmember-action"
+      },
+      {
+        "file_count": 5,
+        "path": ".fugue/comparison-resources/community-skill-selected-v1/vercel/vr-dev-rsc-primitive-derived-array.tar",
+        "paths_digest": "63e01b817c94828512a2ce34f7269168c3cb5e3ae5018371ed9f655b9acbf7f0",
+        "sha256": "2810768d61de74c27c4738784a8ff7ce5d5730c47890a5c8af91f889f9205e0f",
+        "size_bytes": 10240,
+        "task_id": "vr-dev-rsc-primitive-derived-array"
+      },
+      {
+        "file_count": 4,
+        "path": ".fugue/comparison-resources/community-skill-selected-v1/vercel/vr-dev-layout-interleaved-measurement.tar",
+        "paths_digest": "1546192a4fe157115bc0df8606bcc93ae0933ee57ea2bcf02e9ee0db20a5403b",
+        "sha256": "7b2da1fea61894c448fbf7f1ecea7ff907c9ad08102e5f36a464f3b6faf138a6",
+        "size_bytes": 10240,
+        "task_id": "vr-dev-layout-interleaved-measurement"
+      },
+      {
+        "file_count": 4,
+        "path": ".fugue/comparison-resources/community-skill-selected-v1/vercel/vr-dev-use-latest-layout-read.tar",
+        "paths_digest": "8ae9421a5d81df2b6e826b22b6db9f3aa68ed61bed6f23e70c23fc956f146636",
+        "sha256": "f24cff5ee1c9bafc9830905f4ebc8dddd88cf21546d0e81681089f3775c40e90",
+        "size_bytes": 10240,
+        "task_id": "vr-dev-use-latest-layout-read"
+      }
+    ]
+  },
+  "schema_version": 1,
+  "superpowers_source": {
+    "commit": "faa60280841bad8c1a301bd14006d486a86dde5e",
+    "excluded_private_file_count": 13,
+    "excluded_private_roots": [
+      "configs/fugue/evaluations/",
+      "datasets/",
+      "examples/comparisons/",
+      "fugue/resources/"
+    ],
+    "repository": "https://github.com/ash0ts/fugue",
+    "tree": "b301da496caa8894534c29c43df6b59d60815a57"
+  }
+}

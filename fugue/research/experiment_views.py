@@ -88,6 +88,9 @@ _SAFE_BEHAVIORAL_MEASURES = (
     "artifact_schema_valid",
     "answer_facts_correct",
     "unsupported_claims_absent",
+    "skill_ids_opened",
+    "skill_files_opened",
+    "skill_ids_native_invoked",
     "skill_ids_invoked",
     "integration_ids_invoked",
     "mcp_tool_names",
@@ -406,6 +409,160 @@ class ExperimentViewV2:
 
 
 @dataclass(frozen=True)
+class ExperimentSourceIdentityV1:
+    """Role-bound public identity for one exact comparison arm source."""
+
+    schema_version: Literal[1]
+    role: Literal["baseline", "candidate"]
+    kind: str
+    id: str
+    version_identity: str
+    runtime_digest: str
+    lock_digest: str | None
+    identity_digest: str
+
+    def to_dict(self) -> dict[str, Any]:
+        # ``lock_digest`` is required-but-nullable on the cross-repository wire;
+        # preserving null keeps the identity digest language-neutral.
+        return asdict(self)
+
+
+def _experiment_source_identity(
+    raw: Any,
+    *,
+    role: Literal["baseline", "candidate"],
+) -> ExperimentSourceIdentityV1:
+    value = _mapping(raw, f"{role}_source_identity")
+    allowed = {
+        item.name
+        for item in ExperimentSourceIdentityV1.__dataclass_fields__.values()
+    }
+    _reject_unknown(value, allowed, f"{role} source identity")
+    if value.get("schema_version") != 1 or value.get("role") != role:
+        raise ValueError(f"V3 {role} source identity role or schema disagrees")
+    runtime_digest = _required_digest(
+        value.get("runtime_digest"), f"{role} source runtime digest"
+    )
+    lock_digest = (
+        _required_digest(value.get("lock_digest"), f"{role} source lock digest")
+        if value.get("lock_digest") is not None
+        else None
+    )
+    source = ExperimentSourceIdentityV1(
+        schema_version=1,
+        role=role,
+        kind=_text(value.get("kind"), f"{role} source kind", 300),
+        id=_text(value.get("id"), f"{role} source id", 1000),
+        version_identity=_text(
+            value.get("version_identity"), f"{role} source version", 1000
+        ),
+        runtime_digest=runtime_digest,
+        lock_digest=lock_digest,
+        identity_digest=_required_digest(
+            value.get("identity_digest"), f"{role} source identity digest"
+        ),
+    )
+    unsigned = source.to_dict()
+    unsigned.pop("role")
+    unsigned.pop("identity_digest")
+    if source.identity_digest != stable_digest(unsigned):
+        raise ValueError(f"V3 {role} source identity digest does not recompute")
+    return source
+
+
+def _comparison_source_identity(
+    result: Mapping[str, Any],
+    *,
+    role: Literal["baseline", "candidate"],
+) -> ExperimentSourceIdentityV1:
+    lineage = _mapping(result.get("cohort_lineage"), "cohort_lineage")
+    arms = _mapping(lineage.get("arms"), "cohort_lineage.arms")
+    arm = _mapping(arms.get(role), f"cohort_lineage.arms.{role}")
+    revisions = sorted(
+        (
+            dict(item)
+            for item in _sequence(
+                arm.get("source_revisions"), f"{role} source revisions"
+            )
+            if isinstance(item, Mapping)
+        ),
+        key=lambda item: (
+            str(item.get("kind") or ""),
+            str(item.get("id") or ""),
+            str(item.get("version_identity") or ""),
+        ),
+    )
+    if len(revisions) == 1:
+        revision = revisions[0]
+        runtime_digest = _required_digest(
+            str(revision.get("runtime_digest") or "").removeprefix("sha256:"),
+            f"{role} source runtime digest",
+        )
+        raw_lock = str(revision.get("lock_digest") or "")
+        lock_digest = (
+            _required_digest(
+                raw_lock.removeprefix("sha256:"), f"{role} source lock digest"
+            )
+            if raw_lock
+            else None
+        )
+        kind = _text(revision.get("kind"), f"{role} source kind", 300)
+        source_id = _text(revision.get("id"), f"{role} source id", 1000)
+        version_identity = _text(
+            revision.get("version_identity"), f"{role} source version", 1000
+        )
+    else:
+        # A candidate may deliberately bind several exact behavior sources. The
+        # role identity remains exact by binding their canonical ordered bundle;
+        # individual revisions stay available in cohort_lineage/report facts.
+        behavior_digest = _required_digest(
+            arm.get("behavior_digest"), f"{role} behavior digest"
+        )
+        canonical_revisions = [
+            {
+                **item,
+                "runtime_digest": str(item.get("runtime_digest") or "").removeprefix(
+                    "sha256:"
+                ),
+                **(
+                    {
+                        "lock_digest": str(item.get("lock_digest") or "").removeprefix(
+                            "sha256:"
+                        )
+                    }
+                    if item.get("lock_digest")
+                    else {}
+                ),
+            }
+            for item in revisions
+        ]
+        kind = "candidate_bundle"
+        source_id = f"{result.get('comparison_id')}-{role}"
+        version_identity = (
+            f"bundle:{stable_digest(canonical_revisions)}"
+            if canonical_revisions
+            else f"behavior:{behavior_digest}"
+        )
+        runtime_digest = behavior_digest
+        lock_digest = (
+            stable_digest(canonical_revisions) if canonical_revisions else None
+        )
+    unsigned = {
+        "schema_version": 1,
+        "kind": kind,
+        "id": source_id,
+        "version_identity": version_identity,
+        "runtime_digest": runtime_digest,
+        "lock_digest": lock_digest,
+    }
+    return ExperimentSourceIdentityV1(
+        role=role,
+        identity_digest=stable_digest(unsigned),
+        **unsigned,  # type: ignore[arg-type]
+    )
+
+
+@dataclass(frozen=True)
 class ExperimentViewV3:
     """Strict, source-isolated evaluation view for decision-ready Studies."""
 
@@ -423,6 +580,11 @@ class ExperimentViewV3:
     task_validity: tuple[dict[str, Any], ...]
     scorer_revisions: tuple[dict[str, Any], ...]
     runtime_locks: tuple[dict[str, Any], ...]
+    result_digest: str
+    qualification_digest: str
+    runtime_lock_digest: str
+    baseline_source_identity: ExperimentSourceIdentityV1
+    candidate_source_identity: ExperimentSourceIdentityV1
     preview_digest: str | None = None
     approval_state: str | None = None
     phase: str | None = None
@@ -440,6 +602,7 @@ class ExperimentViewV3:
     backend: str | None = None
     candidate_source_revisions: tuple[dict[str, str], ...] = ()
     supersedes: tuple[dict[str, str], ...] = ()
+    report_index: dict[str, Any] | None = None
     judge_summary: dict[str, Any] = field(
         default_factory=lambda: {"status": "not_used"}
     )
@@ -454,6 +617,12 @@ class ExperimentViewV3:
             "supersedes",
         ):
             serialized[name] = [dict(item) for item in getattr(self, name)]
+        serialized["baseline_source_identity"] = (
+            self.baseline_source_identity.to_dict()
+        )
+        serialized["candidate_source_identity"] = (
+            self.candidate_source_identity.to_dict()
+        )
         return serialized
 
 
@@ -471,6 +640,11 @@ def _experiment_view_v3_from_dict(
         "task_validity",
         "scorer_revisions",
         "runtime_locks",
+        "result_digest",
+        "qualification_digest",
+        "runtime_lock_digest",
+        "baseline_source_identity",
+        "candidate_source_identity",
     }
     missing = sorted(required - set(raw))
     if missing:
@@ -506,6 +680,27 @@ def _experiment_view_v3_from_dict(
         raise ValueError("V3 evaluation view requires scorer revisions")
     if not runtime_locks:
         raise ValueError("V3 evaluation view requires runtime locks")
+    result_digest = _required_digest(raw.get("result_digest"), "result_digest")
+    qualification_digest = _required_digest(
+        raw.get("qualification_digest"), "qualification_digest"
+    )
+    runtime_lock_digest = _required_digest(
+        raw.get("runtime_lock_digest"), "runtime_lock_digest"
+    )
+    expected_runtime_lock_digest = stable_digest(list(runtime_locks))
+    if runtime_lock_digest != expected_runtime_lock_digest:
+        raise ValueError("V3 runtime lock digest does not recompute")
+    baseline_source_identity = _experiment_source_identity(
+        raw.get("baseline_source_identity"), role="baseline"
+    )
+    candidate_source_identity = _experiment_source_identity(
+        raw.get("candidate_source_identity"), role="candidate"
+    )
+    if (
+        baseline_source_identity.identity_digest
+        == candidate_source_identity.identity_digest
+    ):
+        raise ValueError("V3 baseline and candidate source identities must differ")
     supersedes = tuple(
         superseded_result_from_dict(_mapping(item, "superseded_result")).to_dict()
         for item in _sequence(raw.get("supersedes"), "supersedes")
@@ -636,7 +831,13 @@ def _experiment_view_v3_from_dict(
         task_validity=task_validity,
         scorer_revisions=scorer_revisions,
         runtime_locks=runtime_locks,
+        result_digest=result_digest,
+        qualification_digest=qualification_digest,
+        runtime_lock_digest=runtime_lock_digest,
+        baseline_source_identity=baseline_source_identity,
+        candidate_source_identity=candidate_source_identity,
         supersedes=supersedes,
+        report_index=_optional_report_index(raw.get("report_index")),
         judge_summary=_safe_judge_summary(
             raw.get("judge_summary"),
             integrity_status=integrity_status,
@@ -647,6 +848,14 @@ def _experiment_view_v3_from_dict(
     _validate_view_shape(view)
     _validate_v3_evidence_routes(view)
     return view
+
+
+def _optional_report_index(raw: Any) -> dict[str, Any] | None:
+    if raw is None:
+        return None
+    from fugue.bench.scientific_reports import study_report_index_from_dict
+
+    return study_report_index_from_dict(_mapping(raw, "report_index")).to_dict()
 
 
 def _validate_v3_evidence_routes(view: ExperimentViewV3) -> None:
@@ -1678,6 +1887,22 @@ def _build_comparison_evaluation_view_v3(
             lock_descriptor_from_dict(_mapping(item, "runtime_lock")).to_dict()
             for item in _sequence(result.get("runtime_locks"), "runtime_locks")
         ),
+        result_digest=_required_digest(result.get("result_digest"), "result_digest"),
+        qualification_digest=_required_digest(
+            result.get("qualification_digest"), "qualification_digest"
+        ),
+        runtime_lock_digest=stable_digest(
+            [
+                lock_descriptor_from_dict(_mapping(item, "runtime_lock")).to_dict()
+                for item in _sequence(result.get("runtime_locks"), "runtime_locks")
+            ]
+        ),
+        baseline_source_identity=_comparison_source_identity(
+            result, role="baseline"
+        ),
+        candidate_source_identity=_comparison_source_identity(
+            result, role="candidate"
+        ),
         supersedes=tuple(
             superseded_result_from_dict(_mapping(item, "superseded_result")).to_dict()
             for item in _sequence(result.get("supersedes"), "supersedes")
@@ -2249,6 +2474,7 @@ def _optional_canonical_attempt(raw: Any) -> dict[str, Any] | None:
         "scores",
         "evidence_links",
         "weave_agent_root_call_id",
+        "weave_agent_evidence_call_id",
         "otel_root_span_id",
         "execution_fingerprint",
         "runtime_lock_digest",
@@ -2261,14 +2487,19 @@ def _optional_canonical_attempt(raw: Any) -> dict[str, Any] | None:
             value.get("evidence_links"), "paired_attempt.evidence_links"
         )
     )
+    observed_kinds = {str(item["kind"]) for item in links}
     expected_kinds = {
         "evaluation_root",
         "prediction_and_score",
         "prediction",
-        "agent_root",
         "dataset",
     }
-    if len(links) != 5 or {str(item["kind"]) for item in links} != expected_kinds:
+    agent_slots = observed_kinds & {"agent_root", "agent_evidence_receipt"}
+    if (
+        len(links) != 5
+        or not expected_kinds <= observed_kinds
+        or len(agent_slots) != 1
+    ):
         raise ValueError(
             "paired_attempt.evidence_links must contain exactly five unique slots"
         )
@@ -2330,6 +2561,7 @@ def _optional_canonical_attempt(raw: Any) -> dict[str, Any] | None:
     for field_name in (
         "prediction_id",
         "weave_agent_root_call_id",
+        "weave_agent_evidence_call_id",
         "otel_root_span_id",
         "execution_fingerprint",
         "runtime_lock_digest",
@@ -2436,7 +2668,17 @@ def _canonical_attempt_evidence_link(raw: Any) -> dict[str, Any]:
     value = _mapping(raw, "paired_attempt.evidence_link")
     _reject_unknown(
         value,
-        {"kind", "status", "system", "ref", "url", "reason"},
+        {
+            "kind",
+            "status",
+            "system",
+            "ref",
+            "url",
+            "reason",
+            "evidence_kind",
+            "native_trajectory_status",
+            "conversation_correlation_status",
+        },
         "paired_attempt.evidence_link",
     )
     kind = _text(value.get("kind"), "attempt evidence kind", 100)
@@ -2445,6 +2687,7 @@ def _canonical_attempt_evidence_link(raw: Any) -> dict[str, Any]:
         "prediction_and_score",
         "prediction",
         "agent_root",
+        "agent_evidence_receipt",
         "dataset",
     }:
         raise ValueError("attempt evidence kind is unsupported")
@@ -2471,6 +2714,20 @@ def _canonical_attempt_evidence_link(raw: Any) -> dict[str, Any]:
         result["url"] = url
     if reason:
         result["reason"] = reason
+    for field_name in (
+        "evidence_kind",
+        "native_trajectory_status",
+        "conversation_correlation_status",
+    ):
+        field_value = _optional_text(
+            value.get(field_name), f"attempt evidence {field_name}", 300
+        )
+        if field_value:
+            if kind != "agent_evidence_receipt":
+                raise ValueError(
+                    f"attempt evidence {field_name} is only valid on Agent receipts"
+                )
+            result[field_name] = field_value
     return result
 
 
@@ -2888,9 +3145,7 @@ def _safe_judge_summary(
     judges = _safe_judge_provenance(value.get("judges"))
     by_variant = _safe_judge_variants(
         value.get("by_variant"),
-        judge_dimensions={
-            item["judge_id"]: set(item["dimensions"]) for item in judges
-        },
+        judge_dimensions={item["judge_id"]: set(item["dimensions"]) for item in judges},
         arm_attempts=arm_attempts,
     )
     unavailable = _non_negative_int(
@@ -3095,9 +3350,7 @@ def _safe_judge_variants(
                     "judge summary mean must be null exactly when no rows were evaluated"
                 )
             if arm_attempts is not None and evaluated > arm_attempts[variant]:
-                raise ValueError(
-                    "judge evaluated count exceeds canonical arm attempts"
-                )
+                raise ValueError("judge evaluated count exceeds canonical arm attempts")
             dimensions[dimension] = {
                 "evaluated": evaluated,
                 "mean": mean,
@@ -3112,15 +3365,8 @@ def _safe_judge_variants(
             "judge summary dimensions do not match locked judge provenance"
         )
     for variant in ("baseline", "candidate"):
-        if len(
-            {
-                summary["evaluated"]
-                for summary in result[variant].values()
-            }
-        ) > 1:
-            raise ValueError(
-                "judge dimensions disagree on evaluated attempt counts"
-            )
+        if len({summary["evaluated"] for summary in result[variant].values()}) > 1:
+            raise ValueError("judge dimensions disagree on evaluated attempt counts")
     return result
 
 
@@ -3134,9 +3380,7 @@ def _unique_judge_dimensions(
         for item in _sequence(raw, f"judge {judge_id} dimensions")
     ]
     if not dimensions or len(dimensions) != len(set(dimensions)):
-        raise ValueError(
-            "judge provenance dimensions must be non-empty and unique"
-        )
+        raise ValueError("judge provenance dimensions must be non-empty and unique")
     return dimensions
 
 
@@ -3144,10 +3388,7 @@ def _judge_arm_attempt_counts(
     paired_cases: Sequence[Mapping[str, Any]],
 ) -> dict[str, int]:
     return {
-        arm: sum(
-            isinstance(pair.get(arm), Mapping)
-            for pair in paired_cases
-        )
+        arm: sum(isinstance(pair.get(arm), Mapping) for pair in paired_cases)
         for arm in ("baseline", "candidate")
     }
 
@@ -3896,6 +4137,8 @@ def _attempt_measures(
         if row.get(key) is not None and isinstance(row[key], str | int | float | bool)
     }
     for key in (
+        "skill_ids_opened",
+        "skill_ids_native_invoked",
         "skill_ids_invoked",
         "integration_ids_invoked",
         "mcp_tool_names",
@@ -3907,6 +4150,19 @@ def _attempt_measures(
         normalized = sorted({str(value) for value in values if str(value)})
         if normalized:
             measures[key] = " | ".join(normalized)
+    skill_files = row.get("skill_files_opened")
+    if isinstance(skill_files, Sequence) and not isinstance(skill_files, str | bytes):
+        normalized_files = sorted(
+            {
+                f"{item.get('skill_id')}:{item.get('relative_path')}"
+                for item in skill_files
+                if isinstance(item, Mapping)
+                and item.get("skill_id")
+                and item.get("relative_path")
+            }
+        )
+        if normalized_files:
+            measures["skill_files_opened"] = " | ".join(normalized_files)
     return measures
 
 

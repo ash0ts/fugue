@@ -64,9 +64,7 @@ def apply_campaign_run_conformance(
     cleanup = receipt.get("docker_cleanup")
     identity = identity if isinstance(identity, Mapping) else {}
     local_privacy = local_privacy if isinstance(local_privacy, Mapping) else {}
-    private_boundary = (
-        private_boundary if isinstance(private_boundary, Mapping) else {}
-    )
+    private_boundary = private_boundary if isinstance(private_boundary, Mapping) else {}
     cleanup = cleanup if isinstance(cleanup, Mapping) else {}
     receipt_version = int(receipt.get("schema_version") or 0)
     receipt_digest = str(receipt.get("receipt_sha256") or "")
@@ -316,9 +314,7 @@ def _expected_attempts(plan: PlanReceiptV1) -> dict[str, dict[str, Any]]:
         supplied_identity = cell.get("attempt_identity")
         supplied_attempt_id = str(cell.get("attempt_id") or "")
         if not isinstance(supplied_identity, Mapping) or not supplied_attempt_id:
-            raise ValueError(
-                "campaign plan is missing its canonical attempt identity"
-            )
+            raise ValueError("campaign plan is missing its canonical attempt identity")
         identity = canonical_attempt_identity(
             task_id=str(cell.get("task_id") or ""),
             arm=str(cell.get("variant_id") or ""),
@@ -385,9 +381,7 @@ def _project_topology_failures(
                 f"row {index} destination receipt differs from its result project"
             )
         queried = {
-            str(value)
-            for value in row.get("mcp_queried_projects") or ()
-            if str(value)
+            str(value) for value in row.get("mcp_queried_projects") or () if str(value)
         }
         allowed_queries = {source_project or result_project}
         unexpected = sorted(queried - allowed_queries)
@@ -460,9 +454,7 @@ def _harbor_conformance_failures(
         str(value) for value in row.get("integration_ids") or () if str(value)
     }
     invoked_integrations = {
-        str(value)
-        for value in row.get("integration_ids_invoked") or ()
-        if str(value)
+        str(value) for value in row.get("integration_ids_invoked") or () if str(value)
     }
     if invoked_integrations - assigned_integrations:
         failures.append("reports invoked integrations outside the locked candidate")
@@ -481,18 +473,30 @@ def _harbor_conformance_failures(
         for value in row.get("skills_assigned") or row.get("skill_ids") or ()
         if str(value)
     }
-    invoked_skills = {
-        str(value) for value in row.get("skill_ids_invoked") or () if str(value)
+    opened_skills = {
+        str(value) for value in row.get("skill_ids_opened") or () if str(value)
     }
-    if invoked_skills - assigned_skills:
-        failures.append("reports invoked skills outside the locked candidate")
+    native_invoked_skills = {
+        str(value)
+        for value in (
+            row.get("skill_ids_native_invoked")
+            if row.get("skill_ids_native_invoked") is not None
+            else row.get("skill_ids_invoked")
+        )
+        or ()
+        if str(value)
+    }
+    if opened_skills - assigned_skills:
+        failures.append("reports opened skills outside the locked candidate")
+    if native_invoked_skills - assigned_skills:
+        failures.append("reports natively invoked skills outside the locked candidate")
     missing_loop_skills = {
         value for value in assigned_skills if value.startswith("loop-intervention-")
-    } - invoked_skills
+    } - opened_skills
     if missing_loop_skills:
         failures.append(
-            "lacks host-observed invocation of locked loop intervention(s): "
-            + ", ".join(sorted(missing_loop_skills))
+            "lacks host-observed instruction opening for locked loop "
+            "intervention(s): " + ", ".join(sorted(missing_loop_skills))
         )
     return failures
 
@@ -836,6 +840,9 @@ _SAFE_PREDICTION_FIELDS = (
     "context_invoked",
     "skill_ids",
     "skills_assigned",
+    "skill_ids_opened",
+    "skill_files_opened",
+    "skill_ids_native_invoked",
     "skill_ids_invoked",
     "skill_provenance",
     "integration_ids",
@@ -929,14 +936,10 @@ def safe_agent_evidence(
             str(value) for value in row.get("weave_conversation_ids") or [] if value
         ],
         "otel_root_span_ids": [
-            str(value)
-            for value in row.get("otel_root_span_ids") or []
-            if value
+            str(value) for value in row.get("otel_root_span_ids") or [] if value
         ],
         "otel_trace_ids": [
-            str(value)
-            for value in row.get("otel_trace_ids") or []
-            if value
+            str(value) for value in row.get("otel_trace_ids") or [] if value
         ],
         "links": link_set["links"],
         "link_failures": link_set["failures"],
@@ -1044,9 +1047,7 @@ def verified_trace_link_set(row: Mapping[str, Any]) -> dict[str, Any]:
                 **({"evidence_kind": evidence_kind} if slot == "agent_root" else {}),
             }
         )
-    dataset_ref = str(
-        row.get("weave_dataset_ref") or row.get("weave_dataset_id") or ""
-    )
+    dataset_ref = str(row.get("weave_dataset_ref") or row.get("weave_dataset_id") or "")
     dataset_url = _safe_immutable_url(row.get("weave_dataset_url"))
     if (
         row.get("dataset_version_object_verified") is not True

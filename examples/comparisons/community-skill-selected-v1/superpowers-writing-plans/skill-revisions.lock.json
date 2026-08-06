@@ -1,0 +1,18 @@
+{
+  "schema_version": 1,
+  "repository": "https://github.com/obra/superpowers",
+  "path": "skills/writing-plans",
+  "baseline": {
+    "id": "superpowers-writing-plans-before-contracts",
+    "commit": "de4672b171213a6ff6960228d8b95c46ea0b09f4",
+    "bundle_digest": "sha256:44212153d6c10186e77ec4e68140f12372f38682179b831e268c94515c7dd8f8",
+    "file_count": 2
+  },
+  "candidate": {
+    "id": "superpowers-writing-plans-contracts",
+    "commit": "8e1262a3bae92b640d87fa81c51c53b65e490590",
+    "bundle_digest": "sha256:25cc345550095417590edec3d3e5157c6682f173a1122372943ce46050a23846",
+    "file_count": 2
+  },
+  "effective_change": ["task right-sizing", "global constraints", "producer and consumer interfaces"]
+}

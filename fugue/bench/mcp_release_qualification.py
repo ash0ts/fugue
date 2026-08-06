@@ -19,6 +19,7 @@ from fugue.bench.analysis_contracts import EvidenceDriftCheckV1
 from fugue.bench.candidates import stable_digest
 from fugue.bench.files import atomic_write_json
 from fugue.bench.operator import load_env
+from fugue.bench.source_filters import task_evidence_wandb_runs
 from fugue.model_plane import trace_api_key
 
 QUALIFICATION_RESULT_PROJECT = "wandb/fugue-mcp-release-qualification-v1"
@@ -3574,7 +3575,7 @@ def _inspect_wandb_run(
 
 def _wandb_project_runs(api: Any, source_project: str) -> list[Any]:
     try:
-        return list(api.runs(source_project, per_page=100))
+        return task_evidence_wandb_runs(api.runs(source_project, per_page=100))
     except Exception as exc:
         status = getattr(getattr(exc, "response", None), "status_code", None)
         message = str(exc).lower()

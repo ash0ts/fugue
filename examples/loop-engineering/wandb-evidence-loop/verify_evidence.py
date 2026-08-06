@@ -7,6 +7,7 @@ from collections.abc import Iterable, Mapping
 from pathlib import Path
 from typing import Any
 
+from fugue.agent_tracing import normalize_skill_mechanism_evidence
 from fugue.bench.campaign_evidence import verified_trace_link_set
 from fugue.bench.files import atomic_write_json
 from fugue.bench.intervention_provenance import (
@@ -65,22 +66,24 @@ def _coordinate(row: Mapping[str, Any]) -> tuple[str, str, int]:
 def _tool_names(row: Mapping[str, Any]) -> set[str]:
     value = row.get("weave_tool_names") or row.get("mcp_tool_names")
     if isinstance(value, Mapping):
-        return {
-            str(name)
-            for name, count in value.items()
-            if float(count or 0) > 0
-        }
+        return {str(name) for name, count in value.items() if float(count or 0) > 0}
     if isinstance(value, list):
         return {str(name) for name in value}
     return set()
 
 
 def _skill_use_observed(row: Mapping[str, Any], skill_id: str) -> bool:
-    evidence = row.get("skill_invocation_evidence")
-    if not isinstance(evidence, Mapping):
-        return False
-    invoked = {str(value) for value in evidence.get("skills_invoked") or ()}
-    return evidence.get("status") == "observed" and skill_id in invoked
+    evidence = normalize_skill_mechanism_evidence(
+        row.get("skill_mechanism_evidence") or row.get("skill_invocation_evidence")
+    )
+    used = {
+        str(value)
+        for value in (
+            *evidence["skills_opened"],
+            *evidence["skills_native_invoked"],
+        )
+    }
+    return evidence["status"] == "observed" and skill_id in used
 
 
 def _integration_ids(row: Mapping[str, Any]) -> set[str]:
@@ -100,9 +103,7 @@ def _integration_use_observed(
     integration_id: str,
 ) -> bool:
     invoked = {
-        str(value)
-        for value in row.get("integration_ids_invoked") or ()
-        if str(value)
+        str(value) for value in row.get("integration_ids_invoked") or () if str(value)
     }
     calls = row.get("mcp_tool_calls")
     if integration_id not in invoked or not isinstance(calls, list):
@@ -206,9 +207,7 @@ def _evidence_issues(rows: Iterable[Mapping[str, Any]]) -> list[str]:
         if row.get("trace_project") != LOOP_PROJECT:
             issues.append(f"{identity}: evidence routed outside the loop project")
         if row.get("trace_link_status") != "linked":
-            issues.append(
-                f"{identity}: native Agent evidence receipt is not linked"
-            )
+            issues.append(f"{identity}: native Agent evidence receipt is not linked")
         link_set = verified_trace_link_set(row)
         for failure in link_set["failures"]:
             issues.append(f"{identity}: {failure}")
@@ -282,8 +281,7 @@ def verify(  # noqa: C901 - one bounded receipt reports every qualification gate
             continue
         component_receipts.append(receipt)
         blockers.extend(
-            f"{component.component_id}: {item}"
-            for item in receipt["blockers"]
+            f"{component.component_id}: {item}" for item in receipt["blockers"]
         )
 
     if len(discovery) != 8:
@@ -291,9 +289,7 @@ def verify(  # noqa: C901 - one bounded receipt reports every qualification gate
     if len(holdout) != 8:
         blockers.append(f"holdout requires exactly 8 rows, found {len(holdout)}")
 
-    discovery_counts = Counter(
-        str(row.get("variant_id") or "") for row in discovery
-    )
+    discovery_counts = Counter(str(row.get("variant_id") or "") for row in discovery)
     expected_discovery = Counter(
         {"production": 2, "skill-only": 2, "mcp-only": 2, "combined": 2}
     )
@@ -314,9 +310,7 @@ def verify(  # noqa: C901 - one bounded receipt reports every qualification gate
         selection.discovery_suite_sha256
     }:
         blockers.append("discovery rows differ from the pre-frozen discovery suite")
-    if {_task_suite_digest(row) for row in holdout} != {
-        selection.holdout_suite_sha256
-    }:
+    if {_task_suite_digest(row) for row in holdout} != {selection.holdout_suite_sha256}:
         blockers.append("holdout rows differ from the pre-frozen holdout suite")
 
     for phase, rows, counts in (
@@ -325,15 +319,14 @@ def verify(  # noqa: C901 - one bounded receipt reports every qualification gate
     ):
         coordinates = {
             variant: {
-                _coordinate(row)
-                for row in rows
-                if row.get("variant_id") == variant
+                _coordinate(row) for row in rows if row.get("variant_id") == variant
             }
             for variant in counts
         }
-        if coordinates and len(
-            {frozenset(value) for value in coordinates.values()}
-        ) != 1:
+        if (
+            coordinates
+            and len({frozenset(value) for value in coordinates.values()}) != 1
+        ):
             blockers.append(f"{phase} candidates are not aligned on exact cells")
 
     all_rows = [*discovery, *holdout]
@@ -380,15 +373,13 @@ def verify(  # noqa: C901 - one bounded receipt reports every qualification gate
         str(source.get("commit") or "") != selection.source_commit
         or str(source.get("tree") or "") != selection.source_tree
         or bool(source.get("dirty"))
-        or str(source.get("dirty_digest") or "")
-        != selection.source_dirty_digest
+        or str(source.get("dirty_digest") or "") != selection.source_dirty_digest
     ):
         blockers.append("current checkout differs from the qualified clean source")
     if any(
         str(row.get("source_commit") or "") != selection.source_commit
         or str(row.get("source_tree") or "") != selection.source_tree
-        or str(row.get("source_dirty_digest") or "")
-        != selection.source_dirty_digest
+        or str(row.get("source_dirty_digest") or "") != selection.source_dirty_digest
         for row in all_rows
     ):
         blockers.append("one or more cells differ from the qualified source tree")
@@ -428,8 +419,7 @@ def verify(  # noqa: C901 - one bounded receipt reports every qualification gate
         if row.get("variant_id") == "production"
     }
     holdout_regressions = sum(
-        row.get("pass") is not True
-        and holdout_baseline.get(_coordinate(row)) is True
+        row.get("pass") is not True and holdout_baseline.get(_coordinate(row)) is True
         for row in holdout
         if row.get("variant_id") == selected
     )
@@ -442,17 +432,13 @@ def verify(  # noqa: C901 - one bounded receipt reports every qualification gate
         row for row in [*discovery, *holdout] if row.get("variant_id") == selected
     ]
     for component in selection.selected_components:
-        if any(
-            not _component_is_bound(row, component)
-            for row in selected_rows
-        ):
+        if any(not _component_is_bound(row, component) for row in selected_rows):
             blockers.append(
                 f"{component.component_id}: selected rows differ from the "
                 "qualified component lock"
             )
     if selected in {"skill-only", "combined"} and any(
-        not _skill_use_observed(row, "loop-intervention-skill")
-        for row in selected_rows
+        not _skill_use_observed(row, "loop-intervention-skill") for row in selected_rows
     ):
         blockers.append("selected Skill intervention use is unproven")
     if selected in {"mcp-only", "combined"} and any(
@@ -488,8 +474,7 @@ def verify(  # noqa: C901 - one bounded receipt reports every qualification gate
     release_tracked_mcp_components = [
         item
         for item in selection.selected_components
-        if item.kind == "mcp"
-        and is_release_tracked_mcp_repository(item.repository)
+        if item.kind == "mcp" and is_release_tracked_mcp_repository(item.repository)
     ]
     if any(
         not item.release_requalification_required
@@ -576,9 +561,7 @@ def main() -> int:
             or not path.strip()
             or component_id.strip() in component_worktrees
         ):
-            parser.error(
-                "--component-worktree must be a unique COMPONENT_ID=PATH"
-            )
+            parser.error("--component-worktree must be a unique COMPONENT_ID=PATH")
         component_worktrees[component_id.strip()] = Path(path).resolve()
     receipt = verify(
         discovery_path=args.discovery,

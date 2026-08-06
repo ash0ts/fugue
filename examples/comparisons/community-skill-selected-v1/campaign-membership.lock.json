@@ -1,0 +1,19 @@
+{
+  "campaign_id": "community-skill-case-studies-v1",
+  "membership_digest": "cc14107a438af38e831756db374b8e64a7d2f245feac699f35cd6dc3dad871f4",
+  "schema_version": 1,
+  "studies": [
+    {
+      "result_project": "wandb/fugue-anthropic-skill-creator-measurement-pilot-v1",
+      "study_id": "anthropic-skill-creator-measurement-pilot-v1"
+    },
+    {
+      "result_project": "wandb/fugue-superpowers-writing-plans-measurement-pilot-v1",
+      "study_id": "superpowers-writing-plans-measurement-pilot-v1"
+    },
+    {
+      "result_project": "wandb/fugue-vercel-react-practices-measurement-pilot-v1",
+      "study_id": "vercel-react-practices-measurement-pilot-v1"
+    }
+  ]
+}

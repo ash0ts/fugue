@@ -2,18 +2,18 @@
   "aligned_analysis": {
     "aligned_attempts": [
       {
-        "alignment_id": "3333333333333333333333333333333333333333333333333333333333333333",
+        "alignment_id": "2b2101aa1954484d7e4036ca161e4dbe5cd37491d68bacf269697e22549418a9",
         "attempt": 1,
         "attempt_ids_by_arm": {
-          "baseline": "76254a6bef570ea2dbf5e4ab975735256169e207d1dae84380c660aec4c5f8b5",
-          "candidate": "2373d4ff51aee7c4d903635a5459f9c2059ebc146fc5785dbdc0e8a608c7757b"
+          "baseline": "7c16ab520be2bb0e9124cea2009c9de4952f1e42cc49ed5c7f76fd70ff0c7b03",
+          "candidate": "7cefe5436521aad1dd6d870e4f80f34d8dfcc02c8d03f4c0db8d08f969487cce"
         },
         "harness": "claude-code",
         "task_id": "task-1",
         "task_label": "Bounded answer"
       }
     ],
-    "analysis_digest": "914ce621a317028599ff1cf873c2958fa0e1937405f0d37f7640d675bf0a5db3",
+    "analysis_digest": "1081ed954f48740d88199b64e955ee8739749813b62a8b45861442e15e35dba3",
     "arms": [
       {
         "id": "baseline",
@@ -62,6 +62,16 @@
     ]
   },
   "backend": "harbor-docker",
+  "baseline_source_identity": {
+    "id": "wandb-mcp-main",
+    "identity_digest": "2a59568f252971d6c723091a138d23c484a44232672f8f85335348f0e5d1e0e5",
+    "kind": "mcp",
+    "lock_digest": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+    "role": "baseline",
+    "runtime_digest": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+    "schema_version": 1,
+    "version_identity": "git:53b199a5f4af29aa82077e2c7f1e2c5e5e0c2ca0"
+  },
   "behavioral_summary": {
     "candidate_critical_failures": 0,
     "critical_blockers": [],
@@ -77,6 +87,16 @@
     "status": "improved",
     "supported_claim": "Candidate improved one aligned pair.",
     "unchanged_pairs": 0
+  },
+  "candidate_source_identity": {
+    "id": "wandb-mcp-0-4-reconciliation-fix",
+    "identity_digest": "558bf048f1db6bc8203f147ec6b6d79cabf9a4c7714f041a1cf894ec73e53413",
+    "kind": "mcp",
+    "lock_digest": "eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee",
+    "role": "candidate",
+    "runtime_digest": "ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff",
+    "schema_version": 1,
+    "version_identity": "git:571ee85eedd73e06bd414316f73d732c398535d6"
   },
   "candidate_source_revisions": [
     {
@@ -114,7 +134,7 @@
     "project": "fugue-mcp-release-qualification-v1"
   },
   "evidence_topology": {
-    "execution_identity": "2222222222222222222222222222222222222222222222222222222222222222",
+    "execution_identity": "31f96c345bb47536b41f5241f8320e0b9efe7795422142c980a6c2679e849a9b",
     "post_run_drift": {
       "expected_digest": "1111111111111111111111111111111111111111111111111111111111111111",
       "observed_digest": "1111111111111111111111111111111111111111111111111111111111111111",
@@ -147,7 +167,7 @@
       "trace_base_url": "https://trace.wandb.ai"
     },
     "source_lock_digest": "1111111111111111111111111111111111111111111111111111111111111111",
-    "topology_digest": "bc63b3c3ad203d3ba57119395da58c2eeeec6dd9a029ba46159b8d24fb6b834d"
+    "topology_digest": "98ef73354e1f075c084f9179be9ab664c6545406a0d7d6502431a25257bdca20"
   },
   "infrastructure_health": "healthy",
   "integrity_status": "reconciled",
@@ -222,55 +242,58 @@
         "actual_query_scope": [
           "wandb/fugue-mcp-release-source-v2"
         ],
-        "attempt_id": "76254a6bef570ea2dbf5e4ab975735256169e207d1dae84380c660aec4c5f8b5",
+        "attempt_id": "7c16ab520be2bb0e9124cea2009c9de4952f1e42cc49ed5c7f76fd70ff0c7b03",
         "cost_usd": 0.1,
         "evaluation_status": "completed",
         "evidence_links": [
           {
             "kind": "evaluation_root",
-            "ref": "baseline-evaluation_root",
+            "ref": "weave:///wandb/fugue-mcp-release-qualification-v1/call/baseline-evaluation_root",
             "status": "resolved",
             "system": "weave",
             "url": "https://wandb.ai/wandb/fugue-mcp-release-qualification-v1/weave/calls/baseline-evaluation_root"
           },
           {
             "kind": "prediction_and_score",
-            "ref": "baseline-prediction_and_score",
+            "ref": "weave:///wandb/fugue-mcp-release-qualification-v1/call/baseline-prediction_and_score",
             "status": "resolved",
             "system": "weave",
             "url": "https://wandb.ai/wandb/fugue-mcp-release-qualification-v1/weave/calls/baseline-prediction_and_score"
           },
           {
             "kind": "prediction",
-            "ref": "baseline-prediction",
+            "ref": "weave:///wandb/fugue-mcp-release-qualification-v1/call/baseline-prediction",
             "status": "resolved",
             "system": "weave",
             "url": "https://wandb.ai/wandb/fugue-mcp-release-qualification-v1/weave/calls/baseline-prediction"
           },
           {
-            "kind": "agent_root",
-            "ref": "baseline-agent_root",
+            "conversation_correlation_status": "verified",
+            "evidence_kind": "native_otel_cross_transport_receipt_v1",
+            "kind": "agent_evidence_receipt",
+            "native_trajectory_status": "otel_correlated",
+            "ref": "weave:///wandb/fugue-mcp-release-qualification-v1/call/baseline-agent-evidence",
             "status": "resolved",
             "system": "weave",
-            "url": "https://wandb.ai/wandb/fugue-mcp-release-qualification-v1/weave/calls/baseline-agent_root"
+            "url": "https://wandb.ai/wandb/fugue-mcp-release-qualification-v1/weave/calls/baseline-agent-evidence"
           },
           {
             "kind": "dataset",
-            "ref": "release-dataset:v1",
+            "ref": "weave:///wandb/fugue-mcp-release-qualification-v1/object/release-dataset:v1",
             "status": "resolved",
             "system": "weave",
             "url": "https://wandb.ai/wandb/fugue-mcp-release-qualification-v1/weave/objects/release-dataset/versions/v1"
           }
         ],
         "evidence_status": "reconciled",
-        "execution_fingerprint": "harbor-execution-fingerprint",
-      "execution_status": "completed",
+        "execution_fingerprint": "5555555555555555555555555555555555555555555555555555555555555555",
+        "execution_status": "completed",
         "identity": {
           "arm": "baseline",
           "attempt": 1,
           "candidate": "baseline-candidate-lock",
           "harness": "claude-code",
-          "runtime": "harbor-runtime-lock",
+          "runtime": "5555555555555555555555555555555555555555555555555555555555555555",
           "task_id": "task-1"
         },
         "infrastructure": {
@@ -287,7 +310,7 @@
           "wandb/fugue-mcp-release-source-v2"
         ],
         "reported_project_identity": "wandb/fugue-mcp-release-source-v2",
-        "runtime_lock_digest": "harbor-runtime-lock",
+        "runtime_lock_digest": "5555555555555555555555555555555555555555555555555555555555555555",
         "sanitized_answer_excerpt": "The baseline summary did not reconcile direct children.",
         "score_explanations": {
           "bounded_answer": "The answer made an unsupported broad claim.",
@@ -308,61 +331,64 @@
           "query_wandb",
           "summarize_evaluation"
         ],
-        "weave_agent_root_call_id": "baseline-agent_root"
+        "weave_agent_evidence_call_id": "baseline-agent-evidence"
       },
       "candidate": {
         "actual_query_scope": [
           "wandb/fugue-mcp-release-source-v2"
         ],
-        "attempt_id": "2373d4ff51aee7c4d903635a5459f9c2059ebc146fc5785dbdc0e8a608c7757b",
+        "attempt_id": "7cefe5436521aad1dd6d870e4f80f34d8dfcc02c8d03f4c0db8d08f969487cce",
         "cost_usd": 0.1,
         "evaluation_status": "completed",
         "evidence_links": [
           {
             "kind": "evaluation_root",
-            "ref": "candidate-evaluation_root",
+            "ref": "weave:///wandb/fugue-mcp-release-qualification-v1/call/candidate-evaluation_root",
             "status": "resolved",
             "system": "weave",
             "url": "https://wandb.ai/wandb/fugue-mcp-release-qualification-v1/weave/calls/candidate-evaluation_root"
           },
           {
             "kind": "prediction_and_score",
-            "ref": "candidate-prediction_and_score",
+            "ref": "weave:///wandb/fugue-mcp-release-qualification-v1/call/candidate-prediction_and_score",
             "status": "resolved",
             "system": "weave",
             "url": "https://wandb.ai/wandb/fugue-mcp-release-qualification-v1/weave/calls/candidate-prediction_and_score"
           },
           {
             "kind": "prediction",
-            "ref": "candidate-prediction",
+            "ref": "weave:///wandb/fugue-mcp-release-qualification-v1/call/candidate-prediction",
             "status": "resolved",
             "system": "weave",
             "url": "https://wandb.ai/wandb/fugue-mcp-release-qualification-v1/weave/calls/candidate-prediction"
           },
           {
-            "kind": "agent_root",
-            "ref": "candidate-agent_root",
+            "conversation_correlation_status": "verified",
+            "evidence_kind": "native_otel_cross_transport_receipt_v1",
+            "kind": "agent_evidence_receipt",
+            "native_trajectory_status": "otel_correlated",
+            "ref": "weave:///wandb/fugue-mcp-release-qualification-v1/call/candidate-agent-evidence",
             "status": "resolved",
             "system": "weave",
-            "url": "https://wandb.ai/wandb/fugue-mcp-release-qualification-v1/weave/calls/candidate-agent_root"
+            "url": "https://wandb.ai/wandb/fugue-mcp-release-qualification-v1/weave/calls/candidate-agent-evidence"
           },
           {
             "kind": "dataset",
-            "ref": "release-dataset:v1",
+            "ref": "weave:///wandb/fugue-mcp-release-qualification-v1/object/release-dataset:v1",
             "status": "resolved",
             "system": "weave",
             "url": "https://wandb.ai/wandb/fugue-mcp-release-qualification-v1/weave/objects/release-dataset/versions/v1"
           }
         ],
         "evidence_status": "reconciled",
-        "execution_fingerprint": "harbor-execution-fingerprint",
-      "execution_status": "completed",
+        "execution_fingerprint": "5555555555555555555555555555555555555555555555555555555555555555",
+        "execution_status": "completed",
         "identity": {
           "arm": "candidate",
           "attempt": 1,
           "candidate": "candidate-candidate-lock",
           "harness": "claude-code",
-          "runtime": "harbor-runtime-lock",
+          "runtime": "5555555555555555555555555555555555555555555555555555555555555555",
           "task_id": "task-1"
         },
         "infrastructure": {
@@ -379,7 +405,7 @@
           "wandb/fugue-mcp-release-source-v2"
         ],
         "reported_project_identity": "wandb/fugue-mcp-release-source-v2",
-        "runtime_lock_digest": "harbor-runtime-lock",
+        "runtime_lock_digest": "5555555555555555555555555555555555555555555555555555555555555555",
         "sanitized_answer_excerpt": "The candidate reconciled the exact direct children.",
         "score_explanations": {
           "bounded_answer": "The answer stayed within the locked project.",
@@ -400,7 +426,7 @@
           "query_wandb",
           "summarize_evaluation"
         ],
-        "weave_agent_root_call_id": "candidate-agent_root"
+        "weave_agent_evidence_call_id": "candidate-agent-evidence"
       },
       "dimension_changes": [
         {
@@ -423,6 +449,9 @@
     }
   ],
   "phase": "completed",
+  "qualification_digest": "7777777777777777777777777777777777777777777777777777777777777777",
+  "result_digest": "7777777777777777777777777777777777777777777777777777777777777777",
+  "runtime_lock_digest": "dbfa5594c735c75b82598feac736f20fccbcf37529a7259afcbcd17c9e07efc7",
   "runtime_locks": [
     {
       "details": {

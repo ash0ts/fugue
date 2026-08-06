@@ -1,0 +1,24 @@
+{
+  "schema_version": 1,
+  "id": "community-skill-judge-calibration-cases-v1",
+  "case_count": 48,
+  "cases_digest": "a6a67f5d6815b255758017ca82f945d76a61ca418e2d9ccfd049f8327e24669e",
+  "source_visibility": "operator-restricted",
+  "repository_modalities": {
+    "superpowers-writing-plans": "implementation-plan",
+    "anthropic-skill-creator": "skill-package",
+    "vercel-react-best-practices": "code-change"
+  },
+  "modalities": {
+    "implementation-plan": {"acceptable": 8, "defective": 8},
+    "skill-package": {"acceptable": 8, "defective": 8},
+    "code-change": {"acceptable": 8, "defective": 8}
+  },
+  "review_policy": {
+    "independent_blinded_reviewers": 2,
+    "adjudicate_disagreements": true,
+    "minimum_tpr_tnr": 0.85,
+    "critical_false_passes_max": 0
+  },
+  "note": "Case contents, reviewer packets, submissions, model outputs, and adjudication content are intentionally not tracked."
+}

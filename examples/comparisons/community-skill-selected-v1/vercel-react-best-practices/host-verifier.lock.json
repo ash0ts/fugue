@@ -1,0 +1,20 @@
+{
+  "schema_version": 1,
+  "id": "fugue-node-test-v1",
+  "runtime": {
+    "kind": "oci",
+    "image": "node:22-bookworm-slim@sha256:a17d50af28002a160548bd4225b3cfcb12c5efcb171f79e68758f2885fb1b066",
+    "network": "none",
+    "read_only_base": true
+  },
+  "command": ["node", "--test"],
+  "verifier_source_sha256": "c87c5a11edaa73664443d4a05f869a91b064a6485ba38c2039774739505c2ce9",
+  "timeout_seconds": 30,
+  "receipt_contract": {
+    "artifact_binding": "canonical-json-sha256-of-agent-files",
+    "input": "one-host-authored-input-json-with-separate-read-only-archive-and-agent-output",
+    "task_binding": "task-id-and-public-archive-sha256",
+    "result": "zero-exit-status-only",
+    "producer": "trusted-host-controller"
+  }
+}

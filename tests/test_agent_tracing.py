@@ -13,6 +13,7 @@ from fugue.agent_tracing import (
     agent_conversation_name,
     codex_skill_instruction,
     conversation_id,
+    normalize_skill_mechanism_evidence,
     normalize_trace_content,
     openclaw_agent_id,
     openclaw_conversation_id,
@@ -204,18 +205,26 @@ def test_codex_skill_read_is_normalized_from_a_successful_structured_event(
         },
     )
 
-    assert evidence == {
-        "status": "observed",
-        "skills_invoked": ["pdf-artifact-workflow"],
-        "missing_skills": [],
-        "events": [
-            {
-                "item_id": "item_6",
-                "operation": "read_skill_instructions",
-                "skill_id": "pdf-artifact-workflow",
-            }
-        ],
-    }
+    assert evidence["schema_version"] == 2
+    assert evidence["status"] == "observed"
+    assert evidence["skills_opened"] == ["pdf-artifact-workflow"]
+    assert evidence["skills_native_invoked"] == []
+    assert evidence["skills_invoked"] == []
+    assert evidence["missing_skill_instructions"] == []
+    assert evidence["skill_files_opened"] == [
+        {
+            "skill_id": "pdf-artifact-workflow",
+            "relative_path": "SKILL.md",
+        }
+    ]
+    assert evidence["events"] == [
+        {
+            "item_id": "item_6",
+            "operation": "read_skill_instructions",
+            "skill_id": "pdf-artifact-workflow",
+            "relative_path": "SKILL.md",
+        }
+    ]
 
 
 def test_codex_assigned_skills_are_read_before_task_work() -> None:
@@ -335,6 +344,8 @@ def test_claude_skill_tool_proves_assigned_skill_invocation(
 
     assert evidence["status"] == "observed"
     assert evidence["skills_invoked"] == ["wandb-evidence-analysis-v2"]
+    assert evidence["skills_native_invoked"] == ["wandb-evidence-analysis-v2"]
+    assert evidence["skills_opened"] == []
     assert evidence["events"] == [
         {
             "item_id": "tool-skill",
@@ -396,6 +407,101 @@ def test_claude_failed_skill_tool_is_not_mechanism_evidence(
 
     assert evidence["status"] == "not_observed"
     assert evidence["missing_skills"] == ["wandb-evidence-analysis-v2"]
+
+
+def test_claude_file_reads_distinguish_instructions_and_relevant_rule(
+    tmp_path: Path,
+) -> None:
+    root = "/tmp/claude/skills"
+    events = []
+    for item_id, relative_path in (
+        ("instructions", "SKILL.md"),
+        ("rule", "rules/server-auth-actions.md"),
+    ):
+        events.extend(
+            [
+                {
+                    "type": "assistant",
+                    "message": {
+                        "content": [
+                            {
+                                "type": "tool_use",
+                                "id": item_id,
+                                "name": "Read",
+                                "input": {
+                                    "file_path": (
+                                        f"{root}/react-practices/{relative_path}"
+                                    )
+                                },
+                            }
+                        ]
+                    },
+                },
+                {
+                    "type": "user",
+                    "message": {
+                        "content": [
+                            {
+                                "type": "tool_result",
+                                "tool_use_id": item_id,
+                                "is_error": False,
+                            }
+                        ]
+                    },
+                },
+            ]
+        )
+    (tmp_path / "claude-code.txt").write_text(
+        "".join(json.dumps(event) + "\n" for event in events)
+    )
+
+    evidence = skill_invocation_evidence(
+        tmp_path,
+        "claude-code",
+        {
+            "skills_assigned": ["react-practices"],
+            "skills_registered": ["react-practices"],
+            "directory": root,
+        },
+    )
+
+    assert evidence["skills_opened"] == ["react-practices"]
+    assert evidence["skills_native_invoked"] == []
+    assert evidence["skill_files_opened"] == [
+        {"skill_id": "react-practices", "relative_path": "SKILL.md"},
+        {
+            "skill_id": "react-practices",
+            "relative_path": "rules/server-auth-actions.md",
+        },
+    ]
+
+
+def test_legacy_merged_skill_use_is_not_reclassified_without_events() -> None:
+    normalized = normalize_skill_mechanism_evidence(
+        {"status": "observed", "skills_invoked": ["historical-skill"]}
+    )
+
+    assert normalized["skills_opened"] == []
+    assert normalized["skills_native_invoked"] == []
+    assert normalized["contract_status"] == "legacy"
+    assert normalized["legacy_unclassified_skill_use"] == ["historical-skill"]
+
+
+def test_v2_skill_evidence_rejects_summary_event_disagreement() -> None:
+    normalized = normalize_skill_mechanism_evidence(
+        {
+            "schema_version": 2,
+            "status": "observed",
+            "skills_opened": ["claimed-but-not-read"],
+            "skill_files_opened": [],
+            "skills_native_invoked": [],
+            "skills_invoked": [],
+            "events": [],
+        }
+    )
+
+    assert normalized["contract_status"] == "invalid"
+    assert normalized["skills_opened"] == []
 
 
 def test_context_registration_digest_is_order_independent_and_behavioral() -> None:

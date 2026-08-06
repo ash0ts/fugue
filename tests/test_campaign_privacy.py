@@ -46,9 +46,7 @@ def _verified_trace_row() -> dict[str, object]:
         )
         row[id_field] = call_id
         row[f"{prefix}_ref"] = f"weave:///{project}/call/{call_id}"
-        row[f"{prefix}_url"] = (
-            f"https://wandb.ai/{project}/weave/calls/{call_id}"
-        )
+        row[f"{prefix}_url"] = f"https://wandb.ai/{project}/weave/calls/{call_id}"
     row.update(
         {
             "evaluation_root_object_verified": True,
@@ -98,19 +96,15 @@ def test_trace_link_set_requires_exact_receipt_cross_transport_edge() -> None:
     result = verified_trace_link_set(row)
 
     assert result["verified"] is False
-    assert "does not verify the Agent receipt cross-transport edge" in result[
-        "failures"
-    ]
+    assert (
+        "does not verify the Agent receipt cross-transport edge" in result["failures"]
+    )
 
     row["agent_cross_transport_edge"]["source_trace_id"] = "b" * 32  # type: ignore[index]
     result = verified_trace_link_set(row)
     assert result["verified"] is True
-    agent_link = next(
-        link for link in result["links"] if link["slot"] == "agent_root"
-    )
-    assert agent_link["evidence_kind"] == (
-        "native_otel_cross_transport_receipt_v1"
-    )
+    agent_link = next(link for link in result["links"] if link["slot"] == "agent_root")
+    assert agent_link["evidence_kind"] == ("native_otel_cross_transport_receipt_v1")
 
 
 def test_local_harbor_receipt_gates_every_agent_row_not_a_workload_label(
@@ -208,6 +202,8 @@ def test_changed_loop_intervention_requires_exact_observed_invocation() -> None:
             "optional-generic-skill",
             "loop-intervention-bounded-evidence",
         ],
+        "skill_ids_opened": [],
+        "skill_ids_native_invoked": [],
         "skill_ids_invoked": [],
     }
 
@@ -218,7 +214,7 @@ def test_changed_loop_intervention_requires_exact_observed_invocation() -> None:
     assert not any("optional-generic" in item for item in failures)
 
     row["integration_ids_invoked"] = ["loop-intervention-fixed-mcp"]
-    row["skill_ids_invoked"] = ["loop-intervention-bounded-evidence"]
+    row["skill_ids_opened"] = ["loop-intervention-bounded-evidence"]
 
     assert _harbor_conformance_failures(row) == []
 

@@ -128,8 +128,8 @@ def test_all_release_harnesses_are_setup_built_and_trial_verified() -> None:
     assert openclaw_adapter.index("_verify_mcp_config_command()") < (
         openclaw_adapter.index("_start_gateway_command()")
     )
-    assert r"plugin.status!==\"loaded\"" in openclaw_adapter
-    assert r"plugin.version!==\"{self._WEAVE_PLUGIN_VERSION}\"" in openclaw_adapter
+    assert 'plugin.status!=="loaded"' in openclaw_adapter
+    assert 'plugin.version!=="{self._WEAVE_PLUGIN_VERSION}"' in openclaw_adapter
     assert '"FUGUE_WEAVE_SINGLE_TURN_KEY": self.trace_conversation_id' in (
         openclaw_adapter
     )
@@ -162,7 +162,7 @@ def test_all_release_harnesses_are_setup_built_and_trial_verified() -> None:
     )
     assert 'hook_event_name:"SessionEnd"' in ranges["claude-code"]
     assert "fugue_trial_finalized" in ranges["claude-code"]
-    assert 'command:\\"shutdown\\"' in ranges["claude-code"]
+    assert 'command:"shutdown"' in ranges["claude-code"]
     assert "daemon.sock" in ranges["claude-code"]
     assert ranges["claude-code"].index("_finalize_weave_session") < ranges[
         "claude-code"

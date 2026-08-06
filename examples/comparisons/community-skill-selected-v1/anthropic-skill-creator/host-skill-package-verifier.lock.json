@@ -1,0 +1,20 @@
+{
+  "schema_version": 1,
+  "id": "fugue-skill-package-validator-v1",
+  "runtime": {
+    "kind": "oci",
+    "image": "node:22-bookworm-slim@sha256:a17d50af28002a160548bd4225b3cfcb12c5efcb171f79e68758f2885fb1b066",
+    "network": "none",
+    "read_only_base": true
+  },
+  "command": ["node", "skill-package-validate"],
+  "verifier_source_sha256": "e541a89e89b5490a22332adfc4587159ba7f4f840800d4181631f419f4ab85c1",
+  "timeout_seconds": 30,
+  "receipt_contract": {
+    "artifact_binding": "canonical-json-sha256-of-agent-files",
+    "input": "one-host-authored-input-json-with-separate-read-only-archive-and-agent-output",
+    "task_binding": "task-id-and-public-archive-sha256",
+    "result": "strict-skill-package-envelope-and-zero-exit-status",
+    "producer": "trusted-host-controller"
+  }
+}

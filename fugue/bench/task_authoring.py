@@ -9,6 +9,8 @@ import re
 import shutil
 import subprocess
 import tempfile
+import time
+import uuid
 from collections import defaultdict
 from collections.abc import Callable, Mapping, Sequence
 from dataclasses import asdict, dataclass, field, replace
@@ -176,6 +178,7 @@ class ScorerRuntimeProfileV1:
     id: str
     title: str
     image: str
+    platform: str
     command: tuple[str, ...]
     profile_digest: str = ""
 
@@ -1525,6 +1528,8 @@ def run_inline_scorer(
             "--rm",
             "--pull",
             "never",
+            "--platform",
+            profile.platform,
             "--network",
             "none",
             "--read-only",
@@ -1565,6 +1570,224 @@ def run_inline_scorer(
             raise ValueError("inline scorer must return one JSON object")
         _scorer_payload(payload)
         return payload
+
+
+def _cleanup_inline_scorer_container(
+    *,
+    docker: str,
+    container_name: str,
+    profile: ScorerRuntimeProfileV1,
+    timeout_sec: int,
+    guard_late_registration: bool,
+) -> dict[str, Any]:
+    """Remove one exact evaluator container and prove it remains absent."""
+
+    deadline = time.monotonic() + float(max(1, min(timeout_sec, 30)))
+    docker_env = {"PATH": os.environ.get("PATH", "")}
+    remove = [docker, "rm", "--force", container_name]
+    prove = [
+        docker,
+        "container",
+        "ls",
+        "--all",
+        "--quiet",
+        "--filter",
+        f"name=^/{container_name}$",
+    ]
+    proof: subprocess.CompletedProcess[str] | None = None
+    while True:
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
+            raise RuntimeError("isolated evaluator cleanup timed out")
+        subprocess.run(
+            remove,
+            capture_output=True,
+            text=True,
+            timeout=max(0.1, remaining / 2),
+            check=False,
+            env=docker_env,
+        )
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
+            raise RuntimeError("isolated evaluator cleanup timed out")
+        proof = subprocess.run(
+            prove,
+            capture_output=True,
+            text=True,
+            timeout=remaining,
+            check=False,
+            env=docker_env,
+        )
+        if proof.returncode != 0:
+            raise RuntimeError("isolated evaluator cleanup could not be verified")
+        if proof.stdout.strip():
+            continue
+        if not guard_late_registration:
+            break
+        if deadline - time.monotonic() <= 0.25:
+            break
+        time.sleep(min(0.25, max(0.0, deadline - time.monotonic() - 0.25)))
+    if proof is None or proof.stdout.strip():  # pragma: no cover - defensive
+        raise RuntimeError("isolated evaluator cleanup could not be verified")
+    unsigned = {
+        "schema_version": 1,
+        "kind": "isolated_evaluator_cleanup",
+        "status": "verified_absent",
+        "container_name_sha256": hashlib.sha256(container_name.encode()).hexdigest(),
+        "runtime_profile_id": profile.id,
+        "runtime_profile_digest": profile.profile_digest,
+        "runtime_image": profile.image,
+        "runtime_platform": profile.platform,
+    }
+    return {**unsigned, "receipt_digest": stable_digest(unsigned)}
+
+
+def run_isolated_evaluator(
+    *,
+    files: Mapping[str, bytes],
+    profile: ScorerRuntimeProfileV1,
+    limits: TaskAuthoringLimitsV1,
+    writable_workdir: bool = False,
+    accepted_exit_codes: tuple[int, ...] = (0,),
+    output_kind: Literal["scorer", "object"] = "scorer",
+) -> dict[str, Any]:
+    """Run exact prepared files in the scorer sandbox and receipt input/cleanup."""
+
+    docker = shutil.which("docker")
+    if docker is None:
+        raise RuntimeError("Docker is required for isolated evaluation")
+    if not files:
+        raise ValueError("isolated evaluator requires prepared input files")
+    if (
+        not accepted_exit_codes
+        or any(type(value) is not int or value < 0 for value in accepted_exit_codes)
+        or output_kind not in {"scorer", "object"}
+    ):
+        raise ValueError("isolated evaluator output contract is invalid")
+    normalized: dict[str, bytes] = {}
+    for name, content in files.items():
+        path = PurePosixPath(str(name))
+        if (
+            path.is_absolute()
+            or len(path.parts) != 1
+            or path.name in {"", ".", ".."}
+            or not isinstance(content, bytes)
+        ):
+            raise ValueError("isolated evaluator inputs must be bounded flat files")
+        if not content or len(content) > 64_000_000:
+            raise ValueError(f"isolated evaluator input {name!r} exceeds its bound")
+        normalized[path.name] = content
+    with tempfile.TemporaryDirectory(prefix="fugue-isolated-evaluator-") as value:
+        root = Path(value)
+        for name, content in normalized.items():
+            selected = root / name
+            selected.write_bytes(content)
+            selected.chmod(0o400)
+        container_name = f"fugue-evaluator-{uuid.uuid4().hex}"
+        command = [
+            docker,
+            "run",
+            "--name",
+            container_name,
+            "--init",
+            "--pull",
+            "never",
+            "--platform",
+            profile.platform,
+            "--network",
+            "none",
+            "--read-only",
+            "--cap-drop",
+            "ALL",
+            "--security-opt",
+            "no-new-privileges",
+            "--pids-limit",
+            "32",
+            "--cpus",
+            str(limits.scorer_cpus),
+            "--memory",
+            f"{limits.scorer_memory_mb}m",
+            "--mount",
+            f"type=bind,src={root},dst=/input,readonly",
+            "--tmpfs",
+            "/tmp:rw,noexec,nosuid,size=16m",
+            *(
+                ["--tmpfs", "/work:rw,noexec,nosuid,size=256m"]
+                if writable_workdir
+                else []
+            ),
+            profile.image,
+            *profile.command,
+        ]
+        completed: subprocess.CompletedProcess[str] | None = None
+        timed_out: subprocess.TimeoutExpired | None = None
+        try:
+            try:
+                completed = subprocess.run(
+                    command,
+                    capture_output=True,
+                    text=True,
+                    timeout=limits.scorer_timeout_sec,
+                    check=False,
+                    env={"PATH": os.environ.get("PATH", "")},
+                )
+            except subprocess.TimeoutExpired as exc:
+                timed_out = exc
+        finally:
+            cleanup = _cleanup_inline_scorer_container(
+                docker=docker,
+                container_name=container_name,
+                profile=profile,
+                timeout_sec=limits.scorer_timeout_sec,
+                guard_late_registration=timed_out is not None,
+            )
+        if timed_out is not None:
+            raise RuntimeError("isolated evaluator timed out") from timed_out
+        if completed is None:  # pragma: no cover - defensive invariant
+            raise RuntimeError("isolated evaluator did not return a result")
+        output = completed.stdout.encode()
+        if len(output) > limits.scorer_output_bytes:
+            raise ValueError("isolated evaluator output exceeds the configured limit")
+        if completed.returncode not in accepted_exit_codes:
+            raise RuntimeError(
+                f"isolated evaluator failed with exit code {completed.returncode}"
+            )
+        try:
+            payload = json.loads(completed.stdout)
+        except json.JSONDecodeError as exc:
+            raise ValueError("isolated evaluator returned invalid JSON") from exc
+        if not isinstance(payload, dict):
+            raise ValueError("isolated evaluator must return one JSON object")
+        if output_kind == "scorer":
+            _scorer_payload(payload)
+        input_files = [
+            {
+                "path": name,
+                "size": len(content),
+                "sha256": hashlib.sha256(content).hexdigest(),
+            }
+            for name, content in sorted(normalized.items())
+        ]
+        unsigned_input = {
+            "schema_version": 1,
+            "kind": "isolated_evaluator_input",
+            "status": "bound",
+            "files": input_files,
+            "files_digest": stable_digest(input_files),
+            "runtime_profile_id": profile.id,
+            "runtime_profile_digest": profile.profile_digest,
+            "runtime_image": profile.image,
+            "runtime_platform": profile.platform,
+            "writable_workdir": writable_workdir,
+        }
+        return {
+            **payload,
+            "fugue_input_receipt": {
+                **unsigned_input,
+                "receipt_digest": stable_digest(unsigned_input),
+            },
+            "fugue_runtime_receipt": cleanup,
+        }
 
 
 def _environment_profile(raw: Any) -> EnvironmentProfileV1:
@@ -1749,7 +1972,7 @@ def _scorer_runtime_profile(raw: Any) -> ScorerRuntimeProfileV1:
     value = _mapping(raw, "scorer runtime")
     _reject_unknown(
         value,
-        {"id", "title", "image", "command", "profile_digest"},
+        {"id", "title", "image", "platform", "command", "profile_digest"},
         "scorer runtime",
     )
     image = _bounded_text(value.get("image"), "scorer image", 500)
@@ -1762,10 +1985,18 @@ def _scorer_runtime_profile(raw: Any) -> ScorerRuntimeProfileV1:
         id=validate_id(value.get("id") or "", kind="scorer runtime id"),
         title=_bounded_text(value.get("title"), "scorer runtime title", 200),
         image=image,
+        platform=_scorer_runtime_platform(value.get("platform") or "linux/amd64"),
         command=command,
         profile_digest=str(value.get("profile_digest") or ""),
     )
     return _with_profile_digest(profile, value)
+
+
+def _scorer_runtime_platform(raw: Any) -> str:
+    platform = _bounded_text(raw, "scorer runtime platform", 100)
+    if platform not in {"linux/amd64", "linux/arm64"}:
+        raise ValueError("scorer runtime platform must be linux/amd64 or linux/arm64")
+    return platform
 
 
 def _authored_task(raw: Any) -> AuthoredTaskV1:

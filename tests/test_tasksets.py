@@ -7,9 +7,11 @@ from pathlib import Path
 import pytest
 
 import fugue.comparison as public_comparison
+from fugue.bench.candidates import stable_digest
 from fugue.bench.tasksets import (
     SimpleTasksetBuilder,
     import_weave_dataset,
+    prepare_locked_private_labels,
     simple_task_json_schema,
     write_taskset_schemas,
 )
@@ -115,4 +117,55 @@ def test_weave_dataset_import_rejects_private_fields(tmp_path: Path) -> None:
             import_id="leaky",
             repo_root=tmp_path,
             loader=loader,
+        )
+
+
+def test_locked_private_labels_prepare_mode_0600_and_public_receipt(
+    tmp_path: Path,
+) -> None:
+    label = {
+        "id": "reviewed-task",
+        "expected": {"private": "truth"},
+        "base_output": None,
+        "gold_output": {"answer": 42},
+    }
+    source = tmp_path / "operator" / "development-private-labels.jsonl"
+    source.parent.mkdir()
+    source.write_text(json.dumps(label) + "\n", encoding="utf-8")
+    destination = tmp_path / ".fugue/private/labels.jsonl"
+
+    receipt = prepare_locked_private_labels(
+        source_path=source,
+        destination_path=destination,
+        expected=[{"task_id": label["id"], "label_digest": stable_digest(label)}],
+    )
+
+    assert stat.S_IMODE(destination.stat().st_mode) == 0o600
+    assert receipt["task_ids"] == ["reviewed-task"]
+    assert "truth" not in json.dumps(receipt)
+    assert receipt["receipt_digest"] == stable_digest(
+        {key: value for key, value in receipt.items() if key != "receipt_digest"}
+    )
+
+
+def test_locked_private_labels_fail_closed_on_drift_and_symlink(
+    tmp_path: Path,
+) -> None:
+    source = tmp_path / "labels.jsonl"
+    source.write_text('{"id":"task","expected":{"answer":1}}\n', encoding="utf-8")
+    expected = [{"task_id": "task", "label_digest": "0" * 64}]
+    with pytest.raises(ValueError, match="content changed"):
+        prepare_locked_private_labels(
+            source_path=source,
+            destination_path=tmp_path / "private.jsonl",
+            expected=expected,
+        )
+
+    link = tmp_path / "labels-link.jsonl"
+    link.symlink_to(source)
+    with pytest.raises(ValueError, match="regular file"):
+        prepare_locked_private_labels(
+            source_path=link,
+            destination_path=tmp_path / "private.jsonl",
+            expected=expected,
         )

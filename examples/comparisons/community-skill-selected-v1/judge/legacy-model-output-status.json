@@ -1,0 +1,16 @@
+{
+  "schema_version": 1,
+  "kind": "judge-model-output-compatibility",
+  "legacy_output_artifact_sha256": "d2b3cc88803df4980c30b60f91b24ee535ee39aae118da7093f922b9cadeea31",
+  "legacy_cases_artifact_sha256": "a6a67f5d6815b255758017ca82f945d76a61ca418e2d9ccfd049f8327e24669e",
+  "legacy_rubric_digest": "6706b2a5dbbc0850b0f1b904920d14ae9df54a212b34f745540efc4d3f3ef74b",
+  "target_rubric_artifact_sha256": "5f849d83c9648df9427f8872c0e81432419919810155b2d2087293c788de91d9",
+  "status": "requires_regeneration",
+  "reuse_allowed": false,
+  "reasons": [
+    "The legacy results do not carry an explicit modality per case.",
+    "All legacy results use the generic useful_actionability, repository_grounding, reviewability, and risk_calibration dimensions rather than the locked modality-specific dimensions.",
+    "The legacy result has no receipt binding two independent blinded human submissions and complete disagreement adjudication."
+  ],
+  "note": "The 48 operator-restricted source cases remain digest-locked. Only the incompatible model outputs require a new approved generation run."
+}

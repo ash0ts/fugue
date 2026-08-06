@@ -610,7 +610,7 @@ done
         result = await self.exec_as_root(
             environment,
             command=(
-                f'manifest={policy}/mutator-modes\n'
+                f"manifest={policy}/mutator-modes\n"
                 'if [ -f "$manifest" ]; then\n'
                 "  while IFS='|' read -r mode path; do\n"
                 '    chmod "$mode" "$path"\n'
@@ -728,8 +728,7 @@ done
             "execution_fingerprint": os.environ.get("FUGUE_EXECUTION_FINGERPRINT"),
             "execution_kind": os.environ.get("FUGUE_EXECUTION_KIND", "agent"),
             "applicable": (
-                os.environ.get("FUGUE_APPLICABLE", "true").strip().lower()
-                == "true"
+                os.environ.get("FUGUE_APPLICABLE", "true").strip().lower() == "true"
             ),
             "skip_reason": os.environ.get("FUGUE_SKIP_REASON") or None,
             "identity_schema_version": int(
@@ -776,12 +775,33 @@ done
             "skill_registration": skill_registration,
             "skill_invocation_evidence": (
                 {
+                    "schema_version": 2,
                     "status": "unavailable",
+                    "skills_assigned": assigned_skills,
+                    "skills_registered": skill_registration.get(
+                        "skills_registered", []
+                    ),
+                    "skills_opened": [],
+                    "skill_files_opened": [],
+                    "skills_native_invoked": [],
                     "skills_invoked": [],
+                    "missing_skill_instructions": assigned_skills,
+                    "events": [],
                     "reason": "execution has not produced skill-use evidence yet",
                 }
                 if assigned_skills
-                else {"status": "not_applicable", "skills_invoked": []}
+                else {
+                    "schema_version": 2,
+                    "status": "not_applicable",
+                    "skills_assigned": [],
+                    "skills_registered": [],
+                    "skills_opened": [],
+                    "skill_files_opened": [],
+                    "skills_native_invoked": [],
+                    "skills_invoked": [],
+                    "missing_skill_instructions": [],
+                    "events": [],
+                }
             ),
             "integration_ids": _split_tags(os.environ.get("FUGUE_INTEGRATION_IDS")),
             "integration_provenance": _json_env("FUGUE_INTEGRATION_PROVENANCE"),
@@ -803,18 +823,10 @@ done
             "trace_receipt": trace_destination_identity(os.environ),
             "wandb_research_id": os.environ.get("FUGUE_WANDB_RESEARCH_ID"),
             "wandb_study_id": os.environ.get("FUGUE_WANDB_STUDY_ID"),
-            "research_experiment_id": os.environ.get(
-                "FUGUE_RESEARCH_EXPERIMENT_ID"
-            ),
-            "source_evidence_project": os.environ.get(
-                "FUGUE_SOURCE_EVIDENCE_PROJECT"
-            ),
-            "result_evidence_project": os.environ.get(
-                "FUGUE_RESULT_EVIDENCE_PROJECT"
-            ),
-            "study_console_backlink": os.environ.get(
-                "FUGUE_STUDY_CONSOLE_BACKLINK"
-            ),
+            "research_experiment_id": os.environ.get("FUGUE_RESEARCH_EXPERIMENT_ID"),
+            "source_evidence_project": os.environ.get("FUGUE_SOURCE_EVIDENCE_PROJECT"),
+            "result_evidence_project": os.environ.get("FUGUE_RESULT_EVIDENCE_PROJECT"),
+            "study_console_backlink": os.environ.get("FUGUE_STUDY_CONSOLE_BACKLINK"),
             "weave_agent_name": stable_agent_name(harness),
             "weave_conversation_key": self.conversation_key,
             "weave_conversation_id": self.trace_conversation_id,
@@ -830,6 +842,7 @@ done
             ),
             "started_at": datetime.now(UTC).isoformat(),
         }
+        meta["skill_mechanism_evidence"] = meta["skill_invocation_evidence"]
         if getattr(self, "_context_artifact_meta", None):
             meta["context_artifact"] = self._context_artifact_meta
         self.logs_dir.mkdir(parents=True, exist_ok=True)
@@ -954,7 +967,7 @@ done
         }
         registration = meta.get("skill_registration")
         if isinstance(registration, dict):
-            meta["skill_invocation_evidence"] = skill_invocation_evidence(
+            skill_evidence = skill_invocation_evidence(
                 self.logs_dir,
                 self.TRACE_HARNESS,
                 {
@@ -962,6 +975,8 @@ done
                     "skill_provenance": meta.get("skill_provenance", []),
                 },
             )
+            meta["skill_mechanism_evidence"] = skill_evidence
+            meta["skill_invocation_evidence"] = skill_evidence
         self._meta_path().write_text(json.dumps(meta, indent=2) + "\n")
 
     def _set_context_registration(self, value: dict[str, Any]) -> None:
@@ -1010,9 +1025,7 @@ done
             ),
             context_config_hash=os.environ.get("FUGUE_CONTEXT_CONFIG_HASH", ""),
             command=(
-                str(registration["command"])
-                if registration.get("command")
-                else None
+                str(registration["command"]) if registration.get("command") else None
             ),
             servers=servers,
         )
@@ -1834,13 +1847,13 @@ class FugueOpenClaw(_TrialMetaMixin, OpenClaw):
             f"test -s {self._WEAVE_PLUGIN_ROOT}/openclaw.plugin.json; "
             "openclaw plugins list --json "
             "> /logs/agent/weave-openclaw-registration.json; "
-            "node -e 'const fs=require(\"fs\"); "
+            'node -e \'const fs=require("fs"); '
             "const value=JSON.parse(fs.readFileSync("
-            "\"/logs/agent/weave-openclaw-registration.json\",\"utf8\")); "
-            "const plugin=value.plugins.find((item)=>item.id===\"weave\"); "
-            f"const root=\"{self._WEAVE_PLUGIN_ROOT}/dist/index.js\"; "
-            f"if (!plugin || plugin.status!==\"loaded\" || "
-            f"plugin.version!==\"{self._WEAVE_PLUGIN_VERSION}\" || "
+            '"/logs/agent/weave-openclaw-registration.json","utf8")); '
+            'const plugin=value.plugins.find((item)=>item.id==="weave"); '
+            f'const root="{self._WEAVE_PLUGIN_ROOT}/dist/index.js"; '
+            f'if (!plugin || plugin.status!=="loaded" || '
+            f'plugin.version!=="{self._WEAVE_PLUGIN_VERSION}" || '
             "plugin.source!==root) { console.error(JSON.stringify(plugin)); "
             "process.exit(1); }'"
         )
@@ -2009,9 +2022,7 @@ class FugueOpenClaw(_TrialMetaMixin, OpenClaw):
                     {
                         "status": "registered",
                         "delivery": "native_mcp",
-                        "servers": sorted(
-                            server.name for server in self.mcp_servers
-                        ),
+                        "servers": sorted(server.name for server in self.mcp_servers),
                         "probe": "openclaw config validate + mcp.servers",
                     }
                 )
@@ -2263,7 +2274,7 @@ class FugueClaudeCode(_TrialMetaMixin, ClaudeCode):
                 'session_id="${transcript##*/}"; session_id="${session_id%.jsonl}"; '
                 "node -e 'process.stdout.write(JSON.stringify({"
                 'hook_event_name:"SessionEnd",session_id:process.argv[1],'
-                "transcript_path:process.argv[2],reason:\"fugue_trial_finalized\"}))' "
+                'transcript_path:process.argv[2],reason:"fugue_trial_finalized"}))\' '
                 '"$session_id" "$transcript" | '
                 f"bash {handler}; "
                 "done; "
@@ -2271,12 +2282,12 @@ class FugueClaudeCode(_TrialMetaMixin, ClaudeCode):
                 # remains alive for interactive reuse. A Fugue cell is terminal:
                 # ask that per-container daemon to shut down so its OTel provider
                 # flushes before Harbor removes the container.
-                "node -e 'const net=require(\"net\");"
+                'node -e \'const net=require("net");'
                 "const socket=process.env.HOME+"
-                "\"/.weave-claude-code/daemon.sock\";"
+                '"/.weave-claude-code/daemon.sock";'
                 "const client=net.createConnection(socket,()=>"
-                "client.end(JSON.stringify({command:\"shutdown\"})));"
-                "client.on(\"error\",()=>process.exit(0));"
+                'client.end(JSON.stringify({command:"shutdown"})));'
+                'client.on("error",()=>process.exit(0));'
                 "setTimeout(()=>process.exit(0),10000);' || true; "
                 "attempt=0; "
                 'while test -S "$HOME/.weave-claude-code/daemon.sock" '

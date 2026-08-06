@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
+from typing import TYPE_CHECKING
 
 from fugue.bench.candidates import stable_digest
 from fugue.bench.library import validate_id
@@ -13,6 +14,9 @@ from fugue.research.agent_contracts import (
 )
 from fugue.research.contracts import RESEARCH_SCHEMA_VERSION, ResearchError, now
 from fugue.research.database import connect_database
+
+if TYPE_CHECKING:
+    from fugue.bench.execution import StageSubsetReceiptV1
 
 
 class ApprovalLedger:
@@ -246,6 +250,68 @@ class ApprovalLedger:
                     (subject_id, approval_digest),
                 )
             conn.commit()
+        return approval
+
+    def claim_stage(
+        self,
+        *,
+        approval_digest: str,
+        subset: StageSubsetReceiptV1,
+        subject_id: str,
+    ) -> ExecutionApprovalV1:
+        """Claim an approval bound to one finite subset of a full preview."""
+
+        return self.claim(
+            approval_digest=approval_digest,
+            subject_kind="experiment",
+            preview_digest=subset.subset_digest,
+            subject_id=subject_id,
+            estimated_cells=subset.maximum_cells,
+            estimated_cost_usd=subset.maximum_cost_usd,
+        )
+
+    def require_claimed_by(
+        self,
+        *,
+        approval_digest: str,
+        subject_kind: str,
+        preview_digest: str,
+        subject_id: str,
+    ) -> ExecutionApprovalV1:
+        """Read-only verification used when a durable controller resumes."""
+
+        subject_id = validate_id(subject_id, kind="approved subject id")
+        with connect_database(self.path) as conn:
+            row = conn.execute(
+                "SELECT receipt_json, consumed_by FROM execution_approvals "
+                "WHERE approval_digest=?",
+                (approval_digest,),
+            ).fetchone()
+        if row is None:
+            raise ResearchError(
+                "approval_not_found",
+                "execution approval was not found",
+                category="policy",
+            )
+        approval = execution_approval_from_dict(json.loads(row[0]))
+        if approval.subject_kind != subject_kind:
+            raise ResearchError(
+                "approval_subject_mismatch",
+                "execution approval belongs to another operation kind",
+                category="policy",
+            )
+        if approval.preview_digest != preview_digest:
+            raise ResearchError(
+                "approval_preview_mismatch",
+                "execution approval does not match the accepted preview",
+                category="policy",
+            )
+        if row[1] != subject_id:
+            raise ResearchError(
+                "approval_not_claimed",
+                "execution approval was not claimed by this exact operation",
+                category="policy",
+            )
         return approval
 
 

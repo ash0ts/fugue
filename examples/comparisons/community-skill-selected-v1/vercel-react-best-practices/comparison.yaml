@@ -1,0 +1,98 @@
+schema_version: 3
+id: vercel-react-practices-measurement-pilot-v1
+question: Does exact Vercel React best-practices revision 20987af2 improve public development-task outcomes relative to ac6a79af under fixed conditions?
+taskset:
+  tasks: tasks.jsonl
+  private_labels: ../../../../.fugue/private/community-skill-selected-v1/vercel-react-best-practices/private-labels.jsonl
+baseline:
+  label: Vercel React best practices at ac6a79af
+  skills: [vercel-react-best-practices-before]
+candidate:
+  label: Vercel React best practices at 20987af2
+  skills: [vercel-react-best-practices-after]
+changed: [skills]
+evaluators:
+  - id: react-change-quality
+    type: deterministic
+    required: true
+    scorer: scorer.py
+    runtime: python312-sandbox-v1
+    verifier:
+      type: node_test
+      source: host_node_verifier.cjs
+      runtime_lock: host-verifier.lock.json
+      runtime: node22-verifier-v1
+      dimension: verification_passed
+    dimensions:
+      - artifact_validity
+      - requested_behavior
+      - repository_grounding
+      - behavior_preservation
+      - verification_passed
+      - scope_safety
+    dimension_roles:
+      artifact_validity: safety_gate
+      requested_behavior: outcome
+      repository_grounding: outcome
+      behavior_preservation: safety_gate
+      verification_passed: outcome
+      scope_safety: safety_gate
+  - {id: code-change-usefulness, type: llm_judge, required: false, profile: anthropic/claude-sonnet-5,
+     calibration: ../../../../.fugue/private/community-skill-selected-v1/judge-calibration-receipt.json,
+     calibration_rubric: ../judge/rubric.json, calibration_modality: code-change,
+     calibration_required_for_execution: true,
+     rubric: "Assess reviewability, evidence use, bounded scope, and risk communication using only public task/output/evidence; never override deterministic gates.",
+     dimensions: [reviewability, evidence_use, bounded_scope, risk_communication], dimension_roles: {reviewability: outcome, evidence_use: outcome, bounded_scope: outcome, risk_communication: outcome},
+     evidence: [artifact_paths, inspected_paths, changed_paths], reserve_cost_usd: 0.1}
+execution:
+  source_evidence_project: wandb/fugue-vercel-react-best-practices-source-v1
+  source_evidence_destination: &public_cloud
+    entity: wandb
+    project: fugue-vercel-react-best-practices-source-v1
+    api_base_url: https://api.wandb.ai
+    trace_base_url: https://trace.wandb.ai
+    app_base_url: https://wandb.ai
+  evidence_project: wandb/fugue-vercel-react-practices-measurement-pilot-v1
+  evidence_destination:
+    <<: *public_cloud
+    project: fugue-vercel-react-practices-measurement-pilot-v1
+  research_id: fugue-vercel-react-practices-measurement-pilot-v1
+  model: anthropic/claude-sonnet-5
+  harnesses: [claude-code]
+  attempts: 2
+  concurrency: 2
+  # 16 logical Agent+judge reservations ($41.60) plus one predeclared
+  # infrastructure replacement ($2.50, no judge on the invalid execution).
+  max_cost_usd: 44.1
+  reserve_per_attempt_usd: 2.5
+  approval_required: true
+  preparation_required: true
+  schedule:
+    stages:
+      - id: checkpoint
+        pair_complete: true
+        task_ids:
+          - vr-dev-signed-in-nonmember-action
+          - vr-dev-layout-interleaved-measurement
+        trial_indexes: [0]
+      - id: complete-development-attempt-0
+        task_ids:
+          - vr-dev-rsc-primitive-derived-array
+          - vr-dev-use-latest-layout-read
+        trial_indexes: [0]
+      - id: repeat-development
+        partitions: [qualification]
+        trial_indexes: [1]
+    worker_limit: 2
+    wave_size: 4
+    infrastructure_retry_limit: 1
+    maximum_physical_executions: 17
+    maximum_in_flight_cost_usd: 5.2
+    coordination:
+      group_id: community-skill-selected-v1
+      worker_limit: 3
+      maximum_physical_executions: 100
+      total_cost_usd: 270
+      maximum_in_flight_cost_usd: 7.8
+  trace_content: full
+  environment: {type: docker}

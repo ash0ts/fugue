@@ -66,6 +66,45 @@ def _write_export_fixture(tmp_path: Path) -> Path:
                 "prompt_id": "smoke-prompt",
                 "prompt_hashes": {"smoke-prompt": "prompt123"},
                 "skill_ids": ["repo-skill"],
+                "skills_assigned": ["repo-skill"],
+                "skills_registered": ["repo-skill"],
+                "skill_registration": {
+                    "status": "registered",
+                    "skills_registered": ["repo-skill"],
+                },
+                "skill_mechanism_evidence": {
+                    "schema_version": 2,
+                    "status": "observed",
+                    "skills_assigned": ["repo-skill"],
+                    "skills_registered": ["repo-skill"],
+                    "skills_opened": ["repo-skill"],
+                    "skill_files_opened": [
+                        {
+                            "skill_id": "repo-skill",
+                            "relative_path": "SKILL.md",
+                        },
+                        {
+                            "skill_id": "repo-skill",
+                            "relative_path": "rules/bounded.md",
+                        },
+                    ],
+                    "skills_native_invoked": [],
+                    "skills_invoked": [],
+                    "events": [
+                        {
+                            "item_id": "instructions",
+                            "operation": "read_skill_instructions",
+                            "skill_id": "repo-skill",
+                            "relative_path": "SKILL.md",
+                        },
+                        {
+                            "item_id": "rule",
+                            "operation": "read_skill_file",
+                            "skill_id": "repo-skill",
+                            "relative_path": "rules/bounded.md",
+                        },
+                    ],
+                },
                 "workload_id": "coding",
                 "preset_id": "smoke",
                 "context_system_id": "rag-bm25",
@@ -150,6 +189,13 @@ def test_export_joins_harbor_result_and_fugue_meta(tmp_path: Path) -> None:
     assert row["prompt_id"] == "smoke-prompt"
     assert row["prompt_hashes"] == {"smoke-prompt": "prompt123"}
     assert row["skill_ids"] == ["repo-skill"]
+    assert row["skill_ids_opened"] == ["repo-skill"]
+    assert row["skill_ids_native_invoked"] == []
+    assert row["skill_ids_invoked"] == []
+    assert row["skill_files_opened"] == [
+        {"skill_id": "repo-skill", "relative_path": "SKILL.md"},
+        {"skill_id": "repo-skill", "relative_path": "rules/bounded.md"},
+    ]
     assert row["workload_id"] == "coding"
     assert row["preset_id"] == "smoke"
     assert row["context_system_id"] == "rag-bm25"

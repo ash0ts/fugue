@@ -1,0 +1,63 @@
+{
+  "entries": [
+    {
+      "invalidation_digest": null,
+      "pooled": false,
+      "preview_digest": "439a42c41358f1e2db5881ba3233d94ff9ebdd7ae082ca44dbc821bff5103af1",
+      "project": "wandb/fugue-anthropic-skill-creator-usefulness-pilot-v3",
+      "reason": "Four reconciled cells found baseline 0/2 and candidate 0/2; both revisions failed critical package constraints.",
+      "record_digest": "6a59826e1d32458e7abcb93303364d74a74af932b92982acdd43bd017e250962",
+      "relationship": "prior-measurement-development",
+      "result_digest": "0722311a3c35f81a3e0023213a64db1a6864928b787d94b7f1cf64c9659429e4",
+      "status": "valid-historical-negative",
+      "study_console_query": "?research_id=anthropic-skill-creator-usefulness-pilot-v3&study_id=anthropic-skill-creator-usefulness-pilot-v3",
+      "study_id": "anthropic-skill-creator-usefulness-pilot-v3",
+      "wandb_project_url": "https://wandb.ai/wandb/fugue-anthropic-skill-creator-usefulness-pilot-v3"
+    },
+    {
+      "invalidation_digest": "a749f2f71df61fd1ed6cb7f7575f7d6ce338633921c8d14537f324e4028bc312",
+      "pooled": false,
+      "preview_digest": "b65ce450152a111c45a0aa6566372f8e5b588556dc72b03a310d271e3a6936f0",
+      "project": "wandb/fugue-superpowers-writing-plans-confirmatory-v3",
+      "reason": "The oversized run did not produce a complete integrity-valid canonical cohort.",
+      "record_digest": "79cc49a5ac03b55c9e5c1ad263e223f168f35c50cc280224386b7c200a2ac214",
+      "relationship": "superseded-execution-attempt",
+      "result_digest": null,
+      "status": "invalid",
+      "study_console_query": "?research_id=superpowers-writing-plans-confirmatory-v3&study_id=superpowers-writing-plans-confirmatory-v3",
+      "study_id": "superpowers-writing-plans-confirmatory-v3",
+      "wandb_project_url": "https://wandb.ai/wandb/fugue-superpowers-writing-plans-confirmatory-v3"
+    },
+    {
+      "invalidation_digest": "f9f1f4394b304d6fa5d9926dd8cb54e39e08dae355672c01159781e4fbf59e83",
+      "pooled": false,
+      "preview_digest": null,
+      "project": "wandb/fugue-superpowers-writing-plans-confirmatory-v8",
+      "reason": "The staged design removes the exposed task and population-scale matrix.",
+      "record_digest": "b4f76fc5b44064121e009458ac239f0327653b731c68c4444e55fda91c56b822",
+      "relationship": "replaced-by-staged-public-development",
+      "result_digest": null,
+      "status": "superseded-design",
+      "study_console_query": "?research_id=superpowers-writing-plans-confirmatory-v8&study_id=superpowers-writing-plans-confirmatory-v8",
+      "study_id": "superpowers-writing-plans-confirmatory-v8",
+      "wandb_project_url": "https://wandb.ai/wandb/fugue-superpowers-writing-plans-confirmatory-v8"
+    },
+    {
+      "invalidation_digest": "0693551789db6c00a23a19a14cf576e154a544fb1aed9d01db9bc533bab0572c",
+      "pooled": false,
+      "preview_digest": null,
+      "project": "wandb/fugue-vercel-react-best-practices-confirmatory-v3",
+      "reason": "The staged design keeps only four public development tasks in Git.",
+      "record_digest": "35786425c35fca87f461aba37f23060f557dcffd240a4a778a0af4bd37c8f399",
+      "relationship": "replaced-by-staged-public-development",
+      "result_digest": null,
+      "status": "superseded-design",
+      "study_console_query": "?research_id=vercel-react-best-practices-confirmatory-v3&study_id=vercel-react-best-practices-confirmatory-v3",
+      "study_id": "vercel-react-best-practices-confirmatory-v3",
+      "wandb_project_url": "https://wandb.ai/wandb/fugue-vercel-react-best-practices-confirmatory-v3"
+    }
+  ],
+  "kind": "community_skill_supersession_registry",
+  "registry_digest": "4bf21c876b9999b126d9679742590d02d2f6c11f267de0d80b24bf9d163d773f",
+  "schema_version": 2
+}

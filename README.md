@@ -286,6 +286,25 @@ uv run fugue compare comparison.yaml \
 uv run fugue result latest
 ```
 
+Large comparisons use the same immutable preview but admit bounded stages. A
+stage receipt cannot change the full matrix, schedule, runtime, or scorer; it
+only authorizes the named subset and its own cell/spend ceiling. Resume uses
+the durable run ID and never repeats an integrity-valid logical attempt:
+
+```bash
+uv run fugue compare comparison.yaml --run \
+  --stage checkpoint --approval CHECKPOINT_APPROVAL
+uv run fugue compare comparison.yaml --resume RUN_ID \
+  --stage development --approval DEVELOPMENT_APPROVAL
+uv run fugue compare comparison.yaml --resume RUN_ID \
+  --stage holdout --approval HOLDOUT_APPROVAL
+```
+
+Infrastructure replacements receive a new physical execution identity and
+retry ordinal while preserving one logical attempt. Task failures and bounded
+Agent timeouts remain terminal behavioral evidence; routing, privacy, identity,
+evidence-link, or cleanup failures stop admission of later cells.
+
 The result separates deterministic task outcomes, blind-judge dimensions,
 mechanism evidence, infrastructure health, and evidence completeness. Live
 comparison scores are attached to the attempt's existing Weave

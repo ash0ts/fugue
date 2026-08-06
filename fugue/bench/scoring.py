@@ -11,6 +11,7 @@ from pathlib import Path
 from statistics import median
 from typing import Any, Literal
 
+from fugue.agent_tracing import normalize_skill_mechanism_evidence
 from fugue.bench.context import RetrievalHit, RetrievalQuery
 from fugue.bench.files import atomic_write_json
 from fugue.bench.intervention_provenance import (
@@ -259,16 +260,10 @@ def select_candidate_configuration(
         paired_delta = _paired_baseline_delta(candidate_rows, baseline_rows)
         if policy.baseline_variant_id and paired_delta is None:
             reasons.append("missing same-task/harness baseline")
-        if (
-            policy.minimum_paired_pass_rate_delta is not None
-            and (
-                paired_delta is None
-                or paired_delta < policy.minimum_paired_pass_rate_delta
-            )
+        if policy.minimum_paired_pass_rate_delta is not None and (
+            paired_delta is None or paired_delta < policy.minimum_paired_pass_rate_delta
         ):
-            reasons.append(
-                "paired pass-rate delta is below the preregistered minimum"
-            )
+            reasons.append("paired pass-rate delta is below the preregistered minimum")
         eligible = not reasons
         if eligible:
             eligible_rows[candidate_id] = candidate_rows
@@ -472,9 +467,7 @@ def build_intervention_selection_lock(  # noqa: C901 - one strict lock contract
     discovery_variant_ids: Iterable[str],
     baseline_variant_id: str,
     selected_variant_id: str,
-    selected_components: Iterable[
-        InterventionComponentLockV1 | Mapping[str, Any]
-    ],
+    selected_components: Iterable[InterventionComponentLockV1 | Mapping[str, Any]],
     rankings: Iterable[Mapping[str, Any]],
     decision: str,
     rationale: str,
@@ -495,7 +488,9 @@ def build_intervention_selection_lock(  # noqa: C901 - one strict lock contract
     if len(source_commit) != 40 or any(
         character not in "0123456789abcdef" for character in source_commit
     ):
-        raise ValueError("intervention selection source commit must be a full Git commit")
+        raise ValueError(
+            "intervention selection source commit must be a full Git commit"
+        )
     if len(source_tree) != 40 or any(
         character not in "0123456789abcdef" for character in source_tree
     ):
@@ -532,14 +527,10 @@ def build_intervention_selection_lock(  # noqa: C901 - one strict lock contract
         dict.fromkeys(str(value).strip() for value in discovery_variant_ids)
     )
     if len(variants) < 2 or any(not value for value in variants):
-        raise ValueError(
-            "intervention selection requires every discovery arm identity"
-        )
+        raise ValueError("intervention selection requires every discovery arm identity")
     components = tuple(
         intervention_component_lock_from_dict(
-            value.to_dict()
-            if isinstance(value, InterventionComponentLockV1)
-            else value
+            value.to_dict() if isinstance(value, InterventionComponentLockV1) else value
         )
         for value in selected_components
     )
@@ -577,17 +568,16 @@ def build_intervention_selection_lock(  # noqa: C901 - one strict lock contract
         "discovery completion time",
     )
     selection_time = _utc_timestamp(selection_locked_at, "selection lock time")
-    parsed_times = tuple(datetime.fromisoformat(value) for value in (
-        failure_time,
-        suites_time,
-        discovery_time,
-        selection_time,
-    ))
-    if not (
-        parsed_times[0] <= parsed_times[1]
-        < parsed_times[2]
-        <= parsed_times[3]
-    ):
+    parsed_times = tuple(
+        datetime.fromisoformat(value)
+        for value in (
+            failure_time,
+            suites_time,
+            discovery_time,
+            selection_time,
+        )
+    )
+    if not (parsed_times[0] <= parsed_times[1] < parsed_times[2] <= parsed_times[3]):
         raise ValueError(
             "intervention chronology must lock the failure, freeze both suites, "
             "complete discovery, then lock selection"
@@ -642,23 +632,20 @@ def read_intervention_selection_lock(path: Path) -> InterventionSelectionLockV1:
         raise ValueError("unsupported intervention selection lock schema")
     expected = str(payload.get("lock_sha256") or "")
     if not expected or _digest({**payload, "lock_sha256": ""}) != expected:
-        raise ValueError("intervention selection lock digest does not match its content")
+        raise ValueError(
+            "intervention selection lock digest does not match its content"
+        )
     rebuilt = build_intervention_selection_lock(
         experiment_id=str(payload.get("experiment_id") or ""),
         source_commit=str(payload.get("source_commit") or ""),
         source_tree=str(payload.get("source_tree") or ""),
         source_dirty_digest=str(payload.get("source_dirty_digest") or ""),
         failure_lock_sha256=str(payload.get("failure_lock_sha256") or ""),
-        discovery_suite_sha256=str(
-            payload.get("discovery_suite_sha256") or ""
-        ),
+        discovery_suite_sha256=str(payload.get("discovery_suite_sha256") or ""),
         holdout_suite_sha256=str(payload.get("holdout_suite_sha256") or ""),
-        analysis_snapshot_sha256=str(
-            payload.get("analysis_snapshot_sha256") or ""
-        ),
+        analysis_snapshot_sha256=str(payload.get("analysis_snapshot_sha256") or ""),
         discovery_run_snapshot_sha256s=tuple(
-            str(value)
-            for value in payload.get("discovery_run_snapshot_sha256s") or ()
+            str(value) for value in payload.get("discovery_run_snapshot_sha256s") or ()
         ),
         comparison_example_ids=tuple(
             str(value) for value in payload.get("comparison_example_ids") or ()
@@ -678,9 +665,7 @@ def read_intervention_selection_lock(path: Path) -> InterventionSelectionLockV1:
         rationale=str(payload.get("rationale") or ""),
         failure_locked_at=str(payload.get("failure_locked_at") or ""),
         suites_frozen_at=str(payload.get("suites_frozen_at") or ""),
-        discovery_completed_at=str(
-            payload.get("discovery_completed_at") or ""
-        ),
+        discovery_completed_at=str(payload.get("discovery_completed_at") or ""),
         selection_locked_at=str(payload.get("selection_locked_at") or ""),
     )
     if rebuilt.lock_sha256 != expected:
@@ -705,18 +690,25 @@ def _sha256(value: str) -> bool:
     )
 
 
-def _assigned_skills_invoked(row: Mapping[str, Any]) -> bool:
+def _assigned_skills_used(row: Mapping[str, Any]) -> bool:
     assigned = {
-        str(value)
-        for value in row.get("skills_assigned") or row.get("skill_ids") or ()
+        str(value) for value in row.get("skills_assigned") or row.get("skill_ids") or ()
     }
     if not assigned:
         return True
-    evidence = row.get("skill_invocation_evidence")
-    if not isinstance(evidence, Mapping) or evidence.get("status") != "observed":
+    evidence = normalize_skill_mechanism_evidence(
+        row.get("skill_mechanism_evidence") or row.get("skill_invocation_evidence")
+    )
+    if evidence["status"] != "observed":
         return False
-    invoked = {str(value) for value in evidence.get("skills_invoked") or ()}
-    return assigned <= invoked
+    used = {
+        str(value)
+        for value in (
+            *evidence["skills_opened"],
+            *evidence["skills_native_invoked"],
+        )
+    }
+    return assigned <= used
 
 
 def _mechanism_reasons(
@@ -724,11 +716,11 @@ def _mechanism_reasons(
 ) -> list[str]:
     reasons: list[str] = []
     if policy.require_skill_invocation and any(
-        not _assigned_skills_invoked(row)
+        not _assigned_skills_used(row)
         for row in rows
         if row.get("skill_ids") or row.get("skills_assigned")
     ):
-        reasons.append("assigned Skill invocation is missing or unproven")
+        reasons.append("assigned Skill opening or native invocation is unproven")
     if policy.required_any_tool_names and any(
         not (set(_tool_names(row)) & set(policy.required_any_tool_names))
         for row in rows
@@ -740,7 +732,9 @@ def _mechanism_reasons(
 def _tool_names(row: Mapping[str, Any]) -> tuple[str, ...]:
     value = row.get("weave_tool_names")
     if isinstance(value, Mapping):
-        return tuple(str(name) for name, count in value.items() if float(count or 0) > 0)
+        return tuple(
+            str(name) for name, count in value.items() if float(count or 0) > 0
+        )
     if isinstance(value, (list, tuple, set)):
         return tuple(str(name) for name in value)
     return ()

@@ -62,6 +62,49 @@ def _private_qualification_projects(
     )
 
 
+def test_report_only_wandb_runs_never_enter_source_inventory() -> None:
+    task_run = SimpleNamespace(
+        id="task-run",
+        job_type="maintenance-evidence",
+        config={"fugue": {"run_kind": "task_evidence"}},
+    )
+    report_by_job = SimpleNamespace(
+        id="report-job",
+        job_type="scientific-report",
+        config={},
+    )
+    report_by_contract = SimpleNamespace(
+        id="report-contract",
+        job_type="",
+        config={
+            "fugue": {
+                "run_kind": "report_only",
+                "excluded_from_task_inputs": True,
+                "excluded_from_evaluation_counts": True,
+            }
+        },
+    )
+    source_manifest = SimpleNamespace(
+        id="source-manifest",
+        job_type="task-source-manifest",
+        config={"fugue": {"run_kind": "task_source_manifest"}},
+    )
+    api = SimpleNamespace(
+        runs=lambda _project, **_kwargs: (
+            task_run,
+            report_by_job,
+            report_by_contract,
+            source_manifest,
+        )
+    )
+
+    selected = mcp_release_qualification._wandb_project_runs(
+        api, "wandb/source-project"
+    )
+
+    assert selected == [task_run]
+
+
 def test_research_registry_exposes_only_canonical_mcp_v3_studies() -> None:
     registry = ComparisonRegistry.from_file(Path.cwd())
     mcp_entries = tuple(

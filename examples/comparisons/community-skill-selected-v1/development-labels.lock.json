@@ -1,0 +1,60 @@
+{
+  "kind": "community_skill_development_private_label_lock",
+  "lanes": {
+    "anthropic-skill-creator": [
+      {
+        "label_digest": "3b5b496e5e86cd1b59f3e804578cdd1388284f9e1cfbc2778de4502b31dc8f6c",
+        "task_id": "as-dev-create-platform-bound-skill"
+      },
+      {
+        "label_digest": "a7021764d19a995938a6948ca5260225ed405c2d7c2b5fd99d1570f6e57fe100",
+        "task_id": "as-dev-no-platform-requirement"
+      },
+      {
+        "label_digest": "f4ee943ec4b58769ec70bc1bd14d961f899d8d74ffb460787eac2312f79fac02",
+        "task_id": "as-dev-preserve-runtime-metadata"
+      },
+      {
+        "label_digest": "514a7ad8724007628749bbeab921a32dae424df15e8a277014d941306591f687",
+        "task_id": "as-dev-repair-runtime-metadata"
+      }
+    ],
+    "superpowers-writing-plans": [
+      {
+        "label_digest": "95af43cf15de6066e8c22578f61a5b116824acd23947548d9266d1e59218bdfd",
+        "task_id": "sp-dev-credential-rotation"
+      },
+      {
+        "label_digest": "0b1f16e77b076156c9f1c9b900b4bb9e0b0a3d44a61d53e73f948dbc0ba609d5",
+        "task_id": "sp-dev-evidence-destination"
+      },
+      {
+        "label_digest": "b29a2d1e1098436018869ee1b3bad8aa694d17641b2e7e89d8e7f5b3583d3d96",
+        "task_id": "sp-dev-package-tree-qualification"
+      },
+      {
+        "label_digest": "5d399ab961556007e15610b5aa9c15355dad766579efb2fe80007c85ad112df6",
+        "task_id": "sp-dev-single-file-validation-fix"
+      }
+    ],
+    "vercel-react-best-practices": [
+      {
+        "label_digest": "3c07a23865f50a7228e3edfc0df75bd1327ef4d0744a64d1dc61279a7797d857",
+        "task_id": "vr-dev-layout-interleaved-measurement"
+      },
+      {
+        "label_digest": "b8bc11413f0028d9aef0fda00a0ffafbebd6cf7da46e8898cb6f405f7b053eb8",
+        "task_id": "vr-dev-rsc-primitive-derived-array"
+      },
+      {
+        "label_digest": "176979bfd4d87c24fa43e3bc42193c8ec4a248256cc559bee699812427dccab4",
+        "task_id": "vr-dev-signed-in-nonmember-action"
+      },
+      {
+        "label_digest": "21802304ad0c391b5e83ce7eaafce85b344144d240f832dcfe0ef873a1aee149",
+        "task_id": "vr-dev-use-latest-layout-read"
+      }
+    ]
+  },
+  "schema_version": 1
+}

@@ -380,9 +380,7 @@ def test_intervention_selection_lock_rejects_incomplete_prefreeze_contract(
     )
     payload = lock.to_dict()
     mutate(payload)
-    payload["lock_sha256"] = stable_digest(
-        {**payload, "lock_sha256": ""}
-    )
+    payload["lock_sha256"] = stable_digest({**payload, "lock_sha256": ""})
     path = tmp_path / f"{message.replace(' ', '-')}.json"
     path.write_text(json.dumps(payload), encoding="utf-8")
 
@@ -417,8 +415,24 @@ def test_selection_policy_rejects_arms_without_required_paired_gain() -> None:
                     "wall_time_sec": 1.0,
                     "skill_ids": skill_ids,
                     "skill_invocation_evidence": {
+                        "schema_version": 2,
                         "status": "observed",
-                        "skills_invoked": skill_ids,
+                        "skills_opened": skill_ids,
+                        "skill_files_opened": [
+                            {"skill_id": skill_id, "relative_path": "SKILL.md"}
+                            for skill_id in skill_ids
+                        ],
+                        "skills_native_invoked": [],
+                        "skills_invoked": [],
+                        "events": [
+                            {
+                                "item_id": f"skill-{skill_id}",
+                                "operation": "read_skill_instructions",
+                                "skill_id": skill_id,
+                                "relative_path": "SKILL.md",
+                            }
+                            for skill_id in skill_ids
+                        ],
                     },
                     "weave_tool_names": {"summarize_evaluation_tool": 1},
                 }

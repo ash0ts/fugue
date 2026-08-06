@@ -1,0 +1,46 @@
+{
+  "anthropic-skill-creator": {
+    "as-dev-create-platform-bound-skill": {
+      "README.md": "# Create a platform-bound Skill\n\nCreate one new Skill for inspecting Linux systemd service state with\n`systemctl` 255+. Name it `linux-systemd-service-state-inspection-tool` and\ndeclare Linux, systemctl 255+, and offline operation in compatibility metadata.\nThe package starts empty. Do not install anything or access the network. Report\nmissing evidence instead of guessing and return complete changed files only.\n"
+    },
+    "as-dev-no-platform-requirement": {
+      "README.md": "# Create a portable text Skill\n\nCreate a generic Skill that rewrites supplied text for clarity. It has no\nplatform, binary, service, or network requirement, so do not invent\ncompatibility metadata. Name it `generic-text-clarity-rewriting-skill`, preserve\nthe supplied text's meaning, never invent missing content, and return complete\nchanged files only.\n"
+    },
+    "as-dev-preserve-runtime-metadata": {
+      "README.md": "# Preserve existing metadata\n\nAdd one bounded instruction that distinguishes observed facts from hypotheses\nbefore reaching a conclusion. Do not change the existing name, compatibility,\nlicense, reference file, or package layout.\n",
+      "skills/incident-evidence-review/SKILL.md": "---\nname: incident-evidence-review\ndescription: Review local incident evidence and report a bounded conclusion.\nlicense: Apache-2.0\ncompatibility: macOS 13+ or Ubuntu 22.04+, Python 3.12+, and local read access\n---\n\nInspect the local incident evidence. Cite each opened path and report missing\nevidence rather than guessing.\n",
+      "skills/incident-evidence-review/references/operations.md": "# Operations\n\nInputs are local and immutable. Do not install packages.\n"
+    },
+    "as-dev-repair-runtime-metadata": {
+      "README.md": "# Repair compatibility metadata\n\nThe existing Skill is behaviorally correct, but its runtime requirements are\nburied in this document. Linux, jq 1.7+, and offline operation are required.\nPreserve the Skill name and instructions while repairing only metadata.\n",
+      "skills/offline-release-audit/SKILL.md": "---\nname: offline-release-audit\ndescription: Audit a local release bundle without network access.\ncompatibility: xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx\n---\n\nInspect the supplied local release bundle. Use jq for JSON manifests. Stop and\nreport unavailable evidence instead of installing tools or using the network.\n"
+    }
+  },
+  "vercel-react-best-practices": {
+    "vr-dev-layout-interleaved-measurement": {
+      "README.md": "# Batch DOM reads before writes\n\nRemove interleaved layout reads and writes without changing the returned size.\nRun `node --test` and keep the change narrow.\n",
+      "lib/panel.mjs": "export function sizePanel(element) {\n  element.style.width = '320px';\n  const width = element.offsetWidth;\n  element.style.height = '180px';\n  const height = element.offsetHeight;\n  return { width, height };\n}\n",
+      "package.json": "{\"name\":\"dom-batching\",\"private\":true,\"type\":\"module\",\"scripts\":{\"test\":\"node --test\"}}\n",
+      "test/task.test.mjs": "import test from 'node:test';\nimport assert from 'node:assert/strict';\nimport { sizePanel } from '../lib/panel.mjs';\n\ntest('reads happen before writes', () => {\n  const operations = [];\n  const style = {};\n  Object.defineProperties(style, {\n    width: { set: (value) => operations.push(['write', 'width', value]) },\n    height: { set: (value) => operations.push(['write', 'height', value]) },\n  });\n  const element = {\n    style,\n    get offsetWidth() { operations.push(['read', 'width']); return 320; },\n    get offsetHeight() { operations.push(['read', 'height']); return 180; },\n  };\n  assert.deepEqual(sizePanel(element), { width: 320, height: 180 });\n  assert.deepEqual(operations.map((item) => item[0]), ['read', 'read', 'write', 'write']);\n});\n"
+    },
+    "vr-dev-rsc-primitive-derived-array": {
+      "README.md": "# Remove duplicate RSC serialization\n\nPass one source collection across the server boundary and derive display data\nin the client. Preserve behavior and types. Run `node --test`.\n",
+      "app/client.mjs": "export function renderUserNames({ names }) {\n  return names.join(', ');\n}\n",
+      "app/server.mjs": "export function buildUserProps(users) {\n  const names = users.map((user) => user.name);\n  return { users, names };\n}\n",
+      "package.json": "{\"name\":\"rsc-derived-array\",\"private\":true,\"type\":\"module\",\"scripts\":{\"test\":\"node --test\"}}\n",
+      "test/task.test.mjs": "import test from 'node:test';\nimport assert from 'node:assert/strict';\nimport { buildUserProps } from '../app/server.mjs';\nimport { renderUserNames } from '../app/client.mjs';\n\ntest('only the source collection crosses the boundary', () => {\n  const users = [{ id: 'u1', name: 'Ada' }, { id: 'u2', name: 'Grace' }];\n  const props = buildUserProps(users);\n  assert.deepEqual(Object.keys(props), ['users']);\n  assert.equal(renderUserNames(props), 'Ada, Grace');\n});\n"
+    },
+    "vr-dev-signed-in-nonmember-action": {
+      "README.md": "# Prevent a signed-in nonmember mutation\n\nRepair the reported behavior without dependencies or unrelated changes. Run\n`node --test` and return complete changed implementation files.\n",
+      "app/teams.mjs": "'use server';\n\nexport async function renameTeam(input, { auth, db }) {\n  const session = await auth();\n  if (!session?.user?.id) throw new Error('Authentication required');\n  const teamId = String(input?.teamId || '').trim();\n  const name = String(input?.name || '').trim();\n  if (!teamId || name.length < 2 || name.length > 80) throw new Error('Invalid team update');\n  return db.team.update({ where: { id: teamId }, data: { name } });\n}\n",
+      "package.json": "{\"name\":\"server-action-membership\",\"private\":true,\"type\":\"module\",\"scripts\":{\"test\":\"node --test\"}}\n",
+      "test/task.test.mjs": "import test from 'node:test';\nimport assert from 'node:assert/strict';\nimport { renameTeam } from '../app/teams.mjs';\n\ntest('a signed-in nonmember cannot rename a team', async () => {\n  let writes = 0;\n  const services = {\n    auth: async () => ({ user: { id: 'outsider' } }),\n    db: {\n      membership: { findFirst: async () => null },\n      team: { update: async () => { writes += 1; } },\n    },\n  };\n  await assert.rejects(() => renameTeam({ teamId: 'team-1', name: 'Safe name' }, services));\n  assert.equal(writes, 0);\n});\n"
+    },
+    "vr-dev-use-latest-layout-read": {
+      "README.md": "# Expose the latest value during layout\n\nRepair the stale long-lived callback while preserving cleanup and public\nbehavior. Run `node --test` and keep the change narrow.\n",
+      "hooks/use-latest.mjs": "export function useLatest(value, hooks) {\n  const ref = hooks.useRef(value);\n  hooks.useEffect(() => { ref.current = value; }, [value]);\n  return ref;\n}\n",
+      "package.json": "{\"name\":\"latest-layout-value\",\"private\":true,\"type\":\"module\",\"scripts\":{\"test\":\"node --test\"}}\n",
+      "test/task.test.mjs": "import test from 'node:test';\nimport assert from 'node:assert/strict';\nimport { useLatest } from '../hooks/use-latest.mjs';\n\ntest('a layout observer sees the latest value', () => {\n  const ref = { current: 'old' };\n  const layout = [];\n  const passive = [];\n  const hooks = {\n    useRef: () => ref,\n    useLayoutEffect: (callback) => layout.push(callback),\n    useEffect: (callback) => passive.push(callback),\n  };\n  useLatest('new', hooks);\n  layout.forEach((callback) => callback());\n  assert.equal(ref.current, 'new');\n});\n"
+    }
+  }
+}

@@ -1,0 +1,18 @@
+{
+  "schema_version": 1,
+  "repository": "https://github.com/vercel-labs/agent-skills",
+  "path": "skills/react-best-practices",
+  "baseline": {
+    "id": "vercel-react-best-practices-before",
+    "commit": "ac6a79af08f6d32c34ee03c829824990f3de0a6d",
+    "bundle_digest": "sha256:042dce52998aa6288b4b5eac3fae325113559a666d959a10dd164a981b8ab797",
+    "file_count": 53
+  },
+  "candidate": {
+    "id": "vercel-react-best-practices-after",
+    "commit": "20987af2f1bc17857b55e7758af8bed91c364ff5",
+    "bundle_digest": "sha256:c9a31361925582718024d9ed69078e4dc3a41293f18642436a05a396d91134de",
+    "file_count": 55
+  },
+  "effective_change": ["Server Action authorization guidance", "RSC serialization guidance", "DOM and hook controls"]
+}

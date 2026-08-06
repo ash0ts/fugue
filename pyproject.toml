@@ -66,6 +66,10 @@ research-worker = [
     "uvicorn>=0.34,<1",
     "wandb==0.28.1; python_version >= '3.13'",
 ]
+reporting = [
+    "wandb==0.28.1",
+    "wandb-workspaces==0.4.5",
+]
 
 [tool.uv]
 # The full context lab contains mem0's older OpenAI client constraint. Candidate
@@ -109,7 +113,9 @@ max-complexity = 20
 known_first_party = ["fugue"]
 optional_dependencies_dev_groups = ["dev"]
 package_module_name_map = { pyyaml = "yaml", mem0ai = "mem0", ag-ui-protocol = "ag_ui" }
-per_rule_ignores = { DEP002 = ["qdrant-client"], DEP004 = ["skills_ref"] }
+# wandb-workspaces is intentionally late-imported only at the explicit report
+# publication boundary so base Fugue installs remain provider-independent.
+per_rule_ignores = { DEP002 = ["qdrant-client", "wandb-workspaces"], DEP004 = ["skills_ref"] }
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]

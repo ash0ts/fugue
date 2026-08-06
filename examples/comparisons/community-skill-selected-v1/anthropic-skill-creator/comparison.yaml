@@ -1,0 +1,100 @@
+schema_version: 3
+id: anthropic-skill-creator-measurement-pilot-v1
+question: Does exact Anthropic Skill Creator revision 1ed29a03 improve public development-task outcomes relative to a5bcdd7e under fixed conditions?
+taskset:
+  tasks: tasks.jsonl
+  private_labels: ../../../../.fugue/private/community-skill-selected-v1/anthropic-skill-creator/private-labels.jsonl
+baseline:
+  label: Anthropic Skill Creator at a5bcdd7e
+  skills: [anthropic-skill-creator-before-compatibility]
+candidate:
+  label: Anthropic Skill Creator at 1ed29a03
+  skills: [anthropic-skill-creator-compatibility]
+changed: [skills]
+evaluators:
+  - id: skill-package-quality
+    type: deterministic
+    required: true
+    scorer: scorer.py
+    runtime: python312-sandbox-v1
+    verifier:
+      type: skill_package
+      source: host_skill_package_verifier.cjs
+      runtime_lock: host-skill-package-verifier.lock.json
+      runtime: node22-verifier-v1
+      dimension: artifact_validity
+    dimensions:
+      - artifact_validity
+      - frontmatter_semantics
+      - compatibility_selection
+      - name_help_consistency
+      - instruction_quality
+      - behavior_preservation
+      - dependency_secret_safety
+    dimension_roles:
+      artifact_validity: safety_gate
+      frontmatter_semantics: outcome
+      compatibility_selection: outcome
+      name_help_consistency: outcome
+      instruction_quality: outcome
+      behavior_preservation: safety_gate
+      dependency_secret_safety: safety_gate
+  - {id: skill-package-usefulness, type: llm_judge, required: false, profile: anthropic/claude-sonnet-5,
+     calibration: ../../../../.fugue/private/community-skill-selected-v1/judge-calibration-receipt.json,
+     calibration_rubric: ../judge/rubric.json, calibration_modality: skill-package,
+     calibration_required_for_execution: true,
+     rubric: "Assess instruction usefulness, compatibility guidance, boundedness, and maintainability using only public task/output/evidence; never override deterministic gates.",
+     dimensions: [instruction_usefulness, compatibility_guidance, boundedness, maintainability], dimension_roles: {instruction_usefulness: outcome, compatibility_guidance: outcome, boundedness: outcome, maintainability: outcome},
+     evidence: [artifact_paths, inspected_paths, changed_paths], reserve_cost_usd: 0.1}
+execution:
+  source_evidence_project: wandb/fugue-anthropic-skill-creator-source-v1
+  source_evidence_destination: &public_cloud
+    entity: wandb
+    project: fugue-anthropic-skill-creator-source-v1
+    api_base_url: https://api.wandb.ai
+    trace_base_url: https://trace.wandb.ai
+    app_base_url: https://wandb.ai
+  evidence_project: wandb/fugue-anthropic-skill-creator-measurement-pilot-v1
+  evidence_destination:
+    <<: *public_cloud
+    project: fugue-anthropic-skill-creator-measurement-pilot-v1
+  research_id: fugue-anthropic-skill-creator-measurement-pilot-v1
+  model: anthropic/claude-sonnet-5
+  harnesses: [claude-code]
+  attempts: 2
+  concurrency: 2
+  # 16 logical Agent+judge reservations ($41.60) plus one predeclared
+  # infrastructure replacement ($2.50, no judge on the invalid execution).
+  max_cost_usd: 44.1
+  reserve_per_attempt_usd: 2.5
+  approval_required: true
+  preparation_required: true
+  schedule:
+    stages:
+      - id: checkpoint
+        pair_complete: true
+        task_ids:
+          - as-dev-create-platform-bound-skill
+          - as-dev-no-platform-requirement
+        trial_indexes: [0]
+      - id: complete-development-attempt-0
+        task_ids:
+          - as-dev-repair-runtime-metadata
+          - as-dev-preserve-runtime-metadata
+        trial_indexes: [0]
+      - id: repeat-development
+        partitions: [qualification]
+        trial_indexes: [1]
+    worker_limit: 2
+    wave_size: 4
+    infrastructure_retry_limit: 1
+    maximum_physical_executions: 17
+    maximum_in_flight_cost_usd: 5.2
+    coordination:
+      group_id: community-skill-selected-v1
+      worker_limit: 3
+      maximum_physical_executions: 100
+      total_cost_usd: 270
+      maximum_in_flight_cost_usd: 7.8
+  trace_content: full
+  environment: {type: docker}

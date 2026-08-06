@@ -133,6 +133,15 @@ def _parser() -> FugueArgumentParser:
     action.add_argument("--preview", action="store_true")
     action.add_argument("--run", action="store_true")
     compare.add_argument("--approval")
+    compare.add_argument(
+        "--stage",
+        help="Run one digest-bound staged subset (for example checkpoint)",
+    )
+    compare.add_argument(
+        "--resume",
+        metavar="CONTROLLER_ID",
+        help="Resume the durable staged controller without rerunning valid cells",
+    )
     compare.add_argument("--fetch-weave", action="store_true")
     _add_common_args(compare, json_output=True)
     compare.set_defaults(handler=_comparison_compare)
@@ -173,9 +182,43 @@ def _parser() -> FugueArgumentParser:
             "ready_for_signoff V3 result"
         ),
     )
+    result_action.add_argument(
+        "--report-action",
+        choices=(
+            "build",
+            "visual-data",
+            "publish",
+            "campaign-index",
+            "publish-campaign",
+        ),
+        help="Build or explicitly publish the digest-bound scientific report chain",
+    )
     result.add_argument("--reviewed-by")
     result.add_argument("--reviewed-at")
     result.add_argument("--research-id")
+    result.add_argument("--report-bundle", type=Path)
+    result.add_argument("--report-out", type=Path)
+    result.add_argument("--visual-assets", type=Path)
+    result.add_argument("--study-index", type=Path, action="append", default=[])
+    result.add_argument("--campaign-membership", type=Path)
+    result.add_argument("--campaign-id")
+    result.add_argument("--campaign-project")
+    result.add_argument("--result-url")
+    result.add_argument("--study-console-url")
+    result.add_argument("--weave-url")
+    result.add_argument(
+        "--visibility",
+        choices=("private", "organization", "public"),
+        default="private",
+    )
+    result.add_argument("--receipt-out", type=Path)
+    result.add_argument("--index-out", type=Path)
+    result.add_argument("--ledger-root", type=Path)
+    result.add_argument(
+        "--yes",
+        action="store_true",
+        help="Confirm an external W&B report-only publication",
+    )
     result.add_argument("--repo-root", type=Path, default=Path.cwd())
     result.set_defaults(handler=_comparison_result)
 
@@ -828,11 +871,13 @@ def _comparison_prepare(
     return 0 if preview_usable else 2
 
 
-def _comparison_compare(args: argparse.Namespace) -> int:
+def _comparison_compare(args: argparse.Namespace) -> int:  # noqa: C901
     from fugue.bench.comparison import (
         ComparisonPublicationError,
         check_comparison,
+        comparison_stage_receipt,
         execute_comparison,
+        execute_comparison_stage,
         load_comparison,
         preview_comparison,
     )
@@ -883,6 +928,11 @@ def _comparison_compare(args: argparse.Namespace) -> int:
         if args.json:
             payload = preview.to_dict()
             payload["approval_eligible"] = preview_usable
+            if preview.execution_schedule:
+                payload["stage_approval_subjects"] = {
+                    stage_id: comparison_stage_receipt(preview, stage_id).to_dict()
+                    for stage_id in preview.execution_schedule["stages"]
+                }
             print(json.dumps(payload, indent=2, sort_keys=True))
         else:
             _print_comparison_readiness_dict(preview.readiness)
@@ -925,6 +975,32 @@ def _comparison_compare(args: argparse.Namespace) -> int:
         return 2
     if not args.approval:
         raise ValueError("--run requires --approval APPROVAL_DIGEST")
+    if args.stage:
+        staged = execute_comparison_stage(
+            preview,
+            stage_id=args.stage,
+            approval_digest=args.approval,
+            repo_root=root,
+            env_file=args.env_file,
+            fetch_weave=args.fetch_weave,
+            controller_id=args.resume,
+        )
+        if args.json:
+            print(json.dumps(staged, indent=2, sort_keys=True))
+        else:
+            CONSOLE.print(
+                Panel(
+                    f"Controller: [bold]{staged['controller_id']}[/]\n"
+                    f"Stage: {staged['stage_id']} · {staged['status']}",
+                    title="Staged comparison",
+                    border_style="fugue.cyan",
+                )
+            )
+            if staged.get("result_path"):
+                CONSOLE.print(f"Result JSON: {staged['result_path']}")
+        return 0 if staged["status"] in {"stage_complete", "complete"} else 3
+    if args.resume:
+        raise ValueError("--resume requires --stage")
     publication_error: ComparisonPublicationError | None = None
     try:
         result, json_path, markdown_path = execute_comparison(
@@ -1031,6 +1107,8 @@ def _comparison_result(args: argparse.Namespace) -> int:
     from fugue.bench.comparison import COMPARISON_RESULT_ROOT
 
     root = args.repo_root.resolve()
+    if args.report_action is not None:
+        return _scientific_report(args, root=root)
     if args.append_invalidation is not None:
         from fugue.research.comparisons import append_comparison_invalidation
 
@@ -1089,6 +1167,169 @@ def _comparison_result(args: argparse.Namespace) -> int:
         print(result_path.read_text(encoding="utf-8"), end="")
     else:
         CONSOLE.print(Markdown(markdown_path.read_text(encoding="utf-8")))
+    return 0
+
+
+def _scientific_report(args: argparse.Namespace, *, root: Path) -> int:
+    from fugue.bench.reporting import (
+        build_scientific_report_bundle,
+        campaign_publication_files,
+        read_scientific_report_bundle,
+        write_campaign_report_index,
+        write_json_once,
+        write_visual_data_manifest,
+    )
+
+    if args.report_action == "build":
+        if args.report_out is None:
+            raise ValueError("report build requires --report-out")
+        from fugue.bench.comparison import COMPARISON_RESULT_ROOT
+
+        result_path, _markdown_path = _comparison_result_paths(
+            root,
+            args.comparison,
+            result_root=root / COMPARISON_RESULT_ROOT,
+        )
+        bundle = build_scientific_report_bundle(
+            result_path,
+            args.report_out,
+            visual_manifest_path=args.visual_assets,
+        )
+        print(
+            json.dumps(
+                {
+                    "schema_version": 1,
+                    "status": "built",
+                    "bundle": str(bundle.root / "bundle.json"),
+                    "bundle_digest": bundle.manifest.bundle_digest,
+                    "result_digest": bundle.result.result_digest,
+                    "report_digest": bundle.report.report_digest,
+                    "publication_performed": False,
+                },
+                indent=2,
+                sort_keys=True,
+            )
+        )
+        return 0
+    if args.report_action == "visual-data":
+        if args.report_bundle is None or args.report_out is None:
+            raise ValueError(
+                "visual-data requires --report-bundle and --report-out"
+            )
+        bundle = read_scientific_report_bundle(args.report_bundle)
+        manifest = write_visual_data_manifest(bundle, args.report_out)
+        print(json.dumps(manifest.to_dict(), indent=2, sort_keys=True))
+        return 0
+    if args.report_action == "campaign-index":
+        if (
+            not args.study_index
+            or args.campaign_membership is None
+            or not args.campaign_id
+            or not args.campaign_project
+            or args.report_out is None
+        ):
+            raise ValueError(
+                "campaign-index requires --study-index, --campaign-membership, "
+                "--campaign-id, --campaign-project, and --report-out"
+            )
+        index = write_campaign_report_index(
+            campaign_id=args.campaign_id,
+            publication_project=args.campaign_project,
+            membership_path=args.campaign_membership,
+            study_index_paths=args.study_index,
+            output_path=args.report_out,
+        )
+        print(json.dumps(index.to_dict(), indent=2, sort_keys=True))
+        return 0
+    if not args.yes:
+        raise ValueError("W&B report publication requires explicit --yes")
+
+    from fugue.bench.scientific_reports import (
+        build_study_report_index,
+        campaign_report_index_from_dict,
+    )
+    from fugue.research.report_publication import (
+        WandbReportPublisher,
+        publish_report,
+    )
+
+    publisher = WandbReportPublisher()
+    ledger_root = args.ledger_root
+    if args.report_action == "publish":
+        required = {
+            "--report-bundle": args.report_bundle,
+            "--result-url": args.result_url,
+            "--study-console-url": args.study_console_url,
+            "--weave-url": args.weave_url,
+            "--receipt-out": args.receipt_out,
+            "--index-out": args.index_out,
+        }
+        missing = [name for name, value in required.items() if value is None]
+        if missing:
+            raise ValueError("report publish requires " + ", ".join(missing))
+        bundle = read_scientific_report_bundle(args.report_bundle)
+        receipt = publish_report(
+            bundle.report,
+            publisher=publisher,
+            artifact_files=bundle.artifact_files,
+            source_result=bundle.result,
+            ledger_root=ledger_root,
+        )
+        index = build_study_report_index(
+            bundle.report,
+            receipt,
+            result_url=args.result_url,
+            study_console_url=args.study_console_url,
+            weave_url=args.weave_url,
+            visibility=args.visibility,
+        )
+        write_json_once(
+            args.receipt_out,
+            receipt.to_dict(),
+            label="report publication receipt",
+        )
+        write_json_once(
+            args.index_out,
+            index.to_dict(),
+            label="Study report index",
+        )
+        print(
+            json.dumps(
+                {
+                    "schema_version": 1,
+                    "status": "published",
+                    "receipt": str(args.receipt_out),
+                    "receipt_digest": receipt.receipt_digest,
+                    "study_index": str(args.index_out),
+                    "study_index_digest": index.index_digest,
+                    "report_url": receipt.report_url,
+                    "artifact_url": receipt.artifact_url,
+                },
+                indent=2,
+                sort_keys=True,
+            )
+        )
+        return 0
+    if args.report_bundle is None or args.receipt_out is None:
+        raise ValueError(
+            "publish-campaign requires --report-bundle and --receipt-out"
+        )
+    raw = json.loads(args.report_bundle.read_text(encoding="utf-8"))
+    if not isinstance(raw, dict):
+        raise ValueError("campaign report index must be an object")
+    campaign = campaign_report_index_from_dict(raw)
+    receipt = publish_report(
+        campaign,
+        publisher=publisher,
+        artifact_files=campaign_publication_files(campaign),
+        ledger_root=ledger_root,
+    )
+    write_json_once(
+        args.receipt_out,
+        receipt.to_dict(),
+        label="campaign publication receipt",
+    )
+    print(json.dumps(receipt.to_dict(), indent=2, sort_keys=True))
     return 0
 
 

@@ -57,8 +57,7 @@ SOURCE_PROJECT = "wandb/fugue-mcp-release-source-v2"
 RESULT_PROJECT = "wandb/fugue-mcp-release-qualification-v1"
 LOOP_PROJECT = "wandb/fugue-claude-loop-engineering-v1"
 CHECKED_FAILURE_LOCK = (
-    REPO_ROOT
-    / "examples/loop-engineering/wandb-evidence-loop/fixtures/"
+    REPO_ROOT / "examples/loop-engineering/wandb-evidence-loop/fixtures/"
     "mcp-v10-exact-history-baseline.failure-lock.json"
 )
 
@@ -157,8 +156,7 @@ def _attempt(
         queried_projects=(SOURCE_PROJECT,),
         scores=resolved_scores,
         score_explanations={
-            dimension: "safe deterministic explanation"
-            for dimension in resolved_scores
+            dimension: "safe deterministic explanation" for dimension in resolved_scores
         },
         sanitized_answer_excerpt=None,
         actual_query_scope=(SOURCE_PROJECT,),
@@ -371,9 +369,7 @@ def _result(
             incomplete_pairs=0,
             candidate_critical_failures=2,
             critical_blockers=("exact-history-target safety failures",),
-            supported_claim=(
-                "The candidate regressed on one locked outcome pair."
-            ),
+            supported_claim=("The candidate regressed on one locked outcome pair."),
             limitations=("This is a bounded canary.",),
             next_action="Lock one repeated failure for loop engineering.",
         ),
@@ -551,9 +547,7 @@ def _build_lock(
         result or _result(),
         preview_digest=str(preview["preview_digest"]),
     )
-    changed_preview_digest = _comparison_qualification_digest(
-        changed_preview.to_dict()
-    )
+    changed_preview_digest = _comparison_qualification_digest(changed_preview.to_dict())
     selected_result = replace(
         changed_preview,
         qualification_digest=changed_preview_digest,
@@ -613,9 +607,7 @@ def test_v10_failure_lock_binds_repeated_real_failure_without_answers(
 
     tampered = json.loads(json.dumps(validated))
     tampered["locks"]["arm_candidates"]["baseline"] = "0" * 64
-    tampered["lock_sha256"] = stable_digest(
-        {**tampered, "lock_sha256": ""}
-    )
+    tampered["lock_sha256"] = stable_digest({**tampered, "lock_sha256": ""})
     with pytest.raises(ValueError, match="primary attempt candidate"):
         validate_comparison_failure_lock(tampered)
 
@@ -629,9 +621,7 @@ def test_v10_failure_lock_binds_repeated_real_failure_without_answers(
             for link in attempt["evidence_links"]
             if link["kind"] == "evaluation_root"
         )
-        evaluation["ref"] = (
-            f"weave:///{RESULT_PROJECT}/call/0123456789abcdef"
-        )
+        evaluation["ref"] = f"weave:///{RESULT_PROJECT}/call/0123456789abcdef"
         evaluation["url"] = (
             f"https://wandb.ai/{RESULT_PROJECT}/weave/calls/0123456789abcdef"
         )
@@ -652,9 +642,7 @@ def test_v10_failure_lock_binds_repeated_real_failure_without_answers(
             if link["kind"] == "evaluation_root"
         )
         evaluation["ref"] = f"weave:///{RESULT_PROJECT}/call/{span_id}"
-        evaluation["url"] = (
-            f"https://wandb.ai/{RESULT_PROJECT}/weave/calls/{span_id}"
-        )
+        evaluation["url"] = f"https://wandb.ai/{RESULT_PROJECT}/weave/calls/{span_id}"
     diagnostic_substitution["lock_sha256"] = stable_digest(
         {**diagnostic_substitution, "lock_sha256": ""}
     )
@@ -672,9 +660,7 @@ def test_v10_failure_lock_binds_repeated_real_failure_without_answers(
             if link["kind"] == "evaluation_root"
         )
         evaluation["ref"] = "not-a-stable-ref"
-    bare_call_id["lock_sha256"] = stable_digest(
-        {**bare_call_id, "lock_sha256": ""}
-    )
+    bare_call_id["lock_sha256"] = stable_digest({**bare_call_id, "lock_sha256": ""})
     with pytest.raises(ValueError, match="canonical Weave Call ref"):
         validate_comparison_failure_lock(bare_call_id)
 
@@ -697,9 +683,7 @@ def test_v10_failure_lock_binds_repeated_real_failure_without_answers(
         noncanonical_dataset["repeated_attempts"][0],
     ):
         dataset = next(
-            link
-            for link in attempt["evidence_links"]
-            if link["kind"] == "dataset"
+            link for link in attempt["evidence_links"] if link["kind"] == "dataset"
         )
         dataset["ref"] = "not-a-weave-ref"
     noncanonical_dataset["lock_sha256"] = stable_digest(
@@ -714,9 +698,7 @@ def test_v10_failure_lock_binds_repeated_real_failure_without_answers(
         wrong_dataset_route["repeated_attempts"][0],
     ):
         dataset = next(
-            link
-            for link in attempt["evidence_links"]
-            if link["kind"] == "dataset"
+            link for link in attempt["evidence_links"] if link["kind"] == "dataset"
         )
         dataset["url"] = f"https://wandb.ai/{RESULT_PROJECT}/anything"
     wrong_dataset_route["lock_sha256"] = stable_digest(
@@ -811,11 +793,10 @@ def test_loop_catalog_is_local_dynamic_and_holdout_locked() -> None:
         "mcp-only",
         "combined",
     ]
-    assert {
-        skill
-        for variant in experiment.variants
-        for skill in variant.skills
-    } == {"loop-production-skill", "loop-intervention-skill"}
+    assert {skill for variant in experiment.variants for skill in variant.skills} == {
+        "loop-production-skill",
+        "loop-intervention-skill",
+    }
     assert {
         integration.id
         for variant in experiment.variants
@@ -840,12 +821,9 @@ def test_loop_assets_do_not_claim_old_smoke_or_fake_trace() -> None:
     paths = (
         REPO_ROOT / "configs/fugue/experiments/claude-loop-skill-mcp.yaml",
         REPO_ROOT / "configs/fugue/campaigns/claude-loop-skill-mcp-v1.yaml",
-        REPO_ROOT
-        / "examples/loop-engineering/wandb-evidence-loop/README.md",
-        REPO_ROOT
-        / "examples/loop-engineering/wandb-evidence-loop/agent-prompt.md",
-        REPO_ROOT
-        / "examples/loop-engineering/wandb-evidence-loop/lock_failure.py",
+        REPO_ROOT / "examples/loop-engineering/wandb-evidence-loop/README.md",
+        REPO_ROOT / "examples/loop-engineering/wandb-evidence-loop/agent-prompt.md",
+        REPO_ROOT / "examples/loop-engineering/wandb-evidence-loop/lock_failure.py",
     )
     text = "\n".join(path.read_text(encoding="utf-8") for path in paths)
 
@@ -861,10 +839,7 @@ def test_loop_assets_do_not_claim_old_smoke_or_fake_trace() -> None:
 
 
 def test_loop_failure_source_is_exact_authoritative_v10() -> None:
-    path = (
-        REPO_ROOT
-        / "examples/loop-engineering/wandb-evidence-loop/lock_failure.py"
-    )
+    path = REPO_ROOT / "examples/loop-engineering/wandb-evidence-loop/lock_failure.py"
     spec = importlib.util.spec_from_file_location("loop_lock_failure", path)
     assert spec is not None and spec.loader is not None
     module = importlib.util.module_from_spec(spec)
@@ -913,10 +888,7 @@ def test_loop_selection_resolves_only_locked_components_in_selected_arm(
             mcp,
         ).relative_to(tmp_path),
     )
-    tags = [
-        f"intervention-component-lock:{path.as_posix()}"
-        for path in paths
-    ]
+    tags = [f"intervention-component-lock:{path.as_posix()}" for path in paths]
     rows = [
         {
             "variant_id": "combined",
@@ -943,8 +915,7 @@ def test_loop_selection_resolves_only_locked_components_in_selected_arm(
 
 def _verification_module():
     path = (
-        REPO_ROOT
-        / "examples/loop-engineering/wandb-evidence-loop/verify_evidence.py"
+        REPO_ROOT / "examples/loop-engineering/wandb-evidence-loop/verify_evidence.py"
     )
     spec = importlib.util.spec_from_file_location("loop_verify_evidence", path)
     assert spec is not None and spec.loader is not None
@@ -968,16 +939,10 @@ def test_loop_mcp_use_requires_host_observed_calls_from_exact_integration() -> N
         ],
     }
 
-    assert (
-        module._integration_use_observed(row, "loop-intervention-mcp")
-        is False
-    )
+    assert module._integration_use_observed(row, "loop-intervention-mcp") is False
     row["integration_ids_invoked"] = ["loop-intervention-mcp"]
     row["mcp_tool_calls"][0]["integration_id"] = "loop-intervention-mcp"
-    assert (
-        module._integration_use_observed(row, "loop-intervention-mcp")
-        is True
-    )
+    assert module._integration_use_observed(row, "loop-intervention-mcp") is True
 
 
 def _verification_row(
@@ -989,9 +954,7 @@ def _verification_row(
     passed: bool,
     failure_lock: dict[str, object],
 ) -> dict[str, object]:
-    identity = stable_digest(
-        {"phase": phase, "task": task, "variant": variant}
-    )
+    identity = stable_digest({"phase": phase, "task": task, "variant": variant})
     weave_base = f"https://wandb.ai/{LOOP_PROJECT}/weave"
     call_base = f"weave:///{LOOP_PROJECT}/call"
     evaluation_id = f"evaluation-{identity}"
@@ -1017,9 +980,7 @@ def _verification_row(
         "evaluation_root_object_verified": True,
         "eval_predict_and_score_call_id": predict_and_score_id,
         "eval_predict_and_score_ref": f"{call_base}/{predict_and_score_id}",
-        "eval_predict_and_score_url": (
-            f"{weave_base}/calls/{predict_and_score_id}"
-        ),
+        "eval_predict_and_score_url": (f"{weave_base}/calls/{predict_and_score_id}"),
         "eval_predict_and_score_object_verified": True,
         "weave_prediction_call_id": prediction_call_id,
         "weave_prediction_ref": f"{call_base}/{prediction_call_id}",
@@ -1047,21 +1008,44 @@ def _verification_row(
         "orphaned_sandbox": False,
         "execution_fingerprint": stable_digest({"phase": phase}),
         "run_snapshot_sha256": "2" * 64,
-        "task_suite_digest": (
-            "6" * 64 if phase == "discovery" else "7" * 64
-        ),
+        "task_suite_digest": ("6" * 64 if phase == "discovery" else "7" * 64),
         "source_commit": "3" * 40,
         "source_tree": "4" * 40,
         "source_dirty_digest": "",
         "weave_tool_names": {"query_wandb_tool": 1},
         "skill_invocation_evidence": {
+            "schema_version": 2,
             "status": "observed",
-            "skills_invoked": [
+            "skills_opened": [
                 (
                     "loop-intervention-skill"
                     if variant in {"skill-only", "combined"}
                     else "loop-production-skill"
                 )
+            ],
+            "skill_files_opened": [
+                {
+                    "skill_id": (
+                        "loop-intervention-skill"
+                        if variant in {"skill-only", "combined"}
+                        else "loop-production-skill"
+                    ),
+                    "relative_path": "SKILL.md",
+                }
+            ],
+            "skills_native_invoked": [],
+            "skills_invoked": [],
+            "events": [
+                {
+                    "item_id": "skill-read",
+                    "operation": "read_skill_instructions",
+                    "skill_id": (
+                        "loop-intervention-skill"
+                        if variant in {"skill-only", "combined"}
+                        else "loop-production-skill"
+                    ),
+                    "relative_path": "SKILL.md",
+                }
             ],
         },
         "skill_provenance": [
@@ -1072,9 +1056,7 @@ def _verification_row(
                     else "loop-production-skill"
                 ),
                 "digest": (
-                    "7" * 64
-                    if variant in {"skill-only", "combined"}
-                    else "8" * 64
+                    "7" * 64 if variant in {"skill-only", "combined"} else "8" * 64
                 ),
             }
         ],

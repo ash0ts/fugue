@@ -175,6 +175,35 @@ AuthoredTaskMaterializer
 # Supported public analysis/builders.
 factorial_difference_in_differences
 build_trace_selection
+build_scientific_report
+build_campaign_report_index
+build_study_report_index
+publish_report
+WandbReportPublisher
+record_study_report_index
+report_index
+
+# Public persisted-artifact reader used by downstream article/Atlas tooling;
+# its direct in-repository caller is the compatibility test by design.
+article_publication_receipt_from_dict
+
+# Operator-bound campaign entrypoints are imported by the checked-in campaign
+# CLIs under examples/comparisons/community-skill-selected-v1/.  Keeping the
+# trusted preparation and review boundary out of the package CLI is deliberate.
+build_human_submission
+build_adjudication
+build_final_receipt
+write_receipt
+materialize_cases
+run_generation
+default_requester
+build_study_advancement_decision
+write_study_advancement_decision
+build_holdout_exposure_audit
+read_study_advancement_decision
+write_holdout_exposure_audit
+read_holdout_exposure_audit
+
 # Imported by the checked-in zero-model MCP qualification entrypoints under
 # examples/comparisons/wandb-mcp-maintenance/.
 qualify_locked_mcp_revisions
@@ -275,6 +304,13 @@ read_comparison_failure_lock
 # scripts and by third-party operator automation outside the package tree.
 write_intervention_component_lock
 verify_intervention_component_checkout
+
+# Trusted preparation APIs called by checked-in operator scripts; these stay
+# outside trial execution and are intentionally not imported by package code.
+build_historical_holdout_exposure_receipt
+read_historical_holdout_exposure_receipt
+write_historical_holdout_exposure_receipt
+prepare_locked_private_labels
 
 # Protocol, stdlib server, FastAPI state, and Textual callback/member access.
 _.input_messages

@@ -21,7 +21,7 @@ jobs:
       fail-fast: false
       matrix:
         python: ["3.12", "3.13"]
-        suite: [core, context, dev, research]
+        suite: [core, context, dev, research, staged-skill-studies]
     steps:
       - uses: actions/checkout@v5
         with:
@@ -42,6 +42,10 @@ jobs:
       - name: Install research service
         if: matrix.suite == 'research'
         run: uv sync --frozen --extra dev --extra research
+      - name: Install staged Skill study and reporting contracts
+        if: matrix.suite == 'staged-skill-studies'
+        run: >-
+          uv sync --frozen --extra dev --extra research --extra reporting
       - name: Test core contracts
         if: matrix.suite == 'core'
         env:
@@ -98,6 +102,20 @@ jobs:
           tests/test_tasksets.py
           tests/test_mcp_read_only_evidence.py
           tests/test_mcp_release_qualification.py tests/test_wandb_sandbox.py
+      - name: Test staged Skill studies and scientific publication
+        if: matrix.suite == 'staged-skill-studies'
+        env:
+          PYTHONWARNINGS: error
+          FUGUE_NO_ANIMATION: "1"
+        run: >-
+          uv run pytest
+          tests/test_community_skill_selected.py tests/test_host_capacity.py
+          tests/test_judge_calibration.py tests/test_judge_calibration_admission.py
+          tests/test_judge_calibration_review_workflow.py
+          tests/test_judge_calibration_run.py tests/test_post_trial_verifier.py
+          tests/test_public_source.py tests/test_scientific_reports_minimal.py
+          tests/test_sealed_holdouts.py tests/test_staged_execution.py
+          tests/test_study_advancement.py
 
   quality:
     name: Quality, build, and command smoke

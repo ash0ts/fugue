@@ -178,6 +178,56 @@ def write_simple_taskset(
     return tasks_path, private_labels_path
 
 
+def prepare_locked_private_labels(
+    *,
+    source_path: Path,
+    destination_path: Path,
+    expected: Sequence[Mapping[str, Any]],
+) -> dict[str, Any]:
+    """Materialize a reviewed private-label bundle without exposing its values."""
+
+    if source_path.is_symlink() or not source_path.is_file():
+        raise ValueError("private-label source must be a regular file")
+    expected_by_id: dict[str, str] = {}
+    for item in expected:
+        if set(item) != {"task_id", "label_digest"}:
+            raise ValueError("private-label lock fields changed")
+        task_id = validate_id(str(item["task_id"]), kind="task id")
+        digest = str(item["label_digest"])
+        if len(digest) != 64 or any(character not in "0123456789abcdef" for character in digest):
+            raise ValueError("private-label lock requires SHA-256 digests")
+        if task_id in expected_by_id:
+            raise ValueError("private-label lock task ids must be unique")
+        expected_by_id[task_id] = digest
+    rows: dict[str, dict[str, Any]] = {}
+    for line in source_path.read_text(encoding="utf-8").splitlines():
+        if not line.strip():
+            continue
+        raw = json.loads(line)
+        if not isinstance(raw, Mapping):
+            raise ValueError("private-label rows must be objects")
+        parsed = _parse_private(raw).to_dict()
+        if parsed["id"] in rows:
+            raise ValueError("private-label source task ids must be unique")
+        rows[parsed["id"]] = parsed
+    if set(rows) != set(expected_by_id):
+        raise ValueError("private-label source does not match its reviewed lock")
+    for task_id, row in rows.items():
+        if stable_digest(row) != expected_by_id[task_id]:
+            raise ValueError(f"private-label content changed: {task_id}")
+    ordered = [rows[task_id] for task_id in sorted(rows)]
+    _write_jsonl(destination_path, ordered, mode=0o600)
+    unsigned = {
+        "schema_version": 1,
+        "kind": "locked_private_labels_preparation",
+        "task_count": len(ordered),
+        "task_ids": sorted(rows),
+        "label_digests": [expected_by_id[task_id] for task_id in sorted(rows)],
+        "lock_digest": stable_digest(list(expected)),
+    }
+    return {**unsigned, "receipt_digest": stable_digest(unsigned)}
+
+
 def write_taskset_schemas(destination: Path) -> tuple[Path, Path]:
     destination.mkdir(parents=True, exist_ok=True)
     public = destination / "simple-task.schema.json"

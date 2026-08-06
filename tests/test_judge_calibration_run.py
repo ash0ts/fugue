@@ -1,0 +1,248 @@
+from __future__ import annotations
+
+import json
+import runpy
+import stat
+from pathlib import Path
+from typing import Any
+
+import pytest
+
+from fugue.bench.judge_calibration import build_blinded_packet, validate_rubric
+from fugue.bench.judge_calibration_run import (
+    build_generation_preview,
+    materialize_cases,
+    run_generation,
+    validate_generation_preview,
+)
+from fugue.research.approvals import ApprovalLedger
+from fugue.research.store import StudyStore
+
+_HELPERS = runpy.run_path(Path(__file__).with_name("test_judge_calibration.py"))
+_case_set = _HELPERS["_case_set"]
+_outputs = _HELPERS["_outputs"]
+_truth = _HELPERS["_truth"]
+_RUN_CALIBRATION = runpy.run_path(
+    Path(__file__).parents[1]
+    / "examples/comparisons/community-skill-selected-v1/judge/run_calibration.py"
+)
+_calibration_env = _RUN_CALIBRATION["_calibration_env"]
+
+
+def _bundle(tmp_path: Path):
+    cases, *_ = _case_set(tmp_path)
+    rubric, rubric_digest = validate_rubric(
+        Path(__file__).parents[1]
+        / "examples/comparisons/community-skill-selected-v1/judge/rubric.json"
+    )
+    packet = build_blinded_packet(cases, rubric_digest)
+    truth = _truth(cases)
+    labels = {
+        ref: ("adequate" if acceptable else "weak")
+        for ref, acceptable in truth.items()
+    }
+    outputs = _outputs(cases, dict(rubric), overrides=labels)
+    preview = build_generation_preview(
+        case_set=cases,
+        rubric=rubric,
+        rubric_digest=rubric_digest,
+        packet=packet,
+    )
+    return cases, rubric, rubric_digest, packet, outputs, preview
+
+
+def _approve(tmp_path: Path, preview: dict[str, Any], *, cost: float = 8) -> str:
+    approval = ApprovalLedger(StudyStore(tmp_path).path).approve(
+        subject_kind="experiment",
+        preview_digest=preview["preview_digest"],
+        maximum_cost_usd=cost,
+        maximum_cells=48,
+        approved_by="test-operator",
+        operation_id="approve-judge-calibration",
+    )
+    return approval.approval_digest
+
+
+def test_preview_is_pure_exact_and_tamper_evident(tmp_path: Path) -> None:
+    _cases, _rubric, _digest, packet, _outputs_value, preview = _bundle(tmp_path)
+
+    validate_generation_preview(preview)
+    assert preview["request_count"] == 48
+    assert preview["maximum_cost_usd"] == 8
+    assert preview["automatic_retries"] == 0
+    assert preview["human_review_automated"] is False
+    assert len(preview["runner_source_sha256"]) == 64
+    assert len(packet["cases"]) == 48
+    assert not (tmp_path / ".fugue").exists()
+
+    tampered = {**preview, "request_count": 49}
+    with pytest.raises(ValueError, match="policy|digest"):
+        validate_generation_preview(tampered)
+
+
+def test_calibration_env_excludes_openai_but_keeps_required_routes(
+    tmp_path: Path,
+) -> None:
+    env_file = tmp_path / ".env"
+    env_file.write_text(
+        "OPENAI_API_KEY=not-used\n"
+        "ANTHROPIC_API_KEY=anthropic-test\n"
+        "WANDB_API_KEY=wandb-test\n",
+        encoding="utf-8",
+    )
+
+    loaded = _calibration_env(env_file)
+
+    assert "OPENAI_API_KEY" not in loaded
+    assert loaded["ANTHROPIC_API_KEY"] == "anthropic-test"
+    assert loaded["WANDB_API_KEY"] == "wandb-test"
+
+
+def test_operator_source_materializes_idempotently_inside_private_boundary(
+    tmp_path: Path,
+) -> None:
+    _cases, source, manifest = _case_set(tmp_path)
+    repo = tmp_path / "repo"
+    destination = Path(".fugue/private/community-skill-selected-v1/cases.jsonl")
+
+    first = materialize_cases(
+        repo_root=repo,
+        manifest_path=manifest,
+        source_path=source,
+        destination=destination,
+    )
+    second = materialize_cases(
+        repo_root=repo,
+        manifest_path=manifest,
+        source_path=source,
+        destination=destination,
+    )
+    target = repo / destination
+    assert first["status"] == "materialized"
+    assert second["status"] == "already_materialized"
+    assert target.read_bytes() == source.read_bytes()
+    assert stat.S_IMODE(target.stat().st_mode) == 0o600
+    assert first["source_kind"] == "explicit_operator_supplied_file"
+    assert "source_path" not in first
+
+    with pytest.raises(ValueError, match="under .fugue/private"):
+        materialize_cases(
+            repo_root=repo,
+            manifest_path=manifest,
+            source_path=source,
+            destination=Path("tracked/cases.jsonl"),
+        )
+
+
+def test_approved_generation_runs_48_once_and_stops_before_human_review(
+    tmp_path: Path,
+) -> None:
+    cases, rubric, rubric_digest, packet, output_rows, preview = _bundle(tmp_path)
+    approval = _approve(tmp_path, preview)
+    calls = 0
+
+    def request(prompt: str):
+        nonlocal calls
+        assert "authored_reference" not in prompt
+        selected = output_rows[calls]
+        calls += 1
+        return selected, {"input_tokens": 100, "output_tokens": 20}
+
+    result = run_generation(
+        repo_root=tmp_path,
+        case_set=cases,
+        rubric=rubric,
+        rubric_digest=rubric_digest,
+        packet=packet,
+        approval_digest=approval,
+        output_path=Path(".fugue/private/campaign/model-outputs.jsonl"),
+        receipt_path=Path(".fugue/private/campaign/generation-receipt.json"),
+        requester=request,
+    )
+
+    assert calls == 48
+    assert result["attempted_requests"] == 48
+    assert result["accounted_cost_usd"] == 8
+    assert result["observed_cost_usd"] is None
+    assert result["human_review_status"] == "pending_two_independent_reviews"
+    assert result["model_output_receipt"]["case_count"] == 48
+    output = tmp_path / ".fugue/private/campaign/model-outputs.jsonl"
+    assert len(output.read_text().splitlines()) == 48
+    state = json.loads(
+        output.with_suffix(".jsonl.partial.json").read_text(encoding="utf-8")
+    )
+    assert state["status"] == "completed"
+    assert state["accounted_cost_usd"] == 8
+
+
+def test_underfunded_approval_cannot_start_provider_calls(tmp_path: Path) -> None:
+    cases, rubric, rubric_digest, packet, _outputs_value, preview = _bundle(tmp_path)
+    approval = _approve(tmp_path, preview, cost=7.99)
+    calls = 0
+
+    def request(_prompt: str):
+        nonlocal calls
+        calls += 1
+        raise AssertionError("provider must not be called")
+
+    with pytest.raises(Exception, match="cost limit"):
+        run_generation(
+            repo_root=tmp_path,
+            case_set=cases,
+            rubric=rubric,
+            rubric_digest=rubric_digest,
+            packet=packet,
+            approval_digest=approval,
+            output_path=Path(".fugue/private/campaign/model-outputs.jsonl"),
+            receipt_path=Path(".fugue/private/campaign/generation-receipt.json"),
+            requester=request,
+        )
+    assert calls == 0
+
+
+def test_uncertain_provider_failure_is_never_replayed(tmp_path: Path) -> None:
+    cases, rubric, rubric_digest, packet, output_rows, preview = _bundle(tmp_path)
+    approval = _approve(tmp_path, preview)
+    calls = 0
+
+    def request(_prompt: str):
+        nonlocal calls
+        calls += 1
+        if calls == 2:
+            raise RuntimeError("provider connection ended after admission")
+        return output_rows[calls - 1], {"input_tokens": None, "output_tokens": None}
+
+    kwargs = {
+        "repo_root": tmp_path,
+        "case_set": cases,
+        "rubric": rubric,
+        "rubric_digest": rubric_digest,
+        "packet": packet,
+        "approval_digest": approval,
+        "output_path": Path(".fugue/private/campaign/model-outputs.jsonl"),
+        "receipt_path": Path(".fugue/private/campaign/generation-receipt.json"),
+        "requester": request,
+    }
+    with pytest.raises(RuntimeError, match="provider connection"):
+        run_generation(**kwargs)
+    assert calls == 2
+    with pytest.raises(RuntimeError, match="automatic replay is forbidden"):
+        run_generation(**kwargs)
+    assert calls == 2
+
+
+def test_outputs_cannot_escape_operator_private_boundary(tmp_path: Path) -> None:
+    cases, rubric, rubric_digest, packet, _rows, preview = _bundle(tmp_path)
+    approval = _approve(tmp_path, preview)
+    with pytest.raises(ValueError, match="under .fugue/private"):
+        run_generation(
+            repo_root=tmp_path,
+            case_set=cases,
+            rubric=rubric,
+            rubric_digest=rubric_digest,
+            packet=packet,
+            approval_digest=approval,
+            output_path=Path("public/model-outputs.jsonl"),
+            receipt_path=Path(".fugue/private/campaign/receipt.json"),
+            requester=lambda _prompt: ({}, {}),
+        )

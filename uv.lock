@@ -805,6 +805,10 @@ dev = [
     { name = "skills-ref" },
     { name = "vulture" },
 ]
+reporting = [
+    { name = "wandb" },
+    { name = "wandb-workspaces" },
+]
 research = [
     { name = "fastapi" },
     { name = "mcp" },
@@ -873,9 +877,11 @@ requires-dist = [
     { name = "uvicorn", marker = "extra == 'serve'", specifier = ">=0.34,<1" },
     { name = "vulture", marker = "extra == 'dev'", specifier = "==2.16" },
     { name = "wandb", marker = "python_full_version >= '3.13' and extra == 'research-worker'", specifier = "==0.28.1" },
+    { name = "wandb", marker = "extra == 'reporting'", specifier = "==0.28.1" },
+    { name = "wandb-workspaces", marker = "extra == 'reporting'", specifier = "==0.4.5" },
     { name = "weave", specifier = "==0.53.1" },
 ]
-provides-extras = ["dev", "context", "serve", "research", "research-worker"]
+provides-extras = ["dev", "context", "serve", "research", "research-worker", "reporting"]
 
 [[package]]
 name = "googleapis-common-protos"
@@ -3504,15 +3510,16 @@ name = "wandb"
 version = "0.28.1"
 source = { registry = "https://pypi.org/simple" }
 dependencies = [
-    { name = "click", marker = "python_full_version >= '3.13'" },
-    { name = "packaging", marker = "python_full_version >= '3.13'" },
-    { name = "platformdirs", marker = "python_full_version >= '3.13'" },
-    { name = "protobuf", version = "5.29.6", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version >= '3.13'" },
-    { name = "pydantic", marker = "python_full_version >= '3.13'" },
-    { name = "pyyaml", marker = "python_full_version >= '3.13'" },
-    { name = "requests", marker = "python_full_version >= '3.13'" },
-    { name = "sentry-sdk", marker = "python_full_version >= '3.13'" },
-    { name = "typing-extensions", marker = "python_full_version >= '3.13'" },
+    { name = "click" },
+    { name = "packaging" },
+    { name = "platformdirs" },
+    { name = "protobuf", version = "5.29.6", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version >= '3.13' or extra == 'extra-5-fugue-context'" },
+    { name = "protobuf", version = "7.35.1", source = { registry = "https://pypi.org/simple" }, marker = "(python_full_version < '3.13' and extra != 'extra-5-fugue-context') or (extra == 'extra-5-fugue-context' and extra == 'extra-5-fugue-research-worker') or (extra == 'extra-5-fugue-context' and extra == 'extra-5-fugue-serve')" },
+    { name = "pydantic" },
+    { name = "pyyaml" },
+    { name = "requests" },
+    { name = "sentry-sdk" },
+    { name = "typing-extensions" },
 ]
 sdist = { url = "https://files.pythonhosted.org/packages/92/fb/8d3f96a8b143060d6fa145462d0785981373e04694e4152555ccb5d23939/wandb-0.28.1.tar.gz", hash = "sha256:870ccb1a01238b0ac07c6fd96a0810a1f79090aba04ea29f4ee012ac8327705d", size = 40578119, upload-time = "2026-07-16T18:47:05.413Z" }
 wheels = [
@@ -3525,6 +3532,19 @@ wheels = [
     { url = "https://files.pythonhosted.org/packages/b2/83/49deab9447687625371435ca21b6da82f223f1c7d014d77386b9cb91833c/wandb-0.28.1-py3-none-win32.whl", hash = "sha256:4bc461cda3ce23a19d8df5e42981a664d95fa3231efb10fd1e85d9d4824c7d29", size = 24418398, upload-time = "2026-07-16T18:46:57.43Z" },
     { url = "https://files.pythonhosted.org/packages/bf/6f/ed6616b11ea15b8ceabedcaa567286c1c9ec65fa50563230a90bfb627cc5/wandb-0.28.1-py3-none-win_amd64.whl", hash = "sha256:d98a10370162b1e970850237114c56e9c4c58f3cb701e4b8cb38f36f6749fd52", size = 24418404, upload-time = "2026-07-16T18:47:00.427Z" },
     { url = "https://files.pythonhosted.org/packages/07/78/75b6827a6665337a715c5347c5edbd84eca660f7a0f48d8d6d24d1f66bee/wandb-0.28.1-py3-none-win_arm64.whl", hash = "sha256:4aa07f13dd3bcac2c0524c8d0f49f76e83ab5c1054fd09f3b1a436cfcde146a6", size = 22299006, upload-time = "2026-07-16T18:47:02.71Z" },
+]
+
+[[package]]
+name = "wandb-workspaces"
+version = "0.4.5"
+source = { registry = "https://pypi.org/simple" }
+dependencies = [
+    { name = "pydantic" },
+    { name = "wandb" },
+]
+sdist = { url = "https://files.pythonhosted.org/packages/8b/ea/36baee6eb9e6df05fba9425d853c61b298a443ccb87c497e35f9b4cc9c5b/wandb_workspaces-0.4.5.tar.gz", hash = "sha256:4df63f42f8cc9ed37c6b5d50e823baf9b34cc55a3f898b34fd4a72da59ce35d1", size = 245256, upload-time = "2026-08-04T14:23:12.608Z" }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/94/1f/ea940756a5a8f50ec52d0748d11a2dfb2bb8c7fa396545abf2cd504c19a3/wandb_workspaces-0.4.5-py3-none-any.whl", hash = "sha256:c29d9ec33f5726f66fb37e6e66af0ed76043ea86f70a952208b0231b2c0ac767", size = 115180, upload-time = "2026-08-04T14:23:11.036Z" },
 ]
 
 [[package]]
