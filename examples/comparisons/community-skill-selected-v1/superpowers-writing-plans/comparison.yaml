@@ -1,5 +1,5 @@
 schema_version: 3
-id: superpowers-writing-plans-measurement-pilot-v1
+id: superpowers-writing-plans-measurement-pilot-v2
 question: Does exact Superpowers writing-plans revision 8e1262a3 improve public development-task outcomes relative to de4672b1 under fixed conditions?
 taskset:
   tasks: tasks.jsonl
@@ -7,9 +7,14 @@ taskset:
 baseline:
   label: Superpowers writing-plans at de4672b1
   skills: [superpowers-writing-plans-before-contracts]
+  agent_kwargs: &bounded_agent
+    max_turns: 48
+    max_budget_usd: "1.80"
+    disallowed_tools: Agent
 candidate:
   label: Superpowers writing-plans at 8e1262a3
   skills: [superpowers-writing-plans-contracts]
+  agent_kwargs: *bounded_agent
 changed: [skills]
 evaluators:
   - id: plan-quality
@@ -47,11 +52,11 @@ execution:
     api_base_url: https://api.wandb.ai
     trace_base_url: https://trace.wandb.ai
     app_base_url: https://wandb.ai
-  evidence_project: wandb/fugue-superpowers-writing-plans-measurement-pilot-v1
+  evidence_project: wandb/fugue-superpowers-writing-plans-measurement-pilot-v2
   evidence_destination:
     <<: *public_cloud
-    project: fugue-superpowers-writing-plans-measurement-pilot-v1
-  research_id: fugue-superpowers-writing-plans-measurement-pilot-v1
+    project: fugue-superpowers-writing-plans-measurement-pilot-v2
+  research_id: fugue-superpowers-writing-plans-measurement-pilot-v2
   model: anthropic/claude-sonnet-5
   harnesses: [claude-code]
   attempts: 2
@@ -67,12 +72,12 @@ execution:
       - id: checkpoint
         pair_complete: true
         task_ids:
-          - sp-dev-credential-rotation
+          - sp-dev-evidence-destination
           - sp-dev-single-file-validation-fix
         trial_indexes: [0]
       - id: complete-development-attempt-0
         task_ids:
-          - sp-dev-evidence-destination
+          - sp-dev-credential-rotation
           - sp-dev-package-tree-qualification
         trial_indexes: [0]
       - id: repeat-development

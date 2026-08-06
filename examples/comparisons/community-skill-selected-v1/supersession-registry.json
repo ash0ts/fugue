@@ -43,6 +43,20 @@
       "wandb_project_url": "https://wandb.ai/wandb/fugue-superpowers-writing-plans-confirmatory-v8"
     },
     {
+      "invalidation_digest": "9881819bab32165b8f7dc73562d1ca2be99d8fe0da02a384c8d0ab50f9991d55",
+      "pooled": false,
+      "preview_digest": "76a718ffcaf2d607b6d4d33939f8d9d68f1471a3c16e5d66644b2940e1f30552",
+      "project": "wandb/fugue-superpowers-writing-plans-measurement-pilot-v1",
+      "reason": "The staged V1 checkpoint required host-only recovery and the next aligned pair exceeded the immutable Agent reserve; it produced no complete scored cohort.",
+      "record_digest": "c18e0002c99ad42919a1afc7268771b92a7657614e05e464744e33dc08026eac",
+      "relationship": "superseded-budget-calibration",
+      "result_digest": null,
+      "status": "invalid",
+      "study_console_query": "?research_id=superpowers-writing-plans-measurement-pilot-v1&study_id=superpowers-writing-plans-measurement-pilot-v1",
+      "study_id": "superpowers-writing-plans-measurement-pilot-v1",
+      "wandb_project_url": "https://wandb.ai/wandb/fugue-superpowers-writing-plans-measurement-pilot-v1"
+    },
+    {
       "invalidation_digest": "0693551789db6c00a23a19a14cf576e154a544fb1aed9d01db9bc533bab0572c",
       "pooled": false,
       "preview_digest": null,
@@ -58,6 +72,6 @@
     }
   ],
   "kind": "community_skill_supersession_registry",
-  "registry_digest": "4bf21c876b9999b126d9679742590d02d2f6c11f267de0d80b24bf9d163d773f",
+  "registry_digest": "ee6c92f69eb67e10ffca7ee050270fa0e75660ae778772cecec385680ae23dd7",
   "schema_version": 2
 }

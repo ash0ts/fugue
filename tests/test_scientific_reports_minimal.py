@@ -462,7 +462,7 @@ def test_campaign_membership_is_independent_complete_and_source_isolated(
     assert len(locked.studies) == 3
     assert {item.study_id for item in locked.studies} == {
         "anthropic-skill-creator-measurement-pilot-v1",
-        "superpowers-writing-plans-measurement-pilot-v1",
+        "superpowers-writing-plans-measurement-pilot-v2",
         "vercel-react-practices-measurement-pilot-v1",
     }
     with pytest.raises(ScientificReportError, match="result projects must be unique"):

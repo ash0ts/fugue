@@ -114,6 +114,41 @@ def test_study_intent_is_derived_from_digest_bound_comparison_semantics() -> Non
     assert _comparison_study_intent(future_staged) == "candidate_comparison"
 
 
+def test_candidate_agent_limits_are_locked_and_fit_the_execution_reserve() -> None:
+    root = Path.cwd()
+    spec = load_comparison(
+        Path("examples/comparisons/community-skill-selected-v1")
+        / "superpowers-writing-plans/comparison.yaml",
+        repo_root=root,
+    )
+
+    expected = {
+        "max_turns": 48,
+        "max_budget_usd": "1.80",
+        "disallowed_tools": "Agent",
+    }
+    assert spec.baseline.agent_kwargs == expected
+    assert spec.candidate.agent_kwargs == expected
+    assert check_comparison(spec, repo_root=root).actual_changes == ("skills",)
+    experiment, _, _ = compile_comparison(spec, repo_root=root)
+    assert {tuple(sorted(item.agent_kwargs.items())) for item in experiment.variants} == {
+        tuple(sorted(expected.items()))
+    }
+
+    oversized = spec.to_dict()
+    oversized["baseline"]["agent_kwargs"]["max_budget_usd"] = "2.51"
+    with pytest.raises(
+        ValueError,
+        match="max_budget_usd cannot exceed execution.reserve_per_attempt_usd",
+    ):
+        comparison_from_dict(oversized, repo_root=root)
+
+    invalid_turns = spec.to_dict()
+    invalid_turns["candidate"]["agent_kwargs"]["max_turns"] = 0
+    with pytest.raises(ValueError, match="max_turns must be a positive integer"):
+        comparison_from_dict(invalid_turns, repo_root=root)
+
+
 def test_exact_approval_may_acknowledge_reviewable_canary(
     tmp_path: Path,
 ) -> None:

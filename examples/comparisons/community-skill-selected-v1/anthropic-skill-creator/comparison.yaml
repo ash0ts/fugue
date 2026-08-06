@@ -7,9 +7,14 @@ taskset:
 baseline:
   label: Anthropic Skill Creator at a5bcdd7e
   skills: [anthropic-skill-creator-before-compatibility]
+  agent_kwargs: &bounded_agent
+    max_turns: 48
+    max_budget_usd: "1.80"
+    disallowed_tools: Agent
 candidate:
   label: Anthropic Skill Creator at 1ed29a03
   skills: [anthropic-skill-creator-compatibility]
+  agent_kwargs: *bounded_agent
 changed: [skills]
 evaluators:
   - id: skill-package-quality

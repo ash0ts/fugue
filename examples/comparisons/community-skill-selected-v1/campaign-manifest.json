@@ -9,6 +9,9 @@
     "model": "anthropic/claude-sonnet-5",
     "environment": "docker",
     "attempts": 2,
+    "agent_max_turns": 48,
+    "native_agent_budget_usd": 1.8,
+    "delegation": "disabled",
     "global_active_cells_max": 3,
     "study_active_cells_max": 2,
     "wave_size": 4
@@ -64,7 +67,7 @@
       "tasks": "superpowers-writing-plans/tasks.jsonl",
       "revision_lock": "superpowers-writing-plans/skill-revisions.lock.json",
       "checkpoint_task_ids": [
-        "sp-dev-credential-rotation",
+        "sp-dev-evidence-destination",
         "sp-dev-single-file-validation-fix"
       ]
     },

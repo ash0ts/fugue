@@ -67,6 +67,9 @@ def test_manifest_has_three_bounded_unpooled_public_lanes() -> None:
         "model": "anthropic/claude-sonnet-5",
         "environment": "docker",
         "attempts": 2,
+        "agent_max_turns": 48,
+        "native_agent_budget_usd": 1.8,
+        "delegation": "disabled",
         "global_active_cells_max": 3,
         "study_active_cells_max": 2,
         "wave_size": 4,
@@ -117,6 +120,12 @@ def test_specs_bind_exact_revisions_and_only_public_development_tasks() -> None:
         assert spec.execution.schedule["maximum_in_flight_cost_usd"] == 5.2
         assert spec.execution.max_cost_usd == 44.1
         assert spec.execution.reserve_per_attempt_usd == 2.5
+        assert spec.baseline.agent_kwargs == {
+            "max_turns": 48,
+            "max_budget_usd": "1.80",
+            "disallowed_tools": "Agent",
+        }
+        assert spec.candidate.agent_kwargs == spec.baseline.agent_kwargs
         assert spec.execution.schedule["coordination"] == {
             "group_id": "community-skill-selected-v1",
             "worker_limit": 3,
@@ -853,7 +862,10 @@ def test_minimal_surface_stays_within_line_budgets() -> None:
     # module. This prevents another campaign-specific implementation from
     # hiding behind per-file budgets while preserving strict readers and
     # publication verification.
-    assert staged_product_lines <= 9_500
+    # The canonical surface now includes frozen host-only stage recovery. Keep
+    # that recovery inside this complete accounting boundary rather than
+    # hiding it in an uncounted compatibility module.
+    assert staged_product_lines <= 10_100
     assert product_lines <= 500
     assert generic_holdout_lines <= 450
     assert campaign_holdout_lines <= 2_550

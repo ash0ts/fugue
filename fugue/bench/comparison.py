@@ -997,13 +997,19 @@ def comparison_from_dict(
         raise ValueError("comparison supersession requires schema_version 3")
     if len({item.result_digest for item in supersedes}) != len(supersedes):
         raise ValueError("superseded result digests must be unique")
+    baseline = _candidate(raw.get("baseline"), "Baseline")
+    candidate = _candidate(raw.get("candidate"), "Candidate")
+    _validate_candidate_agent_limits(
+        (baseline, candidate),
+        execution=execution,
+    )
     unsigned = ComparisonSpecV1(
         schema_version=version,
         id=validate_id(str(raw.get("id") or ""), kind="comparison id"),
         question=_text(raw.get("question"), "comparison question", 1000),
         taskset=taskset,
-        baseline=_candidate(raw.get("baseline"), "Baseline"),
-        candidate=_candidate(raw.get("candidate"), "Candidate"),
+        baseline=baseline,
+        candidate=candidate,
         changed=changed,
         evaluators=evaluators,
         execution=execution,
@@ -12268,6 +12274,45 @@ def _candidate(raw: Any, default_label: str) -> ComparisonCandidateV1:
         agent_kwargs=dict(_mapping(value.get("agent_kwargs") or {}, "agent kwargs")),
         environment=dict(_mapping(value.get("environment") or {}, "environment")),
     )
+
+
+def _validate_candidate_agent_limits(
+    candidates: Sequence[ComparisonCandidateV1],
+    *,
+    execution: ComparisonExecutionPolicyV1,
+) -> None:
+    """Validate native stopping policy before it enters candidate identity."""
+
+    for candidate in candidates:
+        max_turns = candidate.agent_kwargs.get("max_turns")
+        if max_turns is not None and (
+            not isinstance(max_turns, int)
+            or isinstance(max_turns, bool)
+            or max_turns < 1
+        ):
+            raise ValueError("candidate agent max_turns must be a positive integer")
+        raw_budget = candidate.agent_kwargs.get("max_budget_usd")
+        if raw_budget is None:
+            continue
+        try:
+            max_budget_usd = float(raw_budget)
+        except (TypeError, ValueError) as exc:
+            raise ValueError(
+                "candidate agent max_budget_usd must be a positive number"
+            ) from exc
+        if (
+            isinstance(raw_budget, bool)
+            or not math.isfinite(max_budget_usd)
+            or max_budget_usd <= 0
+        ):
+            raise ValueError(
+                "candidate agent max_budget_usd must be a positive number"
+            )
+        if max_budget_usd > execution.reserve_per_attempt_usd:
+            raise ValueError(
+                "candidate agent max_budget_usd cannot exceed "
+                "execution.reserve_per_attempt_usd"
+            )
 
 
 def _integration(raw: Any, index: int) -> dict[str, Any]:

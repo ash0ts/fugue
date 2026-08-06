@@ -7,9 +7,14 @@ taskset:
 baseline:
   label: Vercel React best practices at ac6a79af
   skills: [vercel-react-best-practices-before]
+  agent_kwargs: &bounded_agent
+    max_turns: 48
+    max_budget_usd: "1.80"
+    disallowed_tools: Agent
 candidate:
   label: Vercel React best practices at 20987af2
   skills: [vercel-react-best-practices-after]
+  agent_kwargs: *bounded_agent
 changed: [skills]
 evaluators:
   - id: react-change-quality
