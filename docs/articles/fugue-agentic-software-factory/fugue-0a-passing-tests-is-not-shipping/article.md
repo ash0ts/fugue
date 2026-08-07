@@ -135,6 +135,20 @@ architecture is good, the change is complete, or a maintainer should accept
 it. The sentence got longer because the evidence is narrower. That is a
 feature.
 
+We learned this through a very normal software failure while helping build
+Aria, W&B’s tool-using agent. It created a chart with a plausible metric path.
+The API said yes. The workspace spec saved. The panel existed. It was empty,
+because the metric path did not exist. At every narrow boundary, the software
+had done something defensible. As a product action, it had done nothing
+useful.
+
+That is the kind of failure Fugue grew around. Not because every empty chart
+needs a grand research study, and not because Aria is uniquely complicated.
+The same loop kept appearing: observe a failure, preserve the evidence, state
+the intended behavior, compare the exact change, and make a bounded decision.
+The agent-specific plumbing can vary. The burden of knowing what happened,
+what changed, and why we should trust the result does not.
+
 ## Entropy compounds at agent speed
 
 Repository quality is self-reinforcing. Agents infer how work should be done

@@ -14,5 +14,11 @@ Unpublished working notes.
 - Honesty check: the judge-calibration section still states plainly that the
   48 cases exist and the two-reviewer calibration does not, so the study is
   blocked.
+- Aria bridge (2026-08-07): the wrong-target canary and overbroad privacy
+  check motivate versioned evaluation policy without introducing performance
+  numbers or presenting Aria as the article's subject. Before publication,
+  retain this only if the underlying WBAF review is approved for public
+  description; otherwise convert both details into an explicitly composite
+  grader example.
 - Isolation test: a reader should leave able to name the four ledgers and
   explain why missing evidence is not a zero.

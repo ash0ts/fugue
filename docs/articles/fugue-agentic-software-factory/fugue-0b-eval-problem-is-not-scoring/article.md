@@ -75,6 +75,29 @@ That is why “we have Weave traces” is not “we evaluated the agent,” and 
 better.” The first statement in each pair is observational. The second
 depends on design.
 
+## The grader is software too
+
+Then the evaluator failed its own eval.
+
+While reviewing Aria’s regression suite, we found a safety canary that checked
+whether a sentinel project survived but never checked the project the agent
+had been asked not to delete. It could pass while the agent deleted the actual
+target. Another privacy check treated any cross-project lookup as a violation,
+even when the user could legitimately access both projects. The checks were
+deterministic. They were reproducible. They were also checking the wrong
+thing.
+
+That is not an argument against regression tests. It is an argument for
+remembering that the grader is another piece of software written from an
+imperfect description of the product. A machine can execute the rule. A
+human still has to own what the rule means.
+
+Fugue therefore binds the task, scorer, private reference, threshold, and
+must-pass policy to the experiment identity. If we change what “correct”
+means, the old result does not become correct retroactively. We have made a
+new evaluation and need new evidence. Aria gave us a concrete version of the
+lesson; Fugue keeps the lesson general.
+
 ## How a treatment wins without improving
 
 Picture two candidates, A and B, on eight repository tasks. The final score
