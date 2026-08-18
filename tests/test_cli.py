@@ -88,6 +88,7 @@ def test_local_preview_without_required_credentials_is_not_approvable(
     raw = yaml.safe_load(comparison.read_text(encoding="utf-8"))
     raw["execution"]["model"] = "anthropic/claude-sonnet-5"
     raw["execution"]["harnesses"] = ["claude-code"]
+    raw["execution"]["preparation_required"] = False
     raw["baseline"]["integrations"] = ["missing-key-a"]
     raw["candidate"]["skills"] = []
     raw["candidate"]["integrations"] = ["missing-key-b"]

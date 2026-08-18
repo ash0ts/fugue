@@ -55,7 +55,13 @@ from fugue.bench.library import (
     get_prompt,
 )
 from fugue.bench.local_evidence import LocalEvidenceDestinationV1
-from fugue.bench.manifest import BenchmarkManifest, HarnessSpec, TaskSpec
+from fugue.bench.manifest import (
+    BenchmarkManifest,
+    FixtureRepositorySpec,
+    HarnessSpec,
+    TaskSpec,
+    resolve_fixture_repository_path,
+)
 from fugue.bench.portable_runtime import read_runtime_lock as read_portable_runtime_lock
 from fugue.bench.runtime_manager import read_runtime_lock, render_runtime_compose
 from fugue.bench.runtime_provenance import (
@@ -766,7 +772,12 @@ def _job_config(
             isinstance(item, dict) and item.get("target") == "/fugue-src/fugue"
             for item in mounts
         ):
-            mounts.append(_read_only_mount(repo_root / "fugue", "/fugue-src/fugue"))
+            mounts.append(
+                _read_only_mount(
+                    _installed_fugue_package_root(),
+                    "/fugue-src/fugue",
+                )
+            )
         environment["mounts"] = mounts
     expected_artifacts = _dedupe_values(
         [
@@ -1372,7 +1383,7 @@ def _context_binding(
             mounts.extend(
                 [
                     _read_only_mount(
-                        runtime.repo_root / "fugue",
+                        _installed_fugue_package_root(),
                         "/fugue-src/fugue",
                     ),
                     _read_only_mount(
@@ -1617,13 +1628,21 @@ def _replace_container_paths(value: Any) -> Any:
 def _snapshot_for_task(
     task: TaskSpec, repo_root: Path, dataset_id: str
 ) -> RepositorySnapshot:
+    fixture = (
+        task.repository if isinstance(task.repository, FixtureRepositorySpec) else None
+    )
     return RepositorySnapshot(
         task_id=task.id,
         repo=task.repo or task.repo_slug,
         commit=task.base_commit or "dataset-managed",
-        checkout=repo_root,
+        checkout=(
+            resolve_fixture_repository_path(fixture, repo_root)
+            if fixture is not None
+            else repo_root
+        ),
         dataset_id=dataset_id,
         metadata=task.metadata,
+        fixture_digest=fixture.sha256 if fixture is not None else None,
     )
 
 
@@ -1884,6 +1903,31 @@ def _needs_mcp_proxy(values: list[dict[str, Any]]) -> bool:
         and bool(value.get("command"))
         for value in values
     )
+
+
+def _installed_fugue_package_root() -> Path:
+    """Return the installed distribution package used by the MCP proxy.
+
+    The proxy is part of Fugue's execution runtime, not part of the user's
+    study workspace. Resolving it from this imported module keeps wheel-based
+    studies independent of a sibling Fugue source checkout while preserving a
+    read-only trial mount.
+    """
+
+    package_root = Path(__file__).resolve().parent.parent
+    required = (
+        package_root / "__init__.py",
+        package_root / "mcp_proxy.py",
+        package_root / "mcp_evidence.py",
+        package_root / "redaction.py",
+    )
+    missing = [path.name for path in required if not path.is_file()]
+    if missing:
+        raise FileNotFoundError(
+            "installed Fugue MCP proxy runtime is incomplete: "
+            + ", ".join(sorted(missing))
+        )
+    return package_root
 
 
 def _content_hashes(

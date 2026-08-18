@@ -418,6 +418,7 @@ def test_direct_comparison_projection_is_idempotent_and_preserves_v2_pairs(
             spec.execution,
             research_id=research_id,
             approval_required=False,
+            preparation_required=False,
             evidence_project="wandb/projection-test",
         ),
     )
@@ -567,6 +568,7 @@ def test_execute_comparison_surfaces_result_projection_failure_separately(
             spec.execution,
             research_id=research_id,
             approval_required=False,
+            preparation_required=False,
             evidence_project="wandb/projection-test",
         ),
     )
@@ -691,9 +693,9 @@ def test_execute_comparison_surfaces_result_projection_failure_separately(
     assert raised.value.result_path is not None
     result = raised.value.result
     result_path = raised.value.result_path
-    assert result.improved == 2
+    assert result.improved == 4
     assert result.regressed == 0
-    assert result.candidate_passed == 2
+    assert result.candidate_passed == 4
     assert result.baseline_passed == 0
     assert result.behavioral_summary.status == "improved"
     assert json.loads(result_path.read_text())["result_digest"] == (
@@ -740,6 +742,7 @@ def test_execute_comparison_requires_research_start_before_preparation_or_run(
             spec.execution,
             research_id=research_id,
             approval_required=False,
+            preparation_required=False,
         ),
     )
     spec = comparison_module.comparison_from_dict(

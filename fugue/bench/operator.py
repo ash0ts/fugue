@@ -106,8 +106,8 @@ from fugue.bench.local_evidence import (
 from fugue.bench.manifest import (
     BenchmarkManifest,
     FixtureRepositorySpec,
-    fixture_repository_digest,
     load_manifest,
+    resolve_fixture_repository_path,
 )
 from fugue.bench.portable_runtime import prepare_runtime as prepare_portable_runtime
 from fugue.bench.portable_runtime import runtime_ready as portable_runtime_ready
@@ -1476,13 +1476,9 @@ class OperatorService:
                     )
                 )
         portable = None
-        selected_systems = set(_selected_request_system_ids(selected, request))
         if any(
-            variant.enabled
-            and variant.context.system_id in selected_systems
-            and variant.context.system_id != "none"
-            and variant.context.delivery == "portable"
-            for variant in selected.variants
+            bool((job.config.get("fugue") or {}).get("context_runtime_required"))
+            for job in plan.jobs
         ):
             portable_was_ready, _ = portable_runtime_ready(self.repo_root)
             lock = prepare_portable_runtime(self.repo_root, rebuild=rebuild)
@@ -3997,17 +3993,7 @@ def _fixture_repository_path(
 ) -> Path:
     if not isinstance(repository, FixtureRepositorySpec):
         return repo_root
-    path = (repo_root / repository.path).resolve()
-    try:
-        path.relative_to(repo_root.resolve())
-    except ValueError as exc:
-        raise ValueError("fixture repository escapes the repository root") from exc
-    actual = fixture_repository_digest(path)
-    if actual != repository.sha256:
-        raise ValueError(
-            f"fixture repository digest changed: expected {repository.sha256}, got {actual}"
-        )
-    return path
+    return resolve_fixture_repository_path(repository, repo_root)
 
 
 def _experiment_with_request_overrides(

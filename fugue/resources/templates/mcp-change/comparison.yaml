@@ -1,0 +1,31 @@
+schema_version: 1
+id: mcp-change-local-v1
+question: Does the current configuration of an offline MCP catalogue improve exact configuration lookup over its legacy configuration?
+taskset:
+  tasks: tasks.jsonl
+  private_labels: private-labels.jsonl
+baseline:
+  label: Offline catalogue legacy revision
+  integrations: [offline-catalog-legacy]
+candidate:
+  label: Offline catalogue current revision
+  integrations: [offline-catalog-current]
+changed: [integrations]
+evaluators:
+  - id: catalog-answer
+    type: deterministic
+    required: true
+    checks: [answer_present, expected_values]
+execution:
+  model: anthropic/claude-sonnet-5
+  harnesses: [claude-code]
+  attempts: 2
+  concurrency: 1
+  evidence_checkpoint_cells: 2
+  max_cost_usd: 10
+  reserve_per_attempt_usd: 1.25
+  approval_required: true
+  preparation_required: true
+  trace_content: full
+  evidence_mode: local
+  environment: {type: docker}

@@ -1052,10 +1052,14 @@ interfaces:
     assert "search" in server["args"]
     assert server["args"][-4:] == ["--", "python", "-m", "example_server"]
     assert agent["env"]["PYTHONPATH"] == "/fugue-src"
-    assert any(
-        mount["target"] == "/fugue-src/fugue" and mount["read_only"] is True
+    proxy_mount = next(
+        mount
         for mount in job.config["environment"]["mounts"]
+        if mount["target"] == "/fugue-src/fugue"
     )
+    assert proxy_mount["read_only"] is True
+    assert Path(proxy_mount["source"]).resolve() != (tmp_path / "fugue").resolve()
+    assert (Path(proxy_mount["source"]) / "mcp_proxy.py").is_file()
 
 
 def test_attempts_render_as_independent_comparable_trials(tmp_path: Path):

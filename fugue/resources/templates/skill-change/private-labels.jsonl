@@ -1,0 +1,2 @@
+{"id":"reimbursement-cap","expected":{"amount_usd":180,"source":"travel-policy-2026.md"},"base_output":{"amount_usd":250,"source":"travel-policy-draft.md"},"gold_output":{"amount_usd":180,"source":"travel-policy-2026.md"}}
+{"id":"sev1-escalation","expected":{"minutes":10,"source":"incident-runbook-v3.md"},"base_output":{"minutes":30,"source":"incident-runbook-v2.md"},"gold_output":{"minutes":10,"source":"incident-runbook-v3.md"}}

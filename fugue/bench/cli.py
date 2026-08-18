@@ -44,6 +44,7 @@ from fugue.bench.operator import (
     OperatorService,
     load_env,
 )
+from fugue.bench.templates import standalone_template_ids
 from fugue.bench.workloads import (
     load_workload_dataset,
     run_retrieval_workload,
@@ -60,6 +61,9 @@ FUGUE_THEME = Theme(
     }
 )
 CONSOLE = Console(theme=FUGUE_THEME)
+
+_STANDALONE_STUDY_MARKER = ".fugue-study.json"
+_STANDALONE_TEMPLATE_IDS = standalone_template_ids()
 
 
 class FugueArgumentParser(argparse.ArgumentParser):
@@ -115,10 +119,12 @@ def _parser() -> FugueArgumentParser:
     doctor.set_defaults(handler=_doctor)
 
     init = subparsers.add_parser(
-        "init", help="Scaffold an Agent-change comparison"
+        "init", help="Scaffold a standalone Agent-change comparison"
     )
     init.add_argument(
-        "--template", choices=("agent-change",), default="agent-change"
+        "--template",
+        choices=_STANDALONE_TEMPLATE_IDS,
+        default="prompt-change",
     )
     init.add_argument("destination", nargs="?", type=Path, default=Path("comparison"))
     init.add_argument("--force", action="store_true")
@@ -128,7 +134,7 @@ def _parser() -> FugueArgumentParser:
         "check", help="Validate comparison readiness without spending or writing"
     )
     check.add_argument("comparison", type=Path)
-    _add_common_args(check, json_output=True)
+    _add_common_args(check, json_output=True, infer_comparison_root=True)
     check.set_defaults(handler=_comparison_check)
 
     compare = subparsers.add_parser(
@@ -154,7 +160,7 @@ def _parser() -> FugueArgumentParser:
     )
     compare.add_argument("--approval")
     compare.add_argument("--fetch-weave", action="store_true")
-    _add_common_args(compare, json_output=True)
+    _add_common_args(compare, json_output=True, infer_comparison_root=True)
     compare.set_defaults(handler=_comparison_compare)
 
     approve = subparsers.add_parser(
@@ -800,7 +806,11 @@ def _research(args: argparse.Namespace) -> int:
 def _comparison_init(args: argparse.Namespace) -> int:
     from fugue.bench.comparison import scaffold_comparison
 
-    path = scaffold_comparison(args.destination, force=args.force)
+    path = scaffold_comparison(
+        args.destination,
+        template=args.template,
+        force=args.force,
+    )
     CONSOLE.print(f"[fugue.success]Created[/] {path}")
     return 0
 
@@ -833,8 +843,8 @@ def _doctor(args: argparse.Namespace) -> int:
 def _comparison_check(args: argparse.Namespace) -> int:
     from fugue.bench.comparison import check_comparison, load_comparison
 
-    root = args.repo_root.resolve()
-    spec = load_comparison(args.comparison, repo_root=root)
+    root, comparison = _comparison_cli_context(args)
+    spec = load_comparison(comparison, repo_root=root)
     readiness = check_comparison(spec, repo_root=root)
     if args.json:
         print(json.dumps(readiness.to_dict(), indent=2, sort_keys=True))
@@ -898,8 +908,8 @@ def _comparison_compare(args: argparse.Namespace) -> int:
         preview_comparison,
     )
 
-    root = args.repo_root.resolve()
-    spec = load_comparison(args.comparison, repo_root=root)
+    root, comparison = _comparison_cli_context(args)
+    spec = load_comparison(comparison, repo_root=root)
     operator = OperatorService(root, args.env_file)
     if args.prepare:
         return _comparison_prepare(
@@ -1421,16 +1431,22 @@ def _normalize_runs_argv(argv: list[str]) -> list[str]:
 
 
 def _add_common_args(
-    parser: argparse.ArgumentParser, *, json_output: bool = False
+    parser: argparse.ArgumentParser,
+    *,
+    json_output: bool = False,
+    infer_comparison_root: bool = False,
 ) -> None:
     parser.add_argument(
         "--env-file",
         type=Path,
-        default=Path(".env"),
+        default=None if infer_comparison_root else Path(".env"),
         help="Read credentials from this file without copying it into the repository",
     )
     parser.add_argument(
-        "--repo-root", type=Path, default=Path.cwd(), help=argparse.SUPPRESS
+        "--repo-root",
+        type=Path,
+        default=None if infer_comparison_root else Path.cwd(),
+        help=argparse.SUPPRESS,
     )
     if json_output:
         parser.add_argument(
@@ -1438,6 +1454,45 @@ def _add_common_args(
             action="store_true",
             help="Emit structured output without Rich decoration",
         )
+
+
+def _comparison_cli_context(args: argparse.Namespace) -> tuple[Path, Path]:
+    """Resolve a comparison and its workspace without widening repository scope.
+
+    An explicit ``--repo-root`` remains authoritative. When it is omitted, only
+    a valid standalone-study marker beside the selected comparison permits the
+    comparison directory to become the repository root. All other paths retain
+    the historical current-working-directory behavior.
+    """
+
+    comparison = Path(args.comparison)
+    explicit_root = getattr(args, "repo_root", None)
+    if explicit_root is not None:
+        return Path(explicit_root).resolve(), comparison
+
+    resolved_comparison = comparison.resolve()
+    inferred_root = _generated_study_root(resolved_comparison)
+    if inferred_root is not None:
+        return inferred_root, resolved_comparison
+    return Path.cwd().resolve(), comparison
+
+
+def _generated_study_root(comparison: Path) -> Path | None:
+    marker = comparison.parent / _STANDALONE_STUDY_MARKER
+    try:
+        raw = json.loads(marker.read_text(encoding="utf-8"))
+    except (FileNotFoundError, OSError, UnicodeDecodeError, json.JSONDecodeError):
+        return None
+    if not isinstance(raw, Mapping):
+        return None
+    if (
+        type(raw.get("schema_version")) is not int
+        or raw.get("schema_version") != 1
+        or raw.get("kind") != "fugue_standalone_study"
+        or raw.get("template") not in _STANDALONE_TEMPLATE_IDS
+    ):
+        return None
+    return comparison.parent.resolve()
 
 
 def _add_run_args(parser: argparse.ArgumentParser) -> None:

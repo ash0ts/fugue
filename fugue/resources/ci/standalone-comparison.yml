@@ -1,0 +1,206 @@
+name: Fugue standalone comparison
+
+on:
+  pull_request:
+  workflow_dispatch:
+    inputs:
+      study_root:
+        description: Directory containing the generated Fugue study
+        required: true
+        default: .
+        type: string
+      comparison:
+        description: Study-root-relative comparison YAML
+        required: true
+        default: comparison.yaml
+        type: string
+      fugue_requirement:
+        description: Exact Fugue package requirement to build into the wheelhouse
+        required: true
+        default: fugue[local-runner]==0.1.2
+        type: string
+      execute:
+        description: Run paid Agent cells after protected-environment approval
+        required: true
+        default: false
+        type: boolean
+      max_cells:
+        description: Maximum approved logical cells
+        required: true
+        default: 8
+        type: number
+      max_usd:
+        description: Maximum approved observed and reserved cost
+        required: true
+        default: 10
+        type: number
+
+permissions:
+  contents: read
+
+env:
+  COMPARISON_PATH: ${{ inputs.comparison || 'comparison.yaml' }}
+  FUGUE_REQUIREMENT: ${{ inputs.fugue_requirement || 'fugue[local-runner]==0.1.2' }}
+  STUDY_ROOT: ${{ inputs.study_root || '.' }}
+
+jobs:
+  plan:
+    name: Prepare exact local preview
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    outputs:
+      preview_digest: ${{ steps.preview.outputs.preview_digest }}
+    steps:
+      - name: Check out the user study
+        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+      - name: Use Python 3.13
+        uses: actions/setup-python@48b55a011bda9f5d6aeb4c2d9c7362e8dae4041e # v6.4.0
+        with:
+          python-version: "3.13"
+      - name: Build and install the standalone Fugue wheel
+        shell: bash
+        run: |
+          set -euo pipefail
+          wheelhouse="$RUNNER_TEMP/fugue-wheelhouse"
+          mkdir -p "$wheelhouse"
+          python -m pip wheel \
+            --disable-pip-version-check \
+            --wheel-dir "$wheelhouse" \
+            "$FUGUE_REQUIREMENT"
+          python -m pip install \
+            --disable-pip-version-check \
+            --no-index \
+            --find-links "$wheelhouse" \
+            "$FUGUE_REQUIREMENT"
+          python -c 'import fugue; print(fugue.__file__)'
+      - name: Doctor, check, prepare, and preview
+        id: preview
+        shell: bash
+        run: |
+          set -euo pipefail
+          cd "$STUDY_ROOT"
+          mkdir -p .fugue/ci
+          fugue doctor --workspace . --json > .fugue/ci/doctor.json
+          # A fresh prepared-runtime study is expected to report `blocked`
+          # until the next command materializes its immutable runtime locks.
+          fugue check "$COMPARISON_PATH" \
+            --repo-root . --json > .fugue/ci/readiness.json || test "$?" -eq 2
+          fugue compare "$COMPARISON_PATH" \
+            --prepare --repo-root . --json > .fugue/ci/preparation.json
+          fugue compare "$COMPARISON_PATH" \
+            --preview --repo-root . --json > .fugue/ci/preview.json
+          preview_digest="$(python -c \
+            'import json; print(json.load(open(".fugue/ci/preview.json"))["preview_digest"])')"
+          [[ "$preview_digest" =~ ^[0-9a-f]{64}$ ]]
+          printf 'preview_digest=%s\n' "$preview_digest" >> "$GITHUB_OUTPUT"
+      - name: Upload the canonical local planning ledger
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: fugue-local-preview
+          path: ${{ env.STUDY_ROOT }}/.fugue
+          include-hidden-files: true
+          if-no-files-found: error
+          retention-days: 14
+
+  execute:
+    name: Execute approved local comparison
+    if: ${{ github.event_name == 'workflow_dispatch' && inputs.execute == true }}
+    needs: plan
+    runs-on: ubuntu-latest
+    timeout-minutes: 180
+    environment: fugue-local-experiment
+    steps:
+      - name: Check out the user study
+        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+      - name: Use Python 3.13
+        uses: actions/setup-python@48b55a011bda9f5d6aeb4c2d9c7362e8dae4041e # v6.4.0
+        with:
+          python-version: "3.13"
+      - name: Build and install the standalone Fugue wheel
+        shell: bash
+        run: |
+          set -euo pipefail
+          wheelhouse="$RUNNER_TEMP/fugue-wheelhouse"
+          mkdir -p "$wheelhouse"
+          python -m pip wheel \
+            --disable-pip-version-check \
+            --wheel-dir "$wheelhouse" \
+            "$FUGUE_REQUIREMENT"
+          python -m pip install \
+            --disable-pip-version-check \
+            --no-index \
+            --find-links "$wheelhouse" \
+            "$FUGUE_REQUIREMENT"
+          python -c 'import fugue; print(fugue.__file__)'
+      - name: Recompute and verify the accepted preview
+        shell: bash
+        env:
+          ACCEPTED_PREVIEW_DIGEST: ${{ needs.plan.outputs.preview_digest }}
+        run: |
+          set -euo pipefail
+          cd "$STUDY_ROOT"
+          mkdir -p .fugue/ci
+          fugue doctor --workspace . --json > .fugue/ci/doctor.json
+          fugue check "$COMPARISON_PATH" \
+            --repo-root . --json > .fugue/ci/readiness.json || test "$?" -eq 2
+          fugue compare "$COMPARISON_PATH" \
+            --prepare --repo-root . --json > .fugue/ci/preparation.json
+          fugue compare "$COMPARISON_PATH" \
+            --preview --repo-root . --json > .fugue/ci/preview.json
+          current_digest="$(python -c \
+            'import json; print(json.load(open(".fugue/ci/preview.json"))["preview_digest"])')"
+          test "$current_digest" = "$ACCEPTED_PREVIEW_DIGEST"
+      - name: Require the protected model credential
+        shell: bash
+        env:
+          ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+        run: |
+          set -euo pipefail
+          test -n "$ANTHROPIC_API_KEY"
+      - name: Bind approval to the exact preview
+        id: approve
+        shell: bash
+        env:
+          ACCEPTED_PREVIEW_DIGEST: ${{ needs.plan.outputs.preview_digest }}
+          MAX_CELLS: ${{ inputs.max_cells }}
+          MAX_USD: ${{ inputs.max_usd }}
+        run: |
+          set -euo pipefail
+          cd "$STUDY_ROOT"
+          fugue approve "$ACCEPTED_PREVIEW_DIGEST" \
+            --max-cells "$MAX_CELLS" \
+            --max-usd "$MAX_USD" \
+            --approved-by "github-environment:$GITHUB_ACTOR" \
+            --repo-root . > .fugue/ci/approval.json
+          approval_digest="$(python -c \
+            'import json; print(json.load(open(".fugue/ci/approval.json"))["approval_digest"])')"
+          [[ "$approval_digest" =~ ^[0-9a-f]{64}$ ]]
+          printf 'approval_digest=%s\n' "$approval_digest" >> "$GITHUB_OUTPUT"
+      - name: Run the approved local comparison
+        id: run
+        shell: bash
+        env:
+          ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+          APPROVAL_DIGEST: ${{ steps.approve.outputs.approval_digest }}
+        run: |
+          set -euo pipefail
+          cd "$STUDY_ROOT"
+          fugue compare "$COMPARISON_PATH" \
+            --run --approval "$APPROVAL_DIGEST" --repo-root .
+      - name: Export the canonical local result
+        if: ${{ always() && steps.run.outcome != 'skipped' }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          cd "$STUDY_ROOT"
+          fugue result latest --repo-root . --json > .fugue/ci/result.json
+      - name: Upload the canonical local evidence ledger
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: fugue-local-result
+          path: ${{ env.STUDY_ROOT }}/.fugue
+          include-hidden-files: true
+          if-no-files-found: error
+          retention-days: 30

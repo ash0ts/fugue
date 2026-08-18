@@ -1,0 +1,2 @@
+{"id":"service-rpo","expected":{"service":"checkout","rpo_minutes":15,"source":"service-policy.yaml"},"base_output":{"service":"checkout","rpo_minutes":60,"source":"assumption"},"gold_output":{"service":"checkout","rpo_minutes":15,"source":"service-policy.yaml"}}
+{"id":"rollout-batch","expected":{"max_percent":20,"environment":"production","source":"deployment-policy.md"},"base_output":{"max_percent":100,"environment":"production","source":"guess"},"gold_output":{"max_percent":20,"environment":"production","source":"deployment-policy.md"}}

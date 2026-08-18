@@ -1,0 +1,31 @@
+schema_version: 1
+id: harness-config-change-local-v1
+question: Does a larger Claude Code turn budget improve multi-file maintenance analysis while the harness itself stays fixed?
+taskset:
+  tasks: tasks.jsonl
+  private_labels: private-labels.jsonl
+baseline:
+  label: Claude Code with a 3-turn budget
+  agent_kwargs: {max_turns: 3}
+candidate:
+  label: Claude Code with an 8-turn budget
+  agent_kwargs: {max_turns: 8}
+changed: [agent_kwargs.max_turns]
+evaluators:
+  - id: maintenance-answer
+    type: deterministic
+    required: true
+    checks: [answer_present, expected_values]
+execution:
+  model: anthropic/claude-sonnet-5
+  harnesses: [claude-code]
+  attempts: 2
+  concurrency: 1
+  evidence_checkpoint_cells: 2
+  max_cost_usd: 10
+  reserve_per_attempt_usd: 1.25
+  approval_required: true
+  preparation_required: true
+  trace_content: full
+  evidence_mode: local
+  environment: {type: docker}
