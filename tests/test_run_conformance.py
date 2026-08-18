@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import hashlib
 import json
 import subprocess
 from pathlib import Path
@@ -97,6 +98,24 @@ def _inventory(*container_ids: str) -> dict[str, object]:
         "backend": "local_harbor_docker",
         "container_ids": list(container_ids),
     }
+
+
+def _write_verified_input_lock(
+    run_dir: Path,
+    payload: dict[str, object],
+) -> Path:
+    value = {
+        "schema_version": 1,
+        "snapshot_sha256": "",
+        "lock_sha256": "",
+        **payload,
+    }
+    digest = stable_digest(value)
+    value["snapshot_sha256"] = digest
+    value["lock_sha256"] = digest
+    path = run_dir / "input-lock.json"
+    path.write_text(json.dumps(value) + "\n")
+    return path
 
 
 def _hosted_row() -> dict[str, object]:
@@ -668,6 +687,179 @@ def test_private_boundary_rejects_leaves_copied_from_nested_private_list(
     assert {
         path.rsplit(".", 1)[-1] for path in receipt["tainted_agent_inputs"]
     } >= {"allowed", "message", "threshold"}
+
+
+def test_private_boundary_accepts_only_verified_public_job_fields(
+    tmp_path: Path,
+) -> None:
+    run_id = "run-verified-public-job-fields"
+    job = _local_job(tmp_path, run_id)
+    run_dir = tmp_path / ".fugue/runtime" / run_id
+    source_project = "wandb/public-source"
+    public_tool = "query_public_tool"
+    private_value = "host-only-answer"
+    private_tool = "host_only_tool"
+    private_source_project = "wandb/host-only-source"
+    private_record = {
+        "id": "public-task-a",
+        "expected": {
+            "source_project": source_project,
+            "required_tools": [public_tool, private_tool],
+            "n_tasks": 1,
+            "read_only": True,
+            "create_host_path": False,
+            "private_answer": private_value,
+            "private_source_project": private_source_project,
+        },
+    }
+    private_bytes = (json.dumps(private_record, sort_keys=True) + "\n").encode()
+    private_digest = hashlib.sha256(private_bytes).hexdigest()
+    private_path = (
+        tmp_path
+        / ".fugue/private/comparison-inputs/labels"
+        / f"{private_digest}.jsonl"
+    )
+    private_path.parent.mkdir(parents=True)
+    private_path.write_bytes(private_bytes)
+    private_path.chmod(0o600)
+    _write_verified_input_lock(
+        run_dir,
+        {
+            "experiment": {"source_evidence_project": source_project},
+            "candidates": {
+                job.resolved_candidate.candidate_id: {
+                    "integrations": [
+                        {
+                            "allowed_tools": {
+                                "public-mcp": [public_tool],
+                            }
+                        }
+                    ]
+                }
+            },
+            "request": {
+                "approved_inputs": {
+                    "private_labels_sha256": private_digest,
+                }
+            },
+        },
+    )
+    job.config.update(
+        {
+            "agents": [
+                {
+                    "env": {"FUGUE_SOURCE_EVIDENCE_PROJECT": source_project},
+                    "mcp_servers": [
+                        {
+                            "name": "public-mcp",
+                            "args": [
+                                "--allow-tool",
+                                public_tool,
+                                "--source-project",
+                                source_project,
+                            ],
+                        }
+                    ],
+                    "kwargs": {},
+                }
+            ],
+            "datasets": [{"n_tasks": 1}],
+            "environment": {
+                "mounts": [
+                    {
+                        "read_only": True,
+                        "bind": {"create_host_path": False},
+                    }
+                ]
+            },
+        }
+    )
+
+    receipt = conformance_module._private_label_boundary(
+        run_dir=run_dir,
+        jobs=[job],
+        host_scorer_names=("comparison.deterministic.answer",),
+    )
+
+    assert receipt["status"] == "passed", receipt
+    assert receipt["tainted_agent_inputs"] == []
+
+    job.config["agents"][0]["kwargs"]["leaked_answer"] = private_value
+    leaked = conformance_module._private_label_boundary(
+        run_dir=run_dir,
+        jobs=[job],
+        host_scorer_names=("comparison.deterministic.answer",),
+    )
+    assert leaked["status"] == "failed"
+    assert any("leaked_answer" in path for path in leaked["tainted_agent_inputs"])
+
+    del job.config["agents"][0]["kwargs"]["leaked_answer"]
+    job.config["agents"][0]["mcp_servers"][0]["args"][1] = private_tool
+    unapproved_tool = conformance_module._private_label_boundary(
+        run_dir=run_dir,
+        jobs=[job],
+        host_scorer_names=("comparison.deterministic.answer",),
+    )
+    assert unapproved_tool["status"] == "failed"
+    assert any("args[1]" in path for path in unapproved_tool["tainted_agent_inputs"])
+
+    job.config["agents"][0]["mcp_servers"][0]["args"][1] = public_tool
+    job.config["agents"][0]["env"][
+        "FUGUE_SOURCE_EVIDENCE_PROJECT"
+    ] = private_source_project
+    wrong_source = conformance_module._private_label_boundary(
+        run_dir=run_dir,
+        jobs=[job],
+        host_scorer_names=("comparison.deterministic.answer",),
+    )
+    assert wrong_source["status"] == "failed"
+    assert any(
+        "FUGUE_SOURCE_EVIDENCE_PROJECT" in path
+        for path in wrong_source["tainted_agent_inputs"]
+    )
+
+    job.config["agents"][0]["env"][
+        "FUGUE_SOURCE_EVIDENCE_PROJECT"
+    ] = source_project
+    job.config["environment"]["mounts"][0].update(
+        {"source": private_path.as_posix(), "target": "/input/private.jsonl"}
+    )
+    private_mount = conformance_module._private_label_boundary(
+        run_dir=run_dir,
+        jobs=[job],
+        host_scorer_names=("comparison.deterministic.answer",),
+    )
+    assert private_mount["status"] == "failed"
+    assert any("source" in path for path in private_mount["tainted_agent_inputs"])
+
+
+def test_private_boundary_rejects_tampered_input_lock_exemptions(
+    tmp_path: Path,
+) -> None:
+    run_id = "run-tampered-public-job-fields"
+    job = _local_job(tmp_path, run_id)
+    run_dir = tmp_path / ".fugue/runtime" / run_id
+    input_lock = _write_verified_input_lock(
+        run_dir,
+        {
+            "experiment": {"source_evidence_project": "wandb/public-source"},
+            "candidates": {job.resolved_candidate.candidate_id: {}},
+        },
+    )
+    payload = json.loads(input_lock.read_text())
+    payload["experiment"]["source_evidence_project"] = "wandb/tampered-source"
+    input_lock.write_text(json.dumps(payload) + "\n")
+    assert input_lock.is_file()
+    assert not conformance_module.verify_snapshot(payload)
+
+    receipt = conformance_module._private_label_boundary(
+        run_dir=run_dir,
+        jobs=[job],
+        host_scorer_names=("comparison.deterministic.answer",),
+    )
+
+    assert receipt["status"] == "unavailable", receipt
+    assert receipt["reason"] == "the run input lock failed snapshot verification"
 
 
 def test_private_boundary_rejects_host_only_bundle_mount(tmp_path: Path) -> None:

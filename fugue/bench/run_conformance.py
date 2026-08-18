@@ -13,6 +13,7 @@ from typing import TYPE_CHECKING, Any, Literal
 import httpx
 
 from fugue.bench.files import atomic_write_json
+from fugue.bench.reproducibility import verify_snapshot
 from fugue.model_plane import trace_api_key
 from fugue.redaction import redact_text, redact_value, secrets_from_env
 from fugue.weave_support import WEAVE_AGENTS_BASE_URL
@@ -1421,6 +1422,134 @@ def _private_label_boundary(  # noqa: C901 - one fail-closed taint boundary
                 digests.update(private_label_digests(item))
         return digests
 
+    def candidate_tools(candidate: Mapping[str, Any]) -> dict[str, set[str]]:
+        allowed_tools_by_server: dict[str, set[str]] = {}
+        integrations = candidate.get("integrations")
+        if not isinstance(integrations, list):
+            return allowed_tools_by_server
+        for integration in integrations:
+            if not isinstance(integration, Mapping):
+                continue
+            allowed_tools = integration.get("allowed_tools")
+            if not isinstance(allowed_tools, Mapping):
+                continue
+            for raw_server, raw_tools in allowed_tools.items():
+                if not isinstance(raw_tools, list):
+                    continue
+                allowed_tools_by_server[str(raw_server)] = {
+                    str(tool)
+                    for tool in raw_tools
+                    if isinstance(tool, str) and tool
+                }
+        return allowed_tools_by_server
+
+    def declared_agent_paths(
+        agents: Any,
+        *,
+        source_project: Any,
+        allowed_tools_by_server: Mapping[str, set[str]],
+    ) -> set[str]:
+        paths: set[str] = set()
+        if not isinstance(agents, list):
+            return paths
+        for agent_index, agent in enumerate(agents):
+            if not isinstance(agent, Mapping):
+                continue
+            env = agent.get("env")
+            if (
+                isinstance(env, Mapping)
+                and isinstance(source_project, str)
+                and env.get("FUGUE_SOURCE_EVIDENCE_PROJECT") == source_project
+            ):
+                paths.add(
+                    f"$.agents[{agent_index}].env.FUGUE_SOURCE_EVIDENCE_PROJECT"
+                )
+            servers = agent.get("mcp_servers")
+            if not isinstance(servers, list):
+                continue
+            for server_index, server in enumerate(servers):
+                if not isinstance(server, Mapping):
+                    continue
+                server_name = str(server.get("name") or "")
+                allowed_tools = allowed_tools_by_server.get(server_name, set())
+                args = server.get("args")
+                if not isinstance(args, list):
+                    continue
+                for arg_index, arg in enumerate(args):
+                    if arg_index == 0 or not isinstance(arg, str):
+                        continue
+                    previous = args[arg_index - 1]
+                    approved_tool = previous == "--allow-tool" and arg in allowed_tools
+                    approved_source = (
+                        previous == "--source-project"
+                        and isinstance(source_project, str)
+                        and arg == source_project
+                    )
+                    if approved_tool or approved_source:
+                        paths.add(
+                            f"$.agents[{agent_index}].mcp_servers"
+                            f"[{server_index}].args[{arg_index}]"
+                        )
+        return paths
+
+    def declared_structural_paths(job_config: Mapping[str, Any]) -> set[str]:
+        paths: set[str] = set()
+        datasets = job_config.get("datasets")
+        if isinstance(datasets, list):
+            for dataset_index, dataset in enumerate(datasets):
+                if (
+                    isinstance(dataset, Mapping)
+                    and isinstance(dataset.get("n_tasks"), int)
+                    and not isinstance(dataset.get("n_tasks"), bool)
+                    and int(dataset["n_tasks"]) >= 0
+                ):
+                    paths.add(f"$.datasets[{dataset_index}].n_tasks")
+        environment = job_config.get("environment")
+        if isinstance(environment, Mapping):
+            mounts = environment.get("mounts")
+            if isinstance(mounts, list):
+                for mount_index, mount in enumerate(mounts):
+                    if not isinstance(mount, Mapping):
+                        continue
+                    if isinstance(mount.get("read_only"), bool):
+                        paths.add(
+                            f"$.environment.mounts[{mount_index}].read_only"
+                        )
+                    bind = mount.get("bind")
+                    if isinstance(bind, Mapping) and isinstance(
+                        bind.get("create_host_path"), bool
+                    ):
+                        paths.add(
+                            f"$.environment.mounts[{mount_index}].bind."
+                            "create_host_path"
+                        )
+        return paths
+
+    def declared_public_scalar_paths(
+        job_config: Mapping[str, Any],
+        input_payload: Mapping[str, Any] | None,
+    ) -> set[str]:
+        if input_payload is None:
+            return set()
+        experiment = input_payload.get("experiment")
+        candidates = input_payload.get("candidates")
+        fugue = job_config.get("fugue")
+        if not (
+            isinstance(experiment, Mapping)
+            and isinstance(candidates, Mapping)
+            and isinstance(fugue, Mapping)
+        ):
+            return set()
+        candidate = candidates.get(str(fugue.get("candidate_id") or ""))
+        if not isinstance(candidate, Mapping):
+            return set()
+        paths = declared_agent_paths(
+            job_config.get("agents"),
+            source_project=experiment.get("source_evidence_project"),
+            allowed_tools_by_server=candidate_tools(candidate),
+        )
+        return paths | declared_structural_paths(job_config)
+
     def scan_agent_input(
         value: Any,
         *,
@@ -1428,6 +1557,7 @@ def _private_label_boundary(  # noqa: C901 - one fail-closed taint boundary
         taints: set[str],
         private_paths: set[Path],
         repo_root: Path,
+        declared_public_paths: set[str],
         scalar_match_allowed: bool = True,
         depth: int = 0,
     ) -> list[str]:
@@ -1464,6 +1594,7 @@ def _private_label_boundary(  # noqa: C901 - one fail-closed taint boundary
                         taints=taints,
                         private_paths=private_paths,
                         repo_root=repo_root,
+                        declared_public_paths=declared_public_paths,
                         scalar_match_allowed=child_scalar_allowed,
                         depth=depth + 1,
                     )
@@ -1479,13 +1610,19 @@ def _private_label_boundary(  # noqa: C901 - one fail-closed taint boundary
                         taints=taints,
                         private_paths=private_paths,
                         repo_root=repo_root,
+                        declared_public_paths=declared_public_paths,
                         scalar_match_allowed=scalar_match_allowed,
                         depth=depth + 1,
                     )
                 )
         else:
             token = taint_token(value)
-            if scalar_match_allowed and token is not None and token in taints:
+            if (
+                scalar_match_allowed
+                and token is not None
+                and token in taints
+                and prefix not in declared_public_paths
+            ):
                 matches.append(prefix)
         if isinstance(value, str):
             rendered = value.strip()
@@ -1571,6 +1708,7 @@ def _private_label_boundary(  # noqa: C901 - one fail-closed taint boundary
             "rendered_private_fields": sorted(findings),
         }
     declared_private_missing: list[str] = []
+    verified_input_payload: Mapping[str, Any] | None = None
     input_lock = run_dir / "input-lock.json"
     if input_lock.is_file():
         try:
@@ -1582,6 +1720,14 @@ def _private_label_boundary(  # noqa: C901 - one fail-closed taint boundary
                 "scope": "rendered Harbor Agent-input structures only",
                 "rendered_private_fields": sorted(findings),
             }
+        if not isinstance(input_payload, Mapping) or not verify_snapshot(input_payload):
+            return {
+                "status": "unavailable",
+                "reason": "the run input lock failed snapshot verification",
+                "scope": "rendered Harbor Agent-input structures only",
+                "rendered_private_fields": sorted(findings),
+            }
+        verified_input_payload = input_payload
         for digest in sorted(private_label_digests(input_payload)):
             path = (
                 repo_root
@@ -1640,6 +1786,10 @@ def _private_label_boundary(  # noqa: C901 - one fail-closed taint boundary
                     taints=taints,
                     private_paths=private_paths,
                     repo_root=repo_root,
+                    declared_public_paths=declared_public_scalar_paths(
+                        job.config,
+                        verified_input_payload,
+                    ),
                 )
             )
     except ValueError:
