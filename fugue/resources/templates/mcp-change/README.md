@@ -5,10 +5,14 @@ server. The server uses only Python's standard library, is copied into every
 task image during preparation, and cannot access the network. The matrix has
 eight logical cells.
 
-Copy `.env.example` to `.env`, add `ANTHROPIC_API_KEY`, then run:
+Create a private credential file, add `ANTHROPIC_API_KEY`, then run:
 
 ```bash
-fugue doctor
+install -m 600 .env.example .env
+```
+
+```bash
+fugue doctor --require local-runner --model anthropic/claude-sonnet-5 --env-file .env
 fugue check comparison.yaml --env-file .env
 fugue compare comparison.yaml --prepare --env-file .env
 fugue compare comparison.yaml --preview --env-file .env --json > preview.json

@@ -1,0 +1,646 @@
+{
+  "algorithm": "sha256",
+  "files": [
+    {
+      "path": "agent-skills/optimize-agent-with-fugue/SKILL.md",
+      "sha256": "743ca1d2d77cbbc6e91274f48666c36b754edbf28ef05d5d2b57cb096f2458ed",
+      "size_bytes": 6372
+    },
+    {
+      "path": "agent-skills/optimize-agent-with-fugue/agents/openai.yaml",
+      "sha256": "a7a1e3c8e877bd2cd6b452a2e6bade248a1cf77a6cee7585b19d7eeaddb98e44",
+      "size_bytes": 489
+    },
+    {
+      "path": "agent-skills/optimize-agent-with-fugue/references/analysis-contract.md",
+      "sha256": "bba9f68e568ff7d8eb921ab3bac865945e9ee5d57e4f2edcce13a6d32d198e2d",
+      "size_bytes": 1494
+    },
+    {
+      "path": "agent-skills/optimize-agent-with-fugue/references/mcp-workflow.md",
+      "sha256": "15bb4b861c3c608897fa4eb9f56197e0d21ac743361d8965348d2f8ad23ab3a0",
+      "size_bytes": 4020
+    },
+    {
+      "path": "agent-skills/optimize-agent-with-fugue/references/north-star-cases.md",
+      "sha256": "1c2d3bfc254ab7a8ac420b20b67253dccae06024926ceed5b9e8c324db780aab",
+      "size_bytes": 1853
+    },
+    {
+      "path": "ci/standalone-comparison.yml",
+      "sha256": "a133df83ab941d1e3960a08a160814e01c8d7905ec7239c39da0582a574184e5",
+      "size_bytes": 11659
+    },
+    {
+      "path": "ci/wandb-mcp-reference.yml",
+      "sha256": "e77e07e20fead0e47a438e2213190d63c49477104f55cdacddf9281ff1414e82",
+      "size_bytes": 10212
+    },
+    {
+      "path": "context-systems/agentsmd.yaml",
+      "sha256": "06b70b67de187b77c3b5c7535aa9edfbc59f30fa1cdcc5e3cfcfac67b55fb151",
+      "size_bytes": 362
+    },
+    {
+      "path": "context-systems/aider-repomap.yaml",
+      "sha256": "ecf50da92060fc2b0db004cc03e6dfa098633c2b1b5ddb89576f657545e14e84",
+      "size_bytes": 1028
+    },
+    {
+      "path": "context-systems/codegraph.yaml",
+      "sha256": "2cd55c45ae8057e55ce96d1e8ad5982d90d7781490679c703e4b348112878d88",
+      "size_bytes": 561
+    },
+    {
+      "path": "context-systems/gitnexus.yaml",
+      "sha256": "cc934d240e67a3a1c5fcef709767f94b5c0df65bee8057d0736ca4ed4c9fba92",
+      "size_bytes": 680
+    },
+    {
+      "path": "context-systems/graphiti.yaml",
+      "sha256": "5a5ef33641d6df4358184205a6254380aaf446529c84a31aa55bbfbe63238204",
+      "size_bytes": 795
+    },
+    {
+      "path": "context-systems/latmd.yaml",
+      "sha256": "6a4dce877717faa430ad9a44e7dc9eb704e1db0c019b1ddc414b3f308a489876",
+      "size_bytes": 665
+    },
+    {
+      "path": "context-systems/markdown-log.yaml",
+      "sha256": "230bdb79df05a42367e69bd6ee92f2ccc85cb679f3cc6c82bdda77725e74131c",
+      "size_bytes": 294
+    },
+    {
+      "path": "context-systems/mem0.yaml",
+      "sha256": "782ea087aa038df5c0d0eea1e8651b445cfbc3a2c2bd23d914ef13038b8593f1",
+      "size_bytes": 697
+    },
+    {
+      "path": "context-systems/none.yaml",
+      "sha256": "25d64880dad393e844ddcb26c6232f1d8d51da6d8ad47ed86a1c51b0c9b2a0ad",
+      "size_bytes": 292
+    },
+    {
+      "path": "context-systems/openwiki.yaml",
+      "sha256": "7238b4d4f45d90dddc79ba527c7360f9f1b86780cb59b5bbd25676bd7b21cbe7",
+      "size_bytes": 829
+    },
+    {
+      "path": "context-systems/project-rag.yaml",
+      "sha256": "173011c4059c417bee562e90873d3563e35d470aece6e26e76452494ab4c79f7",
+      "size_bytes": 584
+    },
+    {
+      "path": "context-systems/rag-bm25.yaml",
+      "sha256": "9d428e66dd996edf09e62d4f5089e41d898101e60440e0c164c1d68f2af4ff2c",
+      "size_bytes": 580
+    },
+    {
+      "path": "context-systems/rag-dense.yaml",
+      "sha256": "0fa5b3e694bd2ed728ebf90f717e43f984626a37d5046cf6bb202e9f69f2e1ec",
+      "size_bytes": 652
+    },
+    {
+      "path": "context-systems/rag-hybrid.yaml",
+      "sha256": "46e983655a0a1e4dfb9ae6512d9073a50817e5956e02715210bfc6aa34aa8c7e",
+      "size_bytes": 672
+    },
+    {
+      "path": "context-systems/semble.yaml",
+      "sha256": "f6ae9846af59b3a567b9e7f532638b66586dd04fbb8531cb159b5f471209c648",
+      "size_bytes": 528
+    },
+    {
+      "path": "reference-studies/wandb-mcp/README.md",
+      "sha256": "2cbdbf95470ce838b20a0f98590616059c1f579b759dde0bf99dd50a51229b94",
+      "size_bytes": 3762
+    },
+    {
+      "path": "reference-studies/wandb-mcp/comparison.yaml.template",
+      "sha256": "70d4a889e54524cd20a344c342dfc41d95d9075090ae228af316be5b76b31cb5",
+      "size_bytes": 3295
+    },
+    {
+      "path": "reference-studies/wandb-mcp/mcp.json.template",
+      "sha256": "c501e82fb77bf809f460473602792145b9d2ae0dfbb8074ca2e8df79ece72567",
+      "size_bytes": 2126
+    },
+    {
+      "path": "reference-studies/wandb-mcp/private-labels.jsonl",
+      "sha256": "036ea6bf35c98cd0742a93a70d39fea38af9adb5a171bc0383643158c947507d",
+      "size_bytes": 15333
+    },
+    {
+      "path": "reference-studies/wandb-mcp/release-contract-v1.json",
+      "sha256": "85666658d1f9705f1664906e8d71796eb2688bb340ef81891231c477ea0a0a19",
+      "size_bytes": 1494
+    },
+    {
+      "path": "reference-studies/wandb-mcp/tasks.jsonl",
+      "sha256": "0b8c613d9be1a0e7f1e8e130c33e0e951a4cb6afd7d92967d19e68885496bf0c",
+      "size_bytes": 6295
+    },
+    {
+      "path": "reference-studies/wandb-mcp/tool_surface_scorer_v7.py",
+      "sha256": "ac0fc57a7ca0c585f6c5cc63cde259210adc9f3619fb68298af2075361dc29f3",
+      "size_bytes": 27008
+    },
+    {
+      "path": "reference-studies/wandb-mcp/wbaf-task-design-provenance-v1.json",
+      "sha256": "f99f249e8dfdc3ed287a3bb3c786f4904244668593b3f7a07d8bda7ab1ec28e4",
+      "size_bytes": 1138
+    },
+    {
+      "path": "runtime/claude-code/package-lock.json",
+      "sha256": "93766de1167a2532cfaa7a7625006413fe23e617465cfff7123d2ebeb3b24f02",
+      "size_bytes": 21336
+    },
+    {
+      "path": "runtime/claude-code/package.json",
+      "sha256": "d1ecde726181d6ed2c197352548e7462a31525ea5de3648046b44a72f7c1b488",
+      "size_bytes": 186
+    },
+    {
+      "path": "runtime/claude-code/patch-runtime.mjs",
+      "sha256": "2c550633c4f075f627ace672ff466d4d0c7fecaab5687cc85409c587e8be017c",
+      "size_bytes": 3340
+    },
+    {
+      "path": "runtime/codex/codex-flat-mcp.patch",
+      "sha256": "aafa7533a6b733a1cd9e45477ae3586597a5403e2765e7c6b2f9121f64f60948",
+      "size_bytes": 2256
+    },
+    {
+      "path": "runtime/codex/codex-wrapper.sh",
+      "sha256": "c8d43f9154934937a9fa7c628f5a6e5ef8cb15c0ed400da0dd36974c17a5507f",
+      "size_bytes": 162
+    },
+    {
+      "path": "runtime/codex/package-lock.json",
+      "sha256": "6dd3176999f640b7411e6baa16e4af7151787bf1423e7e5d5cd58345379a7a62",
+      "size_bytes": 18057
+    },
+    {
+      "path": "runtime/codex/package.json",
+      "sha256": "2b1008109de131d2273bb6bd28fb97a4c444a7643cdd213af3cc91486e7c9ee5",
+      "size_bytes": 161
+    },
+    {
+      "path": "runtime/codex/patch-runtime.mjs",
+      "sha256": "92d472b8bd6c31325c22857d9af6ca3edd4fc70fe40b4d18a64fcf57303edb51",
+      "size_bytes": 4502
+    },
+    {
+      "path": "runtime/fugue-context/Dockerfile",
+      "sha256": "e351ad865099f0d918986b401f076e4ca3f3409395a9634df9ebb95cfb7171c9",
+      "size_bytes": 488
+    },
+    {
+      "path": "runtime/fugue-context/requirements.lock",
+      "sha256": "8002e890a0f5403ea06cf4b6fc5d76a7afdf2b547c88214b282883bb655714e5",
+      "size_bytes": 87852
+    },
+    {
+      "path": "runtime/gitnexus/package-lock.json",
+      "sha256": "6e782c91a9e84a43af7f876b3ef389bfb303fc9278db8320faa6b486bd9b4dca",
+      "size_bytes": 138165
+    },
+    {
+      "path": "runtime/gitnexus/package.json",
+      "sha256": "013bc6b3d1772b0648f4145168f73397889961d571fcbc43f6b1af6c16be113e",
+      "size_bytes": 253
+    },
+    {
+      "path": "runtime/gitnexus/patch-runtime.mjs",
+      "sha256": "4380f59adb285af3a6b19b2908cc686947dc7771df4eddbe147a376a2da84e67",
+      "size_bytes": 12896
+    },
+    {
+      "path": "runtime/hermes/patch-plugin.py",
+      "sha256": "21624b1e142fc5e49d01370af5dd94985e8fdebebc5ecbb790b869cef03fecac",
+      "size_bytes": 6987
+    },
+    {
+      "path": "runtime/openclaw/package-lock.json",
+      "sha256": "35c0b83711055a1076c768056a5583de4362b5fa724b01e9eac0351f069d533b",
+      "size_bytes": 170475
+    },
+    {
+      "path": "runtime/openclaw/package.json",
+      "sha256": "b7fc800e7cc8d3d496891899e17df27cdb8aaaa90a816235293210497be1eeff",
+      "size_bytes": 279
+    },
+    {
+      "path": "runtime/openclaw/patch-runtime.mjs",
+      "sha256": "c24ab97fa16682eb9c10c54309455d11d44fc23fbf638fa622184ff6f500aea6",
+      "size_bytes": 6907
+    },
+    {
+      "path": "schemas/providers/candidate-bundle-v1.schema.json",
+      "sha256": "f77e8523b476756ae6aca71222333b7bcaa40a34d071199e7a5ccd97f75e0d4e",
+      "size_bytes": 4675
+    },
+    {
+      "path": "schemas/providers/cell-request-v1.schema.json",
+      "sha256": "d834cda6dd64e42a43030e67ad99b4f4d357bfd00fef5c1f74ffab3f5759fd4c",
+      "size_bytes": 14972
+    },
+    {
+      "path": "schemas/providers/cell-result-v1.schema.json",
+      "sha256": "b17d7474ffbc84096f4326d4bdb23f999051ed8fb31392eb409e3cf97fd47b8d",
+      "size_bytes": 2001
+    },
+    {
+      "path": "schemas/providers/preparation-receipt-v1.schema.json",
+      "sha256": "7f37cf020985d78d11049e63f96c7387b6bf1ed6cabce76e16ad502964db4878",
+      "size_bytes": 1654
+    },
+    {
+      "path": "schemas/providers/private-evaluation-bundle-v1.schema.json",
+      "sha256": "4e669630bb3d242228396b6b1f4a2227b157a868aad362b8819b844156faefa2",
+      "size_bytes": 1245
+    },
+    {
+      "path": "schemas/providers/provider-descriptor-v1.schema.json",
+      "sha256": "fed90da9f85d2eb2938c9eee276914b8543dd0147fa6985a65ea7c11ea9dacec",
+      "size_bytes": 2212
+    },
+    {
+      "path": "schemas/providers/suite-bundle-v1.schema.json",
+      "sha256": "a53ca70d0edb767c3360d76fc3f192cfb94f8d5726786198d3bc4742e01e726e",
+      "size_bytes": 12092
+    },
+    {
+      "path": "source-use-replay/attempts.jsonl",
+      "sha256": "2d98ed460c44bc1ca0fcd0952fcff6f5d8bc4f893e917420e1c2a4ae883f112e",
+      "size_bytes": 2955
+    },
+    {
+      "path": "source-use-replay/comparison.yaml",
+      "sha256": "e8e79cbbfe97a12f3347792db771fbe7d43743d5d249c22c99c6ce619896af3a",
+      "size_bytes": 637
+    },
+    {
+      "path": "source-use-replay/configs/fugue/context-systems/none.yaml",
+      "sha256": "25d64880dad393e844ddcb26c6232f1d8d51da6d8ad47ed86a1c51b0c9b2a0ad",
+      "size_bytes": 292
+    },
+    {
+      "path": "source-use-replay/configs/fugue/skills/verify-current-source/SKILL.md",
+      "sha256": "7c7aed6159357ba9c3827df507592288f7189e8261041ec05719d913e510d7ad",
+      "size_bytes": 657
+    },
+    {
+      "path": "source-use-replay/private-labels.jsonl",
+      "sha256": "6a1a3a12f0f3bf0cf69c1d32a40ac791d75195af47c6eebdf8f2e6e8a2e8884e",
+      "size_bytes": 842
+    },
+    {
+      "path": "source-use-replay/tasks.jsonl",
+      "sha256": "e80bac55480b8f18aa1a450df8e8d3770b65b6337c236ed7662f0087af8ff59c",
+      "size_bytes": 638
+    },
+    {
+      "path": "templates/harness-change/README.md",
+      "sha256": "7414654b0ffb7fe9b4d0c849a8d4f68a5a630e2d9ef051eb82e2ca646b161966",
+      "size_bytes": 945
+    },
+    {
+      "path": "templates/harness-change/comparison.yaml",
+      "sha256": "a2f0044c4f54976f837f78ca47c7c69f49aa54a158c7600a76a61303fce4c9bd",
+      "size_bytes": 1031
+    },
+    {
+      "path": "templates/harness-change/configs/fugue/task-authoring/profiles.yaml",
+      "sha256": "57df480c4e48d39c759459a6536c9d6abac5a250f03447d63def38e0934c097f",
+      "size_bytes": 773
+    },
+    {
+      "path": "templates/harness-change/env.example.template",
+      "sha256": "61ce35f701359cfd1271835e9239d511abbe60ce990ca79f5f046f47b50adc0f",
+      "size_bytes": 78
+    },
+    {
+      "path": "templates/harness-change/fixtures/api-contract.yaml",
+      "sha256": "8432345a9baa0382e2b352e2838f4635c2e7dc2feba8390066e46cd0e825739f",
+      "size_bytes": 138
+    },
+    {
+      "path": "templates/harness-change/fixtures/migration.sql",
+      "sha256": "6f4489cf4402cf756c43f1583126ceeee14afc30384d0c9dde07a1baaa58e564",
+      "size_bytes": 85
+    },
+    {
+      "path": "templates/harness-change/fixtures/model.py",
+      "sha256": "345e7da6732ca681e9a24a9a353d9b68ebe51217981e6c40c76cf759d2392478",
+      "size_bytes": 55
+    },
+    {
+      "path": "templates/harness-change/fixtures/widgets.py",
+      "sha256": "f05c4e132958da660fc575c1b79bb8f7f2a214771a6a90977a468e5976d5e3e5",
+      "size_bytes": 90
+    },
+    {
+      "path": "templates/harness-change/fugue-study.marker",
+      "sha256": "f962c4dba5d3ca1f96b4432493c7943deb589b3e50a73b2fffabb5e754bd5950",
+      "size_bytes": 81
+    },
+    {
+      "path": "templates/harness-change/gitignore.template",
+      "sha256": "7df92edf835a4621c7e7f5c58d4844147a86de3abb64a1dc10317469fa54eb97",
+      "size_bytes": 53
+    },
+    {
+      "path": "templates/harness-change/private-labels.jsonl",
+      "sha256": "b1c36eac82dfe54139c1039a8d8d906cfade7abe054dde147dfb3b0aa9ef9c90",
+      "size_bytes": 808
+    },
+    {
+      "path": "templates/harness-change/scorer.py",
+      "sha256": "d945d7023e45c8847bdc3e5cb05deb8922d0f85ea7edb806b3ec79634be518ab",
+      "size_bytes": 742
+    },
+    {
+      "path": "templates/harness-change/tasks.jsonl",
+      "sha256": "039550529ba6477aa70259338eba504d18ad27c577342f5274b8a827a76ae62c",
+      "size_bytes": 901
+    },
+    {
+      "path": "templates/mcp-change/README.md",
+      "sha256": "d4d8c0aaefcd1e4e13ec41062f183a5bf89004e9565fd1f74a0d6fd255d8d00d",
+      "size_bytes": 965
+    },
+    {
+      "path": "templates/mcp-change/comparison.yaml",
+      "sha256": "cbe577796ee3c9fa96d7981ea639d21d95d0246dfc1f1e4b56f6c3b050784b92",
+      "size_bytes": 1038
+    },
+    {
+      "path": "templates/mcp-change/configs/fugue/integrations/offline-catalog-current.yaml",
+      "sha256": "77109a41d5b55355cdcdf05c26e6a41229b030d2ab0a1a883d149df879d6e0db",
+      "size_bytes": 301
+    },
+    {
+      "path": "templates/mcp-change/configs/fugue/integrations/offline-catalog-legacy.yaml",
+      "sha256": "0f89b269c8d1adf5ed771e5cedff364c5d7e18b3d88f4e506b93851b7d1ab278",
+      "size_bytes": 299
+    },
+    {
+      "path": "templates/mcp-change/configs/fugue/task-authoring/profiles.yaml",
+      "sha256": "57df480c4e48d39c759459a6536c9d6abac5a250f03447d63def38e0934c097f",
+      "size_bytes": 773
+    },
+    {
+      "path": "templates/mcp-change/env.example.template",
+      "sha256": "61ce35f701359cfd1271835e9239d511abbe60ce990ca79f5f046f47b50adc0f",
+      "size_bytes": 78
+    },
+    {
+      "path": "templates/mcp-change/fixtures/offline_catalog_mcp.py",
+      "sha256": "780b9e33da3964a1e80f69d8ff91cc0db0a24582e339e7eb8390ea02c19d6cf5",
+      "size_bytes": 3384
+    },
+    {
+      "path": "templates/mcp-change/fugue-study.marker",
+      "sha256": "657d8f4cbf392ba886b6e2ea7a8429c58b389c8212242a98ccabbe6a43405c89",
+      "size_bytes": 77
+    },
+    {
+      "path": "templates/mcp-change/gitignore.template",
+      "sha256": "7df92edf835a4621c7e7f5c58d4844147a86de3abb64a1dc10317469fa54eb97",
+      "size_bytes": 53
+    },
+    {
+      "path": "templates/mcp-change/private-labels.jsonl",
+      "sha256": "6f74bafc411d475d4dd4f05fa0080f5d6fdaa0ba9e8a2e53d174b1081958f5e2",
+      "size_bytes": 761
+    },
+    {
+      "path": "templates/mcp-change/scorer.py",
+      "sha256": "d945d7023e45c8847bdc3e5cb05deb8922d0f85ea7edb806b3ec79634be518ab",
+      "size_bytes": 742
+    },
+    {
+      "path": "templates/mcp-change/tasks.jsonl",
+      "sha256": "d2b75edffb15d3e1c8ba69e3872afa23b1fbb79301e0a5554b989210e7576380",
+      "size_bytes": 699
+    },
+    {
+      "path": "templates/memory-change/README.md",
+      "sha256": "225d99bce7187202f99b2bf940aa369397992061c3058bc013ab347a218a09cb",
+      "size_bytes": 954
+    },
+    {
+      "path": "templates/memory-change/comparison.yaml",
+      "sha256": "5c110baa17f0549bfa49ee9f2c6ea4bf4306976593860c115802984fbc65d7a0",
+      "size_bytes": 1079
+    },
+    {
+      "path": "templates/memory-change/configs/fugue/context-systems/agentsmd.yaml",
+      "sha256": "06b70b67de187b77c3b5c7535aa9edfbc59f30fa1cdcc5e3cfcfac67b55fb151",
+      "size_bytes": 362
+    },
+    {
+      "path": "templates/memory-change/configs/fugue/task-authoring/profiles.yaml",
+      "sha256": "57df480c4e48d39c759459a6536c9d6abac5a250f03447d63def38e0934c097f",
+      "size_bytes": 773
+    },
+    {
+      "path": "templates/memory-change/env.example.template",
+      "sha256": "61ce35f701359cfd1271835e9239d511abbe60ce990ca79f5f046f47b50adc0f",
+      "size_bytes": 78
+    },
+    {
+      "path": "templates/memory-change/fixtures/config.py",
+      "sha256": "b946e5483536bdb4ea779d469a3e80e46c1dcff08f04a4a5b30eca94945f0582",
+      "size_bytes": 82
+    },
+    {
+      "path": "templates/memory-change/fixtures/ledger_cli.py",
+      "sha256": "d2e5363303213b27927aef27f9dbd40f42f537cca79859832345f9f8b6785c67",
+      "size_bytes": 66
+    },
+    {
+      "path": "templates/memory-change/fixtures/operations.md",
+      "sha256": "1ac5477354dcfad87b3584e3065430d0cdc377bd75e17ab8f6cb64c8e867656f",
+      "size_bytes": 146
+    },
+    {
+      "path": "templates/memory-change/fixtures/pyproject.toml",
+      "sha256": "714c307cbd1200be40b45944b787ed8883b48d0f3baa74f53fae00f9ed776c8c",
+      "size_bytes": 98
+    },
+    {
+      "path": "templates/memory-change/fugue-study.marker",
+      "sha256": "c67faca3b4b7daa5030381b341d0dd06cdb6016edcc8a2b4072b1730a2350df8",
+      "size_bytes": 80
+    },
+    {
+      "path": "templates/memory-change/gitignore.template",
+      "sha256": "7df92edf835a4621c7e7f5c58d4844147a86de3abb64a1dc10317469fa54eb97",
+      "size_bytes": 53
+    },
+    {
+      "path": "templates/memory-change/private-labels.jsonl",
+      "sha256": "c4cbeda427347fa654755cadc199795d24a71e993554dd4f1a7b08bdba00e18b",
+      "size_bytes": 604
+    },
+    {
+      "path": "templates/memory-change/scorer.py",
+      "sha256": "d945d7023e45c8847bdc3e5cb05deb8922d0f85ea7edb806b3ec79634be518ab",
+      "size_bytes": 742
+    },
+    {
+      "path": "templates/memory-change/tasks.jsonl",
+      "sha256": "b6f05034d1740cbe94da36238cc8ddaa863c41328edbb33e317beac51c38f7d2",
+      "size_bytes": 981
+    },
+    {
+      "path": "templates/prompt-change/README.md",
+      "sha256": "69bad789f42c51138b6bfd40300661b43f2c663e55d53e38ed3da2ee9234f3bf",
+      "size_bytes": 960
+    },
+    {
+      "path": "templates/prompt-change/comparison.yaml",
+      "sha256": "150b7e57366bcf4d8ba292dc396440fa3a7d101d105096ce34a4ae79a450e102",
+      "size_bytes": 984
+    },
+    {
+      "path": "templates/prompt-change/configs/fugue/prompts/concise-maintainer-v1.md",
+      "sha256": "82496e57e3a159233a965578cb28abe56cfd0f63f9b717b37a364eb4f55a00bb",
+      "size_bytes": 83
+    },
+    {
+      "path": "templates/prompt-change/configs/fugue/prompts/evidence-first-maintainer-v2.md",
+      "sha256": "380420afb1365f02a93b096b137733213be778b69415be574a79f74afef8d03a",
+      "size_bytes": 276
+    },
+    {
+      "path": "templates/prompt-change/configs/fugue/task-authoring/profiles.yaml",
+      "sha256": "57df480c4e48d39c759459a6536c9d6abac5a250f03447d63def38e0934c097f",
+      "size_bytes": 773
+    },
+    {
+      "path": "templates/prompt-change/env.example.template",
+      "sha256": "61ce35f701359cfd1271835e9239d511abbe60ce990ca79f5f046f47b50adc0f",
+      "size_bytes": 78
+    },
+    {
+      "path": "templates/prompt-change/fixtures/deployment-policy.md",
+      "sha256": "9c2c63b886a20c2126934e5aa83b9d59c290c884d345a3aecc69472669042969",
+      "size_bytes": 184
+    },
+    {
+      "path": "templates/prompt-change/fixtures/service-policy.yaml",
+      "sha256": "51df81307046243c9d02b8ccd34eee0e47d0abb8624574653983d5b8e4c38cf2",
+      "size_bytes": 98
+    },
+    {
+      "path": "templates/prompt-change/fugue-study.marker",
+      "sha256": "646685537402094d71b05c432f9a82d08fbd45ca1efe7f0bc9a5fe445049ff50",
+      "size_bytes": 80
+    },
+    {
+      "path": "templates/prompt-change/gitignore.template",
+      "sha256": "7df92edf835a4621c7e7f5c58d4844147a86de3abb64a1dc10317469fa54eb97",
+      "size_bytes": 53
+    },
+    {
+      "path": "templates/prompt-change/private-labels.jsonl",
+      "sha256": "d4f7b68a511ea787514bbd028db6803c0055d2e9892aa1ac7c3df959ca709f2d",
+      "size_bytes": 546
+    },
+    {
+      "path": "templates/prompt-change/scorer.py",
+      "sha256": "d945d7023e45c8847bdc3e5cb05deb8922d0f85ea7edb806b3ec79634be518ab",
+      "size_bytes": 742
+    },
+    {
+      "path": "templates/prompt-change/tasks.jsonl",
+      "sha256": "77299bc41b0f7e60fbdb8177937851374f555e0d068ffb75314e0441acc7fc73",
+      "size_bytes": 740
+    },
+    {
+      "path": "templates/skill-change/README.md",
+      "sha256": "9bedb9725484ae558ff38773cdd6ef08ea2988f60cc9c30d199376d6acf1ec97",
+      "size_bytes": 923
+    },
+    {
+      "path": "templates/skill-change/comparison.yaml",
+      "sha256": "e72b136d6e847b1e3713eb067b6df52e2fb8025cb6bb76619369ee2bfcce6873",
+      "size_bytes": 965
+    },
+    {
+      "path": "templates/skill-change/configs/fugue/skills/verify-current-source/SKILL.md",
+      "sha256": "f62a5214b66b0d960d489e3aec92efbb74df217735e73b4840062b5b8a575daf",
+      "size_bytes": 523
+    },
+    {
+      "path": "templates/skill-change/configs/fugue/task-authoring/profiles.yaml",
+      "sha256": "57df480c4e48d39c759459a6536c9d6abac5a250f03447d63def38e0934c097f",
+      "size_bytes": 773
+    },
+    {
+      "path": "templates/skill-change/env.example.template",
+      "sha256": "61ce35f701359cfd1271835e9239d511abbe60ce990ca79f5f046f47b50adc0f",
+      "size_bytes": 78
+    },
+    {
+      "path": "templates/skill-change/fixtures/incident-runbook-v2.md",
+      "sha256": "099af5d59f46a22d75161a7681466c1a83f76853f277f3184ccfed08f7e975bb",
+      "size_bytes": 122
+    },
+    {
+      "path": "templates/skill-change/fixtures/incident-runbook-v3.md",
+      "sha256": "ef0636dd3bc20a5bf2d68410962c9e24bec39c753e61fa0e6e05f15bb8eeb060",
+      "size_bytes": 117
+    },
+    {
+      "path": "templates/skill-change/fixtures/travel-policy-2025.md",
+      "sha256": "4e7fc66d1e2ec8a5fda05d548362560223312dda4950fd5a9f53939817dc238c",
+      "size_bytes": 113
+    },
+    {
+      "path": "templates/skill-change/fixtures/travel-policy-2026.md",
+      "sha256": "88f0c5902a68a1449df6e3f1da41cb9974fdce9e1de116e742cb230f9e094173",
+      "size_bytes": 115
+    },
+    {
+      "path": "templates/skill-change/fixtures/travel-policy-draft.md",
+      "sha256": "fe1c2b05b1df73566fdfab35ac3b2699369d2dd7eebee682a871a09dcb07a8eb",
+      "size_bytes": 112
+    },
+    {
+      "path": "templates/skill-change/fugue-study.marker",
+      "sha256": "436b66c978e99a4c0a6e5437e1e84a75fb714309321223d1bff3af84b2cb32e3",
+      "size_bytes": 79
+    },
+    {
+      "path": "templates/skill-change/gitignore.template",
+      "sha256": "7df92edf835a4621c7e7f5c58d4844147a86de3abb64a1dc10317469fa54eb97",
+      "size_bytes": 53
+    },
+    {
+      "path": "templates/skill-change/private-labels.jsonl",
+      "sha256": "b79da7e5d759c674b5921ff9228844971c9e0595ed31d21b1126e471caaa4f35",
+      "size_bytes": 434
+    },
+    {
+      "path": "templates/skill-change/scorer.py",
+      "sha256": "d945d7023e45c8847bdc3e5cb05deb8922d0f85ea7edb806b3ec79634be518ab",
+      "size_bytes": 742
+    },
+    {
+      "path": "templates/skill-change/tasks.jsonl",
+      "sha256": "47915c715aa01cdf31413b8a487799539496039e1e16951532447af1c80bcc05",
+      "size_bytes": 1023
+    },
+    {
+      "path": "vendor/weave-node-sdk.tgz",
+      "sha256": "709676954ebfd2979d3a15df50168f9bdc7c1c7d9f4ffc761aed2d776470a0bf",
+      "size_bytes": 518978
+    }
+  ],
+  "schema_version": 1
+}

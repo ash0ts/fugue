@@ -456,7 +456,8 @@ def _probe_stdio_manifest(
             from mcp.client.stdio import stdio_client
         except ImportError as exc:
             raise RuntimeError(
-                "MCP conformance inspection requires `uv sync --extra research-worker`"
+                "MCP conformance inspection requires the optional MCP client: "
+                '`python -m pip install "fugue[mcp]"`'
             ) from exc
 
         environment = _mcp_process_environment(draft)

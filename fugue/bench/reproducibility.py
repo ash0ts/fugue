@@ -16,6 +16,7 @@ from fugue.bench.context import (
 )
 from fugue.bench.files import atomic_write_json, store_consistent
 from fugue.bench.library import ExperimentSpec, get_agent_preset, get_prompt
+from fugue.bench.runtime_provenance import study_workspace_provenance
 from fugue.bench.sources import resolve_skill
 from fugue.model_plane import provider_api_key_env, resolve_harness_model_route
 
@@ -107,7 +108,7 @@ def build_run_snapshot(
     executions: dict[str, dict[str, Any]] = {}
     assets: dict[str, dict[str, Any]] = {}
     generated_runtime_assets_by_config: dict[str, tuple[str, ...]] = {}
-    fugue_source: dict[str, Any] | None = None
+    study_workspace: dict[str, Any] | None = None
     fugue_distribution: dict[str, Any] | None = None
     for job in jobs:
         resolved = job.resolved_candidate
@@ -125,13 +126,18 @@ def build_run_snapshot(
                 f"execution {resolved.execution_fingerprint} resolved inconsistently"
             ),
         )
-        selected_fugue_source = resolved.execution_definition.get("fugue_source")
-        if selected_fugue_source is not None:
-            if not isinstance(selected_fugue_source, dict):
-                raise ValueError("Fugue source provenance must be an object")
-            if fugue_source is not None and fugue_source != selected_fugue_source:
-                raise ValueError("jobs resolved from different Fugue source states")
-            fugue_source = selected_fugue_source
+        selected_study_workspace = study_workspace_provenance(
+            resolved.execution_definition
+        )
+        if selected_study_workspace is not None:
+            if (
+                study_workspace is not None
+                and study_workspace != selected_study_workspace
+            ):
+                raise ValueError(
+                    "jobs resolved from different study workspace states"
+                )
+            study_workspace = selected_study_workspace
         selected_distribution = resolved.execution_definition.get(
             "fugue_distribution"
         )
@@ -256,8 +262,8 @@ def build_run_snapshot(
         agent_runtime = resolved.execution_definition.get("agent_runtime")
         if agent_runtime is not None:
             runtime["agent_runtime"] = agent_runtime
-        if selected_fugue_source is not None:
-            runtime["fugue_source"] = selected_fugue_source
+        if selected_study_workspace is not None:
+            runtime["study_workspace"] = selected_study_workspace
         if selected_distribution is not None:
             runtime["fugue_distribution"] = selected_distribution
         required_env.update(candidate_required_env)
@@ -390,7 +396,7 @@ def build_run_snapshot(
                 {job.resolved_candidate.execution_fingerprint for job in jobs}
             ),
             "executions": executions,
-            "fugue_source": fugue_source,
+            "study_workspace": study_workspace,
             "fugue_distribution": fugue_distribution,
             "bridge": dict(bridge_runtime) if bridge_runtime is not None else None,
         },

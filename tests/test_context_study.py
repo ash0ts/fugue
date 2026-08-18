@@ -299,6 +299,7 @@ def test_pdf_skill_presets_are_controlled_and_study_plans_72_cells(
 
     env_file = tmp_path / "env"
     env_file.write_text("WANDB_API_KEY=test\n")
+    env_file.chmod(0o600)
     jobs = OperatorService(REPO_ROOT, env_file=env_file).rendered_jobs(
         ExperimentRequest(
             experiment_id=experiment.id,

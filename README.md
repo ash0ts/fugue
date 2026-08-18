@@ -118,10 +118,11 @@ flowchart TB
   make control-plane retries safe. An already-launched trial is reconciled,
   never silently launched again.
 - **Reconciled evidence.** Every coordinate becomes terminal, explicitly not
-  applicable, or cancelled. Agent cells resolve to one local Dataset record,
-  evaluation, prediction-and-score record, prediction, provider-neutral Agent
-  receipt, and the required policy/privacy/cleanup receipts. Hosted Call links
-  are an additional contract only in `weave_required` mode or after publication.
+  applicable, or cancelled. Agent cells resolve to one local dataset manifest,
+  evaluation record, prediction-and-score record, prediction record, and
+  provider-neutral Agent receipt. They also resolve the required policy,
+  privacy, and cleanup receipts. Hosted Call links are an additional contract
+  only in `weave_required` mode or after publication.
 - **Bounded conclusions.** Results retain their task, treatment, attempt,
   evidence, uncertainty, exclusions, and limitations. Fugue does not emit a
   universal model or harness ranking.
@@ -253,13 +254,17 @@ Console, a GitHub App, or a W&B project:
 
 ```bash
 python -m pip install "fugue[local-runner]"
-fugue doctor
 fugue init my-study --template prompt-change
-fugue check my-study/comparison.yaml
-fugue compare my-study/comparison.yaml --prepare
-fugue compare my-study/comparison.yaml --preview --json
+cd my-study
+install -m 600 .env.example .env
+fugue doctor --require local-runner \
+  --model anthropic/claude-sonnet-5 --env-file .env
+fugue check comparison.yaml --env-file .env
+fugue compare comparison.yaml --prepare --env-file .env
+fugue compare comparison.yaml --preview --env-file .env --json
 fugue approve PREVIEW_DIGEST --max-usd 10 --max-cells 8
-fugue compare my-study/comparison.yaml --run --approval APPROVAL_DIGEST
+fugue compare comparison.yaml \
+  --run --approval APPROVAL_DIGEST --env-file .env
 fugue result latest
 ```
 
@@ -305,12 +310,44 @@ uv run fugue result latest
 
 The result separates deterministic task outcomes, blind-judge dimensions,
 mechanism evidence, infrastructure health, and evidence completeness. Local
-mode writes one canonical Dataset, evaluation, prediction-and-score,
-prediction, and Agent receipt per attempt. `weave_required` mode additionally
-binds native hosted Calls. `fugue publish weave RESULT --project ENTITY/PROJECT`
-can publish a completed local result later without changing its digest.
+mode writes one canonical dataset manifest, evaluation record,
+prediction-and-score record, prediction record, and provider-neutral Agent
+receipt per attempt. `weave_required` mode additionally binds native hosted
+Calls. `fugue publish weave RESULT --project ENTITY/PROJECT` can publish a
+completed local result later without changing its digest.
 CI uses distinct exit codes for a passed gate (`0`), a completed regression
 (`1`), an invalid comparison (`2`), and incomplete required evidence (`3`).
+
+To share several results with colleagues, publish each unchanged evidence
+chain with an explicit Research and Study identity. Then build one immutable
+local index and publish that index to a W&B project:
+
+```bash
+fugue publish weave RESULT.json \
+  --project ENTITY/EVIDENCE_PROJECT \
+  --research-id agent-change-research-v1 \
+  --study-id prompt-change-v1
+
+fugue study index \
+  --research-id agent-change-research-v1 \
+  --title "Agent change experiments" \
+  --objective "Compare exact candidates on locked tasks." \
+  --source RESULT.json weave-publication-receipt.json \
+  --output research-index.json
+
+python -m pip install "fugue[wandb-index]"
+fugue publish wandb-index research-index.json \
+  --project ENTITY/INDEX_PROJECT
+```
+
+The last command creates a deterministic W&B index Run and an immutable
+Artifact. The Run contains a derivative table for browsing the studies. The
+Artifact preserves the exact Research index and its bound result and
+publication-receipt sources. The installed W&B SDK does not expose a native
+`wandb.study` service API. Fugue therefore does not claim that the index is a
+native Study or provide a fabricated Study Console link. A future native
+publisher can implement the same optional publication protocol without
+changing the local index or any result.
 
 Normal MCP configurations and standard Agent Skills are candidate inputs, not
 special experiment types:
@@ -324,13 +361,13 @@ uv run fugue skills import ./skills/verify-current-source
 uv run fugue skills lock verify-current-source
 ```
 
-Fugue imports only the selected component, strips secret values, resolves the
-exact source and dependency closure for the Harbor platform during
-preparation, records the tool manifest and built-wheel hashes in a
-content-addressed lock, and mounts that runtime read-only into an isolated
-attempt. Non-secret process settings may be locked explicitly; credentials
-remain runtime references. Fugue never edits global Codex, Claude Code, MCP,
-or Skill configuration.
+The import command selects one component and removes secret values. The lock
+and preparation steps resolve its exact source and dependency closure for the
+selected Harbor platform. Fugue records the tool manifest and built-wheel
+hashes in a content-addressed lock. During a trial, Fugue mounts the prepared
+runtime read-only. Fugue injects credentials from runtime references and does
+not store their values in the lock. Fugue never edits global Codex, Claude
+Code, MCP, or Skill configuration.
 
 This remains a technical preview. The package is still named `fugue`; no new
 distribution or container is being released from this work.
@@ -341,8 +378,11 @@ Use the operator CLI or TUI when a human is directly designing and running a
 saved experiment:
 
 ```text
-ExperimentSpec → preview → prepare → run → normalized evidence → analysis
+ExperimentSpec → check → prepare → final preview → approval → run → normalized evidence → analysis
 ```
+
+A preview created before preparation is exploratory. If preparation changes a
+locked input, generate and approve a new preview before execution.
 
 Use the Research service when Aria or another outer loop needs a governed
 laboratory:
@@ -470,16 +510,17 @@ fugue run pilot
 fugue run pilot --detach
 ```
 
-Before the first cell starts, `OperatorService` resolves the full plan,
-persists the experiment snapshot, prepares context, renders jobs, plans cells,
-and atomically writes `.fugue/runtime/RUN_ID/input-lock.json`. A failure before
-that commit leaves the run failed in its `starting` phase and executes no cell.
+Before the first cell starts, `OperatorService` resolves the full plan. It
+persists the experiment snapshot. It verifies the prepared context and runtime
+locks. It renders jobs and plans cells. It then writes
+`.fugue/runtime/RUN_ID/input-lock.json` atomically. If any step fails before
+that write completes, Fugue executes no cell.
 
 ```mermaid
 flowchart TD
     REQUEST["ExperimentRequest"] --> RESOLVE["Resolve and validate exact plan"]
     RESOLVE --> SNAPSHOT["Persist experiment snapshot"]
-    SNAPSHOT --> CONTEXT["Prepare required context"]
+    SNAPSHOT --> CONTEXT["Verify prepared context and runtime locks"]
     CONTEXT --> RENDER["Render jobs and planned cells"]
     RENDER --> LOCK["Atomically write input-lock.json"]
     LOCK --> RUNNING["Transition run to running"]

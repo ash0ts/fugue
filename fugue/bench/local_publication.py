@@ -22,6 +22,13 @@ from fugue.bench.local_evidence import (
     LocalEvidenceStore,
     local_result_attempt_projection_v1,
 )
+from fugue.model_plane import (
+    EvidenceDestinationV1,
+    default_evidence_destination,
+    evidence_destination_from_dict,
+    resolve_evidence_destination,
+    trace_project_environment,
+)
 from fugue.redaction import redact_text
 
 WEAVE_PUBLICATION_SCHEMA_VERSION = 1
@@ -48,6 +55,7 @@ _CALL_KINDS = _HOSTED_KINDS - {"dataset"}
 _HEX_SHA256 = re.compile(r"^[0-9a-f]{64}$")
 _SLUG_PART = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$")
 _OBJECT_ID = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._:@+-]{0,511}$")
+_STUDY_ID = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._:-]{0,255}$")
 
 
 class LocalResultPublicationError(ValueError):
@@ -59,10 +67,32 @@ class MissingWeaveExtraError(LocalResultPublicationError):
 
 
 @dataclass(frozen=True)
+class StudyPublicationScopeV1:
+    research_id: str
+    study_id: str
+    schema_version: Literal[1] = WEAVE_PUBLICATION_SCHEMA_VERSION
+
+    def __post_init__(self) -> None:
+        if self.schema_version != WEAVE_PUBLICATION_SCHEMA_VERSION:
+            raise ValueError("unsupported Study publication scope schema")
+        for label, value in (
+            ("research id", self.research_id),
+            ("study id", self.study_id),
+        ):
+            if not _STUDY_ID.fullmatch(value):
+                raise ValueError(f"invalid Study publication {label}")
+
+    def to_dict(self) -> dict[str, Any]:
+        return asdict(self)
+
+
+@dataclass(frozen=True)
 class WeavePublicationTargetV1:
     entity: str
     project: str
     schema_version: Literal[1] = WEAVE_PUBLICATION_SCHEMA_VERSION
+    study_scope: StudyPublicationScopeV1 | None = None
+    destination: EvidenceDestinationV1 | None = None
 
     def __post_init__(self) -> None:
         if self.schema_version != WEAVE_PUBLICATION_SCHEMA_VERSION:
@@ -70,13 +100,33 @@ class WeavePublicationTargetV1:
         for label, value in (("entity", self.entity), ("project", self.project)):
             if not _SLUG_PART.fullmatch(value):
                 raise ValueError(f"invalid Weave publication {label}")
+        if self.study_scope is not None and not isinstance(
+            self.study_scope, StudyPublicationScopeV1
+        ):
+            raise ValueError("invalid Weave publication Study scope")
+        if self.destination is not None:
+            if not isinstance(self.destination, EvidenceDestinationV1):
+                raise ValueError("invalid Weave publication evidence destination")
+            if self.destination.project_slug != self.project_slug:
+                raise ValueError(
+                    "Weave publication target and evidence destination disagree"
+                )
 
     @property
     def project_slug(self) -> str:
         return f"{self.entity}/{self.project}"
 
     def to_dict(self) -> dict[str, Any]:
-        return asdict(self)
+        value: dict[str, Any] = {
+            "entity": self.entity,
+            "project": self.project,
+            "schema_version": self.schema_version,
+        }
+        if self.study_scope is not None:
+            value["study_scope"] = self.study_scope.to_dict()
+        if self.destination is not None:
+            value["destination"] = self.destination.to_dict()
+        return value
 
 
 @dataclass(frozen=True)
@@ -168,17 +218,28 @@ def weave_publisher_from_environment(
             '`pip install "fugue[weave]"` and retry.'
         ) from exc
 
+    bound_env = dict(env)
+
     def publish(
         result: ComparisonResultV3,
         manifest: LocalEvidenceManifestV1,
         target: WeavePublicationTargetV1,
     ) -> WeavePublicationOutcomeV1:
+        destination = _require_current_publication_destination(target)
+        observed = resolve_evidence_destination(
+            trace_project_environment(target.project_slug, bound_env)
+        )
+        if observed != destination:
+            raise LocalResultPublicationError(
+                "Weave publisher environment disagrees with the immutable "
+                "publication destination"
+            )
         return _publish_with_weave_sdk(
             weave_module,
             result=result,
             manifest=manifest,
             target=target,
-            env=env,
+            env=bound_env,
         )
 
     return publish
@@ -272,6 +333,7 @@ def publish_local_result_to_weave(
     *,
     target: str | WeavePublicationTargetV1,
     publisher: LocalResultWeavePublisher,
+    study_scope: StudyPublicationScopeV1 | None = None,
     receipt_path: Path | None = None,
     secret_values: Sequence[str] = (),
     clock: Callable[[], datetime] | None = None,
@@ -286,9 +348,15 @@ def publish_local_result_to_weave(
 
     result_path = _regular_file(result_path, "comparison result")
     manifest_path = _regular_file(manifest_path, "local evidence manifest")
-    selected_target = (
-        target if isinstance(target, WeavePublicationTargetV1) else parse_target(target)
-    )
+    if isinstance(target, WeavePublicationTargetV1):
+        if study_scope is not None and target.study_scope != study_scope:
+            raise LocalResultPublicationError(
+                "Study publication scope disagrees with the Weave target"
+            )
+        selected_target = target
+    else:
+        selected_target = parse_target(target, study_scope=study_scope)
+    _require_current_publication_destination(selected_target)
     result_before = result_path.read_bytes()
     manifest_before = manifest_path.read_bytes()
     _assert_secret_free(result_before, secret_values, "comparison result")
@@ -398,15 +466,55 @@ def publish_local_result_to_weave(
         return receipt
 
 
-def parse_target(value: str) -> WeavePublicationTargetV1:
+def parse_target(
+    value: str,
+    *,
+    study_scope: StudyPublicationScopeV1 | None = None,
+) -> WeavePublicationTargetV1:
     parts = value.strip().split("/")
     if len(parts) != 2:
         raise ValueError("Weave target must be exactly ENTITY/PROJECT")
-    return WeavePublicationTargetV1(entity=parts[0], project=parts[1])
+    return WeavePublicationTargetV1(
+        entity=parts[0],
+        project=parts[1],
+        study_scope=study_scope,
+        destination=default_evidence_destination(value.strip()),
+    )
+
+
+def weave_publication_target_from_environment(
+    value: str,
+    env: Mapping[str, str],
+    *,
+    study_scope: StudyPublicationScopeV1 | None = None,
+) -> WeavePublicationTargetV1:
+    """Resolve one endpoint-bound publication target from an exact environment."""
+
+    parts = value.strip().split("/")
+    if len(parts) != 2:
+        raise ValueError("Weave target must be exactly ENTITY/PROJECT")
+    destination = resolve_evidence_destination(
+        trace_project_environment(value.strip(), env)
+    )
+    return WeavePublicationTargetV1(
+        entity=parts[0],
+        project=parts[1],
+        study_scope=study_scope,
+        destination=destination,
+    )
 
 
 def read_weave_publication_receipt(path: Path) -> WeavePublicationReceiptV1:
     value = _read_mapping(path, "Weave publication receipt")
+    return weave_publication_receipt_from_dict(value)
+
+
+def weave_publication_receipt_from_dict(
+    raw: Mapping[str, Any],
+) -> WeavePublicationReceiptV1:
+    """Parse and verify a canonical receipt without requiring a temporary file."""
+
+    value = dict(raw)
     allowed = {
         "schema_version",
         "publication_id",
@@ -486,11 +594,25 @@ def _publish_with_weave_sdk(
     target: WeavePublicationTargetV1,
     env: Mapping[str, str],
 ) -> WeavePublicationOutcomeV1:
-    from fugue.weave_support import initialize_weave
+    from fugue.weave_support import weave_destination_session
 
-    active_weave = initialize_weave(target.project_slug, env)
-    if active_weave is not weave_module:
-        weave_module = active_weave
+    destination = _require_current_publication_destination(target)
+    with weave_destination_session(destination, env) as active_weave:
+        return _publish_with_active_weave_sdk(
+            active_weave if active_weave is not weave_module else weave_module,
+            result=result,
+            manifest=manifest,
+            target=target,
+        )
+
+
+def _publish_with_active_weave_sdk(
+    weave_module: Any,
+    *,
+    result: ComparisonResultV3,
+    manifest: LocalEvidenceManifestV1,
+    target: WeavePublicationTargetV1,
+) -> WeavePublicationOutcomeV1:
     get_client = getattr(weave_module, "get_client", None)
     publish_object = getattr(weave_module, "publish", None)
     if not callable(get_client) or not callable(publish_object):
@@ -545,6 +667,17 @@ def _publish_with_weave_sdk(
         dataset_payload = {
             "schema_version": 1,
             "publication_id": publication_id,
+            "evidence_destination_digest": (
+                _require_current_publication_destination(target).destination_digest
+            ),
+            **(
+                {
+                    "wandb_research_id": target.study_scope.research_id,
+                    "wandb_study_id": target.study_scope.study_id,
+                }
+                if target.study_scope is not None
+                else {}
+            ),
             "attempt_id": attempt_id,
             "task_id": pair.task_id,
             "harness": pair.harness,
@@ -587,7 +720,11 @@ def _publish_with_weave_sdk(
         attributes = {
             "fugue.publication.schema_version": 1,
             "fugue.publication_id": publication_id,
+            "fugue.evidence.destination_digest": (
+                _require_current_publication_destination(target).destination_digest
+            ),
             "fugue.evidence.source": "canonical_local_result",
+            "fugue.comparison_id": result.comparison_id,
             "fugue.result_digest": result.result_digest,
             "fugue.qualification_digest": result.qualification_digest,
             "fugue.local_manifest_digest": manifest.manifest_digest,
@@ -598,6 +735,14 @@ def _publish_with_weave_sdk(
             "fugue.trial_index": pair.attempt,
             "fugue.candidate_id": str(attempt.identity["candidate"]),
             "fugue.execution_fingerprint": str(attempt.identity["runtime"]),
+            **(
+                {
+                    "wandb.research_id": target.study_scope.research_id,
+                    "wandb.study_id": target.study_scope.study_id,
+                }
+                if target.study_scope is not None
+                else {}
+            ),
         }
         root_inputs = {"dataset_ref": dataset_ref, "task_id": pair.task_id}
         root_output = {
@@ -1084,29 +1229,49 @@ def _read_complete_manifest(
     return manifest, binding
 
 
-def _validate_local_result(
+def verify_comparison_result_local_evidence(
+    result: ComparisonResultV3,
+    manifest_path: Path,
+) -> LocalEvidenceManifestV1:
+    """Recompute and reconcile the local ledger bound by a V3 result.
+
+    This is the network-free verification boundary shared by result display and
+    optional hosted publication.  It deliberately accepts both local-only and
+    dual-chain V3 results: hosted status is irrelevant to whether the canonical
+    local attempt records still match the decision-bearing result.
+    """
+
+    if not isinstance(result, ComparisonResultV3):
+        raise LocalResultPublicationError(
+            "local evidence verification requires ComparisonResultV3"
+        )
+    try:
+        manifest_raw = manifest_path.resolve().read_bytes()
+    except OSError as exc:
+        raise LocalResultPublicationError(
+            "comparison result local evidence manifest is unavailable"
+        ) from exc
+    manifest, local_binding = _read_complete_manifest(
+        manifest_path,
+        manifest_file_sha256=hashlib.sha256(manifest_raw).hexdigest(),
+    )
+    _validate_result_local_evidence_binding(
+        result,
+        manifest,
+        local_binding=local_binding,
+    )
+    return manifest
+
+
+def _validate_result_local_evidence_binding(
     result: ComparisonResultV3,
     manifest: LocalEvidenceManifestV1,
     *,
     local_binding: Mapping[str, Any],
 ) -> tuple[str, ...]:
-    if result.evidence_backend != "local":
-        raise LocalResultPublicationError("comparison result is not local evidence")
-    if result.publication_status != "not_requested":
-        raise LocalResultPublicationError(
-            "canonical local result has an invalid embedded publication status"
-        )
     if result.local_chain_integrity != "reconciled":
         raise LocalResultPublicationError(
             "comparison result local evidence chain is not reconciled"
-        )
-    if result.hosted_chain_integrity != "not_applicable":
-        raise LocalResultPublicationError(
-            "unpublished local result cannot claim hosted evidence integrity"
-        )
-    if result.evidence_topology.result_destination != manifest.destination:
-        raise LocalResultPublicationError(
-            "comparison result and local manifest destinations disagree"
         )
     if result.source != manifest.run_id:
         raise LocalResultPublicationError(
@@ -1162,8 +1327,7 @@ def _validate_local_result(
             )
         if (
             record.prediction_row_sha256 is None
-            or attempt.local_prediction_row_sha256
-            != record.prediction_row_sha256
+            or attempt.local_prediction_row_sha256 != record.prediction_row_sha256
         ):
             raise LocalResultPublicationError(
                 "comparison attempt local prediction digest disagrees with its "
@@ -1209,6 +1373,33 @@ def _validate_local_result(
     if not _HEX_SHA256.fullmatch(result.qualification_digest):
         raise LocalResultPublicationError("comparison qualification digest is invalid")
     return attempts
+
+
+def _validate_local_result(
+    result: ComparisonResultV3,
+    manifest: LocalEvidenceManifestV1,
+    *,
+    local_binding: Mapping[str, Any],
+) -> tuple[str, ...]:
+    if result.evidence_backend != "local":
+        raise LocalResultPublicationError("comparison result is not local evidence")
+    if result.publication_status != "not_requested":
+        raise LocalResultPublicationError(
+            "canonical local result has an invalid embedded publication status"
+        )
+    if result.hosted_chain_integrity != "not_applicable":
+        raise LocalResultPublicationError(
+            "unpublished local result cannot claim hosted evidence integrity"
+        )
+    if result.evidence_topology.result_destination != manifest.destination:
+        raise LocalResultPublicationError(
+            "comparison result and local manifest destinations disagree"
+        )
+    return _validate_result_local_evidence_binding(
+        result,
+        manifest,
+        local_binding=local_binding,
+    )
 
 
 def _validate_outcome(
@@ -1340,12 +1531,57 @@ def _object_from_mapping(raw: Any) -> WeaveHostedObjectRefV1:
 
 def _target_from_mapping(raw: Any) -> WeavePublicationTargetV1:
     value = dict(_mapping(raw, "Weave target"))
-    _strict_fields(value, {"schema_version", "entity", "project"}, "Weave target")
+    required = {"schema_version", "entity", "project"}
+    unknown = set(value) - required - {"study_scope", "destination"}
+    missing = required - set(value)
+    if unknown or missing:
+        details = []
+        if unknown:
+            details.append("unknown " + ", ".join(sorted(unknown)))
+        if missing:
+            details.append("missing " + ", ".join(sorted(missing)))
+        raise ValueError("invalid Weave target: " + "; ".join(details))
+    raw_scope = value.get("study_scope")
+    scope = None
+    if raw_scope is not None:
+        scope_value = dict(_mapping(raw_scope, "Study publication scope"))
+        _strict_fields(
+            scope_value,
+            {"schema_version", "research_id", "study_id"},
+            "Study publication scope",
+        )
+        scope = StudyPublicationScopeV1(
+            schema_version=_literal_one(
+                scope_value["schema_version"], "Study publication scope"
+            ),
+            research_id=str(scope_value["research_id"]),
+            study_id=str(scope_value["study_id"]),
+        )
+    raw_destination = value.get("destination")
+    destination = (
+        evidence_destination_from_dict(
+            _mapping(raw_destination, "Weave publication evidence destination")
+        )
+        if raw_destination is not None
+        else None
+    )
     return WeavePublicationTargetV1(
         schema_version=_literal_one(value["schema_version"], "target"),
         entity=str(value["entity"]),
         project=str(value["project"]),
+        study_scope=scope,
+        destination=destination,
     )
+
+
+def _require_current_publication_destination(
+    target: WeavePublicationTargetV1,
+) -> EvidenceDestinationV1:
+    if target.destination is None:
+        raise LocalResultPublicationError(
+            "new Weave publication requires an endpoint-bound evidence destination"
+        )
+    return target.destination
 
 
 def _object_sort_key(item: WeaveHostedObjectRefV1) -> tuple[str, str]:

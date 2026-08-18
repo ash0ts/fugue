@@ -1,4 +1,4 @@
-schema_version: 1
+schema_version: 2
 id: memory-change-local-v1
 question: Does a prepared AGENTS.md repository map improve grounded navigation of an unfamiliar maintenance fixture?
 taskset:

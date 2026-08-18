@@ -45,6 +45,7 @@ def test_public_command_surface_is_intentionally_small() -> None:
         "approve",
         "result",
         "publish",
+        "study",
         "demo",
         "sandbox",
         "mcp",
@@ -538,6 +539,7 @@ def test_run_preview_reports_missing_governed_asset_without_traceback(
 def test_shell_environment_wins_over_blank_dotenv(tmp_path: Path, monkeypatch) -> None:
     env_file = tmp_path / ".env"
     env_file.write_text("OPENAI_API_KEY=\nWANDB_API_KEY=dotenv-value\n")
+    env_file.chmod(0o600)
     monkeypatch.setenv("OPENAI_API_KEY", "shell-value")
     monkeypatch.setenv("WANDB_API_KEY", "shell-trace")
 
@@ -545,6 +547,28 @@ def test_shell_environment_wins_over_blank_dotenv(tmp_path: Path, monkeypatch) -
 
     assert env["OPENAI_API_KEY"] == "shell-value"
     assert env["WANDB_API_KEY"] == "shell-trace"
+
+
+def test_load_env_rejects_group_or_world_readable_credentials(
+    tmp_path: Path,
+) -> None:
+    env_file = tmp_path / ".env"
+    env_file.write_text("ANTHROPIC_API_KEY=secret\n", encoding="utf-8")
+    env_file.chmod(0o644)
+
+    with pytest.raises(PermissionError, match="chmod 600"):
+        load_env(env_file)
+
+
+def test_load_env_rejects_a_symlinked_credential_file(tmp_path: Path) -> None:
+    target = tmp_path / "private.env"
+    target.write_text("ANTHROPIC_API_KEY=credential\n")
+    target.chmod(0o600)
+    link = tmp_path / ".env"
+    link.symlink_to(target)
+
+    with pytest.raises(ValueError, match="cannot be a symlink"):
+        load_env(link)
 
 
 def test_repo_memory_smoke_preview_uses_per_workload_limits(

@@ -20,6 +20,10 @@ from fugue.bench.library import validate_id
 WANDB_MCP_REFERENCE_STUDY_ID = "wandb-mcp-release"
 WANDB_MCP_REFERENCE_STUDY_VERSION = 1
 WANDB_MCP_REFERENCE_STUDY_INTENT = "python-package-release-qualification"
+WANDB_MCP_LEGACY_REFERENCE_STUDY_VERSION = 2
+WANDB_MCP_LEGACY_REFERENCE_STUDY_INTENT = (
+    "historical-hosted-release-qualification"
+)
 
 
 @dataclass(frozen=True)
@@ -93,7 +97,11 @@ def reference_study_binding_from_dict(raw: Any) -> ReferenceStudyBindingV1:
     return binding
 
 
-def infer_legacy_reference_study(execution: Any) -> ReferenceStudyBindingV1 | None:
+def infer_legacy_reference_study(
+    execution: Any,
+    *,
+    schema_version: int = 1,
+) -> ReferenceStudyBindingV1 | None:
     """Infer the historical W&B MCP adapter without changing old documents.
 
     The legacy quartet already uniquely identifies this reference study.  The
@@ -107,12 +115,14 @@ def infer_legacy_reference_study(execution: Any) -> ReferenceStudyBindingV1 | No
         "release_notes_lock",
         "mechanism_receipt",
     )
-    if not any(getattr(execution, field, None) for field in legacy_fields):
+    if schema_version != 1 or not all(
+        getattr(execution, field, None) for field in legacy_fields
+    ):
         return None
     return ReferenceStudyBindingV1(
         id=WANDB_MCP_REFERENCE_STUDY_ID,
-        version=WANDB_MCP_REFERENCE_STUDY_VERSION,
-        intent=WANDB_MCP_REFERENCE_STUDY_INTENT,
+        version=WANDB_MCP_LEGACY_REFERENCE_STUDY_VERSION,
+        intent=WANDB_MCP_LEGACY_REFERENCE_STUDY_INTENT,
     )
 
 
@@ -135,6 +145,11 @@ def _adapter_module(binding: ReferenceStudyBindingV1) -> str:
             WANDB_MCP_REFERENCE_STUDY_ID,
             WANDB_MCP_REFERENCE_STUDY_VERSION,
             WANDB_MCP_REFERENCE_STUDY_INTENT,
+        ): "fugue.reference_studies.wandb_mcp_qualification",
+        (
+            WANDB_MCP_REFERENCE_STUDY_ID,
+            WANDB_MCP_LEGACY_REFERENCE_STUDY_VERSION,
+            WANDB_MCP_LEGACY_REFERENCE_STUDY_INTENT,
         ): "fugue.reference_studies.wandb_mcp_qualification",
     }
     key = (binding.id, binding.version, binding.intent)

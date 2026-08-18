@@ -5,10 +5,14 @@ Skill is a real versioned candidate asset; its assignment and observed use are
 mechanism evidence, while deterministic task correctness remains the outcome.
 The matrix contains eight logical cells.
 
-Copy `.env.example` to `.env`, add `ANTHROPIC_API_KEY`, then run:
+Create a private credential file, add `ANTHROPIC_API_KEY`, then run:
 
 ```bash
-fugue doctor
+install -m 600 .env.example .env
+```
+
+```bash
+fugue doctor --require local-runner --model anthropic/claude-sonnet-5 --env-file .env
 fugue check comparison.yaml --env-file .env
 fugue compare comparison.yaml --prepare --env-file .env
 fugue compare comparison.yaml --preview --env-file .env --json > preview.json

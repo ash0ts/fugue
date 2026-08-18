@@ -197,6 +197,9 @@ _.on_job_end
 # Supported public analysis/builders.
 factorial_difference_in_differences
 build_trace_selection
+# Pre-standalone callers may still import the original workspace-provenance
+# schema constant. New artifacts use STUDY_WORKSPACE_PROVENANCE_SCHEMA_VERSION.
+SOURCE_PROVENANCE_SCHEMA_VERSION
 # Imported by the checked-in zero-model MCP qualification entrypoints under
 # examples/comparisons/wandb-mcp-maintenance/.
 qualify_locked_mcp_revisions

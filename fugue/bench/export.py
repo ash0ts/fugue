@@ -1914,7 +1914,7 @@ class GeneratedEvaluationCoordinator:
         candidates = _publication_candidates(planned_rows) if planned_rows else []
         scopes: dict[str, tuple[str, str, list[dict[str, Any]]]] = {}
         for candidate in candidates:
-            dataset_id = _stable_digest(
+            dataset_content_digest = _stable_digest(
                 {
                     "schema_version": 1,
                     "evaluation_scope_id": candidate["evaluation_scope_id"],
@@ -1922,9 +1922,28 @@ class GeneratedEvaluationCoordinator:
                 }
             )
             for row in candidate["rows"]:
-                scopes[str(row["attempt_id"])] = (
-                    str(candidate["evaluation_scope_id"]),
-                    dataset_id,
+                attempt_id = str(row["attempt_id"])
+                scopes[attempt_id] = (
+                    _stable_digest(
+                        {
+                            "schema_version": 1,
+                            "record_type": "local_evaluation_record",
+                            "run_id": str(row["run_id"]),
+                            "attempt_id": attempt_id,
+                            "source_evaluation_scope_id": candidate[
+                                "evaluation_scope_id"
+                            ],
+                        }
+                    ),
+                    _stable_digest(
+                        {
+                            "schema_version": 1,
+                            "record_type": "local_dataset_manifest",
+                            "run_id": str(row["run_id"]),
+                            "attempt_id": attempt_id,
+                            "dataset_content_digest": dataset_content_digest,
+                        }
+                    ),
                     list(candidate["dataset_examples"]),
                 )
         agent_cells = tuple(

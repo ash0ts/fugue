@@ -7,7 +7,6 @@ from collections.abc import Mapping
 from dataclasses import asdict, dataclass
 from pathlib import Path
 from typing import Any, Literal
-from urllib.parse import urlparse
 
 from fugue.bench.candidates import stable_digest
 from fugue.bench.files import atomic_write_json
@@ -29,7 +28,6 @@ _COMPONENT_FIELDS = {
 }
 _HEX_40 = re.compile(r"^[0-9a-f]{40}$")
 _HEX_64 = re.compile(r"^[0-9a-f]{64}$")
-_RELEASE_TRACKED_MCP_REPOSITORY_NAME = "wandb-mcp-server"
 
 
 @dataclass(frozen=True)
@@ -83,14 +81,10 @@ def build_intervention_component_lock(
         raise ValueError(
             "intervention component requires full source commit and tree identities"
         )
-    release_tracked_mcp = (
-        normalized_kind == "mcp" and is_release_tracked_mcp_repository(repo)
-    )
-    if release_tracked_mcp and not release_requalification_required:
-        raise ValueError(
-            "an intervention in the release-tracked W&B MCP repository must "
-            "invalidate the exact package-release candidate"
-        )
+    # Repository-specific release policy belongs to the reference study or
+    # user-authored workflow that owns that release.  The generic lock records
+    # an explicitly declared impact; it does not infer one from a repository
+    # name or URL.
     if release_requalification_required:
         if normalized_kind != "mcp":
             raise ValueError(
@@ -264,12 +258,3 @@ def _canonical_repository(value: str) -> str:
             "ssh://git@github.com/"
         )
     return text.removesuffix(".git")
-
-
-def is_release_tracked_mcp_repository(repository: str) -> bool:
-    """Recognize the upstream repository and ordinary GitHub forks."""
-
-    parsed = urlparse(repository)
-    if parsed.hostname != "github.com":
-        return False
-    return Path(parsed.path).name == _RELEASE_TRACKED_MCP_REPOSITORY_NAME

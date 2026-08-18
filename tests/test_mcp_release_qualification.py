@@ -43,6 +43,9 @@ from fugue.bench.mcp_release_qualification import (
     validate_release_notes_lock,
 )
 from fugue.model_plane import EvidenceDestinationV1
+from fugue.reference_studies.wandb_mcp_qualification import (
+    validate_release_candidate_binding,
+)
 from fugue.research.comparisons import ComparisonRegistry
 
 EXAMPLE = Path("examples/comparisons/wandb-mcp-maintenance")
@@ -110,7 +113,7 @@ def test_release_decision_candidate_sha_binds_release_notes_and_mcp_lock(
         encoding="utf-8",
     )
 
-    comparison_module._validate_release_candidate_binding(
+    validate_release_candidate_binding(
         spec,
         release_notes={"commit": candidate_sha},
         repo_root=tmp_path,
@@ -124,13 +127,13 @@ def test_release_decision_candidate_sha_binds_release_notes_and_mcp_lock(
         ),
     )
     with pytest.raises(ValueError, match="release-notes lock"):
-        comparison_module._validate_release_candidate_binding(
+        validate_release_candidate_binding(
             drifted,
             release_notes={"commit": candidate_sha},
             repo_root=tmp_path,
         )
     with pytest.raises(ValueError, match="candidate MCP lock"):
-        comparison_module._validate_release_candidate_binding(
+        validate_release_candidate_binding(
             drifted,
             release_notes={"commit": "0" * 40},
             repo_root=tmp_path,
@@ -653,6 +656,7 @@ def test_evidence_lock_rejects_wrong_weave_object_version_name() -> None:
 def _preparation_env(tmp_path: Path) -> Path:
     path = tmp_path / ".env"
     path.write_text("WANDB_API_KEY=unit-test-key\n", encoding="utf-8")
+    path.chmod(0o600)
     return path
 
 
@@ -835,6 +839,7 @@ def test_zero_model_verifier_reads_only_source_and_redacts_key(
     evidence_lock.write_text(json.dumps(lock), encoding="utf-8")
     env_file = tmp_path / ".env"
     env_file.write_text("WANDB_API_KEY=secret-verifier-key\n", encoding="utf-8")
+    env_file.chmod(0o600)
     output = tmp_path / "source-conformance.json"
     roots, children = _source_call_snapshot(lock)
     captured = {}
@@ -891,6 +896,7 @@ def test_mechanism_receipt_keeps_public_endpoint_but_redacts_api_key(
     env_file = tmp_path / ".env"
     api_key = "secret-mechanism-key"
     env_file.write_text(f"WANDB_API_KEY={api_key}\n", encoding="utf-8")
+    env_file.chmod(0o600)
     output = tmp_path / "mechanism.json"
     captured = {}
 

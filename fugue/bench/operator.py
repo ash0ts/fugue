@@ -6,6 +6,7 @@ import json
 import os
 import shutil
 import signal
+import stat
 import sys
 import threading
 import time
@@ -132,7 +133,8 @@ from fugue.bench.run_conformance import (
 from fugue.bench.runtime_manager import prepare_runtime, runtime_ready, runtime_spec
 from fugue.bench.runtime_provenance import (
     resolve_fugue_distribution_provenance,
-    resolve_fugue_source_provenance,
+    resolve_study_workspace_provenance,
+    study_workspace_provenance,
 )
 from fugue.bench.scoring import (
     read_intervention_selection_lock,
@@ -1176,7 +1178,7 @@ class OperatorService:
         )
         if recomputed.to_dict() != stored_snapshot:
             raise ValueError("resume run snapshot no longer matches exact inputs")
-        source = recomputed.runtime.get("fugue_source") or {}
+        source = study_workspace_provenance(recomputed.runtime) or {}
         cells = tuple(
             replace(
                 cell,
@@ -1876,7 +1878,7 @@ class OperatorService:
         requested_systems = list(request.systems) or (
             _request_variant_system_ids(selected, request) if request.variants else None
         )
-        source_provenance = resolve_fugue_source_provenance(self.repo_root)
+        study_workspace = resolve_study_workspace_provenance(self.repo_root)
         for workload in workloads:
             if workload.runner == "harbor":
                 manifest_path = _resolve(
@@ -1951,7 +1953,7 @@ class OperatorService:
                             scorer_reference(item) for item in workload.scorers
                         ],
                         asset_overlay=asset_overlay,
-                        source_provenance=source_provenance,
+                        study_workspace_provenance=study_workspace,
                         scheduling_seed=preset.scheduling_seed,
                     )
                 )
@@ -1965,7 +1967,7 @@ class OperatorService:
                         run_name=run_name,
                         request=request,
                         run_id=run_id,
-                        source_provenance=source_provenance,
+                        study_workspace_provenance=study_workspace,
                     )
                 )
         _validate_selection_lock_jobs(
@@ -1994,7 +1996,7 @@ class OperatorService:
         run_name: str,
         request: ExperimentRequest,
         run_id: str,
-        source_provenance: dict[str, Any],
+        study_workspace_provenance: dict[str, Any],
     ) -> list[RenderedJob]:
         if not workload.dataset:
             raise ValueError(f"workload {workload.id} requires dataset")
@@ -2198,7 +2200,7 @@ class OperatorService:
                         else {}
                     ),
                     "scheduling_seed": preset.scheduling_seed,
-                    "fugue_source": source_provenance,
+                    "study_workspace": study_workspace_provenance,
                     "fugue_distribution": resolve_fugue_distribution_provenance(),
                 },
             )
@@ -2457,7 +2459,7 @@ class OperatorService:
                         else ""
                     ),
                 )
-                source_state = run_snapshot.runtime.get("fugue_source") or {}
+                source_state = study_workspace_provenance(run_snapshot.runtime) or {}
                 initial_cells = [
                     replace(
                         cell,
@@ -4034,8 +4036,18 @@ def _experiment_with_request_overrides(
 
 def load_env(path: Path) -> dict[str, str]:
     env = os.environ.copy()
+    if path.is_symlink():
+        raise ValueError(f"credential environment path cannot be a symlink: {path}")
     if not path.exists():
         return env
+    metadata = path.stat()
+    if not stat.S_ISREG(metadata.st_mode):
+        raise ValueError(f"credential environment path is not a regular file: {path}")
+    if os.name != "nt" and metadata.st_mode & 0o077:
+        raise PermissionError(
+            "credential environment file must not be accessible by group or "
+            f"other users (run `chmod 600 {path}`)"
+        )
     for line in path.read_text().splitlines():
         stripped = line.strip()
         if not stripped or stripped.startswith("#") or "=" not in stripped:
@@ -4586,7 +4598,7 @@ def _request_with_selection_lock(
             raise ValueError(
                 "intervention selection lock belongs to a different experiment"
             )
-        current_source = resolve_fugue_source_provenance(repo_root)
+        current_source = resolve_study_workspace_provenance(repo_root)
         if (
             str(current_source.get("commit") or "") != intervention.source_commit
             or str(current_source.get("tree") or "") != intervention.source_tree
@@ -4595,7 +4607,8 @@ def _request_with_selection_lock(
             != intervention.source_dirty_digest
         ):
             raise ValueError(
-                "intervention selection lock source tree differs from this clean checkout"
+                "intervention selection lock study workspace differs from this "
+                "clean checkout"
             )
         task_suite_digests = {
             value.removeprefix("task-suite:")

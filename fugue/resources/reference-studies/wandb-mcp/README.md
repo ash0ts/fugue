@@ -14,14 +14,17 @@ release.
 
 ## Prepare and run locally
 
-Install the local runner and MCP preparation support:
+Install the local runner, MCP integration support, and the Weave SDK that
+trusted preparation uses to freeze the hosted source evidence:
 
 ```bash
 python -m pip install "fugue[local-runner,mcp,weave]"
 ```
 
-Resolve the moving staging branch twice, freeze the exact commit and tree,
-materialize the packaged study, and lock both MCP runtimes outside trials:
+Run the preparation command. It observes `staging/0.4.0` before it fetches the
+candidate. It materializes and locks the packaged study. It then observes the
+branch again. If the two observations differ, Fugue publishes no reference
+lock.
 
 ```bash
 fugue mcp prepare-wandb-release \
@@ -48,19 +51,22 @@ fugue compare "$COMPARISON" \
 fugue result latest
 ```
 
-`WANDB_API_KEY` authenticates the read-only hosted-source freeze and the two
-locked MCP servers because W&B is the integration under test. Preparation
-fails rather than seeding, repairing, or silently accepting drift in that
-source. Fugue writes its canonical result evidence locally and does not use
-W&B or Weave as its result backend. The selected model route requires
-`ANTHROPIC_API_KEY`. Credential values and the host-only private labels are
-never copied into task inputs, locks, traces, results, or CI artifacts.
+During trusted preparation, the reference-study adapter uses `WANDB_API_KEY`
+to freeze the read-only hosted source evidence. During trials, the tested MCP
+servers use the same credential to query W&B. Fugue writes canonical evidence
+to its local ledger; that ledger does not use the W&B credential. Preparation
+fails rather than seeding, repairing, or silently accepting drift in the
+source project. The selected model route requires `ANTHROPIC_API_KEY`.
+Credential values and the host-only private labels are never copied into task
+inputs, locks, traces, results, or CI artifacts.
 
 If desired, publish the unchanged completed result after the fact:
 
 ```bash
 fugue publish weave /path/to/result.json \
   --project ENTITY/PROJECT \
+  --research-id wandb-mcp-0-4-qualification-v1 \
+  --study-id wandb-mcp-staging-canary-v1 \
   --env-file /path/to/.env
 ```
 

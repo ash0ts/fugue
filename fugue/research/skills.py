@@ -1,18 +1,20 @@
 from __future__ import annotations
 
 import shutil
+from importlib.resources import as_file, files
+from importlib.resources.abc import Traversable
 from pathlib import Path
 
 SKILL_NAME = "optimize-agent-with-fugue"
 
 
-def skill_directory() -> Path:
-    path = (
-        Path(__file__).resolve().parents[1] / "resources" / "agent-skills" / SKILL_NAME
+def skill_directory() -> Traversable:
+    resource = (
+        files("fugue").joinpath("resources", "agent-skills", SKILL_NAME)
     )
-    if not (path / "SKILL.md").is_file():
+    if not resource.joinpath("SKILL.md").is_file():
         raise RuntimeError("packaged Fugue Agent Skill is unavailable")
-    return path
+    return resource
 
 
 def export_skill(destination: Path) -> Path:
@@ -24,5 +26,6 @@ def export_skill(destination: Path) -> Path:
             )
     else:
         target.mkdir(parents=True)
-    shutil.copytree(skill_directory(), target, dirs_exist_ok=True)
+    with as_file(skill_directory()) as source:
+        shutil.copytree(source, target, dirs_exist_ok=True)
     return target

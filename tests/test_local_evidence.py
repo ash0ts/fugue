@@ -4,6 +4,7 @@ import ast
 import hashlib
 import json
 from concurrent.futures import ThreadPoolExecutor
+from dataclasses import replace
 from pathlib import Path
 from typing import Any
 
@@ -16,10 +17,13 @@ from fugue.bench.local_evidence import (
     LocalArtifactRefV1,
     LocalAttemptPlanV1,
     LocalEvidenceCoordinator,
+    LocalEvidenceDestinationV1,
     LocalEvidenceIntegrityError,
+    LocalEvidenceRunPlanV1,
     LocalEvidenceStore,
     build_local_evidence_run_plan,
     local_evidence_run_plan_from_dict,
+    local_result_row_projection_digest,
 )
 
 
@@ -50,9 +54,15 @@ def _attempt(
             {"record_type": "prediction", "attempt_id": canonical_id}
         ),
         evaluation_scope_id=stable_digest(
-            {"evaluation": run_id, "candidate": candidate_id}
+            {
+                "evaluation": run_id,
+                "candidate": candidate_id,
+                "attempt_id": canonical_id,
+            }
         ),
-        dataset_id=stable_digest({"dataset": run_id}),
+        dataset_id=stable_digest(
+            {"dataset": run_id, "attempt_id": canonical_id}
+        ),
     )
 
 
@@ -259,6 +269,78 @@ def test_strict_run_plan_reader_rejects_unknown_fields_and_drift(
         local_evidence_run_plan_from_dict(drifted)
 
 
+@pytest.mark.parametrize(
+    ("field", "kind"),
+    [
+        ("evaluation_scope_id", "evaluation_root"),
+        ("dataset_id", "dataset"),
+    ],
+)
+def test_new_run_plan_rejects_cross_attempt_evidence_refs(
+    field: str,
+    kind: str,
+) -> None:
+    run_id = "duplicate-local-ref-run"
+    first = _attempt(
+        run_id=run_id,
+        task_id="task-a",
+        arm="same-candidate",
+        index=1,
+    )
+    second = _attempt(
+        run_id=run_id,
+        task_id="task-b",
+        arm="same-candidate",
+        index=2,
+    )
+    second = replace(second, **{field: getattr(first, field)})
+
+    with pytest.raises(
+        ValueError,
+        match=rf"one unique {kind} ref per logical attempt",
+    ):
+        build_local_evidence_run_plan(
+            run_id=run_id,
+            run_snapshot_sha256=stable_digest({"snapshot": run_id}),
+            evaluation_asset_lock_sha256=stable_digest({"assets": run_id}),
+            attempts=(first, second),
+        )
+
+
+def test_legacy_shared_scope_plan_remains_readable() -> None:
+    run_id = "legacy-shared-local-evidence"
+    first = _attempt(
+        run_id=run_id,
+        task_id="task-a",
+        arm="same-candidate",
+        index=1,
+    )
+    second = _attempt(
+        run_id=run_id,
+        task_id="task-b",
+        arm="same-candidate",
+        index=2,
+    )
+    second = replace(
+        second,
+        evaluation_scope_id=first.evaluation_scope_id,
+        dataset_id=first.dataset_id,
+    )
+    legacy = LocalEvidenceRunPlanV1(
+        run_id=run_id,
+        destination=LocalEvidenceDestinationV1(),
+        run_snapshot_sha256=stable_digest({"snapshot": run_id}),
+        evaluation_asset_lock_sha256=stable_digest({"assets": run_id}),
+        attempts=tuple(sorted((first, second), key=lambda item: item.attempt_id)),
+        require_run_conformance=False,
+        evidence_cardinality="legacy_shared_scope_v1",
+    )
+    raw = legacy.to_dict()
+
+    assert "evidence_cardinality" not in raw
+    assert local_evidence_run_plan_from_dict(raw) == legacy
+
+
 def test_terminal_attempt_is_exactly_once_and_idempotent(tmp_path: Path) -> None:
     coordinator, (attempt,) = _coordinator(tmp_path)
     record = _finish(coordinator, tmp_path, attempt)
@@ -402,6 +484,10 @@ def test_tampered_run_conformance_fails_manifest_recomputation(
     [
         ({"private_labels": {"answer": "host-only"}}, "private or credential"),
         ({"answer": "contains local-secret-value"}, "configured secret value"),
+        (
+            {"answer": "unexpected sk-unconfiguredtokenvalue123456"},
+            "token-shaped credential",
+        ),
     ],
 )
 def test_private_truth_and_secret_values_fail_closed(
@@ -425,6 +511,72 @@ def test_private_truth_and_secret_values_fail_closed(
             scores={"answer_correct": 1},
             agent_receipt=_agent_receipt(tmp_path, attempt),
         )
+
+
+def test_final_manifest_rescans_canonical_artifacts_for_token_shapes(
+    tmp_path: Path,
+) -> None:
+    coordinator, (attempt,) = _coordinator(tmp_path)
+    coordinator.begin_attempt(attempt.attempt_id)
+    coordinator.finish_attempt(
+        attempt.attempt_id,
+        terminal_status="passed",
+        prediction_row=_prediction(attempt),
+        scores={"answer_correct": 1},
+        agent_receipt=_agent_receipt(tmp_path, attempt),
+        attempt_payload={
+            "receipts": {
+                name: {"status": "passed"}
+                for name in ("privacy", "policy", "usage", "cleanup")
+            }
+        },
+    )
+    record = coordinator.store.read_attempt(attempt.attempt_id)
+    prediction_node = next(
+        node for node in record.nodes if node.kind == "prediction"
+    )
+    assert prediction_node.artifact is not None
+    prediction_path = coordinator.store.root / prediction_node.artifact.path
+    prediction = json.loads(prediction_path.read_text(encoding="utf-8"))
+    prediction["answer"] = "unexpected sk-unconfiguredtokenvalue123456"
+    prediction_path.write_text(
+        json.dumps(prediction, sort_keys=True) + "\n",
+        encoding="utf-8",
+    )
+    prediction_raw = prediction_path.read_bytes()
+    replacement_artifact = replace(
+        prediction_node.artifact,
+        sha256=hashlib.sha256(prediction_raw).hexdigest(),
+        size_bytes=len(prediction_raw),
+    )
+    replacement_nodes = tuple(
+        replace(node, artifact=replacement_artifact)
+        if node.kind == "prediction"
+        else node
+        for node in record.nodes
+    )
+    replacement_record = replace(
+        record,
+        nodes=replacement_nodes,
+        prediction_row_sha256=stable_digest(prediction),
+        result_row_projection_digest=local_result_row_projection_digest(prediction),
+        record_digest="",
+    )
+    record_path = (
+        coordinator.store.root
+        / "attempt-records"
+        / f"{attempt.attempt_id}.json"
+    )
+    record_path.write_text(
+        json.dumps(replacement_record.to_dict(), sort_keys=True) + "\n",
+        encoding="utf-8",
+    )
+
+    with pytest.raises(
+        LocalEvidenceIntegrityError,
+        match="failed its final privacy scan",
+    ):
+        coordinator.finalize()
 
 
 def test_missing_agent_evidence_is_invalid_not_a_fake_call(tmp_path: Path) -> None:
@@ -497,7 +649,7 @@ def test_concurrent_attempts_do_not_cross_link(tmp_path: Path) -> None:
         )
 
 
-def test_same_candidate_attempts_share_scope_without_cross_linking_artifacts(
+def test_same_candidate_attempts_have_five_attempt_scoped_evidence_records(
     tmp_path: Path,
 ) -> None:
     run_id = "same-candidate-local-run"
@@ -535,10 +687,13 @@ def test_same_candidate_attempts_share_scope_without_cross_linking_artifacts(
         {node.kind: node for node in record.nodes}
         for record in records
     ]
-    # Dataset and Evaluation scope are intentionally candidate-level.
-    assert nodes[0]["dataset"].ref == nodes[1]["dataset"].ref
-    assert nodes[0]["evaluation_root"].ref == nodes[1]["evaluation_root"].ref
-    for kind in ("prediction_and_score", "prediction", "agent_root"):
+    for kind in (
+        "evaluation_root",
+        "prediction_and_score",
+        "prediction",
+        "agent_root",
+        "dataset",
+    ):
         assert nodes[0][kind].ref != nodes[1][kind].ref
         assert nodes[0][kind].artifact != nodes[1][kind].artifact
     for index, record in enumerate(records):
@@ -550,6 +705,23 @@ def test_same_candidate_attempts_share_scope_without_cross_linking_artifacts(
         assert other.attempt.attempt_id not in by_kind["prediction_and_score"].ref
         assert other.attempt.attempt_id not in by_kind["agent_root"].ref
         assert other.attempt.prediction_id not in by_kind["prediction"].ref
+        assert record.attempt.attempt_id in by_kind["evaluation_root"].artifact.path
+        assert record.attempt.attempt_id in by_kind["dataset"].artifact.path
+        evaluation_record = json.loads(
+            (
+                coordinator.store.root
+                / by_kind["evaluation_root"].artifact.path
+            ).read_text(encoding="utf-8")
+        )
+        dataset_manifest = json.loads(
+            (
+                coordinator.store.root / by_kind["dataset"].artifact.path
+            ).read_text(encoding="utf-8")
+        )
+        assert evaluation_record["record_type"] == "local_evaluation_record"
+        assert evaluation_record["attempt_id"] == record.attempt.attempt_id
+        assert dataset_manifest["record_type"] == "local_dataset_manifest"
+        assert dataset_manifest["attempt_id"] == record.attempt.attempt_id
         transcript_path = record.agent_receipt.transcript_artifact
         assert transcript_path is not None
         assert record.attempt.attempt_id in transcript_path.path

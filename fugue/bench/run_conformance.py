@@ -14,7 +14,7 @@ import httpx
 
 from fugue.bench.files import atomic_write_json
 from fugue.model_plane import trace_api_key
-from fugue.redaction import redact_value, secrets_from_env
+from fugue.redaction import redact_text, redact_value, secrets_from_env
 from fugue.weave_support import WEAVE_AGENTS_BASE_URL
 
 if TYPE_CHECKING:
@@ -353,10 +353,10 @@ def write_harbor_run_conformance_receipt(
                 "it does not infer unknown private values from output text."
             ),
             (
-                "The secret-value scan covers only the exact local run directory "
-                "and rendered Harbor job artifact directories. It does not inspect "
-                "hosted Weave objects, external services, or removed container "
-                "filesystems."
+                "The privacy scan checks configured secret values and token-shaped "
+                "text only in the exact local run directory and rendered Harbor "
+                "job artifact directories. It does not inspect hosted Weave "
+                "objects, external services, or removed container filesystems."
             ),
             (
                 "The cleanup audit covers only Docker Compose projects derived "
@@ -1246,24 +1246,6 @@ def _scan_run_artifacts(  # noqa: C901 - one bounded audit reports every gap
     jobs: Sequence[RenderedJob],
     secrets: Sequence[str],
 ) -> dict[str, Any]:
-    if not secrets:
-        return {
-            "status": "unavailable",
-            "reason": "no configured secret values were available to verify",
-            "scope": {
-                "kind": "exact_local_run_artifacts",
-                "included": [],
-                "excluded": [
-                    "hosted Weave objects",
-                    "external services",
-                    "removed container filesystems",
-                ],
-            },
-            "configured_sensitive_value_count": 0,
-            "files_scanned": 0,
-            "bytes_scanned": 0,
-            "files_with_matches": [],
-        }
     roots: set[Path] = {run_dir}
     errors: list[str] = []
     runtime_root = (repo_root / ".fugue" / "runtime").resolve()
@@ -1320,13 +1302,22 @@ def _scan_run_artifacts(  # noqa: C901 - one bounded audit reports every gap
         except OSError:
             errors.append(f"could not read {_safe_path(path, repo_root)}")
             continue
-        count = sum(content.count(secret) for secret in secret_bytes)
+        configured_count = sum(content.count(secret) for secret in secret_bytes)
+        text = content.decode("utf-8", errors="ignore")
+        redacted = redact_text(text)
+        token_shape_count = max(
+            redacted.count("[redacted]") - text.count("[redacted]"),
+            0,
+        )
+        count = configured_count + token_shape_count
         scanned += 1
         if count:
             matched.append(
                 {
                     "path": _safe_path(path, repo_root),
                     "match_count": count,
+                    "configured_value_match_count": configured_count,
+                    "token_shape_match_count": token_shape_count,
                 }
             )
     status: ReceiptStatus
@@ -1348,6 +1339,7 @@ def _scan_run_artifacts(  # noqa: C901 - one bounded audit reports every gap
             ],
         },
         "configured_sensitive_value_count": len(secrets),
+        "token_shape_detector": "fugue.redaction.redact_text",
         "files_scanned": scanned,
         "bytes_scanned": total_bytes,
         "files_with_matches": matched,

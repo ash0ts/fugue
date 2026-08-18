@@ -5,6 +5,7 @@ import asyncio
 import json
 import os
 import sys
+import tempfile
 import time
 import webbrowser
 from collections.abc import Mapping
@@ -222,6 +223,34 @@ def _parser() -> FugueArgumentParser:
     result.add_argument("--repo-root", type=Path, default=Path.cwd())
     result.set_defaults(handler=_comparison_result)
 
+    study = subparsers.add_parser(
+        "study", help="Build a local index of immutable comparison results"
+    )
+    study_actions = study.add_subparsers(
+        dest="study_action", metavar="ACTION", required=True
+    )
+    study_index = study_actions.add_parser(
+        "index",
+        help="Build one digest-bound Research index from published local results",
+    )
+    study_index.add_argument("--research-id", required=True)
+    study_index.add_argument("--title", required=True)
+    study_index.add_argument("--objective", required=True)
+    study_index.add_argument(
+        "--source",
+        action="append",
+        nargs=2,
+        required=True,
+        metavar=("RESULT", "WEAVE_RECEIPT"),
+        help=(
+            "Add one exact ComparisonResultV3 and its scoped Weave publication "
+            "receipt; repeat for each Study."
+        ),
+    )
+    study_index.add_argument("--output", type=Path)
+    _add_common_args(study_index, json_output=True)
+    study_index.set_defaults(handler=_study_index)
+
     publish_command = subparsers.add_parser(
         "publish", help="Publish an unchanged canonical local result"
     )
@@ -233,10 +262,32 @@ def _parser() -> FugueArgumentParser:
     )
     publish_weave.add_argument("result", type=Path)
     publish_weave.add_argument("--project", required=True, metavar="ENTITY/PROJECT")
+    publish_weave.add_argument(
+        "--research-id",
+        help=(
+            "Attach this published evidence to one Research collection. "
+            "Requires --study-id or uses the result comparison id."
+        ),
+    )
+    publish_weave.add_argument(
+        "--study-id",
+        help="Stable Study id within --research-id",
+    )
     publish_weave.add_argument("--manifest", type=Path, help=argparse.SUPPRESS)
     publish_weave.add_argument("--receipt", type=Path)
     _add_common_args(publish_weave, json_output=True)
     publish_weave.set_defaults(handler=_publish_local_result)
+    publish_index = publish_actions.add_parser(
+        "wandb-index",
+        help=(
+            "Publish an unchanged Research index as a W&B index Run and Artifact"
+        ),
+    )
+    publish_index.add_argument("index", type=Path)
+    publish_index.add_argument("--project", required=True, metavar="ENTITY/PROJECT")
+    publish_index.add_argument("--receipt", type=Path)
+    _add_common_args(publish_index, json_output=True)
+    publish_index.set_defaults(handler=_publish_research_index)
 
     demo = subparsers.add_parser(
         "demo", help="Run a deterministic no-key comparison replay"
@@ -881,10 +932,16 @@ def _doctor(args: argparse.Namespace) -> int:
         distribution = report["distribution"]
         readiness = report["readiness"]
         assets_ready = readiness["requirements"]["packaged_assets"]["ready"]
+        assets_detail = readiness["requirements"]["packaged_assets"]["detail"]
         table.add_row(
             "distribution",
             "ready" if assets_ready else "invalid",
             f"fugue {distribution['version']} · {distribution['digest'][:12]}",
+        )
+        table.add_row(
+            "packaged assets",
+            "ready" if assets_ready else "invalid",
+            assets_detail,
         )
         if readiness["mode"] == "required":
             table.add_row(
@@ -948,11 +1005,22 @@ def _comparison_prepare(
         print(json.dumps(payload, indent=2, sort_keys=True))
     else:
         _print_comparison_readiness_dict(preview.readiness)
+        treatment_identities = _comparison_preview_treatment_identities(
+            preview.matrix
+        )
+        prepared_summary = Text()
+        prepared_summary.append(receipt["receipt_digest"], style="bold")
+        prepared_summary.append(
+            f"\n{receipt_path.relative_to(root)}\n"
+            f"Final preview: {preview.preview_digest}"
+        )
+        _append_comparison_preview_treatment_identities(
+            prepared_summary,
+            treatment_identities,
+        )
         CONSOLE.print(
             Panel(
-                f"[bold]{receipt['receipt_digest']}[/]\n"
-                f"{receipt_path.relative_to(root)}\n"
-                f"Final preview: {preview.preview_digest}",
+                prepared_summary,
                 title="Prepared comparison",
                 border_style="fugue.cyan",
             )
@@ -1024,11 +1092,22 @@ def _comparison_compare(args: argparse.Namespace) -> int:
         else:
             _print_comparison_readiness_dict(preview.readiness)
             if preview_usable:
+                treatment_identities = _comparison_preview_treatment_identities(
+                    preview.matrix
+                )
+                preview_summary = Text()
+                preview_summary.append(preview.preview_digest, style="bold")
+                preview_summary.append(
+                    f"\n{preview.matrix['estimated_trials']} aligned attempts\n"
+                    "This exact digest is eligible for human approval."
+                )
+                _append_comparison_preview_treatment_identities(
+                    preview_summary,
+                    treatment_identities,
+                )
                 CONSOLE.print(
                     Panel(
-                        f"[bold]{preview.preview_digest}[/]\n"
-                        f"{preview.matrix['estimated_trials']} aligned attempts\n"
-                        "This exact digest is eligible for human approval.",
+                        preview_summary,
                         title="Exact preview",
                         border_style="fugue.cyan",
                     )
@@ -1144,7 +1223,45 @@ def _comparison_compare(args: argparse.Namespace) -> int:
     )
 
 
+def _comparison_preview_treatment_identities(
+    matrix: Mapping[str, Any],
+) -> tuple[tuple[str, str, str, str], ...]:
+    """Return presentation rows from the preview's canonical matrix cells."""
+
+    rows: set[tuple[str, str, str, str]] = set()
+    matrix_cells = matrix.get("matrix_cells")
+    if not isinstance(matrix_cells, list | tuple):
+        return ()
+    for raw_cell in matrix_cells:
+        if not isinstance(raw_cell, Mapping):
+            continue
+        candidate_id = str(raw_cell.get("candidate_id") or "")
+        if not candidate_id:
+            continue
+        variant_id = str(raw_cell.get("variant_id") or "")
+        variant_label = str(
+            raw_cell.get("variant_label") or variant_id or "Unlabelled treatment"
+        )
+        harness = str(raw_cell.get("harness") or "unknown harness")
+        rows.add((variant_label, variant_id, harness, candidate_id))
+    return tuple(sorted(rows, key=lambda row: (row[1], row[2], row[3], row[0])))
+
+
+def _append_comparison_preview_treatment_identities(
+    target: Text,
+    identities: tuple[tuple[str, str, str, str], ...],
+) -> None:
+    if not identities:
+        return
+    target.append("\n\nTreatment identities", style="bold")
+    for variant_label, variant_id, harness, candidate_id in identities:
+        target.append(
+            f"\n- {variant_label} ({variant_id}; {harness}): {candidate_id}"
+        )
+
+
 def _comparison_approve(args: argparse.Namespace) -> int:
+    from fugue.bench.comparison import prepared_candidate_definitions
     from fugue.research.approvals import ApprovalLedger
     from fugue.research.store import StudyStore
 
@@ -1152,6 +1269,10 @@ def _comparison_approve(args: argparse.Namespace) -> int:
         raise ValueError("--max-cells must be positive")
     store = StudyStore(args.repo_root.resolve())
     operation_id = args.operation_id or f"approve-{args.preview_digest[:20]}"
+    candidate_definitions = prepared_candidate_definitions(
+        args.preview_digest,
+        repo_root=args.repo_root.resolve(),
+    )
     approval = ApprovalLedger(store.path).approve(
         subject_kind="experiment",
         preview_digest=args.preview_digest,
@@ -1160,13 +1281,23 @@ def _comparison_approve(args: argparse.Namespace) -> int:
         approved_by=args.approved_by,
         operation_id=operation_id,
         expires_in_seconds=args.expires_in,
+        candidate_definitions=candidate_definitions,
     )
     print(json.dumps(approval.to_dict(), indent=2, sort_keys=True))
     return 0
 
 
 def _comparison_result(args: argparse.Namespace) -> int:
-    from fugue.bench.comparison import COMPARISON_RESULT_ROOT
+    from fugue.bench.comparison import (
+        COMPARISON_RESULT_ROOT,
+        ComparisonResultV3,
+        _result_markdown,
+        read_comparison_result,
+    )
+    from fugue.bench.local_evidence import LocalEvidenceStore
+    from fugue.bench.local_publication import (
+        verify_comparison_result_local_evidence,
+    )
 
     root = args.repo_root.resolve()
     if args.append_invalidation is not None:
@@ -1181,11 +1312,40 @@ def _comparison_result(args: argparse.Namespace) -> int:
         return 0
     if args.research_id is not None:
         raise ValueError("--research-id requires --append-invalidation")
-    result_path, markdown_path = _comparison_result_paths(
+    result_path, _stored_markdown_path = _comparison_result_paths(
         root,
         args.comparison,
         result_root=root / COMPARISON_RESULT_ROOT,
     )
+    result = read_comparison_result(result_path)
+    verification_note = ""
+    if isinstance(result, ComparisonResultV3):
+        if result.local_evidence is not None:
+            manifest_path = LocalEvidenceStore(root, result.source).manifest_path
+            verify_comparison_result_local_evidence(result, manifest_path)
+        elif (
+            result.evidence_backend == "local"
+            or result.local_chain_integrity == "reconciled"
+        ):
+            raise ValueError(
+                "ComparisonResultV3 claims canonical local evidence without a "
+                "bound local evidence manifest"
+            )
+        else:
+            verification_note = (
+                "\n## Verification boundary\n\n"
+                "- This historical hosted V3 result passed canonical result "
+                "validation but predates the bound local evidence ledger. Its "
+                "hosted evidence is not requalified by `fugue result`.\n"
+            )
+    else:
+        verification_note = (
+            "\n## Verification boundary\n\n"
+            "- This historical V1/V2 result passed its canonical result-digest "
+            "validation but has no V3 local evidence manifest to reconcile. It "
+            "remains readable audit history, not qualified local evidence.\n"
+        )
+    verified_markdown = _result_markdown(result) + verification_note
     reviewed_at = args.reviewed_at or datetime.now(UTC).isoformat().replace(
         "+00:00",
         "Z",
@@ -1222,11 +1382,21 @@ def _comparison_result(args: argparse.Namespace) -> int:
             "--signoff-by"
         )
     if args.open_result:
-        webbrowser.open(markdown_path.resolve().as_uri())
+        with tempfile.NamedTemporaryFile(
+            mode="w",
+            encoding="utf-8",
+            prefix="fugue-verified-result-",
+            suffix=".md",
+            delete=False,
+        ) as handle:
+            handle.write(verified_markdown)
+            verified_markdown_path = Path(handle.name)
+        verified_markdown_path.chmod(0o600)
+        webbrowser.open(verified_markdown_path.resolve().as_uri())
     if args.json:
-        print(result_path.read_text(encoding="utf-8"), end="")
+        print(json.dumps(result.to_dict(), indent=2, sort_keys=True))
     else:
-        CONSOLE.print(Markdown(markdown_path.read_text(encoding="utf-8")))
+        CONSOLE.print(Markdown(verified_markdown))
     return 0
 
 
@@ -1236,30 +1406,94 @@ def _comparison_result_paths(
     *,
     result_root: Path,
 ) -> tuple[Path, Path]:
+    resolved_root = root.resolve()
+    resolved_result_root = result_root.resolve()
+    try:
+        resolved_result_root.relative_to(resolved_root)
+    except ValueError as exc:
+        raise ValueError("comparison result root escapes the repository") from exc
     if comparison == "latest":
         pointer_path = result_root / "latest.json"
-        if not pointer_path.is_file():
+        if not pointer_path.is_file() or pointer_path.is_symlink():
             raise FileNotFoundError("no comparison result has been recorded")
         pointer = json.loads(pointer_path.read_text(encoding="utf-8"))
-        result_path = root / str(pointer["result"])
-        markdown_path = root / str(pointer["markdown"])
-    else:
-        candidates = sorted(result_root.glob("*/result.json"))
-        result_path = next(
-            (
-                path
-                for path in candidates
-                if json.loads(path.read_text(encoding="utf-8")).get("comparison_id")
-                == comparison
-            ),
-            None,
+        if not isinstance(pointer, Mapping):
+            raise ValueError("latest comparison result pointer must be an object")
+        result_path = _contained_result_pointer_path(
+            root,
+            resolved_result_root,
+            pointer.get("result"),
+            filename="result.json",
         )
+        markdown_path = _contained_result_pointer_path(
+            root,
+            resolved_result_root,
+            pointer.get("markdown"),
+            filename="result.md",
+        )
+        if result_path.parent != markdown_path.parent:
+            raise ValueError(
+                "latest comparison result and Markdown pointers must share a directory"
+            )
+    else:
+        result_path = None
+        for candidate in sorted(result_root.glob("*/result.json")):
+            contained_candidate = _contained_result_pointer_path(
+                resolved_root,
+                resolved_result_root,
+                candidate,
+                filename="result.json",
+                allow_absolute=True,
+            )
+            candidate_payload = json.loads(
+                contained_candidate.read_text(encoding="utf-8")
+            )
+            if (
+                isinstance(candidate_payload, Mapping)
+                and candidate_payload.get("comparison_id") == comparison
+            ):
+                result_path = contained_candidate
+                break
         if result_path is None:
             raise FileNotFoundError(f"comparison result not found: {comparison}")
-        markdown_path = result_path.with_name("result.md")
+        markdown_path = _contained_result_pointer_path(
+            resolved_root,
+            resolved_result_root,
+            result_path.with_name("result.md"),
+            filename="result.md",
+            allow_absolute=True,
+        )
     if not result_path.is_file():
         raise FileNotFoundError(f"comparison result not found: {result_path}")
     return result_path, markdown_path
+
+
+def _contained_result_pointer_path(
+    root: Path,
+    result_root: Path,
+    raw: Any,
+    *,
+    filename: str,
+    allow_absolute: bool = False,
+) -> Path:
+    if isinstance(raw, Path):
+        selected = raw
+    elif isinstance(raw, str) and raw.strip():
+        selected = Path(raw)
+    else:
+        raise ValueError(f"comparison result pointer requires {filename}")
+    if selected.is_absolute() and not allow_absolute:
+        raise ValueError(f"comparison result pointer {filename} must be relative")
+    resolved = (selected if selected.is_absolute() else root / selected).resolve()
+    try:
+        resolved.relative_to(result_root.resolve())
+    except ValueError as exc:
+        raise ValueError(
+            f"comparison result pointer {filename} escapes the result root"
+        ) from exc
+    if resolved.name != filename:
+        raise ValueError(f"comparison result pointer must name {filename}")
+    return resolved
 
 
 def _publish_local_result(args: argparse.Namespace) -> int:
@@ -1268,7 +1502,9 @@ def _publish_local_result(args: argparse.Namespace) -> int:
     from fugue.bench.local_publication import (
         LocalResultPublicationError,
         MissingWeaveExtraError,
+        StudyPublicationScopeV1,
         publish_local_result_to_weave,
+        weave_publication_target_from_environment,
         weave_publisher_from_environment,
     )
     from fugue.redaction import secrets_from_env
@@ -1284,6 +1520,18 @@ def _publish_local_result(args: argparse.Namespace) -> int:
         raise LocalResultPublicationError(
             "optional Weave publication requires ComparisonResultV3"
         )
+    if args.study_id and not args.research_id:
+        raise LocalResultPublicationError(
+            "--study-id requires --research-id so collection membership is explicit"
+        )
+    study_scope = (
+        StudyPublicationScopeV1(
+            research_id=args.research_id,
+            study_id=args.study_id or result.comparison_id,
+        )
+        if args.research_id
+        else None
+    )
     manifest_path = (
         args.manifest.resolve()
         if args.manifest is not None and args.manifest.is_absolute()
@@ -1301,10 +1549,15 @@ def _publish_local_result(args: argparse.Namespace) -> int:
     env = load_env(args.env_file)
     try:
         publisher = weave_publisher_from_environment(env)
+        target = weave_publication_target_from_environment(
+            args.project,
+            env,
+            study_scope=study_scope,
+        )
         receipt = publish_local_result_to_weave(
             result_path,
             manifest_path,
-            target=args.project,
+            target=target,
             publisher=publisher,
             receipt_path=receipt_path,
             secret_values=secrets_from_env(env),
@@ -1324,11 +1577,20 @@ def _publish_local_result(args: argparse.Namespace) -> int:
     if args.json:
         print(json.dumps(receipt.to_dict(), indent=2, sort_keys=True))
     else:
+        scope_lines = (
+            (
+                f"Research: {receipt.target.study_scope.research_id}",
+                f"Study: {receipt.target.study_scope.study_id}",
+            )
+            if receipt.target.study_scope is not None
+            else ()
+        )
         CONSOLE.print(
             Panel(
                 "\n".join(
                     (
                         f"Target: {receipt.target.project_slug}",
+                        *scope_lines,
                         f"Result: {receipt.result_digest}",
                         f"Local evidence: {receipt.local_manifest_digest}",
                         f"Hosted objects: {len(receipt.hosted_objects)}",
@@ -1336,6 +1598,138 @@ def _publish_local_result(args: argparse.Namespace) -> int:
                     )
                 ),
                 title="Published unchanged local result",
+                border_style="fugue.success",
+            )
+        )
+    return 0
+
+
+def _study_index(args: argparse.Namespace) -> int:
+    from fugue.bench.research_index import (
+        ResearchIndexSourceV1,
+        build_research_index,
+        write_research_index,
+    )
+    from fugue.redaction import secrets_from_env
+
+    root = args.repo_root.resolve()
+
+    def resolve(value: str) -> Path:
+        path = Path(value)
+        return path.resolve() if path.is_absolute() else (root / path).resolve()
+
+    sources = tuple(
+        ResearchIndexSourceV1(
+            result_path=resolve(result_path),
+            publication_receipt_path=resolve(receipt_path),
+        )
+        for result_path, receipt_path in args.source
+    )
+    env = load_env(args.env_file)
+    index = build_research_index(
+        research_id=args.research_id,
+        title=args.title,
+        objective=args.objective,
+        sources=sources,
+        secret_values=secrets_from_env(env),
+    )
+    output = (
+        args.output.resolve()
+        if args.output is not None and args.output.is_absolute()
+        else (root / args.output).resolve()
+        if args.output is not None
+        else (root / ".fugue" / "research" / args.research_id / "index.json")
+    )
+    write_research_index(
+        output,
+        index,
+        secret_values=secrets_from_env(env),
+    )
+    if args.json:
+        print(json.dumps(index.to_dict(), indent=2, sort_keys=True))
+    else:
+        CONSOLE.print(
+            Panel(
+                "\n".join(
+                    (
+                        f"Research: {index.research_id}",
+                        f"Studies: {index.study_count}",
+                        f"Rows: {index.total_rows}",
+                        f"Index: {index.index_digest}",
+                        f"Path: {output}",
+                    )
+                ),
+                title="Built immutable Research index",
+                border_style="fugue.success",
+            )
+        )
+    return 0
+
+
+def _publish_research_index(args: argparse.Namespace) -> int:
+    from fugue.bench.research_index import publish_research_index
+    from fugue.bench.wandb_research_index import (
+        MissingWandbIndexExtraError,
+        wandb_research_index_publisher_from_environment,
+        wandb_research_index_target_from_environment,
+    )
+    from fugue.redaction import secrets_from_env
+
+    root = args.repo_root.resolve()
+    index_path = (
+        args.index.resolve()
+        if args.index.is_absolute()
+        else (root / args.index).resolve()
+    )
+    receipt_path = (
+        args.receipt.resolve()
+        if args.receipt is not None and args.receipt.is_absolute()
+        else (root / args.receipt).resolve()
+        if args.receipt is not None
+        else None
+    )
+    env = load_env(args.env_file)
+    try:
+        publisher = wandb_research_index_publisher_from_environment(env)
+        target = wandb_research_index_target_from_environment(args.project, env)
+        receipt = publish_research_index(
+            index_path,
+            target=target,
+            publisher=publisher,
+            receipt_path=receipt_path,
+            secret_values=secrets_from_env(env),
+        )
+    except MissingWandbIndexExtraError as exc:
+        message = str(exc)
+        payload = {
+            "schema_version": 1,
+            "status": "blocked",
+            "error_type": "missing_wandb_index_extra",
+            "message": message,
+        }
+        if args.json:
+            print(json.dumps(payload, indent=2, sort_keys=True))
+        else:
+            CONSOLE.print(f"[fugue.coral]Blocked:[/] {message}")
+        return 2
+    if args.json:
+        print(json.dumps(receipt.to_dict(), indent=2, sort_keys=True))
+    else:
+        report = receipt.report_url or "not available in the installed W&B SDK"
+        CONSOLE.print(
+            Panel(
+                "\n".join(
+                    (
+                        f"Project: {receipt.target.project}",
+                        f"Destination: {receipt.target.destination_digest}",
+                        f"Index Run: {receipt.run_url}",
+                        f"Artifact: {receipt.artifact_url}",
+                        f"Report: {report}",
+                        f"Index: {receipt.index_digest}",
+                        f"Receipt: {receipt.receipt_digest}",
+                    )
+                ),
+                title="Published unchanged Research index",
                 border_style="fugue.success",
             )
         )

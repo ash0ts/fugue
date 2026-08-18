@@ -128,7 +128,7 @@ def qualification_input_readiness(
             expected_result_project=str(result_project),
         )
         release = validate_release_notes_lock(release_raw)
-        _validate_release_candidate_binding(
+        validate_release_candidate_binding(
             spec,
             release_notes=release,
             repo_root=repo_root,
@@ -765,12 +765,14 @@ def _validate_mechanism_reconciliation_binding(
             )
 
 
-def _validate_release_candidate_binding(
+def validate_release_candidate_binding(
     spec: Any,
     *,
     release_notes: Mapping[str, Any],
     repo_root: Path,
 ) -> None:
+    """Bind this reference study's governed SHA to notes and MCP lock."""
+
     from fugue.bench import comparison as c
 
     policy = spec.decision_policy

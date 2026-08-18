@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+from contextlib import contextmanager
 from dataclasses import replace
 from datetime import UTC, datetime
 from pathlib import Path
@@ -25,12 +26,14 @@ from fugue.bench.local_evidence import (
 from fugue.bench.local_publication import (
     LocalResultPublicationError,
     MissingWeaveExtraError,
+    StudyPublicationScopeV1,
     WeaveHostedObjectRefV1,
     WeavePublicationOutcomeV1,
     WeavePublicationReceiptV1,
     WeavePublicationTargetV1,
     publish_local_result_to_weave,
     read_weave_publication_receipt,
+    weave_publication_receipt_from_dict,
     weave_publisher_from_environment,
 )
 
@@ -306,6 +309,25 @@ def _outcome(
     )
 
 
+def _target(
+    *,
+    project: str = "local-result",
+    study_scope: StudyPublicationScopeV1 | None = None,
+    api_base_url: str = "https://api.wandb.ai",
+    trace_base_url: str = "https://trace.wandb.ai",
+    app_base_url: str = "https://wandb.ai",
+) -> WeavePublicationTargetV1:
+    return publication.weave_publication_target_from_environment(
+        f"wandb/{project}",
+        {
+            "FUGUE_WEAVE_BASE_URL": api_base_url,
+            "FUGUE_WEAVE_TRACE_SERVER_URL": trace_base_url,
+            "WANDB_APP_BASE_URL": app_base_url,
+        },
+        study_scope=study_scope,
+    )
+
+
 def _patch_v3_reader(
     monkeypatch: pytest.MonkeyPatch,
     fake_result: _FakeComparisonResultV3,
@@ -325,7 +347,7 @@ def test_publication_is_digest_bound_idempotent_and_does_not_rewrite_result(
     manifest_path, manifest = _canonical_manifest(tmp_path)
     result_path, result = _result_fixture(tmp_path, manifest)
     _patch_v3_reader(monkeypatch, result)
-    target = WeavePublicationTargetV1(entity="wandb", project="local-result")
+    target = _target()
     calls = 0
 
     def publisher(*_args: Any) -> WeavePublicationOutcomeV1:
@@ -581,7 +603,7 @@ def test_publication_rejects_result_mutation_and_writes_no_receipt(
     manifest_path, manifest = _canonical_manifest(tmp_path)
     result_path, result = _result_fixture(tmp_path, manifest)
     _patch_v3_reader(monkeypatch, result)
-    target = WeavePublicationTargetV1(entity="wandb", project="local-result")
+    target = _target()
 
     def publisher(*_args: Any) -> WeavePublicationOutcomeV1:
         result_path.write_text('{"mutated":true}\n', encoding="utf-8")
@@ -606,7 +628,7 @@ def test_publication_rejects_wrong_project_refs_and_secret_values(
     manifest_path, manifest = _canonical_manifest(tmp_path)
     result_path, result = _result_fixture(tmp_path, manifest)
     _patch_v3_reader(monkeypatch, result)
-    target = WeavePublicationTargetV1(entity="wandb", project="local-result")
+    target = _target()
     secret = "super-secret-value-123"
 
     def publisher(*_args: Any) -> dict[str, Any]:
@@ -622,7 +644,9 @@ def test_publication_rejects_wrong_project_refs_and_secret_values(
             )
         return raw
 
-    expected = "another project" if failure == "wrong_project" else "secret"
+    expected = (
+        "destination disagree" if failure == "wrong_project" else "secret"
+    )
     with pytest.raises(ValueError, match=expected):
         publish_local_result_to_weave(
             result_path,
@@ -640,7 +664,7 @@ def test_publication_rejects_conflicting_existing_receipt(
     manifest_path, manifest = _canonical_manifest(tmp_path)
     result_path, result = _result_fixture(tmp_path, manifest)
     _patch_v3_reader(monkeypatch, result)
-    target = WeavePublicationTargetV1(entity="wandb", project="local-result")
+    target = _target()
 
     receipt = publish_local_result_to_weave(
         result_path,
@@ -736,6 +760,217 @@ def test_publication_receipt_rejects_digest_tampering(tmp_path: Path) -> None:
         read_weave_publication_receipt(path)
 
 
+def test_legacy_project_only_receipt_is_readable_but_cannot_be_republished(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    legacy_target = WeavePublicationTargetV1(
+        entity="wandb",
+        project="local-result",
+    )
+    attempt = "a" * 64
+    outcome = _outcome(
+        SimpleNamespace(planned_attempt_ids=(attempt,)),
+        legacy_target,
+    )
+    result_digest = "b" * 64
+    manifest_digest = "c" * 64
+    receipt = WeavePublicationReceiptV1(
+        publication_id=stable_digest(
+            {
+                "schema_version": 1,
+                "target": legacy_target.to_dict(),
+                "result_digest": result_digest,
+                "local_manifest_digest": manifest_digest,
+            }
+        ),
+        target=legacy_target,
+        result_digest=result_digest,
+        qualification_digest="d" * 64,
+        result_file_sha256="e" * 64,
+        local_manifest_digest=manifest_digest,
+        local_manifest_file_sha256="f" * 64,
+        hosted_objects=outcome.objects,
+        publisher_id=outcome.publisher_id,
+        publisher_revision=outcome.publisher_revision,
+        status="published",
+        published_at="2026-08-17T12:00:00+00:00",
+    )
+
+    assert weave_publication_receipt_from_dict(receipt.to_dict()) == receipt
+    assert receipt.target.destination is None
+
+    manifest_path, manifest = _canonical_manifest(tmp_path)
+    result_path, result = _result_fixture(tmp_path, manifest)
+    _patch_v3_reader(monkeypatch, result)
+    called = False
+
+    def publisher(*_args: Any) -> WeavePublicationOutcomeV1:
+        nonlocal called
+        called = True
+        raise AssertionError("legacy target must be rejected before publication")
+
+    with pytest.raises(
+        LocalResultPublicationError,
+        match="endpoint-bound evidence destination",
+    ):
+        publish_local_result_to_weave(
+            result_path,
+            manifest_path,
+            target=legacy_target,
+            publisher=publisher,
+        )
+    assert called is False
+
+
+def test_endpoint_change_changes_publication_identity_and_conflicts_with_receipt(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    manifest_path, manifest = _canonical_manifest(tmp_path)
+    result_path, result = _result_fixture(tmp_path, manifest)
+    _patch_v3_reader(monkeypatch, result)
+    target_a = _target(
+        api_base_url="https://api-a.example.test",
+        trace_base_url="https://trace-a.example.test",
+        app_base_url="https://app-a.example.test",
+    )
+    target_b = _target(
+        api_base_url="https://api-b.example.test",
+        trace_base_url="https://trace-b.example.test",
+        app_base_url="https://app-b.example.test",
+    )
+    first_path = tmp_path / "receipt-a.json"
+    second_path = tmp_path / "receipt-b.json"
+    receipt_a = publish_local_result_to_weave(
+        result_path,
+        manifest_path,
+        target=target_a,
+        publisher=lambda *_args: _outcome(manifest, target_a),
+        receipt_path=first_path,
+    )
+    receipt_b = publish_local_result_to_weave(
+        result_path,
+        manifest_path,
+        target=target_b,
+        publisher=lambda *_args: _outcome(manifest, target_b),
+        receipt_path=second_path,
+    )
+
+    assert target_a.destination is not None
+    assert target_b.destination is not None
+    assert (
+        target_a.destination.destination_digest
+        != target_b.destination.destination_digest
+    )
+    assert receipt_a.publication_id != receipt_b.publication_id
+
+    with pytest.raises(LocalResultPublicationError, match="conflicting immutable"):
+        publish_local_result_to_weave(
+            result_path,
+            manifest_path,
+            target=target_b,
+            publisher=lambda *_args: _outcome(manifest, target_b),
+            receipt_path=first_path,
+        )
+
+
+def test_study_scope_is_bound_to_publication_identity_and_weave_attributes(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _manifest_path, manifest = _canonical_manifest(tmp_path)
+    _result_path, result = _result_fixture(tmp_path, manifest)
+    scope = StudyPublicationScopeV1(
+        research_id="fugue-standalone-lab-v1",
+        study_id="prompt-change-live-v1",
+    )
+    target = WeavePublicationTargetV1(
+        entity="wandb",
+        project="fugue-experiments",
+        study_scope=scope,
+        destination=_target(project="fugue-experiments").destination,
+    )
+    client = _FakeWeaveClient(target)
+    _install_fake_weave(monkeypatch, target, client)
+
+    publisher = weave_publisher_from_environment({"WANDB_API_KEY": "test-only-key"})
+    outcome = publisher(result, manifest, target)
+
+    assert outcome.target.study_scope == scope
+    for call in client.calls.values():
+        assert call.attributes["wandb.research_id"] == scope.research_id
+        assert call.attributes["wandb.study_id"] == scope.study_id
+        assert call.attributes["fugue.comparison_id"] == result.comparison_id
+    dataset = next(iter(client.objects.values()))
+    assert dataset["wandb_research_id"] == scope.research_id
+    assert dataset["wandb_study_id"] == scope.study_id
+
+
+def test_target_preserves_legacy_positional_schema_version() -> None:
+    target = WeavePublicationTargetV1("wandb", "fugue-experiments", 1)
+
+    assert target.schema_version == 1
+    assert target.study_scope is None
+    assert target.destination is None
+    assert target.to_dict() == {
+        "entity": "wandb",
+        "project": "fugue-experiments",
+        "schema_version": 1,
+    }
+
+    with pytest.raises(ValueError, match="Study scope"):
+        WeavePublicationTargetV1(
+            "wandb",
+            "fugue-experiments",
+            1,
+            1,  # type: ignore[arg-type]
+        )
+
+
+def test_study_scope_change_conflicts_with_existing_publication_receipt(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    manifest_path, manifest = _canonical_manifest(tmp_path)
+    result_path, result = _result_fixture(tmp_path, manifest)
+    _patch_v3_reader(monkeypatch, result)
+    first_scope = StudyPublicationScopeV1(
+        research_id="fugue-standalone-lab-v1",
+        study_id="prompt-change-live-v1",
+    )
+    first_target = WeavePublicationTargetV1(
+        entity="wandb",
+        project="fugue-experiments",
+        study_scope=first_scope,
+        destination=_target(project="fugue-experiments").destination,
+    )
+    publish_local_result_to_weave(
+        result_path,
+        manifest_path,
+        target=first_target,
+        publisher=lambda *_args: _outcome(manifest, first_target),
+    )
+    changed_scope = StudyPublicationScopeV1(
+        research_id="another-research",
+        study_id="prompt-change-live-v1",
+    )
+    changed_target = WeavePublicationTargetV1(
+        entity="wandb",
+        project="fugue-experiments",
+        study_scope=changed_scope,
+        destination=_target(project="fugue-experiments").destination,
+    )
+
+    with pytest.raises(LocalResultPublicationError, match="conflicting immutable"):
+        publish_local_result_to_weave(
+            result_path,
+            manifest_path,
+            target=changed_target,
+            publisher=lambda *_args: _outcome(manifest, changed_target),
+        )
+
+
 def test_weave_publisher_is_lazy_and_has_actionable_missing_extra(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -746,6 +981,36 @@ def test_weave_publisher_is_lazy_and_has_actionable_missing_extra(
 
     with pytest.raises(MissingWeaveExtraError, match=r'fugue\[weave\]'):
         weave_publisher_from_environment({})
+
+
+def test_weave_publisher_rejects_environment_endpoint_drift(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _manifest_path, manifest = _canonical_manifest(tmp_path)
+    _result_path, result = _result_fixture(tmp_path, manifest)
+    target = _target(
+        api_base_url="https://api-a.example.test",
+        trace_base_url="https://trace-a.example.test",
+        app_base_url="https://app-a.example.test",
+    )
+    client = _FakeWeaveClient(target)
+    _install_fake_weave(monkeypatch, target, client)
+    publisher = weave_publisher_from_environment(
+        {
+            "WANDB_API_KEY": "test-only-key",
+            "FUGUE_WEAVE_BASE_URL": "https://api-b.example.test",
+            "FUGUE_WEAVE_TRACE_SERVER_URL": "https://trace-b.example.test",
+            "WANDB_APP_BASE_URL": "https://app-b.example.test",
+        }
+    )
+
+    with pytest.raises(
+        LocalResultPublicationError,
+        match="environment disagrees",
+    ):
+        publisher(result, manifest, target)
+    assert client.calls == {}
 
 
 class _FakeWeaveClient:
@@ -877,10 +1142,14 @@ def _install_fake_weave(
         "import_module",
         lambda name: fake_weave if name == "weave" else None,
     )
+    @contextmanager
+    def destination_session(_project, _env):
+        yield fake_weave
+
     monkeypatch.setattr(
         weave_support,
-        "initialize_weave",
-        lambda _project, _env: fake_weave,
+        "weave_destination_session",
+        destination_session,
     )
     return fake_weave
 
@@ -891,7 +1160,7 @@ def test_real_weave_adapter_emits_nested_five_object_chain(
 ) -> None:
     _manifest_path, manifest = _canonical_manifest(tmp_path)
     _result_path, result = _result_fixture(tmp_path, manifest)
-    target = WeavePublicationTargetV1(entity="wandb", project="local-result")
+    target = _target()
     client = _FakeWeaveClient(target)
     _install_fake_weave(monkeypatch, target, client)
 
@@ -929,7 +1198,7 @@ def test_real_weave_adapter_requires_authoritative_matching_readback(
 ) -> None:
     _manifest_path, manifest = _canonical_manifest(tmp_path)
     _result_path, result = _result_fixture(tmp_path, manifest)
-    target = WeavePublicationTargetV1(entity="wandb", project="local-result")
+    target = _target()
     client = _FakeWeaveClient(target)
     client.tamper_dataset = tamper == "dataset"
     client.tamper_call_kind = "prediction" if tamper != "dataset" else None
@@ -953,7 +1222,7 @@ def test_real_weave_adapter_resumes_partial_deterministic_publication(
 ) -> None:
     _manifest_path, manifest = _canonical_manifest(tmp_path)
     _result_path, result = _result_fixture(tmp_path, manifest)
-    target = WeavePublicationTargetV1(entity="wandb", project="local-result")
+    target = _target()
     client = _FakeWeaveClient(target)
     client.fail_after_finish = 2
     _install_fake_weave(monkeypatch, target, client)

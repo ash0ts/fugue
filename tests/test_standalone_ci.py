@@ -143,6 +143,7 @@ def test_standalone_workflow_uses_wheel_and_the_canonical_local_cli() -> None:
 
     smoke_commands = _run_commands(jobs["pull-request-smoke"])
     assert "fugue doctor" in smoke_commands
+    assert "fugue demo source-use" in smoke_commands
     assert "fugue check" in smoke_commands
     assert "--prepare" not in smoke_commands
     assert "--preview" not in smoke_commands

@@ -228,18 +228,9 @@ class ComparisonExecutionPolicyV1:
             or isinstance(self.evidence_destination, EvidenceDestinationV1)
         )
         if self.evidence_mode == "local" and hosted_result_declared:
-            # Older callers use ``dataclasses.replace`` to bind a W&B project
-            # onto a comparison that was parsed before local evidence became
-            # the default. Parsing an explicitly local document remains
-            # fail-closed; this only preserves the programmatic migration path.
-            object.__setattr__(self, "evidence_mode", "weave_required")
-            if isinstance(
-                self.source_evidence_destination,
-                LocalEvidenceDestinationV1,
-            ):
-                object.__setattr__(self, "source_evidence_destination", None)
-            if isinstance(self.evidence_destination, LocalEvidenceDestinationV1):
-                object.__setattr__(self, "evidence_destination", None)
+            raise ValueError(
+                "local evidence mode cannot declare a W&B result destination"
+            )
         if self.evidence_mode == "weave_required" and isinstance(
             self.evidence_destination,
             LocalEvidenceDestinationV1,
@@ -1117,6 +1108,7 @@ def comparison_from_dict(
         raw.get("execution"),
         source=base,
         repo_root=repo_root,
+        spec_version=version,
     )
     if (
         version >= 3
@@ -1442,7 +1434,8 @@ def _reference_study_adapter(
     spec: ComparisonSpecV1,
 ) -> Any | None:
     binding = spec.execution.reference_study or infer_legacy_reference_study(
-        spec.execution
+        spec.execution,
+        schema_version=spec.schema_version,
     )
     return resolve_reference_study_adapter(binding) if binding is not None else None
 
@@ -2017,21 +2010,6 @@ def _common_cohort_lineage(raw: Mapping[str, Any]) -> dict[str, Any]:
     }
 
 
-def _validate_release_candidate_binding(
-    spec: ComparisonSpecV1,
-    *,
-    release_notes: Mapping[str, Any],
-    repo_root: Path,
-) -> None:
-    """Backward-compatible test/operator shim for the extracted adapter."""
-
-    from fugue.reference_studies.wandb_mcp_qualification import (
-        _validate_release_candidate_binding as validate,
-    )
-
-    validate(spec, release_notes=release_notes, repo_root=repo_root)
-
-
 def _qualification_input_readiness(
     spec: ComparisonSpecV1,
     *,
@@ -2045,7 +2023,10 @@ def _qualification_input_readiness(
     so approval changes whenever adapter version or intent changes.
     """
     explicit = spec.execution.reference_study
-    binding = explicit or infer_legacy_reference_study(spec.execution)
+    binding = explicit or infer_legacy_reference_study(
+        spec.execution,
+        schema_version=spec.schema_version,
+    )
     if binding is None:
         return {}, []
     adapter = resolve_reference_study_adapter(binding)
@@ -2815,6 +2796,86 @@ def prepare_comparison(
     return receipt, stable_preview, receipt_path
 
 
+def prepared_candidate_definitions(
+    preview_digest: str,
+    *,
+    repo_root: Path,
+) -> dict[str, dict[str, Any]]:
+    """Return the exact candidate map from a locally retained preview.
+
+    The standalone approval command accepts only a digest. Preparation and
+    Research previewing retain the corresponding private preview so the human
+    approval receipt can expose, rather than reconstruct, the candidate
+    definitions bound by that digest.
+    """
+
+    if not re.fullmatch(r"[0-9a-f]{64}", preview_digest):
+        raise ValueError("preview digest must be an exact sha256 digest")
+    roots = (
+        (repo_root / COMPARISON_RUNTIME_ROOT).resolve(),
+        (repo_root / ".fugue/private/research-comparisons").resolve(),
+    )
+    paths: list[Path] = []
+    runtime_root, research_root = roots
+    if runtime_root.is_dir():
+        paths.extend(runtime_root.glob("*/*/prepared-preview.json"))
+    research_preview = research_root / preview_digest / "preview.json"
+    if research_preview.exists() or research_preview.is_symlink():
+        paths.append(research_preview)
+
+    matches: list[dict[str, dict[str, Any]]] = []
+    for path in paths:
+        owning_root = next(
+            (root for root in roots if path.resolve().is_relative_to(root)),
+            None,
+        )
+        if owning_root is None or path.is_symlink() or not path.is_file():
+            raise ValueError("stored comparison preview path is unsafe")
+        raw = json.loads(path.read_text(encoding="utf-8"))
+        if not isinstance(raw, Mapping):
+            raise ValueError("stored comparison preview must be an object")
+        if str(raw.get("preview_digest") or "") != preview_digest:
+            continue
+        _verify_artifact(raw, "preview_digest", "stored comparison preview")
+        matrix = _mapping(raw.get("matrix"), "stored preview matrix")
+        definitions = _mapping(
+            matrix.get("candidate_definitions"),
+            "stored preview candidate definitions",
+        )
+        cells = tuple(
+            _mapping(item, "stored preview matrix cell")
+            for item in _sequence(matrix.get("matrix_cells"), "stored preview cells")
+        )
+        expected_ids = sorted({str(item.get("candidate_id") or "") for item in cells})
+        if not expected_ids or sorted(definitions) != expected_ids:
+            raise ValueError(
+                "stored preview candidate definitions do not match its matrix"
+            )
+        normalized: dict[str, dict[str, Any]] = {}
+        for candidate_id, definition in definitions.items():
+            if not re.fullmatch(r"[0-9a-f]{64}", str(candidate_id)):
+                raise ValueError("stored preview candidate id is invalid")
+            candidate_definition = _mapping(
+                definition,
+                f"stored preview candidate {candidate_id}",
+            )
+            if stable_digest(candidate_definition) != candidate_id:
+                raise ValueError(
+                    "stored preview candidate definition does not match its id"
+                )
+            normalized[str(candidate_id)] = candidate_definition
+        matches.append(dict(sorted(normalized.items())))
+
+    if not matches:
+        raise ValueError(
+            "the exact prepared preview is unavailable; run `fugue compare "
+            "SPEC --prepare` and approve its final preview digest"
+        )
+    if any(item != matches[0] for item in matches[1:]):
+        raise ValueError("stored previews disagree for the same preview digest")
+    return matches[0]
+
+
 def _prepare_comparison_scorer_runtimes(
     spec: ComparisonSpecV1,
     *,
@@ -3426,7 +3487,10 @@ def _approved_comparison_execution_lock(
     )
     reference_study = (
         locked_spec.execution.reference_study
-        or infer_legacy_reference_study(locked_spec.execution)
+        or infer_legacy_reference_study(
+            locked_spec.execution,
+            schema_version=locked_spec.schema_version,
+        )
     )
     unsigned = {
         "schema_version": 1,
@@ -3540,6 +3604,18 @@ def claim_comparison_approval(
             "preview comparison execution schedule",
         )
     )
+    candidate_definitions = {
+        str(candidate_id): dict(
+            _mapping(
+                definition,
+                f"preview candidate {candidate_id} definition",
+            )
+        )
+        for candidate_id, definition in _mapping(
+            preview.matrix.get("candidate_definitions"),
+            "preview candidate definitions",
+        ).items()
+    }
     ApprovalLedger(store.path).claim(
         approval_digest=approval_digest,
         subject_kind="experiment",
@@ -3547,6 +3623,7 @@ def claim_comparison_approval(
         subject_id=(subject_id or f"comparison-{preview.preview_digest[:20]}"),
         estimated_cells=execution.schedule.maximum_physical_executions,
         estimated_cost_usd=(execution.schedule.maximum_total_micro_usd / 1_000_000),
+        expected_candidate_definitions=candidate_definitions,
     )
 
 
@@ -4424,12 +4501,10 @@ def _behavioral_summary_v3(
         next_action = "Run the separately approved confirmation cohort."
     else:
         status = "unchanged"
-        recommendation = (
-            "UNCHANGED — no release-qualifying behavioral improvement was established."
-        )
+        recommendation = "UNCHANGED — no behavioral improvement was established."
         claim = (
-            f"No release-qualifying improvement was established across "
-            f"{len(paired_cases)} aligned pair(s)."
+            f"No behavioral improvement was established across {len(paired_cases)} "
+            "aligned pair(s)."
         )
         next_action = (
             "Repair the named blockers or use harder pre-frozen tasks."
@@ -5384,7 +5459,13 @@ def write_comparison_result(
 
 
 def read_comparison_result(path: Path) -> ComparisonResult:
-    raw = json.loads(path.read_text(encoding="utf-8"))
+    return comparison_result_from_json(path.read_text(encoding="utf-8"))
+
+
+def comparison_result_from_json(payload: str | bytes) -> ComparisonResult:
+    """Parse and verify one canonical persisted comparison result."""
+
+    raw = json.loads(payload)
     if not isinstance(raw, dict):
         raise ValueError("comparison result must be a mapping")
     version = raw.get("schema_version")
@@ -5972,7 +6053,12 @@ def _paired_attempt_view_v3(
             else None
         ),
         evidence_links=legacy.evidence_links,
-        weave_agent_root_call_id=legacy.weave_agent_root_call_id,
+        weave_agent_root_call_id=(
+            _row_text(row, "weave_agent_root_call_id")
+            or _row_text(row, "native_agent_root_call_id")
+            if require_hosted_evidence
+            else legacy.weave_agent_root_call_id
+        ),
         otel_root_span_id=legacy.otel_root_span_id,
         execution_fingerprint=(
             str(projection["execution_fingerprint"])
@@ -7850,7 +7936,7 @@ def _behavioral_summary(
     )
     common_limitations = (
         "This is behavioral evidence for the exact locked candidates, taskset, model, harness, attempts, and execution fingerprint.",
-        "A local Harbor result does not qualify W&B Serverless or authorize a package release.",
+        "Behavioral evidence does not authorize a package or service release unless a separately governed decision policy says so.",
     )
     if (
         integrity.get("status") == "invalid"
@@ -8894,14 +8980,27 @@ def _verify_v3_result_shape(result: ComparisonResultV3) -> None:  # noqa: C901
         for attempt in attempts
         if {link.system for link in attempt.evidence_links} == {"local_artifact"}
     )
-    if result.evidence_backend == "local":
+    historical_hosted = bool(
+        result.evidence_backend == "weave"
+        and attempts
+        and all(
+            {link.system for link in attempt.evidence_links} == {"weave"}
+            for attempt in attempts
+        )
+    )
+    # Every newly written V3 result is locally canonical, including a
+    # weave_required Study whose hosted Calls enrich (rather than replace) the
+    # local ledger.  Only historical V3 artifacts whose canonical five-link
+    # chain is entirely Weave predate this binding.
+    if not historical_hosted:
         if result.local_evidence is None:
             raise ValueError(
-                "canonical local ComparisonResultV3 requires its ledger binding"
+                "canonical ComparisonResultV3 local evidence requires its ledger "
+                "binding"
             )
         if result.local_evidence.get("run_id") != result.source:
             raise ValueError(
-                "local ComparisonResultV3 ledger run disagrees with its source"
+                "ComparisonResultV3 local ledger run disagrees with its source"
             )
         if len(local_attempts) != len(attempts) or any(
             attempt.local_evidence_record_digest is None
@@ -8909,7 +9008,7 @@ def _verify_v3_result_shape(result: ComparisonResultV3) -> None:  # noqa: C901
             for attempt in local_attempts
         ):
             raise ValueError(
-                "local ComparisonResultV3 attempts require bound ledger digests"
+                "ComparisonResultV3 local attempts require bound ledger digests"
             )
         projection_set_digest = result.local_evidence.get(
             "result_row_projection_set_digest"
@@ -8939,18 +9038,6 @@ def _verify_v3_result_shape(result: ComparisonResultV3) -> None:  # noqa: C901
                     "local ComparisonResultV3 decision projection set digest "
                     "does not match"
                 )
-    # Hosted V3 artifacts written before the standalone ledger contract can
-    # contain local-style links without a manifest-set binding. They remain
-    # readable as historical evidence; every new Operator execution binds the
-    # manifest before hosted enrichment.
-    historical_hosted = bool(
-        result.evidence_backend == "weave"
-        and attempts
-        and all(
-            {link.system for link in attempt.evidence_links} == {"weave"}
-            for attempt in attempts
-        )
-    )
     expected_local_chain = (
         "not_applicable"
         if historical_hosted
@@ -9628,7 +9715,6 @@ def score_comparison_rows(
                 row["comparison_mechanism"] = _comparison_mechanism(
                     row,
                     expected=label["expected"],
-                    passed=passed,
                     candidate_skill_ids=spec.candidate.skills,
                 )
                 row["comparison_required_evaluation_complete"] = True
@@ -10306,7 +10392,6 @@ def _comparison_mechanism(
     row: Mapping[str, Any],
     *,
     expected: Any,
-    passed: bool,
     candidate_skill_ids: tuple[str, ...],
 ) -> dict[str, str]:
     variant = str(row.get("variant_id") or "")
@@ -10395,7 +10480,6 @@ def _comparison_mechanism(
             available=bool(opened_paths) and output is not None,
             reached=source_used,
         ),
-        "task_passed": "observed" if passed else "not_observed",
     }
 
 
@@ -10580,7 +10664,14 @@ def _numeric_summary(values: Sequence[Any]) -> dict[str, Any]:
 
 def _mechanism_summary(rows: Sequence[Mapping[str, Any]]) -> dict[str, Any]:
     stages = sorted(
-        {str(key) for row in rows for key in (row.get("comparison_mechanism") or {})}
+        {
+            str(key)
+            for row in rows
+            for key in (row.get("comparison_mechanism") or {})
+            # Historical rows may contain outcomes in this mechanism mapping.
+            # Outcomes stay in deterministic/paired result sections instead.
+            if str(key) not in {"task_passed"}
+        }
     )
     return {
         stage: {
@@ -12265,6 +12356,7 @@ def _execution(
     *,
     source: Path,
     repo_root: Path,
+    spec_version: int,
 ) -> ComparisonExecutionPolicyV1:
     value = _mapping(raw, "execution policy")
     _reject_unknown(
@@ -12320,9 +12412,9 @@ def _execution(
     )
     raw_mode = str(value.get("evidence_mode") or "").strip()
     if not raw_mode:
-        # Missing modes are historical and retain their hosted semantics.
-        # New scaffolds write ``local`` explicitly.
-        evidence_mode: EvidenceMode = "weave_required"
+        evidence_mode: EvidenceMode = (
+            "local" if spec_version >= 2 else "weave_required"
+        )
     elif raw_mode in {"local", "weave_required"}:
         evidence_mode = raw_mode  # type: ignore[assignment]
     else:
@@ -13479,27 +13571,125 @@ def _preview_dict(value: PreviewSummary) -> dict[str, Any]:
     }
 
 
+def _result_evidence_destination_markdown(result: ComparisonResult) -> str:
+    if isinstance(result, ComparisonResultV3) and isinstance(
+        result.evidence_topology.result_destination,
+        LocalEvidenceDestinationV1,
+    ):
+        destination = result.evidence_topology.result_destination
+        run_id = str((result.local_evidence or {}).get("run_id") or "<run-id>")
+        ledger = f".fugue/runtime/{run_id}/evidence/"
+        publication = result.publication_status.replace("_", " ").upper()
+        return (
+            "- Evidence backend: **local Fugue ledger**\n"
+            f"- Local evidence ledger: `{ledger}` "
+            "(workspace-relative; not part of the portable identity)\n"
+            f"- Portable evidence destination: `{destination.format}` layout "
+            f"v{destination.layout_version} (`{destination.destination_digest}`)\n"
+            f"- Hosted publication recorded when this result was created: "
+            f"**{publication}**\n"
+            "- Later hosted publication is recorded in a separate immutable "
+            "publication receipt.\n"
+        )
+    projects = result.evidence_project or ", ".join(
+        result.operational_summary.get("evidence_projects") or ()
+    )
+    return f"- Evidence project: {projects or 'unavailable'}\n"
+
+
+def _result_evidence_markdown(
+    result: ComparisonResult,
+    *,
+    invalid_behavior: bool,
+) -> str:
+    if invalid_behavior:
+        return (
+            "- Attempt navigation is suppressed because behavioral evidence "
+            "is invalid.\n"
+        )
+
+    lines = [
+        f"- [{item['label']}]({item['url']})\n" for item in result.evidence_links
+    ]
+    if isinstance(result, ComparisonResultV3):
+        labels = {
+            "evaluation_root": "Evaluation record",
+            "prediction_and_score": "Prediction-and-score record",
+            "prediction": "Prediction record",
+            "agent_root": "Provider-neutral Agent receipt",
+            "dataset": "Dataset manifest",
+        }
+        local_attempt_count = sum(
+            attempt is not None
+            for pair in result.paired_cases
+            for attempt in (pair.baseline, pair.candidate)
+        )
+        shown_local_attempts = 0
+        maximum_local_attempts = 8
+        for pair in result.paired_cases:
+            for arm, attempt in (
+                ("baseline", pair.baseline),
+                ("candidate", pair.candidate),
+            ):
+                if attempt is None:
+                    continue
+                if shown_local_attempts >= maximum_local_attempts:
+                    continue
+                prefix = (
+                    f"{pair.task_id} / {pair.harness} / attempt {pair.attempt} / "
+                    f"{arm}"
+                )
+                local_links = tuple(
+                    link
+                    for link in attempt.evidence_links
+                    if link.system == "local_artifact"
+                    and link.status == "resolved"
+                    and link.ref
+                )
+                if local_links:
+                    shown_local_attempts += 1
+                for link in local_links:
+                    lines.append(
+                        f"- {prefix} / {labels[link.kind]}: `{link.ref}`\n"
+                    )
+        if local_attempt_count > shown_local_attempts:
+            lines.append(
+                f"- Showing local evidence for {shown_local_attempts} of "
+                f"{local_attempt_count} attempts. The canonical `result.json` and "
+                "local evidence manifest contain every reference.\n"
+            )
+    if lines:
+        return "".join(lines)
+    if isinstance(result, ComparisonResultV3) and result.evidence_backend == "local":
+        return "No reconciled local artifact references were available.\n"
+    return "No safe hosted evidence links were available.\n"
+
+
 def _result_markdown(result: ComparisonResult) -> str:
     invalid_behavior = (
         isinstance(result, ComparisonResultV2 | ComparisonResultV3)
         and result.behavioral_summary.status == "invalid"
     )
+
+    def mechanism_arm(value: Mapping[str, Any]) -> str:
+        applicable = int(value.get("applicable") or 0)
+        if applicable == 0:
+            return "not applicable"
+        return f"{int(value.get('observed') or 0)}/{applicable} observed"
+
     mechanism = "".join(
-        (
-            f"- {stage.replace('_', ' ').title()}: "
-            f"baseline {values['baseline']['observed']}/"
-            f"{values['baseline']['applicable']}; "
-            f"candidate {values['candidate']['observed']}/"
-            f"{values['candidate']['applicable']}\n"
-        )
+        f"- {stage.replace('_', ' ').title()}: "
+        f"baseline {mechanism_arm(values['baseline'])}; "
+        f"candidate {mechanism_arm(values['candidate'])}\n"
         for stage, values in result.mechanism_summary.items()
+        if stage != "task_passed"
     )
     judge = (
         "No blind judge was used.\n"
         if result.judge_summary.get("status") == "not_used"
         else "Blind-judge dimensions are available in `result.json`.\n"
     )
-    pair_rows = (
+    pair_rows = tuple(
         (
             item.task_id,
             item.harness,
@@ -13541,16 +13731,14 @@ def _result_markdown(result: ComparisonResult) -> str:
             )
         )
     )
-    evidence = (
-        "- Attempt navigation is suppressed because behavioral evidence is invalid.\n"
-        if invalid_behavior
-        else "".join(
-            f"- [{item['label']}]({item['url']})\n" for item in result.evidence_links
-        )
+    baseline_attempts = sum(row[3] is not None for row in pair_rows)
+    candidate_attempts = sum(row[4] is not None for row in pair_rows)
+    evidence = _result_evidence_markdown(
+        result,
+        invalid_behavior=invalid_behavior,
     )
-    projects = result.evidence_project or ", ".join(
-        result.operational_summary.get("evidence_projects") or ()
-    )
+    treatment_identities = _result_treatment_identities_markdown(result)
+    destination = _result_evidence_destination_markdown(result)
     integration_tools = result.operational_summary.get("mcp_tool_usage") or {}
     tool_usage = "".join(
         f"- {variant}: "
@@ -13578,26 +13766,65 @@ def _result_markdown(result: ComparisonResult) -> str:
         and result.decision.candidate_sha
         else "not applicable (no package release policy)"
     )
+    release_summary = (
+        "- Package release: **NOT EVALUATED**\n"
+        if isinstance(result, ComparisonResultV2 | ComparisonResultV3)
+        and result.decision_policy is None
+        else (
+            f"- Package release decision: **{result.decision.status.upper()}**\n"
+            if isinstance(result, ComparisonResultV2 | ComparisonResultV3)
+            else ""
+        )
+    )
+    release_note = (
+        "- Release-policy note: Package release was not evaluated by this Study.\n"
+        if isinstance(result, ComparisonResultV2 | ComparisonResultV3)
+        and result.decision_policy is None
+        else (
+            f"- Release-policy recommendation: {result.decision.recommendation}\n"
+            if isinstance(result, ComparisonResultV2 | ComparisonResultV3)
+            else ""
+        )
+    )
+    behavioral_recommendation = (
+        result.behavioral_summary.recommendation
+        if isinstance(result, ComparisonResultV2 | ComparisonResultV3)
+        else ""
+    )
     decision = (
         (
             f"- Behavioral verdict: "
             f"**{result.behavioral_summary.status.upper()}**\n"
             f"- Behavioral recommendation: "
-            f"{result.behavioral_summary.recommendation}\n"
-            f"- Release decision: **{result.decision.status.upper()}**\n"
-            f"- Evidence grade: **{result.decision.evidence_grade}**\n"
+            f"{behavioral_recommendation}\n"
+            + (
+                "- Interpretation note: The recommendation is preserved from the "
+                "canonical result. This Study did not evaluate package release.\n"
+                if result.decision_policy is None
+                else ""
+            )
+            + release_summary
+            + f"- Evidence integrity grade: **{result.decision.evidence_grade}** "
+            "(evidence-link reconciliation and privacy integrity; not a "
+            "behavioral-quality score)\n"
             f"- Candidate source revisions: {candidate_sources}\n"
             f"- Governed release candidate SHA: {release_candidate}\n"
-            f"- Recommendation: {result.decision.recommendation}\n"
+            + release_note
         )
         if isinstance(result, ComparisonResultV2 | ComparisonResultV3)
         else "- Release decision: unavailable in V1 result\n"
     )
+    observed_cost = result.operational_summary["observed_cost_usd"]
+    observed_cost_label = (
+        f"${float(observed_cost):.6f}" if observed_cost is not None else "unavailable"
+    )
     return (
         f"# {result.comparison_id}\n\n"
         "## Decision summary\n\n" + decision + f"- Rows: {result.rows}\n"
-        f"- Baseline passed: {result.baseline_passed}\n"
-        f"- Candidate passed: {result.candidate_passed}\n"
+        f"- Baseline aligned attempts passed: {result.baseline_passed}/"
+        f"{baseline_attempts}\n"
+        f"- Candidate aligned attempts passed: {result.candidate_passed}/"
+        f"{candidate_attempts}\n"
         f"- Improved pairs: {result.improved}\n"
         f"- Regressed pairs: {result.regressed}\n"
         f"- Mixed pairs: "
@@ -13606,8 +13833,10 @@ def _result_markdown(result: ComparisonResult) -> str:
         f"- Incomplete pairs: {result.incomplete}\n\n"
         f"- Required evaluations incomplete: "
         f"{result.required_evaluations_incomplete}\n"
-        f"- Evidence project: {projects or 'unavailable'}\n\n"
-        "## Aligned cases\n\n" + pairs + "\n"
+        + destination
+        + "\n"
+        + treatment_identities
+        + "## Aligned cases\n\n" + pairs + "\n"
         "## Operational health\n\n"
         f"- Infrastructure failures: "
         f"{result.operational_summary['infrastructure_failures']}\n"
@@ -13615,8 +13844,7 @@ def _result_markdown(result: ComparisonResult) -> str:
         f"`{json.dumps(result.operational_summary['execution_states'], sort_keys=True)}`\n"
         f"- Evidence states: "
         f"`{json.dumps(result.operational_summary['evidence_states'], sort_keys=True)}`\n"
-        f"- Observed cost: "
-        f"{result.operational_summary['observed_cost_usd'] if result.operational_summary['observed_cost_usd'] is not None else 'unavailable'}\n\n"
+        f"- Observed cost (USD): {observed_cost_label}\n\n"
         "## Mechanism evidence\n\n"
         + (mechanism or "No mechanism evidence was available.\n")
         + "\n### Tool and integration use\n\n"
@@ -13624,9 +13852,57 @@ def _result_markdown(result: ComparisonResult) -> str:
         + "\n## Blind judge\n\n"
         + judge
         + "\n## Open the evidence\n\n"
-        + (evidence or "No safe evidence links were available.\n")
+        + evidence
         + "\n"
         "## Limitations\n\n" + "".join(f"- {item}\n" for item in result.limitations)
+    )
+
+
+def _result_treatment_identities_markdown(result: ComparisonResult) -> str:
+    """Render the exact V3 candidate definitions without rebuilding identity."""
+
+    if not isinstance(result, ComparisonResultV3):
+        return ""
+    lines = ["## Treatment identities\n\n"]
+    for candidate_id, definition in sorted(result.candidate_definitions.items()):
+        model_route = definition.get("model_route")
+        context = definition.get("context")
+        model = (
+            str(model_route.get("display_model") or "unavailable")
+            if isinstance(model_route, Mapping)
+            else "unavailable"
+        )
+        context_id = (
+            str(context.get("id") or "unavailable")
+            if isinstance(context, Mapping)
+            else "unavailable"
+        )
+        skill_ids = _candidate_component_ids(definition.get("skills"))
+        integration_ids = _candidate_component_ids(definition.get("integrations"))
+        details = [
+            f"harness `{definition.get('harness') or 'unavailable'}`",
+            f"model `{model}`",
+            f"context `{context_id}`",
+            "skills "
+            + (", ".join(f"`{item}`" for item in skill_ids) or "none"),
+            "integrations "
+            + (", ".join(f"`{item}`" for item in integration_ids) or "none"),
+        ]
+        prompt_digest = str(definition.get("prompt_digest") or "")
+        if prompt_digest:
+            details.append(f"prompt `{prompt_digest}`")
+        lines.append(f"- `{candidate_id}` — " + "; ".join(details) + "\n")
+    lines.append("\n")
+    return "".join(lines)
+
+
+def _candidate_component_ids(value: Any) -> tuple[str, ...]:
+    if not isinstance(value, list | tuple):
+        return ()
+    return tuple(
+        str(item["id"])
+        for item in value
+        if isinstance(item, Mapping) and str(item.get("id") or "")
     )
 
 

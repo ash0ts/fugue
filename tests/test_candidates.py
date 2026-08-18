@@ -8,7 +8,7 @@ import pytest
 
 from fugue.bench.candidates import CANDIDATE_IDENTITY_SCHEMA_VERSION, resolve_candidate
 from fugue.bench.job_config import _comparison_example_id
-from fugue.bench.runtime_provenance import resolve_fugue_source_provenance
+from fugue.bench.runtime_provenance import resolve_study_workspace_provenance
 
 
 def _candidate_inputs() -> dict:
@@ -157,16 +157,16 @@ def test_context_runtime_topology_changes_only_execution_identity() -> None:
     assert first.execution_fingerprint != second.execution_fingerprint
 
 
-def test_fugue_source_commit_changes_only_execution_identity() -> None:
+def test_study_workspace_commit_changes_only_execution_identity() -> None:
     original = _candidate_inputs()
-    original["execution"]["fugue_source"] = {
+    original["execution"]["study_workspace"] = {
         "schema_version": 1,
         "kind": "git",
         "commit": "a" * 40,
         "dirty": False,
     }
     changed = deepcopy(original)
-    changed["execution"]["fugue_source"]["commit"] = "b" * 40
+    changed["execution"]["study_workspace"]["commit"] = "b" * 40
 
     first = resolve_candidate(**original)
     second = resolve_candidate(**changed)
@@ -195,11 +195,11 @@ def test_source_provenance_distinguishes_clean_and_dirty_trees(tmp_path: Path) -
         check=True,
     )
 
-    clean = resolve_fugue_source_provenance(tmp_path)
+    clean = resolve_study_workspace_provenance(tmp_path)
     source.write_text("VERSION = 2\n")
-    first_dirty = resolve_fugue_source_provenance(tmp_path)
+    first_dirty = resolve_study_workspace_provenance(tmp_path)
     source.write_text("VERSION = 3\n")
-    second_dirty = resolve_fugue_source_provenance(tmp_path)
+    second_dirty = resolve_study_workspace_provenance(tmp_path)
 
     assert clean["kind"] == "git"
     assert clean["dirty"] is False
@@ -216,14 +216,14 @@ def test_unversioned_source_provenance_ignores_secrets_and_runtime_state(
 ) -> None:
     source = tmp_path / "fugue.py"
     source.write_text("VERSION = 1\n")
-    first = resolve_fugue_source_provenance(tmp_path)
+    first = resolve_study_workspace_provenance(tmp_path)
     (tmp_path / ".env").write_text("API_KEY=secret-value\n")
     runtime = tmp_path / ".fugue" / "runtime"
     runtime.mkdir(parents=True)
     (runtime / "run.json").write_text("{}\n")
-    second = resolve_fugue_source_provenance(tmp_path)
+    second = resolve_study_workspace_provenance(tmp_path)
     source.write_text("VERSION = 2\n")
-    changed = resolve_fugue_source_provenance(tmp_path)
+    changed = resolve_study_workspace_provenance(tmp_path)
 
     assert first == second
     assert first["kind"] == "unversioned"

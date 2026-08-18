@@ -487,6 +487,59 @@ def test_first_cell_conformance_proves_cleanup_and_private_boundary(
     assert "wandb-secret-value" not in json.dumps(receipt)
 
 
+def test_first_cell_conformance_rejects_unconfigured_token_shaped_secret(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    run_id = "run-unconfigured-token-shape"
+    job = _local_job(tmp_path, run_id)
+    (job.result_path.parent / "agent-output.txt").write_text(
+        "unexpected sk-unconfiguredtokenvalue123456\n",
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(
+        conformance_module.subprocess,
+        "run",
+        lambda command, **kwargs: subprocess.CompletedProcess(
+            command,
+            0,
+            stdout="",
+            stderr="",
+        ),
+    )
+    cell = SimpleNamespace(
+        id="cell-1",
+        run_id=run_id,
+        attempt_id="b" * 64,
+        config_path=job.config_path,
+    )
+
+    receipt = capture_local_cell_conformance(
+        repo_root=tmp_path,
+        cell=cell,
+        job=job,
+        env={},
+        host_scorer_names=("comparison.deterministic.answer",),
+        pre_execution_inventory=_inventory(),
+    )
+
+    scan = receipt["local_artifact_privacy_scan"]
+    assert receipt["status"] == "failed"
+    assert scan["status"] == "failed"
+    assert scan["configured_sensitive_value_count"] == 0
+    assert scan["token_shape_detector"] == "fugue.redaction.redact_text"
+    assert scan["files_with_matches"] == [
+        {
+            "path": (
+                ".fugue/runtime/jobs/demo/run-unconfigured-token-shape/"
+                "job/agent-output.txt"
+            ),
+            "match_count": 1,
+            "configured_value_match_count": 0,
+            "token_shape_match_count": 1,
+        }
+    ]
+
+
 def test_private_boundary_rejects_neutral_key_private_bundle_copy(
     tmp_path: Path,
 ) -> None:

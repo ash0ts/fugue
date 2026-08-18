@@ -119,7 +119,13 @@ def test_legacy_quartet_infers_adapter_without_serializing_new_identity(
     spec = load_comparison(EXAMPLE / "comparison.yaml", repo_root=Path.cwd())
     legacy = replace(
         spec,
-        execution=replace(spec.execution, evidence_lock="legacy-lock.json"),
+        execution=replace(
+            spec.execution,
+            evidence_lock="legacy-evidence-lock.json",
+            source_conformance_receipt="legacy-source-conformance.json",
+            release_notes_lock="legacy-release-notes.json",
+            mechanism_receipt="legacy-mechanism.json",
+        ),
     )
     selected: list[ReferenceStudyBindingV1] = []
 
@@ -138,6 +144,24 @@ def test_legacy_quartet_infers_adapter_without_serializing_new_identity(
     assert selected[0].id == WANDB_MCP_REFERENCE_STUDY_ID
     assert "reference_study" not in legacy.to_dict()["execution"]
     assert infer_legacy_reference_study(SimpleNamespace()) is None
+
+
+def test_partial_or_new_release_fields_do_not_infer_wandb_reference_study() -> None:
+    partial = SimpleNamespace(
+        evidence_lock="generic-evidence-lock.json",
+        source_conformance_receipt=None,
+        release_notes_lock=None,
+        mechanism_receipt=None,
+    )
+    complete = SimpleNamespace(
+        evidence_lock="generic-evidence-lock.json",
+        source_conformance_receipt="generic-conformance.json",
+        release_notes_lock="generic-release-notes.json",
+        mechanism_receipt="generic-mechanism.json",
+    )
+
+    assert infer_legacy_reference_study(partial, schema_version=1) is None
+    assert infer_legacy_reference_study(complete, schema_version=2) is None
 
 
 def test_reference_study_rejects_unknown_fields_and_bindings() -> None:

@@ -9,6 +9,8 @@ import pytest
 import yaml
 from fastapi.testclient import TestClient
 
+from fugue.research import mcp as research_mcp
+from fugue.research import skills as research_skills
 from fugue.research.access import (
     AccessGrantV1,
     ResearchAccessAuthorizer,
@@ -629,6 +631,39 @@ def test_skill_export_and_container_privilege_split(tmp_path: Path) -> None:
         "/run/secrets/research_record_ingest_key"
     )
     assert all("docker.sock" not in value for value in operator["volumes"])
+
+
+def test_optimization_skill_loads_from_packaged_resources(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    package = tmp_path / "installed-fugue"
+    skill = (
+        package
+        / "resources"
+        / "agent-skills"
+        / research_skills.SKILL_NAME
+    )
+    skill.mkdir(parents=True)
+    (skill / "SKILL.md").write_text(
+        "---\nname: resource-test\n---\n# Installed resource instructions\n",
+        encoding="utf-8",
+    )
+    references = skill / "references"
+    references.mkdir()
+    (references / "proof.md").write_text("packaged proof\n", encoding="utf-8")
+    monkeypatch.setattr(research_skills, "files", lambda _package: package)
+    monkeypatch.setattr(research_mcp, "files", lambda _package: package)
+
+    exported = research_skills.export_skill(tmp_path / "exported")
+
+    assert (exported / "SKILL.md").read_text(encoding="utf-8").endswith(
+        "# Installed resource instructions\n"
+    )
+    assert (exported / "references/proof.md").read_text(encoding="utf-8") == (
+        "packaged proof\n"
+    )
+    assert research_mcp._skill_instructions() == "# Installed resource instructions"
 
 
 def test_research_image_ci_materializes_every_compose_secret() -> None:

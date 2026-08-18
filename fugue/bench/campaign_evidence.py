@@ -15,6 +15,7 @@ from fugue.bench.candidates import (
     stable_digest,
 )
 from fugue.bench.reproducibility import verify_snapshot
+from fugue.bench.runtime_provenance import study_workspace_provenance
 from fugue.redaction import redact_value
 
 if TYPE_CHECKING:
@@ -546,7 +547,15 @@ def _snapshot_eligibility_failures(
     for index, row in enumerate(rows, 1):
         if row.get("run_snapshot_sha256") != snapshot_sha:
             failures.append(f"row {index} does not bind the run snapshot")
-    source = (snapshot.get("runtime") or {}).get("fugue_source") or {}
+    runtime = snapshot.get("runtime") or {}
+    if not isinstance(runtime, Mapping):
+        failures.append("run snapshot runtime provenance is invalid")
+        runtime = {}
+    try:
+        source = study_workspace_provenance(runtime) or {}
+    except ValueError:
+        failures.append("run snapshot study workspace provenance is ambiguous")
+        source = {}
     comparable = ("kind", "commit", "dirty", "dirty_digest", "digest")
     if any(source.get(key) != plan.source_provenance.get(key) for key in comparable):
         failures.append("run source provenance differs from the plan receipt")

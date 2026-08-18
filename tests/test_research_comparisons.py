@@ -25,7 +25,7 @@ from fugue.bench.comparison import (
     write_comparison_result,
 )
 from fugue.bench.files import atomic_write_json
-from fugue.model_plane import trace_destination_identity
+from fugue.model_plane import default_evidence_destination, trace_destination_identity
 from fugue.research.approvals import ApprovalLedger
 from fugue.research.comparisons import (
     COMPARISON_RESULT_ROOT,
@@ -181,6 +181,7 @@ def test_exact_approval_is_required_and_launch_is_idempotent(
         maximum_cells=int(preview["readiness"]["estimated_cells"]),
         approved_by="operator",
         operation_id="approve-comparison",
+        candidate_definitions=preview["matrix"]["candidate_definitions"],
     )
     started = service.start(
         "study-1",
@@ -229,6 +230,7 @@ def test_approval_limits_are_checked_before_worker_launch(tmp_path: Path) -> Non
         maximum_cells=1,
         approved_by="operator",
         operation_id="approve-too-small",
+        candidate_definitions=preview["matrix"]["candidate_definitions"],
     )
 
     with pytest.raises(ResearchError) as denied:
@@ -581,7 +583,11 @@ def test_execute_comparison_surfaces_result_projection_failure_separately(
             research_id=research_id,
             approval_required=False,
             preparation_required=False,
+            evidence_mode="weave_required",
             evidence_project="wandb/projection-test",
+            evidence_destination=default_evidence_destination(
+                "wandb/projection-test"
+            ),
         ),
     )
     spec = comparison_module.comparison_from_dict(

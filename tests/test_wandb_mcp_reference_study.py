@@ -102,6 +102,7 @@ def test_prepare_fences_ref_and_publishes_one_immutable_directory(
     git = FakeGit()
     env_file = tmp_path / ".env"
     env_file.write_text("ANTHROPIC_API_KEY=not-read-by-source-core\n", encoding="utf-8")
+    env_file.chmod(0o600)
 
     receipt = prepare_wandb_mcp_reference_study(
         repo_root=tmp_path,
@@ -219,6 +220,7 @@ def test_default_materializer_builds_a_complete_check_ready_bundle(
     monkeypatch.delenv("WANDB_API_KEY", raising=False)
     env_file = tmp_path / ".env"
     env_file.write_text("WANDB_API_KEY=unit-test-wandb-key\n", encoding="utf-8")
+    env_file.chmod(0o600)
 
     receipt = prepare_wandb_mcp_reference_study(
         repo_root=tmp_path,
@@ -396,6 +398,7 @@ def test_materializer_cannot_publish_undeclared_or_secret_content(
     monkeypatch.delenv("ANTHROPIC_API_KEY", raising=False)
     env_file = tmp_path / ".env"
     env_file.write_text(f"ANTHROPIC_API_KEY={secret}\n", encoding="utf-8")
+    env_file.chmod(0o600)
 
     def leaking_materializer(request: ReferenceMaterializationRequest):
         body = secret.encode()

@@ -31,6 +31,7 @@ from fugue.bench.comparison import (
     _comparison_trial_output,
     _evaluate_decision,
     _evaluator_digest,
+    _mechanism_summary,
     _paired_attempt_v3,
     _paired_attempt_view_v3,
     _prepare_comparison_scorer_runtimes,
@@ -39,6 +40,7 @@ from fugue.bench.comparison import (
     _require_checkpoint_judges,
     _restore_or_verify_checkpoint_receipt,
     _result_candidate_definitions,
+    _result_markdown,
     _resume_approved_comparison_lock,
     analyze_comparison_rows,
     check_comparison,
@@ -49,6 +51,7 @@ from fugue.bench.comparison import (
     load_comparison,
     materialize_comparison,
     prepare_comparison,
+    prepared_candidate_definitions,
     preview_comparison,
     read_comparison_result,
     scaffold_comparison,
@@ -93,6 +96,22 @@ def test_new_programmatic_comparison_policy_defaults_to_local_evidence() -> None
 
     assert policy.evidence_mode == "local"
     assert policy.evidence_destination.kind == "local"
+
+
+def test_explicit_local_comparison_policy_cannot_silently_switch_to_weave() -> None:
+    with pytest.raises(ValueError, match="W&B result destination"):
+        ComparisonExecutionPolicyV1(
+            model="anthropic/claude-sonnet-5",
+            harnesses=("claude-code",),
+            attempts=1,
+            concurrency=1,
+            max_cost_usd=1.0,
+            reserve_per_attempt_usd=1.0,
+            approval_required=True,
+            trace_content="full",
+            evidence_mode="local",
+            evidence_project="wandb/should-not-activate",
+        )
 
 
 def test_source_use_comparison_is_ready_and_exact() -> None:
@@ -192,13 +211,76 @@ def test_exact_approval_may_acknowledge_reviewable_canary(
         maximum_cells=8,
         approved_by="test-reviewer",
         operation_id="approve-reviewable-canary",
+        candidate_definitions=preview.matrix["candidate_definitions"],
     )
+
+    assert approval.candidate_definitions == preview.matrix["candidate_definitions"]
 
     claim_comparison_approval(
         preview,
         approval_digest=approval.approval_digest,
         repo_root=tmp_path,
     )
+
+
+def test_exact_approval_rejects_a_different_candidate_map(tmp_path: Path) -> None:
+    root = Path.cwd()
+    spec = load_comparison(EXAMPLE / "comparison.yaml", repo_root=root)
+    preview = preview_comparison(
+        replace(spec, execution=replace(spec.execution, attempts=1)),
+        repo_root=root,
+    )
+    definitions = dict(preview.matrix["candidate_definitions"])
+    one_candidate_id = next(iter(definitions))
+    wrong_definition = {**definitions[one_candidate_id], "label": "other candidate"}
+    definitions.pop(one_candidate_id)
+    definitions[stable_digest(wrong_definition)] = wrong_definition
+    ledger = ApprovalLedger(StudyStore(tmp_path).path)
+    approval = ledger.approve(
+        subject_kind="experiment",
+        preview_digest=preview.preview_digest,
+        maximum_cost_usd=1,
+        maximum_cells=8,
+        approved_by="test-reviewer",
+        operation_id="approve-wrong-candidate-map",
+        candidate_definitions=definitions,
+    )
+
+    with pytest.raises(ResearchError, match="accepted candidates"):
+        claim_comparison_approval(
+            preview,
+            approval_digest=approval.approval_digest,
+            repo_root=tmp_path,
+        )
+
+
+def test_prepared_preview_exposes_exact_candidate_map_for_approval(
+    tmp_path: Path,
+) -> None:
+    comparison_path = scaffold_comparison(tmp_path)
+    spec = load_comparison(comparison_path, repo_root=tmp_path)
+    preview = preview_comparison(spec, repo_root=tmp_path)
+    retained = (
+        tmp_path
+        / COMPARISON_RUNTIME_ROOT
+        / spec.spec_digest
+        / "prepared"
+        / "prepared-preview.json"
+    )
+    retained.parent.mkdir(parents=True)
+    retained.write_text(json.dumps(preview.to_dict()), encoding="utf-8")
+
+    definitions = prepared_candidate_definitions(
+        preview.preview_digest,
+        repo_root=tmp_path,
+    )
+
+    assert definitions == preview.matrix["candidate_definitions"]
+    assert all(stable_digest(value) == key for key, value in definitions.items())
+
+    retained.unlink()
+    with pytest.raises(ValueError, match="exact prepared preview is unavailable"):
+        prepared_candidate_definitions(preview.preview_digest, repo_root=tmp_path)
 
 
 def test_approval_ledger_supports_exact_preview_renewal_and_migration(
@@ -533,6 +615,7 @@ def test_comparison_declared_destination_overrides_legacy_test_endpoint(
         )
         + "\n"
     )
+    env_file.chmod(0o600)
     spec = comparison_from_dict(raw, repo_root=root, source=EXAMPLE)
 
     preview = preview_comparison(
@@ -560,6 +643,8 @@ def test_comparison_declared_destination_overrides_legacy_test_endpoint(
 def test_comparison_defaults_to_canonical_local_evidence(tmp_path: Path) -> None:
     comparison_path = scaffold_comparison(tmp_path)
     raw = yaml.safe_load(comparison_path.read_text())
+    assert raw["schema_version"] == 2
+    raw["execution"].pop("evidence_mode")
     spec = comparison_from_dict(raw, repo_root=tmp_path, source=tmp_path)
 
     assert spec.execution.evidence_mode == "local"
@@ -608,6 +693,21 @@ def test_comparison_defaults_to_canonical_local_evidence(tmp_path: Path) -> None
     raw["execution"]["evidence_project"] = "wandb/not-local"
     with pytest.raises(ValueError, match="does not accept W&B"):
         comparison_from_dict(raw, repo_root=tmp_path, source=tmp_path)
+
+
+def test_v1_comparison_without_evidence_mode_retains_weave_default(
+    tmp_path: Path,
+) -> None:
+    comparison_path = scaffold_comparison(tmp_path)
+    raw = yaml.safe_load(comparison_path.read_text())
+    raw["schema_version"] = 1
+    raw["execution"].pop("evidence_mode")
+    raw["execution"]["evidence_project"] = "wandb/legacy-results"
+
+    spec = comparison_from_dict(raw, repo_root=tmp_path, source=tmp_path)
+
+    assert spec.execution.evidence_mode == "weave_required"
+    assert spec.execution.evidence_project == "wandb/legacy-results"
 
 
 def test_comparison_evaluation_projects_aligned_attempts_and_weave_links() -> None:
@@ -1245,8 +1345,21 @@ def test_v3_result_round_trips_source_topology_and_canonical_view(
     assert result.paired_cases[0].candidate.actual_query_scope == (source_project,)
 
     dual_chain_rows = json.loads(json.dumps(rows))
-    for row in dual_chain_rows:
+    local_binding = {
+        "local_evidence_manifest_digest": "1" * 64,
+        "local_evidence_manifest_file_sha256": "2" * 64,
+        "local_evidence_plan_digest": "3" * 64,
+        "local_evidence_attempt_record_set_digest": "4" * 64,
+        "local_evidence_prediction_row_set_digest": "5" * 64,
+        "local_evidence_run_receipt_digest": "6" * 64,
+        "local_evidence_run_receipt_file_sha256": "7" * 64,
+    }
+    for index, row in enumerate(dual_chain_rows, start=1):
         attempt = str(row["attempt_id"])
+        row["run_id"] = "v3-run"
+        row["local_evidence_record_digest"] = f"{index:x}" * 64
+        row["local_evidence_prediction_row_sha256"] = f"{index + 4:x}" * 64
+        row.update(local_binding)
         row["local_evidence_links"] = [
             {
                 "kind": kind,
@@ -1276,6 +1389,8 @@ def test_v3_result_round_trips_source_topology_and_canonical_view(
     )
     assert isinstance(dual_chain, ComparisonResultV3)
     assert dual_chain.evidence_backend == "weave"
+    assert dual_chain.local_evidence is not None
+    assert dual_chain.local_evidence["run_id"] == "v3-run"
     assert dual_chain.local_chain_integrity == "reconciled"
     assert dual_chain.hosted_chain_integrity == "reconciled"
     assert {
@@ -1285,6 +1400,36 @@ def test_v3_result_round_trips_source_topology_and_canonical_view(
         item.system
         for item in dual_chain.paired_cases[0].candidate.hosted_evidence_links
     } == {"weave"}
+    local_markdown = _result_markdown(dual_chain)
+    assert "Evaluation record:" in local_markdown
+    assert "Prediction-and-score record:" in local_markdown
+    assert "Prediction record:" in local_markdown
+    assert "Provider-neutral Agent receipt:" in local_markdown
+    assert "Dataset manifest:" in local_markdown
+    assert "## Treatment identities" in local_markdown
+    for candidate_id, definition in dual_chain.candidate_definitions.items():
+        assert f"`{candidate_id}`" in local_markdown
+        assert f"harness `{definition['harness']}`" in local_markdown
+        assert (
+            f"model `{definition['model_route']['display_model']}`"
+            in local_markdown
+        )
+        assert f"context `{definition['context']['id']}`" in local_markdown
+        for skill in definition["skills"]:
+            assert f"`{skill['id']}`" in local_markdown
+        for integration in definition["integrations"]:
+            assert f"`{integration['id']}`" in local_markdown
+        if definition.get("prompt_digest"):
+            assert f"prompt `{definition['prompt_digest']}`" in local_markdown
+
+    dual_chain_destination = tmp_path / "v3-dual-chain-result"
+    dual_chain_destination.mkdir()
+    (dual_chain_destination / "attempts.jsonl").write_text(
+        "\n".join(json.dumps(row, sort_keys=True) for row in dual_chain_rows) + "\n",
+        encoding="utf-8",
+    )
+    write_comparison_result(dual_chain, destination=dual_chain_destination)
+    assert read_comparison_result(dual_chain_destination / "result.json") == dual_chain
 
     role_drift = json.loads(json.dumps(rows))
     candidate_row = next(row for row in role_drift if row["variant_id"] == "candidate")
@@ -1324,6 +1469,28 @@ def test_v3_result_round_trips_source_topology_and_canonical_view(
         path = destination / filename
         path.write_text(json.dumps(raw_result), encoding="utf-8")
         return path
+
+    missing_local_binding = dual_chain.to_dict()
+    missing_local_binding.pop("local_evidence")
+    with pytest.raises(ValueError, match="local evidence requires its ledger binding"):
+        read_comparison_result(
+            write_rehashed_result(
+                missing_local_binding,
+                "missing-dual-chain-local-binding.json",
+            )
+        )
+
+    missing_attempt_binding = dual_chain.to_dict()
+    missing_attempt_binding["paired_cases"][0]["candidate"].pop(
+        "local_evidence_record_digest"
+    )
+    with pytest.raises(ValueError, match="requires record and prediction digests"):
+        read_comparison_result(
+            write_rehashed_result(
+                missing_attempt_binding,
+                "missing-dual-chain-attempt-binding.json",
+            )
+        )
 
     expected_candidate_ids = {
         str(attempt.identity["candidate"])
@@ -1647,6 +1814,9 @@ def test_v3_result_round_trips_source_topology_and_canonical_view(
     assert non_discriminating.task_validity[0].blockers == ()
     assert non_discriminating.behavioral_summary.status == "unchanged"
     assert non_discriminating.behavioral_summary.improved_pairs == 0
+    assert "release" not in non_discriminating.behavioral_summary.recommendation.lower()
+    assert non_discriminating.behavioral_summary.supported_claim is not None
+    assert "release" not in non_discriminating.behavioral_summary.supported_claim.lower()
 
 
 def test_v2_read_binds_go_attestation_and_all_attestation_metadata(
@@ -2478,6 +2648,38 @@ def test_v3_candidate_definition_recompute_requires_exact_coverage() -> None:
         )
 
 
+def test_v3_treatment_identity_markdown_uses_stored_definition_fields(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from fugue.bench import comparison as comparison_module
+
+    candidate_id = "d" * 64
+
+    class StoredV3:
+        candidate_definitions = {
+            candidate_id: {
+                "harness": "claude-code",
+                "model_route": {"display_model": "anthropic/claude-sonnet-5"},
+                "context": {"id": "repo-context-v1"},
+                "skills": [{"id": "review-plan"}],
+                "integrations": [{"id": "wandb-mcp-0-4"}],
+                "prompt_digest": "e" * 64,
+            }
+        }
+
+    monkeypatch.setattr(comparison_module, "ComparisonResultV3", StoredV3)
+
+    markdown = comparison_module._result_treatment_identities_markdown(StoredV3())
+
+    assert markdown == (
+        "## Treatment identities\n\n"
+        f"- `{candidate_id}` — harness `claude-code`; "
+        "model `anthropic/claude-sonnet-5`; context `repo-context-v1`; "
+        "skills `review-plan`; integrations `wandb-mcp-0-4`; "
+        f"prompt `{'e' * 64}`\n\n"
+    )
+
+
 def test_v1_result_remains_readable(tmp_path: Path) -> None:
     raw = {
         "schema_version": 1,
@@ -2730,6 +2932,69 @@ def test_mechanism_summary_keeps_assignment_registration_and_use_distinct() -> N
     assert (
         result.mechanism_summary["relevant_source_used"]["candidate"]["observed"] == 1
     )
+    assert "task_passed" not in result.mechanism_summary
+
+    historical = _mechanism_summary(
+        [
+            {
+                "variant_id": "candidate",
+                "comparison_mechanism": {
+                    "skill_invoked": "observed",
+                    "task_passed": "observed",
+                },
+            }
+        ]
+    )
+    assert historical["skill_invoked"]["candidate"]["observed"] == 1
+    assert "task_passed" not in historical
+
+
+def test_eight_row_report_uses_real_pair_counts_and_neutral_study_language() -> None:
+    rows = [
+        _decision_row(variant=variant, task_id=f"task-{task}", passed=True)
+        for task in range(1, 5)
+        for variant in ("baseline", "candidate")
+    ]
+    result = analyze_comparison_rows(
+        comparison_id="eight-row-behavior-study",
+        preview_digest="a" * 64,
+        rows=rows,
+        source="test",
+        expected_evidence_project="wandb/release-project",
+    )
+    historical_wording = replace(
+        result.behavioral_summary,
+        recommendation=(
+            "HOLD — no release-qualifying behavioral improvement was established."
+        ),
+    )
+    historical_mechanism = {
+        **result.mechanism_summary,
+        "task_passed": {
+            "baseline": {"observed": 4, "applicable": 4, "unavailable": 0},
+            "candidate": {"observed": 4, "applicable": 4, "unavailable": 0},
+        },
+    }
+
+    markdown = _result_markdown(
+        replace(
+            result,
+            behavioral_summary=historical_wording,
+            mechanism_summary=historical_mechanism,
+        )
+    )
+
+    assert "- Rows: 8" in markdown
+    assert "Baseline aligned attempts passed: 4/4" in markdown
+    assert "Candidate aligned attempts passed: 4/4" in markdown
+    assert "0/0" not in markdown
+    assert "Task Passed" not in markdown
+    assert (
+        "Behavioral recommendation: HOLD — no release-qualifying behavioral "
+        "improvement was established."
+    ) in markdown
+    assert "recommendation is preserved from the canonical result" in markdown
+    assert "Package release: **NOT EVALUATED**" in markdown
 
 
 def test_zero_row_comparison_cannot_succeed() -> None:
@@ -4218,7 +4483,21 @@ def test_execute_local_comparison_never_requires_or_fetches_weave(
     assert result_path.is_file()
     markdown = markdown_path.read_text(encoding="utf-8")
     assert "]()" not in markdown
-    assert "No safe evidence links were available." in markdown
+    assert "Package release: **NOT EVALUATED**" in markdown
+    assert "Release-policy note: Package release was not evaluated" in markdown
+    assert "behavioral study is not release-complete" not in markdown
+    assert (
+        "Evidence integrity grade: **A** (evidence-link reconciliation and privacy "
+        "integrity; not a behavioral-quality score)" in markdown
+    )
+    assert "Evidence backend: **local Fugue ledger**" in markdown
+    assert result.local_evidence is not None
+    assert (
+        f".fugue/runtime/{result.local_evidence['run_id']}/evidence/" in markdown
+    )
+    assert "Portable evidence destination: `fugue-evidence` layout v1" in markdown
+    assert "`fugue://evidence/" in markdown
+    assert "No safe evidence links were available." not in markdown
     approved = dict(captured["approved"])  # type: ignore[arg-type]
     assert approved["approval_required"] is False
     assert approved["approval_digest"] == ""

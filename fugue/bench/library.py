@@ -384,6 +384,7 @@ class PresetSpec:
 class ExperimentSpec:
     id: str
     title: str
+    schema_version: Literal[1, 2] = 2
     description: str = ""
     manifest: Path = Path("datasets/pilot.yaml")
     model: str | None = None
@@ -422,6 +423,8 @@ class ExperimentSpec:
     quiet: bool = False
 
     def __post_init__(self) -> None:
+        if self.schema_version not in {1, 2}:
+            raise ValueError("experiment schema_version must be 1 or 2")
         mode = self.evidence_mode
         hosted_result_declared = bool(
             self.evidence_project
@@ -429,26 +432,21 @@ class ExperimentSpec:
             or self.require_live_evidence
         )
         if mode is None:
-            # New programmatic studies are standalone unless they explicitly
-            # declare a hosted result destination. The document reader below
-            # keeps missing legacy fields on their historical Weave semantics.
-            mode = "weave_required" if hosted_result_declared else "local"
+            # V2 and new programmatic studies are standalone unless they
+            # explicitly declare a hosted result destination. V1 documents
+            # retain the hosted default that existed before local evidence.
+            mode = (
+                "weave_required"
+                if hosted_result_declared or self.schema_version == 1
+                else "local"
+            )
             object.__setattr__(self, "evidence_mode", mode)
         if mode not in {"local", "weave_required"}:
             raise ValueError("evidence_mode must be local or weave_required")
         if mode == "local" and hosted_result_declared:
-            # ``dataclasses.replace`` is used by older operator callers to
-            # bind a declared W&B destination to a previously local spec.
-            # External parsing still rejects an explicit local+W&B config.
-            mode = "weave_required"
-            object.__setattr__(self, "evidence_mode", mode)
-            if isinstance(
-                self.source_evidence_destination,
-                LocalEvidenceDestinationV1,
-            ):
-                object.__setattr__(self, "source_evidence_destination", None)
-            if isinstance(self.evidence_destination, LocalEvidenceDestinationV1):
-                object.__setattr__(self, "evidence_destination", None)
+            raise ValueError(
+                "local evidence mode cannot declare a hosted result destination"
+            )
         if mode == "weave_required":
             if (
                 self.source_evidence_project is not None
@@ -772,11 +770,14 @@ def experiment_from_data(
         evidence_project=evidence_project,
     )
     require_live_evidence = bool(raw.get("require_live_evidence", False))
+    schema_version = int(raw.get("schema_version") or 1)
+    if schema_version not in {1, 2}:
+        raise ValueError("experiment schema_version must be 1 or 2")
     declared_evidence_mode = _optional_str(raw.get("evidence_mode"))
     if declared_evidence_mode is None:
-        # Documents created before this field existed were live Weave runs.
-        # New templates write ``local`` explicitly.
-        evidence_mode: EvidenceMode = "weave_required"
+        evidence_mode: EvidenceMode = (
+            "local" if schema_version >= 2 else "weave_required"
+        )
     elif declared_evidence_mode in {"local", "weave_required"}:
         evidence_mode = declared_evidence_mode  # type: ignore[assignment]
     else:
@@ -818,6 +819,7 @@ def experiment_from_data(
     return ExperimentSpec(
         id=experiment_id,
         title=str(raw.get("title") or experiment_id),
+        schema_version=schema_version,  # type: ignore[arg-type]
         description=str(raw.get("description") or ""),
         manifest=Path(str(raw.get("manifest") or "datasets/pilot.yaml")),
         model=_optional_str(raw.get("model")),

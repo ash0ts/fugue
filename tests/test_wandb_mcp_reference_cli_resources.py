@@ -31,6 +31,7 @@ def test_cli_lazily_prepares_runnable_wandb_mcp_reference(
 
     env_file = tmp_path / "operator.env"
     env_file.write_text("WANDB_API_KEY=not-serialized\n", encoding="utf-8")
+    env_file.chmod(0o600)
     captured: dict[str, object] = {}
 
     def prepare(**kwargs: object) -> SimpleNamespace:

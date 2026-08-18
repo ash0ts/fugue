@@ -16,6 +16,7 @@ from filelock import FileLock
 from fugue.bench.candidates import attempt_id as canonical_attempt_id
 from fugue.bench.candidates import stable_digest
 from fugue.bench.files import atomic_write_json
+from fugue.redaction import redact_text
 
 LOCAL_EVIDENCE_SCHEMA_VERSION = 1
 LOCAL_EVIDENCE_LAYOUT_VERSION = 1
@@ -39,6 +40,10 @@ AttemptTerminalStatus = Literal[
 ]
 AttemptIntegrityStatus = Literal["resolved", "incomplete", "invalid"]
 ManifestStatus = Literal["complete", "incomplete", "invalid"]
+EvidenceCardinality = Literal[
+    "legacy_shared_scope_v1",
+    "attempt_scoped_v1",
+]
 RunConformanceStatus = Literal[
     "passed", "failed", "unavailable", "not_applicable"
 ]
@@ -65,6 +70,9 @@ _TERMINAL_STATUSES = frozenset(
 )
 _INTEGRITY_STATUSES = frozenset({"resolved", "incomplete", "invalid"})
 _MANIFEST_STATUSES = frozenset({"complete", "incomplete", "invalid"})
+_EVIDENCE_CARDINALITIES = frozenset(
+    {"legacy_shared_scope_v1", "attempt_scoped_v1"}
+)
 _EVENT_TYPES = frozenset(
     {
         "run_initialized",
@@ -736,6 +744,7 @@ class LocalEvidenceRunPlanV1:
     evaluation_asset_lock_sha256: str
     attempts: tuple[LocalAttemptPlanV1, ...]
     require_run_conformance: bool = True
+    evidence_cardinality: EvidenceCardinality = "attempt_scoped_v1"
     schema_version: Literal[1] = LOCAL_EVIDENCE_SCHEMA_VERSION
     plan_digest: str = ""
 
@@ -760,6 +769,10 @@ class LocalEvidenceRunPlanV1:
             raise ValueError("local evidence run-plan prediction ids must be unique")
         if any(item.run_id != self.run_id for item in self.attempts):
             raise ValueError("local evidence attempt belongs to another run")
+        if self.evidence_cardinality not in _EVIDENCE_CARDINALITIES:
+            raise ValueError("unsupported local evidence cardinality")
+        if self.evidence_cardinality == "attempt_scoped_v1":
+            _require_unique_attempt_evidence_refs(self.attempts)
         computed = self.computed_digest()
         if self.plan_digest and self.plan_digest != computed:
             raise ValueError("local evidence run-plan digest does not match")
@@ -767,22 +780,10 @@ class LocalEvidenceRunPlanV1:
             object.__setattr__(self, "plan_digest", computed)
 
     def computed_digest(self) -> str:
-        return stable_digest(
-            {
-                "schema_version": self.schema_version,
-                "run_id": self.run_id,
-                "destination": self.destination.to_dict(),
-                "run_snapshot_sha256": self.run_snapshot_sha256,
-                "evaluation_asset_lock_sha256": (
-                    self.evaluation_asset_lock_sha256
-                ),
-                "attempts": [item.to_dict() for item in self.attempts],
-                "require_run_conformance": self.require_run_conformance,
-            }
-        )
+        return stable_digest(self._unsigned_dict())
 
-    def to_dict(self) -> dict[str, Any]:
-        return {
+    def _unsigned_dict(self) -> dict[str, Any]:
+        value = {
             "schema_version": self.schema_version,
             "run_id": self.run_id,
             "destination": self.destination.to_dict(),
@@ -790,8 +791,16 @@ class LocalEvidenceRunPlanV1:
             "evaluation_asset_lock_sha256": self.evaluation_asset_lock_sha256,
             "attempts": [item.to_dict() for item in self.attempts],
             "require_run_conformance": self.require_run_conformance,
-            "plan_digest": self.computed_digest(),
         }
+        # Records written before attempt-scoped cardinality remain readable and
+        # retain their original digest. New plans always carry the explicit
+        # invariant and reject a shared Dataset or Evaluation ref.
+        if self.evidence_cardinality != "legacy_shared_scope_v1":
+            value["evidence_cardinality"] = self.evidence_cardinality
+        return value
+
+    def to_dict(self) -> dict[str, Any]:
+        return {**self._unsigned_dict(), "plan_digest": self.computed_digest()}
 
 
 @dataclass(frozen=True)
@@ -1650,15 +1659,26 @@ class LocalEvidenceStore:
                 raise LocalEvidenceIntegrityError(
                     f"local evidence artifact digest changed: {node.artifact.path}"
                 )
+            try:
+                payload = json.loads(raw)
+            except json.JSONDecodeError as exc:
+                raise LocalEvidenceIntegrityError(
+                    f"local evidence artifact is not valid JSON: {node.artifact.path}"
+                ) from exc
+            if not isinstance(payload, Mapping):
+                raise LocalEvidenceIntegrityError(
+                    f"local evidence artifact is not an object: {node.artifact.path}"
+                )
+            try:
+                _assert_public_payload(payload)
+            except ValueError as exc:
+                raise LocalEvidenceIntegrityError(
+                    "local evidence artifact failed its final privacy scan: "
+                    f"{node.artifact.path}"
+                ) from exc
             if node.kind == "prediction" and record.result_row_projection_digest:
-                try:
-                    prediction = json.loads(raw)
-                except json.JSONDecodeError as exc:
-                    raise LocalEvidenceIntegrityError(
-                        "local prediction artifact is not valid JSON"
-                    ) from exc
-                if not isinstance(prediction, Mapping) or (
-                    local_result_row_projection_digest(prediction)
+                if (
+                    local_result_row_projection_digest(payload)
                     != record.result_row_projection_digest
                 ):
                     raise LocalEvidenceIntegrityError(
@@ -1812,23 +1832,36 @@ class LocalEvidenceCoordinator:
             return existing
         safe_scores = _public_payload(scores, secret_values=self.secret_values)
         safe_evaluation = _public_payload(
-            evaluation_payload
-            or {
-                "run_id": attempt.run_id,
-                "evaluation_root_id": attempt.evaluation_root_id,
-                "evaluation_scope_id": attempt.evaluation_scope_id,
-                "candidate_id": attempt.candidate_id,
-            },
+            _bind_local_record_identity(
+                evaluation_payload,
+                {
+                    "schema_version": 1,
+                    "record_type": "local_evaluation_record",
+                    "run_id": attempt.run_id,
+                    "attempt_id": attempt.attempt_id,
+                    "evaluation_root_id": attempt.evaluation_root_id,
+                    "evaluation_scope_id": attempt.evaluation_scope_id,
+                    "candidate_id": attempt.candidate_id,
+                },
+                "local Evaluation record",
+            ),
             secret_values=self.secret_values,
         )
         safe_dataset = _public_payload(
-            dataset_payload
-            or {
-                "dataset_id": attempt.dataset_id,
-                "evaluation_asset_lock_sha256": (
-                    self.plan.evaluation_asset_lock_sha256
-                ),
-            },
+            _bind_local_record_identity(
+                dataset_payload,
+                {
+                    "schema_version": 1,
+                    "record_type": "local_dataset_manifest",
+                    "run_id": attempt.run_id,
+                    "attempt_id": attempt.attempt_id,
+                    "dataset_id": attempt.dataset_id,
+                    "evaluation_asset_lock_sha256": (
+                        self.plan.evaluation_asset_lock_sha256
+                    ),
+                },
+                "local Dataset manifest",
+            ),
             secret_values=self.secret_values,
         )
         safe_attempt = _public_payload(
@@ -1854,15 +1887,12 @@ class LocalEvidenceCoordinator:
 
         artifacts = {
             "evaluation_root": self.store.write_artifact(
-                (
-                    f"evaluations/{attempt.evaluation_root_id}/"
-                    "evaluation-root.json"
-                ),
+                f"evaluations/{attempt.attempt_id}/evaluation-record.json",
                 safe_evaluation,
                 secret_values=self.secret_values,
             ),
             "dataset": self.store.write_artifact(
-                f"datasets/{attempt.dataset_id}.json",
+                f"datasets/{attempt.attempt_id}/dataset-manifest.json",
                 safe_dataset,
                 secret_values=self.secret_values,
             ),
@@ -1989,6 +2019,26 @@ def local_attempt_refs(attempt: LocalAttemptPlanV1) -> dict[EvidenceNodeKind, st
     }
 
 
+def _require_unique_attempt_evidence_refs(
+    attempts: Sequence[LocalAttemptPlanV1],
+) -> None:
+    refs_by_kind = {
+        kind: [local_attempt_refs(attempt)[kind] for attempt in attempts]
+        for kind in _NODE_KINDS
+    }
+    for kind, refs in refs_by_kind.items():
+        if len(set(refs)) != len(refs):
+            raise ValueError(
+                "attempt-scoped local evidence requires one unique "
+                f"{kind} ref per logical attempt"
+            )
+    all_refs = [ref for refs in refs_by_kind.values() for ref in refs]
+    if len(set(all_refs)) != len(all_refs):
+        raise ValueError(
+            "attempt-scoped local evidence refs must be globally unique"
+        )
+
+
 def local_evidence_destination_from_dict(
     raw: Mapping[str, Any],
 ) -> LocalEvidenceDestinationV1:
@@ -2045,6 +2095,13 @@ def local_attempt_plan_from_dict(raw: Mapping[str, Any]) -> LocalAttemptPlanV1:
 def local_evidence_run_plan_from_dict(
     raw: Mapping[str, Any],
 ) -> LocalEvidenceRunPlanV1:
+    has_cardinality = "evidence_cardinality" in raw
+    raw = {
+        **raw,
+        "evidence_cardinality": raw.get(
+            "evidence_cardinality", "legacy_shared_scope_v1"
+        ),
+    }
     value = _strict_mapping(
         raw,
         {
@@ -2055,6 +2112,7 @@ def local_evidence_run_plan_from_dict(
             "evaluation_asset_lock_sha256",
             "attempts",
             "require_run_conformance",
+            "evidence_cardinality",
             "plan_digest",
         },
         "local evidence run plan",
@@ -2078,6 +2136,11 @@ def local_evidence_run_plan_from_dict(
         require_run_conformance=_required_bool(
             value.get("require_run_conformance"),
             "require run conformance",
+        ),
+        evidence_cardinality=(
+            _evidence_cardinality(value.get("evidence_cardinality"))
+            if has_cardinality
+            else "legacy_shared_scope_v1"
         ),
         plan_digest=_required_digest(value.get("plan_digest"), "plan digest"),
     )
@@ -2615,6 +2678,18 @@ def _verify_prediction_identity(
         raise ValueError("prediction row attempt identity disagrees with its plan")
 
 
+def _bind_local_record_identity(
+    payload: Mapping[str, Any] | None,
+    identity: Mapping[str, Any],
+    label: str,
+) -> dict[str, Any]:
+    value = dict(payload or {})
+    for key, expected in identity.items():
+        if key in value and value[key] != expected:
+            raise ValueError(f"{label} {key} disagrees with its attempt")
+    return {**value, **identity}
+
+
 def _attempt_from_plan(
     plan: LocalEvidenceRunPlanV1, attempt_id: str
 ) -> LocalAttemptPlanV1:
@@ -2646,6 +2721,13 @@ def _canonical_attempt_identity(raw: Mapping[str, Any]) -> dict[str, Any]:
         "candidate": _required_text(raw.get("candidate"), "attempt candidate"),
         "runtime": _required_text(raw.get("runtime"), "attempt runtime"),
     }
+
+
+def _evidence_cardinality(value: Any) -> EvidenceCardinality:
+    normalized = str(value or "")
+    if normalized not in _EVIDENCE_CARDINALITIES:
+        raise ValueError("unsupported local evidence cardinality")
+    return normalized  # type: ignore[return-value]
 
 
 def _write_immutable_json(path: Path, value: Mapping[str, Any]) -> None:
@@ -2821,3 +2903,9 @@ def _assert_public_payload(
                     f"configured secret value is not allowed in local evidence: "
                     f"{location}"
                 )
+        if redact_text(value) != value:
+            location = ".".join(path) or "payload"
+            raise ValueError(
+                "token-shaped credential is not allowed in local evidence: "
+                f"{location}"
+            )

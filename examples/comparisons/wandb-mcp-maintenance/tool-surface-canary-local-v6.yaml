@@ -69,6 +69,11 @@ evaluators:
     timeout_sec: 300
     reserve_cost_usd: 0.10
 execution:
+  reference_study:
+    id: wandb-mcp-release
+    version: 2
+    intent: historical-hosted-release-qualification
+  evidence_mode: weave_required
   source_evidence_project: wandb/fugue-mcp-release-source-v2
   source_evidence_destination:
     entity: wandb

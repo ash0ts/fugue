@@ -4,10 +4,14 @@ This local study holds the Claude Code harness fixed and compares only its
 locked `max_turns` configuration. It does **not** rank Claude Code against
 another harness. The matrix contains eight logical cells.
 
-Copy `.env.example` to `.env`, add `ANTHROPIC_API_KEY`, then run:
+Create a private credential file, add `ANTHROPIC_API_KEY`, then run:
 
 ```bash
-fugue doctor
+install -m 600 .env.example .env
+```
+
+```bash
+fugue doctor --require local-runner --model anthropic/claude-sonnet-5 --env-file .env
 fugue check comparison.yaml --env-file .env
 fugue compare comparison.yaml --prepare --env-file .env
 fugue compare comparison.yaml --preview --env-file .env --json > preview.json

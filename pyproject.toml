@@ -8,7 +8,7 @@ version = "0.1.2"
 description = "Governed laboratory for controlled experiments on agent systems."
 readme = "README.md"
 license = "Apache-2.0"
-requires-python = ">=3.12"
+requires-python = ">=3.12,<3.14"
 dependencies = [
     "httpx",
     "filelock==3.29.7",
@@ -27,9 +27,11 @@ dev = [
     "deptry==0.25.1",
     "pytest",
     "ruff",
+    "setuptools>=69",
     "skills-ref==0.1.1",
     "vulture==2.16",
     "weave==0.53.1",
+    "wheel",
 ]
 local-runner = [
     "harbor==0.18.0; python_version >= '3.13'",
@@ -39,6 +41,9 @@ mcp = [
 ]
 weave = [
     "weave==0.53.1",
+]
+wandb-index = [
+    "wandb==0.28.1",
 ]
 context = [
     "fastembed==0.8.0",
@@ -104,6 +109,7 @@ include = ["fugue*", "tools*"]
 
 [tool.setuptools.package-data]
 fugue = [
+    "resources/asset-manifest-v1.json",
     "resources/agent-skills/**/*.md",
     "resources/agent-skills/**/*.yaml",
     "resources/source-use-replay/*.jsonl",
@@ -117,6 +123,8 @@ fugue = [
     "resources/build-provenance.json",
     "resources/source-commit.txt",
     "resources/runtime/**/*.json",
+    "resources/runtime/**/Dockerfile",
+    "resources/runtime/**/*.lock",
     "resources/runtime/**/*.mjs",
     "resources/runtime/**/*.patch",
     "resources/runtime/**/*.py",

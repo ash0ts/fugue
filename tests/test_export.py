@@ -27,6 +27,7 @@ from fugue.bench.export import (
     publish_to_weave,
     write_jsonl,
 )
+from fugue.bench.local_evidence import local_attempt_refs
 from fugue.bench.operator import OperatorService
 from fugue.mcp_evidence import safe_graphql_event_arguments
 
@@ -5036,6 +5037,56 @@ def test_generated_evaluation_closes_canonical_local_evidence_chain(
     assert attempt["attempt"]["receipts"]["policy"]["status"] == "passed"
     assert attempt["attempt"]["receipts"]["usage"]["status"] == "passed"
     assert attempt["attempt"]["receipts"]["cleanup"]["status"] == "passed"
+
+
+def test_generated_local_plan_assigns_five_unique_refs_per_attempt(
+    tmp_path: Path,
+) -> None:
+    cells = [
+        PlannedCell(
+            id=f"cell-{trial_index}",
+            run_id="attempt-scoped-local-run",
+            run_name="attempt-scoped-local-run",
+            workload_id="suite",
+            task_id="task-a",
+            harness="claude-code",
+            context_system_id="none",
+            variant_id="baseline",
+            model_provider="anthropic",
+            model="anthropic/claude-test",
+            trial_index=trial_index,
+            comparison_example_id="example-a",
+            candidate_id="candidate-a",
+            execution_fingerprint="execution-a",
+            config_path=tmp_path / f"config-{trial_index}.json",
+            result_path=tmp_path / f"cell-{trial_index}" / "result.json",
+            command=("harbor", "run"),
+            env={"FUGUE_EVIDENCE_MODE": "local", "FUGUE_DATASET": "suite@v1"},
+            n_attempts=2,
+            evaluation_asset_lock_sha256="e" * 64,
+            run_snapshot_sha256="a" * 64,
+        )
+        for trial_index in (1, 2)
+    ]
+    coordinator = GeneratedEvaluationCoordinator(
+        cells,
+        repo_root=tmp_path,
+        env={"ANTHROPIC_API_KEY": "not-a-real-secret-value"},
+        evidence_mode="local",
+    )
+
+    assert coordinator._local is not None
+    attempts = coordinator._local.plan.attempts
+    assert coordinator._local.plan.evidence_cardinality == "attempt_scoped_v1"
+    refs = [local_attempt_refs(attempt) for attempt in attempts]
+    for kind in (
+        "evaluation_root",
+        "prediction_and_score",
+        "prediction",
+        "agent_root",
+        "dataset",
+    ):
+        assert len({item[kind] for item in refs}) == len(attempts)
 
 
 def _write_realistic_local_harness_transcript(

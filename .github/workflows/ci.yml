@@ -58,6 +58,18 @@ jobs:
           tests/test_provider_contract.py tests/test_scoring.py tests/test_sources.py
           tests/test_supervisor.py tests/test_atlas_site.py
           tests/test_task_authoring.py tests/test_tool_policy.py
+          tests/test_doctor.py tests/test_installed_wheel.py
+          tests/test_local_evidence.py tests/test_local_publication.py
+          tests/test_local_publication_cli.py tests/test_result_cli.py
+          tests/test_standalone_cli.py tests/test_standalone_templates.py
+          tests/test_standalone_ci.py tests/test_aligned_analysis.py
+          tests/test_build_provenance.py tests/test_campaign_privacy.py
+          tests/test_executables.py tests/test_harbor_outcome.py
+          tests/test_intervention_provenance.py tests/test_loop_engineering.py
+          tests/test_private_inputs.py tests/test_prompt_injection_action_gate_study.py
+          tests/test_real_study_lanes.py tests/test_resource_integrity.py
+          tests/test_runtime_provenance.py tests/test_sandbox_policy.py
+          tests/test_support_data_authority_ready.py
       - name: Test context and operator contracts
         if: matrix.suite == 'context'
         env:
@@ -73,6 +85,8 @@ jobs:
           tests/test_runtime_manager.py tests/test_weave_support.py
           tests/test_services.py tests/test_agent_runtime.py tests/test_task_runtime.py
           tests/test_task_interaction.py
+          tests/test_execution_recovery.py tests/test_local_credential_isolation.py
+          tests/test_portable_runtime.py tests/test_context_server.py
       - name: Test development and release tooling
         if: matrix.suite == 'dev'
         env:
@@ -98,6 +112,108 @@ jobs:
           tests/test_tasksets.py
           tests/test_mcp_read_only_evidence.py
           tests/test_mcp_release_qualification.py tests/test_wandb_sandbox.py
+          tests/test_reference_study_dispatch.py tests/test_research_index.py
+          tests/test_research_index_cli.py tests/test_wandb_research_index.py
+          tests/test_mcp_pagination_evidence.py
+          tests/test_mcp_release_candidate_selection.py
+          tests/test_mcp_release_qualification_compat.py
+          tests/test_mcp_tool_surface_scorer.py
+          tests/test_mcp_tool_surface_scorer_v5.py
+          tests/test_mcp_tool_surface_scorer_v7.py
+          tests/test_mcp_tool_surface_v10_authoritative_close.py
+          tests/test_mcp_tool_surface_v6_spec.py
+          tests/test_mcp_tool_surface_v8_policy.py
+          tests/test_wandb_mcp_reference_cli_resources.py
+          tests/test_wandb_mcp_reference_study.py
+
+  local-runner:
+    name: Python 3.13 local Harbor contracts
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          fetch-depth: 0
+      - uses: actions/setup-python@v6
+        with:
+          python-version: "3.13"
+      - uses: astral-sh/setup-uv@v8.3.2
+      - name: Install local runner
+        run: uv sync --frozen --extra dev --extra local-runner
+      - name: Test local Harbor execution contracts
+        env:
+          PYTHONWARNINGS: error
+          FUGUE_NO_ANIMATION: "1"
+        run: >-
+          uv run pytest
+          tests/test_comparison_execution.py
+          tests/test_local_harness_evidence.py
+
+  standalone-wheel:
+    name: Standalone wheel / Python ${{ matrix.python }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    strategy:
+      fail-fast: false
+      matrix:
+        python: ["3.12", "3.13"]
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          fetch-depth: 0
+      - uses: actions/setup-python@v6
+        with:
+          python-version: ${{ matrix.python }}
+      - uses: astral-sh/setup-uv@v8.3.2
+      - name: Build the distribution
+        run: uv build --wheel --out-dir /tmp/fugue-wheel
+      - name: Install the wheel without the source checkout
+        env:
+          PYTHON_VERSION: ${{ matrix.python }}
+        run: |
+          python -m venv /tmp/fugue-installed
+          if test "$PYTHON_VERSION" = "3.13"; then
+            /tmp/fugue-installed/bin/python -m pip install "/tmp/fugue-wheel/$(basename /tmp/fugue-wheel/fugue-*.whl)[local-runner]"
+          else
+            /tmp/fugue-installed/bin/python -m pip install /tmp/fugue-wheel/fugue-*.whl
+          fi
+      - name: Exercise the installed package in an empty workspace
+        env:
+          PYTHON_VERSION: ${{ matrix.python }}
+          FUGUE_NO_ANIMATION: "1"
+        working-directory: /tmp
+        run: |
+          mkdir "fugue-empty-${PYTHON_VERSION}"
+          cd "fugue-empty-${PYTHON_VERSION}"
+          /tmp/fugue-installed/bin/fugue doctor --json > doctor.json
+          if test "$PYTHON_VERSION" = "3.13"; then
+            /tmp/fugue-installed/bin/fugue doctor --require local-runner --json > local-runner-doctor.json
+          fi
+          /tmp/fugue-installed/bin/fugue init my-study --template prompt-change
+          set +e
+          /tmp/fugue-installed/bin/fugue check my-study/comparison.yaml --json > check.json
+          status=$?
+          set -e
+          test "$status" -eq 2
+          /tmp/fugue-installed/bin/fugue demo source-use --out replay --json > replay.json
+          test -f replay/result.json
+      - name: Validate the isolated W&B index publisher extra
+        if: matrix.python == '3.12'
+        run: |
+          python -m venv /tmp/fugue-wandb-index
+          /tmp/fugue-wandb-index/bin/python -m pip install "/tmp/fugue-wheel/$(basename /tmp/fugue-wheel/fugue-*.whl)[wandb-index]"
+          /tmp/fugue-wandb-index/bin/python - <<'PY'
+          import importlib.util
+          import wandb
+
+          from fugue.bench.wandb_research_index import (
+              wandb_research_index_publisher_from_environment,
+          )
+
+          assert wandb.__version__ == "0.28.1"
+          assert importlib.util.find_spec("weave") is None
+          assert callable(wandb_research_index_publisher_from_environment)
+          PY
 
   quality:
     name: Quality, build, and command smoke
@@ -117,6 +233,8 @@ jobs:
       - run: uv sync --frozen --extra dev
       - run: uv lock --check
       - run: uv run ruff check .
+      - name: Verify packaged resource manifest
+        run: uv run python -m fugue.resource_integrity --check
       - name: Reject high-confidence dead production code
         run: uv run vulture fugue --min-confidence 80
       - name: Reject unreviewed 60%-confidence dead production code
