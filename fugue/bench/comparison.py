@@ -52,6 +52,7 @@ from fugue.bench.library import ExperimentSpec, experiment_from_data, validate_i
 from fugue.bench.local_evidence import (
     LocalEvidenceDestinationV1,
     LocalEvidenceStore,
+    ReconciliationStatus,
     local_evidence_destination_from_dict,
     local_result_attempt_projection_v1,
     local_result_row_projection_digest,
@@ -106,6 +107,7 @@ EvidenceChainIntegrity = Literal[
     "reconciled", "incomplete", "invalid", "not_applicable"
 ]
 PublicationStatus = Literal["not_requested", "published", "failed", "not_applicable"]
+_RECONCILIATION_STATUSES = frozenset({"resolved", "unresolved", "unavailable"})
 _READINESS = frozenset({"ready", "needs_review", "blocked", "no_comparison_justified"})
 _PUBLIC_TASK_FIELDS = frozenset(
     {
@@ -488,8 +490,33 @@ class PairedAttemptV3:
     local_evidence_record_digest: str | None = None
     local_prediction_row_sha256: str | None = None
     local_result_row_projection_digest: str | None = None
+    cost_reconciliation_status: ReconciliationStatus | None = None
+    latency_reconciliation_status: ReconciliationStatus | None = None
+    usage_reconciliation_status: ReconciliationStatus | None = None
 
     def __post_init__(self) -> None:
+        for field_name in (
+            "cost_reconciliation_status",
+            "latency_reconciliation_status",
+            "usage_reconciliation_status",
+        ):
+            _reconciliation_status(
+                getattr(self, field_name),
+                field_name,
+            )
+        if self.cost_reconciliation_status == "resolved" and self.cost_usd is None:
+            raise ValueError("resolved cost reconciliation requires cost_usd")
+        if (
+            self.latency_reconciliation_status == "resolved"
+            and self.latency_sec is None
+        ):
+            raise ValueError("resolved latency reconciliation requires latency_sec")
+        if self.usage_reconciliation_status == "resolved" and (
+            self.input_tokens is None or self.output_tokens is None
+        ):
+            raise ValueError(
+                "resolved usage reconciliation requires input and output tokens"
+            )
         local_digests = (
             self.local_evidence_record_digest,
             self.local_prediction_row_sha256,
@@ -524,6 +551,9 @@ class PairedAttemptV3:
                 reported_project_identity=self.reported_project_identity,
                 execution_fingerprint=self.execution_fingerprint,
                 runtime_lock_digest=self.runtime_lock_digest,
+                cost_reconciliation_status=self.cost_reconciliation_status,
+                latency_reconciliation_status=self.latency_reconciliation_status,
+                usage_reconciliation_status=self.usage_reconciliation_status,
             )
             if stable_digest(projection) != self.local_result_row_projection_digest:
                 raise ValueError(
@@ -975,7 +1005,7 @@ def _verify_local_evidence_binding(value: Mapping[str, Any]) -> None:
         raise ValueError("unsupported ComparisonResultV3 local evidence binding")
     if not str(value.get("run_id") or "").strip():
         raise ValueError("ComparisonResultV3 local evidence run id is required")
-    for key in (set(value) - {"schema_version", "run_id"}):
+    for key in set(value) - {"schema_version", "run_id"}:
         if not re.fullmatch(r"[0-9a-f]{64}", str(value.get(key) or "")):
             raise ValueError(
                 f"ComparisonResultV3 local evidence {key} must be a digest"
@@ -5886,6 +5916,22 @@ def _bool_score(value: Any) -> bool | None:
     return None
 
 
+def _reconciliation_status(
+    value: Any,
+    field_name: str,
+) -> ReconciliationStatus | None:
+    if value is None:
+        return None
+    if value == "resolved":
+        return "resolved"
+    if value == "unresolved":
+        return "unresolved"
+    if value == "unavailable":
+        return "unavailable"
+    supported = ", ".join(sorted(_RECONCILIATION_STATUSES))
+    raise ValueError(f"{field_name} must be one of: {supported}")
+
+
 def _paired_attempt_view(
     row: Mapping[str, Any] | None,
 ) -> PairedAttemptV2 | None:
@@ -6088,6 +6134,18 @@ def _paired_attempt_view_v3(
         ),
         local_result_row_projection_digest=_row_text(
             row, "local_evidence_result_row_projection_digest"
+        ),
+        cost_reconciliation_status=_reconciliation_status(
+            projection.get("cost_reconciliation_status"),
+            "cost_reconciliation_status",
+        ),
+        latency_reconciliation_status=_reconciliation_status(
+            projection.get("latency_reconciliation_status"),
+            "latency_reconciliation_status",
+        ),
+        usage_reconciliation_status=_reconciliation_status(
+            projection.get("usage_reconciliation_status"),
+            "usage_reconciliation_status",
         ),
     )
 
@@ -7100,6 +7158,18 @@ def _paired_attempt_v3(raw: Any) -> PairedAttemptV3 | None:
         local_result_row_projection_digest=(
             str(value.get("local_result_row_projection_digest") or "") or None
         ),
+        cost_reconciliation_status=_reconciliation_status(
+            value.get("cost_reconciliation_status"),
+            "cost_reconciliation_status",
+        ),
+        latency_reconciliation_status=_reconciliation_status(
+            value.get("latency_reconciliation_status"),
+            "latency_reconciliation_status",
+        ),
+        usage_reconciliation_status=_reconciliation_status(
+            value.get("usage_reconciliation_status"),
+            "usage_reconciliation_status",
+        ),
     )
 
 
@@ -7811,13 +7881,10 @@ def _decision_facts(
     )
     local_harbor_rows = bool(rows) and all(_is_local_harbor_row(row) for row in rows)
     local_harbor_complete = bool(
-        allow_local_harbor_conformance
-        and _local_harbor_run_conformance_complete(rows)
+        allow_local_harbor_conformance and _local_harbor_run_conformance_complete(rows)
     )
     infrastructure_complete = (
-        local_harbor_complete
-        if local_harbor_rows
-        else declared_infrastructure_complete
+        local_harbor_complete if local_harbor_rows else declared_infrastructure_complete
     )
     privacy_evidence_available = bool(rows) and all(
         _privacy_scan_evidence_available(row) for row in rows
@@ -9386,8 +9453,7 @@ def _legacy_v3_task_validity(
         prefix = f"{value.task_id}: both arms failed "
         blockers = tuple(
             (
-                f"{value.task_id}: {blocker.removeprefix(prefix)} "
-                "failed in both arms"
+                f"{value.task_id}: {blocker.removeprefix(prefix)} failed in both arms"
                 if blocker.startswith(prefix)
                 else blocker
             )
@@ -11000,10 +11066,7 @@ def _mcp_tool_usage_counts(row: Mapping[str, Any]) -> dict[str, int]:
             if not isinstance(item, Mapping):
                 continue
             name = str(
-                item.get("tool")
-                or item.get("name")
-                or item.get("tool_name")
-                or ""
+                item.get("tool") or item.get("name") or item.get("tool_name") or ""
             )
             if name:
                 normalized_counts[name] = normalized_counts.get(name, 0) + 1
@@ -11058,9 +11121,7 @@ def _operational_summary(
             _attempt_evidence_status(row)
             if row.get("local_evidence_links")
             else str(
-                row.get("trace_link_status")
-                or row.get("evidence_status")
-                or "unknown"
+                row.get("trace_link_status") or row.get("evidence_status") or "unknown"
             )
         )
         evidence[evidence_status] = evidence.get(evidence_status, 0) + 1
@@ -11894,13 +11955,10 @@ def _restore_or_verify_checkpoint_receipt(
         ):
             raise RuntimeError("comparison checkpoint receipt targets other inputs")
         drift = existing.get("source_drift")
-        if (
-            isinstance(
-                spec.execution.source_evidence_destination,
-                LocalEvidenceDestinationV1,
-            )
-            and not isinstance(drift, Mapping)
-        ):
+        if isinstance(
+            spec.execution.source_evidence_destination,
+            LocalEvidenceDestinationV1,
+        ) and not isinstance(drift, Mapping):
             raise RuntimeError(
                 "local comparison checkpoint receipt is missing its source-lock "
                 "verification"
@@ -11918,8 +11976,7 @@ def _restore_or_verify_checkpoint_receipt(
             LocalEvidenceDestinationV1,
         ) and restored != _matched_local_source_drift(approved_comparison):
             raise RuntimeError(
-                "local comparison checkpoint does not bind the approved source "
-                "lock"
+                "local comparison checkpoint does not bind the approved source lock"
             )
         return restored
     source_drift = _verify_v3_source_drift(
@@ -11928,12 +11985,9 @@ def _restore_or_verify_checkpoint_receipt(
         repo_root=repo_root,
         env=env,
     )
-    if (
-        source_drift is None
-        and isinstance(
-            spec.execution.source_evidence_destination,
-            LocalEvidenceDestinationV1,
-        )
+    if source_drift is None and isinstance(
+        spec.execution.source_evidence_destination,
+        LocalEvidenceDestinationV1,
     ):
         _verified_approved_inputs(
             approved_comparison,
@@ -12598,9 +12652,7 @@ def _execution(
     )
     raw_mode = str(value.get("evidence_mode") or "").strip()
     if not raw_mode:
-        evidence_mode: EvidenceMode = (
-            "local" if spec_version >= 2 else "weave_required"
-        )
+        evidence_mode: EvidenceMode = "local" if spec_version >= 2 else "weave_required"
     elif raw_mode in {"local", "weave_required"}:
         evidence_mode = raw_mode  # type: ignore[assignment]
     else:
@@ -13794,9 +13846,7 @@ def _result_evidence_markdown(
             "is invalid.\n"
         )
 
-    lines = [
-        f"- [{item['label']}]({item['url']})\n" for item in result.evidence_links
-    ]
+    lines = [f"- [{item['label']}]({item['url']})\n" for item in result.evidence_links]
     if isinstance(result, ComparisonResultV3):
         labels = {
             "evaluation_root": "Evaluation record",
@@ -13822,8 +13872,7 @@ def _result_evidence_markdown(
                 if shown_local_attempts >= maximum_local_attempts:
                     continue
                 prefix = (
-                    f"{pair.task_id} / {pair.harness} / attempt {pair.attempt} / "
-                    f"{arm}"
+                    f"{pair.task_id} / {pair.harness} / attempt {pair.attempt} / {arm}"
                 )
                 local_links = tuple(
                     link
@@ -13835,9 +13884,7 @@ def _result_evidence_markdown(
                 if local_links:
                     shown_local_attempts += 1
                 for link in local_links:
-                    lines.append(
-                        f"- {prefix} / {labels[link.kind]}: `{link.ref}`\n"
-                    )
+                    lines.append(f"- {prefix} / {labels[link.kind]}: `{link.ref}`\n")
         if local_attempt_count > shown_local_attempts:
             lines.append(
                 f"- Showing local evidence for {shown_local_attempts} of "
@@ -13967,8 +14014,7 @@ def _result_markdown(result: ComparisonResult) -> str:
     elif result.decision_policy is None:
         release_summary = "- Package release: **NOT EVALUATED**\n"
         release_note = (
-            "- Release-policy note: Package release was not evaluated by this "
-            "Study.\n"
+            "- Release-policy note: Package release was not evaluated by this Study.\n"
         )
     elif local_governed_study:
         release_summary = (
@@ -14009,8 +14055,7 @@ def _result_markdown(result: ComparisonResult) -> str:
             "(evidence-link reconciliation and privacy integrity; not a "
             "behavioral-quality score)\n"
             f"- Candidate source revisions: {candidate_sources}\n"
-            f"- Governed release candidate SHA: {release_candidate}\n"
-            + release_note
+            f"- Governed release candidate SHA: {release_candidate}\n" + release_note
         )
         if isinstance(result, ComparisonResultV2 | ComparisonResultV3)
         else "- Release decision: unavailable in V1 result\n"
@@ -14037,7 +14082,9 @@ def _result_markdown(result: ComparisonResult) -> str:
         + destination
         + "\n"
         + treatment_identities
-        + "## Aligned cases\n\n" + pairs + "\n"
+        + "## Aligned cases\n\n"
+        + pairs
+        + "\n"
         "## Operational health\n\n"
         f"- Infrastructure failures: "
         f"{result.operational_summary['infrastructure_failures']}\n"
@@ -14084,8 +14131,7 @@ def _result_treatment_identities_markdown(result: ComparisonResult) -> str:
             f"harness `{definition.get('harness') or 'unavailable'}`",
             f"model `{model}`",
             f"context `{context_id}`",
-            "skills "
-            + (", ".join(f"`{item}`" for item in skill_ids) or "none"),
+            "skills " + (", ".join(f"`{item}`" for item in skill_ids) or "none"),
             "integrations "
             + (", ".join(f"`{item}`" for item in integration_ids) or "none"),
         ]

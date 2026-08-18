@@ -1382,6 +1382,10 @@ def test_v3_result_round_trips_source_topology_and_canonical_view(
             "project": source_project,
             "answer": "safe maintainer summary",
         }
+        row["usage"] = {"input_tokens": 100, "output_tokens": 25}
+        row["cost_reconciliation_status"] = "resolved"
+        row["latency_reconciliation_status"] = "resolved"
+        row["usage_reconciliation_status"] = "resolved"
         call_prefix = f"{variant}-{cell['trial_index']}"
         row["evaluation_url"] = f"{result_base}/calls/{call_prefix}-evaluation"
         row["weave_evaluation_root_call_id"] = f"{call_prefix}-evaluation"
@@ -1431,6 +1435,14 @@ def test_v3_result_round_trips_source_topology_and_canonical_view(
     assert result.task_validity[0].status == "valid"
     assert result.paired_cases[0].dimension_changes[0].role == "outcome"
     assert result.paired_cases[0].candidate.actual_query_scope == (source_project,)
+    assert result.paired_cases[0].candidate.cost_reconciliation_status == "resolved"
+    assert result.paired_cases[0].candidate.latency_reconciliation_status == "resolved"
+    assert result.paired_cases[0].candidate.usage_reconciliation_status == "resolved"
+    projected_view = build_comparison_evaluation_view(result.to_dict())
+    projected_candidate = projected_view.paired_cases[0]["candidate"]
+    assert projected_candidate["cost_reconciliation_status"] == "resolved"
+    assert projected_candidate["latency_reconciliation_status"] == "resolved"
+    assert projected_candidate["usage_reconciliation_status"] == "resolved"
 
     dual_chain_rows = json.loads(json.dumps(rows))
     local_binding = {
@@ -1498,10 +1510,7 @@ def test_v3_result_round_trips_source_topology_and_canonical_view(
     for candidate_id, definition in dual_chain.candidate_definitions.items():
         assert f"`{candidate_id}`" in local_markdown
         assert f"harness `{definition['harness']}`" in local_markdown
-        assert (
-            f"model `{definition['model_route']['display_model']}`"
-            in local_markdown
-        )
+        assert f"model `{definition['model_route']['display_model']}`" in local_markdown
         assert f"context `{definition['context']['id']}`" in local_markdown
         for skill in definition["skills"]:
             assert f"`{skill['id']}`" in local_markdown
@@ -1904,7 +1913,9 @@ def test_v3_result_round_trips_source_topology_and_canonical_view(
     assert non_discriminating.behavioral_summary.improved_pairs == 0
     assert "release" not in non_discriminating.behavioral_summary.recommendation.lower()
     assert non_discriminating.behavioral_summary.supported_claim is not None
-    assert "release" not in non_discriminating.behavioral_summary.supported_claim.lower()
+    assert (
+        "release" not in non_discriminating.behavioral_summary.supported_claim.lower()
+    )
 
 
 def test_v2_read_binds_go_attestation_and_all_attestation_metadata(
@@ -2885,9 +2896,7 @@ def test_comparison_scoring_prefers_locked_answer_artifact(
 
 def test_exact_answer_artifact_populates_safe_reported_project_projection() -> None:
     exact_output = (
-        "```json\n"
-        '{"source_project":"wandb/fugue-mcp-release-source-v2"}'
-        "\n```"
+        '```json\n{"source_project":"wandb/fugue-mcp-release-source-v2"}\n```'
     )
     reported = _normalized_reported_project_identity(exact_output)
     assert reported == "wandb/fugue-mcp-release-source-v2"
@@ -2904,9 +2913,12 @@ def test_exact_answer_artifact_populates_safe_reported_project_projection() -> N
     assert _normalized_reported_project_identity(
         '{"source_project":"wandb/other-project"}'
     ) == ("wandb/other-project")
-    assert _normalized_reported_project_identity(
-        '{"source_project":"https://wandb.ai/wandb/project?token=secret"}'
-    ) is None
+    assert (
+        _normalized_reported_project_identity(
+            '{"source_project":"https://wandb.ai/wandb/project?token=secret"}'
+        )
+        is None
+    )
     malformed_projection = local_result_row_projection_v1(
         {
             "attempt_id": "b" * 64,
@@ -4340,8 +4352,7 @@ def test_scorer_preparation_pulls_and_locks_the_declared_platform(
     ]
     assert len(inspect_calls) == 2
     assert all(
-        command[3:5] == ["--platform", profile.platform]
-        for command in inspect_calls
+        command[3:5] == ["--platform", profile.platform] for command in inspect_calls
     )
     assert calls[1][1:4] == ["pull", "--platform", profile.platform]
 
@@ -4652,9 +4663,7 @@ def test_execute_local_comparison_never_requires_or_fetches_weave(
     )
     assert "Evidence backend: **local Fugue ledger**" in markdown
     assert result.local_evidence is not None
-    assert (
-        f".fugue/runtime/{result.local_evidence['run_id']}/evidence/" in markdown
-    )
+    assert f".fugue/runtime/{result.local_evidence['run_id']}/evidence/" in markdown
     assert "Portable evidence destination: `fugue-evidence` layout v1" in markdown
     assert "`fugue://local-evidence/" in markdown
     assert "No safe evidence links were available." not in markdown
@@ -4751,10 +4760,7 @@ def test_local_execution_binding_reconciles_manifest_and_run_receipt(
     for row, record in zip(rows, records, strict=True):
         record.result_row_projection_digest = local_result_row_projection_digest(row)
     manifest.result_row_projection_set_digest = stable_digest(
-        [
-            [record.attempt_id, record.result_row_projection_digest]
-            for record in records
-        ]
+        [[record.attempt_id, record.result_row_projection_digest] for record in records]
     )
 
     def apply_conformance(
@@ -4814,9 +4820,7 @@ def test_local_execution_binding_reconciles_manifest_and_run_receipt(
             repo_root=tmp_path,
             run_id="local-run",
         )
-    conflicting_backend_rows = [
-        dict(row, evidence_backend="weave") for row in rows
-    ]
+    conflicting_backend_rows = [dict(row, evidence_backend="weave") for row in rows]
     with pytest.raises(RuntimeError, match="evidence backend"):
         _bind_local_execution_evidence(
             conflicting_backend_rows,
@@ -4901,9 +4905,7 @@ def test_local_checkpoint_verifies_and_persists_source_lock(
         "observed_digest": "a" * 64,
     }
 
-    unsigned = {
-        key: value for key, value in receipt.items() if key != "receipt_digest"
-    }
+    unsigned = {key: value for key, value in receipt.items() if key != "receipt_digest"}
     unsigned["source_drift"] = None
     receipt_path.write_text(
         json.dumps(
@@ -5010,6 +5012,11 @@ def test_v3_attempt_construction_rejects_exported_decision_field_mutation() -> N
         "comparison_deterministic_scores": {"facts.answer_correct": True},
         "agent_response": "bounded answer",
         "cost_usd": 0.25,
+        "latency_sec": 1.5,
+        "usage": {"input_tokens": 100, "output_tokens": 25},
+        "cost_reconciliation_status": "resolved",
+        "latency_reconciliation_status": "resolved",
+        "usage_reconciliation_status": "resolved",
         "local_evidence_links": [
             {
                 "kind": kind,
@@ -5034,12 +5041,18 @@ def test_v3_attempt_construction_rejects_exported_decision_field_mutation() -> N
     attempt = _paired_attempt_view_v3(row)
     assert attempt is not None
     assert attempt.passed is True
+    assert attempt.cost_reconciliation_status == "resolved"
+    assert attempt.latency_reconciliation_status == "resolved"
+    assert attempt.usage_reconciliation_status == "resolved"
 
     mutations = (
         {"pass": False},
         {"comparison_deterministic_scores": {"facts.answer_correct": False}},
         {"agent_response": "altered excerpt"},
         {"cost_usd": 99.0},
+        {"cost_reconciliation_status": "unresolved"},
+        {"latency_reconciliation_status": "unresolved"},
+        {"usage_reconciliation_status": "unresolved"},
     )
     for mutation in mutations:
         altered = {**row, **mutation}
@@ -5049,12 +5062,58 @@ def test_v3_attempt_construction_rejects_exported_decision_field_mutation() -> N
     with pytest.raises(ValueError, match="decision projection digest"):
         replace(
             attempt,
-            score_explanations={
-                "facts.answer_correct": "altered explanation"
-            },
+            score_explanations={"facts.answer_correct": "altered explanation"},
         )
 
     serialized = attempt.to_dict()
+    assert serialized["cost_reconciliation_status"] == "resolved"
+    assert serialized["latency_reconciliation_status"] == "resolved"
+    assert serialized["usage_reconciliation_status"] == "resolved"
     serialized["cost_usd"] = 88.0
     with pytest.raises(ValueError, match="decision projection digest"):
         _paired_attempt_v3(serialized)
+
+
+def test_v3_attempt_reconciliation_statuses_are_source_authoritative() -> None:
+    recorded_metrics: dict[str, object] = {
+        "attempt_id": "4" * 64,
+        "status": "passed",
+        "cost_usd": 0.25,
+        "latency_sec": 1.5,
+        "usage": {"input_tokens": 100, "output_tokens": 25},
+        "local_usage_status": "available",
+        "weave_usage_status": "available",
+    }
+
+    projection = local_result_row_projection_v1(recorded_metrics)
+    for field_name in (
+        "cost_reconciliation_status",
+        "latency_reconciliation_status",
+        "usage_reconciliation_status",
+    ):
+        assert field_name not in projection
+
+    explicit_nulls = {
+        **recorded_metrics,
+        "cost_reconciliation_status": None,
+        "latency_reconciliation_status": None,
+        "usage_reconciliation_status": None,
+    }
+    null_projection = local_result_row_projection_v1(explicit_nulls)
+    assert null_projection == projection
+
+    published = {
+        **recorded_metrics,
+        "cost_reconciliation_status": "resolved",
+        "latency_reconciliation_status": "unresolved",
+        "usage_reconciliation_status": "unavailable",
+    }
+    published_projection = local_result_row_projection_v1(published)
+    assert published_projection["cost_reconciliation_status"] == "resolved"
+    assert published_projection["latency_reconciliation_status"] == "unresolved"
+    assert published_projection["usage_reconciliation_status"] == "unavailable"
+
+    with pytest.raises(ValueError, match="cost_reconciliation_status must be one of"):
+        local_result_row_projection_v1(
+            {**recorded_metrics, "cost_reconciliation_status": "available"}
+        )

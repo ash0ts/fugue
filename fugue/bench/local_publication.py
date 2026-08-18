@@ -214,7 +214,7 @@ def weave_publisher_from_environment(
         weave_module = importlib.import_module("weave")
     except (ImportError, ModuleNotFoundError) as exc:
         raise MissingWeaveExtraError(
-            'Weave publication requires the optional extra; install '
+            "Weave publication requires the optional extra; install "
             '`pip install "fugue[weave]"` and retry.'
         ) from exc
 
@@ -1045,7 +1045,9 @@ def _verify_weave_call(
         raise RuntimeError("authoritative Weave readback returned an unfinished Call")
     if getattr(call, "exception", None) not in (None, ""):
         raise RuntimeError("authoritative Weave readback returned a failed Call")
-    if output is None or not _canonical_values_equal(getattr(call, "output", None), output):
+    if output is None or not _canonical_values_equal(
+        getattr(call, "output", None), output
+    ):
         raise RuntimeError(
             "authoritative Weave readback returned a conflicting Call output"
         )
@@ -1396,6 +1398,9 @@ def _validate_result_local_evidence_binding(
                 reported_project_identity=attempt.reported_project_identity,
                 execution_fingerprint=attempt.execution_fingerprint,
                 runtime_lock_digest=attempt.runtime_lock_digest,
+                cost_reconciliation_status=attempt.cost_reconciliation_status,
+                latency_reconciliation_status=attempt.latency_reconciliation_status,
+                usage_reconciliation_status=attempt.usage_reconciliation_status,
             )
             if stable_digest(projection) != record.result_row_projection_digest:
                 raise LocalResultPublicationError(
@@ -1442,13 +1447,9 @@ def _validate_outcome(
     attempt_ids: tuple[str, ...],
 ) -> None:
     if outcome.target != target:
-        raise LocalResultPublicationError(
-            "publisher returned a different Weave target"
-        )
+        raise LocalResultPublicationError("publisher returned a different Weave target")
     expected = {
-        (attempt_id, kind)
-        for attempt_id in attempt_ids
-        for kind in _HOSTED_KINDS
+        (attempt_id, kind) for attempt_id in attempt_ids for kind in _HOSTED_KINDS
     }
     observed = {(item.attempt_id, item.kind) for item in outcome.objects}
     if len(observed) != len(outcome.objects):
@@ -1504,9 +1505,7 @@ def _verify_existing_receipt(
     )
 
 
-def _write_immutable_receipt(
-    path: Path, receipt: WeavePublicationReceiptV1
-) -> None:
+def _write_immutable_receipt(path: Path, receipt: WeavePublicationReceiptV1) -> None:
     if path.exists():
         existing = read_weave_publication_receipt(path)
         if existing != receipt:
@@ -1641,9 +1640,7 @@ def _assert_secret_free(
                 f"{label} contains a configured secret value"
             )
     if redact_text(text) != text:
-        raise LocalResultPublicationError(
-            f"{label} contains secret-shaped content"
-        )
+        raise LocalResultPublicationError(f"{label} contains secret-shaped content")
 
 
 def _read_mapping(path: Path, label: str) -> dict[str, Any]:

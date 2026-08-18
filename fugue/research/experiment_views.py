@@ -55,6 +55,7 @@ _EXECUTION_STATES = {
 _OUTCOME_STATES = {"pending", "passed", "failed", "unavailable", "not_applicable"}
 _EVIDENCE_STATES = {"pending", "reconciled", "missing", "not_applicable"}
 _VIEW_KINDS = {"design", "progress", "evaluation"}
+_RECONCILIATION_STATUSES = {"resolved", "unresolved", "unavailable"}
 _PROVISIONAL_V2_EVALUATION_FIELDS = frozenset(
     {
         "aligned_comparisons",
@@ -659,8 +660,9 @@ def _experiment_view_v3_from_dict(
         ),
     )
     _validate_view_shape(view)
-    if view.runtime_lock_digest is not None and view.runtime_lock_digest != stable_digest(
-        list(view.runtime_locks)
+    if (
+        view.runtime_lock_digest is not None
+        and view.runtime_lock_digest != stable_digest(list(view.runtime_locks))
     ):
         raise ValueError("V3 runtime lock digest does not recompute")
     _validate_v3_evidence_routes(view)
@@ -674,12 +676,8 @@ def _validate_v3_evidence_routes(view: ExperimentViewV3) -> None:
         if isinstance(topology.source_destination, LocalEvidenceDestinationV1)
         else topology.source_destination.project_slug
     )
-    local_result = isinstance(
-        topology.result_destination, LocalEvidenceDestinationV1
-    )
-    result_project = (
-        None if local_result else topology.result_destination.project_slug
-    )
+    local_result = isinstance(topology.result_destination, LocalEvidenceDestinationV1)
+    result_project = None if local_result else topology.result_destination.project_slug
     call_prefix = (
         ""
         if local_result
@@ -2419,6 +2417,9 @@ def _optional_canonical_attempt_v3(raw: Any) -> dict[str, Any] | None:
         "local_evidence_record_digest",
         "local_prediction_row_sha256",
         "local_result_row_projection_digest",
+        "cost_reconciliation_status",
+        "latency_reconciliation_status",
+        "usage_reconciliation_status",
     }
     base_allowed = {item for item in value if item not in extras}
     base = _optional_canonical_attempt({key: value[key] for key in base_allowed})
@@ -2491,6 +2492,31 @@ def _optional_canonical_attempt_v3(raw: Any) -> dict[str, Any] | None:
         digest = _optional_digest(value.get(field_name), f"V3 {field_name}")
         if digest:
             base[field_name] = digest
+    for field_name in (
+        "cost_reconciliation_status",
+        "latency_reconciliation_status",
+        "usage_reconciliation_status",
+    ):
+        if field_name not in value or value[field_name] is None:
+            continue
+        status = _text(value[field_name], f"V3 {field_name}", 40)
+        if status not in _RECONCILIATION_STATUSES:
+            supported = ", ".join(sorted(_RECONCILIATION_STATUSES))
+            raise ValueError(f"V3 {field_name} must be one of: {supported}")
+        base[field_name] = status
+    if base.get("cost_reconciliation_status") == "resolved" and "cost_usd" not in base:
+        raise ValueError("resolved cost reconciliation requires cost_usd")
+    if (
+        base.get("latency_reconciliation_status") == "resolved"
+        and "latency_sec" not in base
+    ):
+        raise ValueError("resolved latency reconciliation requires latency_sec")
+    if base.get("usage_reconciliation_status") == "resolved" and (
+        "input_tokens" not in base or "output_tokens" not in base
+    ):
+        raise ValueError(
+            "resolved usage reconciliation requires input and output tokens"
+        )
     return base
 
 
@@ -2535,9 +2561,7 @@ def _canonical_attempt_evidence_link(raw: Any) -> dict[str, Any]:
     url = _optional_text(value.get("url"), "attempt evidence url", 2000)
     reason = _optional_text(value.get("reason"), "attempt evidence reason", 1000)
     if status == "resolved":
-        if system == "weave" and (
-            not ref or not url or not url.startswith("https://")
-        ):
+        if system == "weave" and (not ref or not url or not url.startswith("https://")):
             raise ValueError("resolved Weave evidence requires ref and HTTPS url")
         if system == "local_artifact" and (
             not ref or not ref.startswith("fugue://local-evidence/") or url
@@ -2972,9 +2996,7 @@ def _safe_judge_summary(
     judges = _safe_judge_provenance(value.get("judges"))
     by_variant = _safe_judge_variants(
         value.get("by_variant"),
-        judge_dimensions={
-            item["judge_id"]: set(item["dimensions"]) for item in judges
-        },
+        judge_dimensions={item["judge_id"]: set(item["dimensions"]) for item in judges},
         arm_attempts=arm_attempts,
     )
     unavailable = _non_negative_int(
@@ -3179,9 +3201,7 @@ def _safe_judge_variants(
                     "judge summary mean must be null exactly when no rows were evaluated"
                 )
             if arm_attempts is not None and evaluated > arm_attempts[variant]:
-                raise ValueError(
-                    "judge evaluated count exceeds canonical arm attempts"
-                )
+                raise ValueError("judge evaluated count exceeds canonical arm attempts")
             dimensions[dimension] = {
                 "evaluated": evaluated,
                 "mean": mean,
@@ -3196,15 +3216,8 @@ def _safe_judge_variants(
             "judge summary dimensions do not match locked judge provenance"
         )
     for variant in ("baseline", "candidate"):
-        if len(
-            {
-                summary["evaluated"]
-                for summary in result[variant].values()
-            }
-        ) > 1:
-            raise ValueError(
-                "judge dimensions disagree on evaluated attempt counts"
-            )
+        if len({summary["evaluated"] for summary in result[variant].values()}) > 1:
+            raise ValueError("judge dimensions disagree on evaluated attempt counts")
     return result
 
 
@@ -3218,9 +3231,7 @@ def _unique_judge_dimensions(
         for item in _sequence(raw, f"judge {judge_id} dimensions")
     ]
     if not dimensions or len(dimensions) != len(set(dimensions)):
-        raise ValueError(
-            "judge provenance dimensions must be non-empty and unique"
-        )
+        raise ValueError("judge provenance dimensions must be non-empty and unique")
     return dimensions
 
 
@@ -3228,10 +3239,7 @@ def _judge_arm_attempt_counts(
     paired_cases: Sequence[Mapping[str, Any]],
 ) -> dict[str, int]:
     return {
-        arm: sum(
-            isinstance(pair.get(arm), Mapping)
-            for pair in paired_cases
-        )
+        arm: sum(isinstance(pair.get(arm), Mapping) for pair in paired_cases)
         for arm in ("baseline", "candidate")
     }
 

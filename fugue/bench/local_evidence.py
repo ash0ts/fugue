@@ -44,9 +44,8 @@ EvidenceCardinality = Literal[
     "legacy_shared_scope_v1",
     "attempt_scoped_v1",
 ]
-RunConformanceStatus = Literal[
-    "passed", "failed", "unavailable", "not_applicable"
-]
+RunConformanceStatus = Literal["passed", "failed", "unavailable", "not_applicable"]
+ReconciliationStatus = Literal["resolved", "unresolved", "unavailable"]
 
 _NODE_KINDS = frozenset(
     {
@@ -70,9 +69,8 @@ _TERMINAL_STATUSES = frozenset(
 )
 _INTEGRITY_STATUSES = frozenset({"resolved", "incomplete", "invalid"})
 _MANIFEST_STATUSES = frozenset({"complete", "incomplete", "invalid"})
-_EVIDENCE_CARDINALITIES = frozenset(
-    {"legacy_shared_scope_v1", "attempt_scoped_v1"}
-)
+_EVIDENCE_CARDINALITIES = frozenset({"legacy_shared_scope_v1", "attempt_scoped_v1"})
+_RECONCILIATION_STATUSES = frozenset({"resolved", "unresolved", "unavailable"})
 _EVENT_TYPES = frozenset(
     {
         "run_initialized",
@@ -128,15 +126,13 @@ def local_result_row_projection_v1(row: Mapping[str, Any]) -> dict[str, Any]:
     queried_projects = tuple(sorted(_projection_queried_projects(row)))
     tools, tool_calls = _projection_tool_activity(row)
     usage = _projection_mapping(row.get("usage"))
-    return {
+    projection: dict[str, Any] = {
         "schema_version": 1,
         "attempt_id": str(row.get("attempt_id") or ""),
         "prediction_id": str(row.get("prediction_id") or "") or None,
         "passed": _projection_bool(row.get("pass")),
         "execution_status": _projection_execution_status(row),
-        "evaluation_status": str(
-            row.get("comparison_evaluation_status") or "unknown"
-        ),
+        "evaluation_status": str(row.get("comparison_evaluation_status") or "unknown"),
         "cost_usd": _projection_first_number(
             row, "cost_usd", "observed_cost_usd", "total_cost_usd"
         ),
@@ -162,13 +158,21 @@ def local_result_row_projection_v1(row: Mapping[str, Any]) -> dict[str, Any]:
         "sanitized_answer_excerpt": _projection_answer_excerpt(row),
         "actual_query_scope": list(queried_projects),
         "reported_project_identity": _projection_reported_project(row),
-        "execution_fingerprint": str(row.get("execution_fingerprint") or "")
-        or None,
+        "execution_fingerprint": str(row.get("execution_fingerprint") or "") or None,
         "runtime_lock_digest": str(
             row.get("runtime_lock_digest") or row.get("runtime_digest") or ""
         )
         or None,
     }
+    for field_name in (
+        "cost_reconciliation_status",
+        "latency_reconciliation_status",
+        "usage_reconciliation_status",
+    ):
+        if field_name not in row or row[field_name] is None:
+            continue
+        projection[field_name] = _reconciliation_status(row[field_name], field_name)
+    return projection
 
 
 def local_result_attempt_projection_v1(
@@ -192,10 +196,13 @@ def local_result_attempt_projection_v1(
     reported_project_identity: str | None,
     execution_fingerprint: str | None,
     runtime_lock_digest: str | None,
+    cost_reconciliation_status: ReconciliationStatus | None = None,
+    latency_reconciliation_status: ReconciliationStatus | None = None,
+    usage_reconciliation_status: ReconciliationStatus | None = None,
 ) -> dict[str, Any]:
     """Project an already-normalized V3 attempt using the canonical shape."""
 
-    return {
+    projection: dict[str, Any] = {
         "schema_version": 1,
         "attempt_id": attempt_id,
         "prediction_id": prediction_id,
@@ -217,6 +224,25 @@ def local_result_attempt_projection_v1(
         "execution_fingerprint": execution_fingerprint,
         "runtime_lock_digest": runtime_lock_digest,
     }
+    for field_name, value in (
+        ("cost_reconciliation_status", cost_reconciliation_status),
+        ("latency_reconciliation_status", latency_reconciliation_status),
+        ("usage_reconciliation_status", usage_reconciliation_status),
+    ):
+        if value is not None:
+            projection[field_name] = _reconciliation_status(value, field_name)
+    return projection
+
+
+def _reconciliation_status(value: Any, field_name: str) -> ReconciliationStatus:
+    if value == "resolved":
+        return "resolved"
+    if value == "unresolved":
+        return "unresolved"
+    if value == "unavailable":
+        return "unavailable"
+    supported = ", ".join(sorted(_RECONCILIATION_STATUSES))
+    raise ValueError(f"{field_name} must be one of: {supported}")
 
 
 def local_result_row_projection_digest(row: Mapping[str, Any]) -> str:
@@ -767,7 +793,10 @@ class LocalEvidenceRunPlanV1:
         _digest(self.evaluation_asset_lock_sha256, "evaluation asset lock digest")
         if not self.attempts:
             raise ValueError("local evidence run plan requires at least one attempt")
-        if tuple(sorted(self.attempts, key=lambda item: item.attempt_id)) != self.attempts:
+        if (
+            tuple(sorted(self.attempts, key=lambda item: item.attempt_id))
+            != self.attempts
+        ):
             raise ValueError("local evidence run-plan attempts must be sorted")
         attempt_ids = [item.attempt_id for item in self.attempts]
         cell_ids = [item.cell_id for item in self.attempts]
@@ -841,7 +870,10 @@ class LocalAttemptEvidenceV1:
                 self.result_row_projection_digest,
                 "result row projection digest",
             )
-        if self.terminal_status in {"passed", "failed"} and not self.prediction_row_sha256:
+        if (
+            self.terminal_status in {"passed", "failed"}
+            and not self.prediction_row_sha256
+        ):
             raise ValueError("executed attempts require a prediction row digest")
         if self.agent_receipt.attempt_id != self.attempt.attempt_id:
             raise ValueError("Agent evidence receipt belongs to another attempt")
@@ -934,11 +966,7 @@ class LocalAttemptEvidenceV1:
             "edges": [item.to_dict() for item in self.edges],
             "prediction_row_sha256": self.prediction_row_sha256,
             **(
-                {
-                    "result_row_projection_digest": (
-                        self.result_row_projection_digest
-                    )
-                }
+                {"result_row_projection_digest": (self.result_row_projection_digest)}
                 if self.result_row_projection_digest is not None
                 else {}
             ),
@@ -1055,7 +1083,9 @@ class LocalEvidenceManifestV1:
         if tuple(sorted(set(self.planned_attempt_ids))) != self.planned_attempt_ids:
             raise ValueError("planned local evidence attempt ids must be sorted/unique")
         if tuple(sorted(set(self.terminal_attempt_ids))) != self.terminal_attempt_ids:
-            raise ValueError("terminal local evidence attempt ids must be sorted/unique")
+            raise ValueError(
+                "terminal local evidence attempt ids must be sorted/unique"
+            )
         if not set(self.terminal_attempt_ids) <= set(self.planned_attempt_ids):
             raise ValueError("terminal local evidence attempt was not planned")
         for attempt_id in (*self.planned_attempt_ids, *self.terminal_attempt_ids):
@@ -1106,10 +1136,7 @@ class LocalEvidenceManifestV1:
             conformance_status = "missing"
         elif self.run_conformance is None:
             conformance_status = "not_required"
-        elif (
-            self.run_conformance.status == "passed"
-            and self.run_conformance.enforced
-        ):
+        elif self.run_conformance.status == "passed" and self.run_conformance.enforced:
             conformance_status = "resolved"
         elif self.run_conformance.status == "failed":
             conformance_status = "invalid"
@@ -1128,7 +1155,9 @@ class LocalEvidenceManifestV1:
             else "incomplete"
         )
         if self.status != expected_status:
-            raise ValueError("local evidence manifest status does not match its records")
+            raise ValueError(
+                "local evidence manifest status does not match its records"
+            )
         computed = self.computed_digest()
         if self.manifest_digest and self.manifest_digest != computed:
             raise ValueError("local evidence manifest digest does not match")
@@ -1455,9 +1484,7 @@ class LocalEvidenceStore:
                     integrity_status=record.integrity_status,
                     terminal_status=record.terminal_status,
                     prediction_row_sha256=record.prediction_row_sha256,
-                    result_row_projection_digest=(
-                        record.result_row_projection_digest
-                    ),
+                    result_row_projection_digest=(record.result_row_projection_digest),
                 )
             )
         records = tuple(sorted(record_refs, key=lambda item: item.attempt_id))
@@ -1503,10 +1530,7 @@ class LocalEvidenceStore:
                 [item.to_dict() for item in records]
             ),
             prediction_row_set_digest=stable_digest(
-                [
-                    [item.attempt_id, item.prediction_row_sha256]
-                    for item in records
-                ]
+                [[item.attempt_id, item.prediction_row_sha256] for item in records]
             ),
             result_row_projection_set_digest=(
                 stable_digest(
@@ -1517,8 +1541,7 @@ class LocalEvidenceStore:
                 )
                 if records
                 and all(
-                    item.result_row_projection_digest is not None
-                    for item in records
+                    item.result_row_projection_digest is not None for item in records
                 )
                 else None
             ),
@@ -1532,8 +1555,7 @@ class LocalEvidenceStore:
         manifest = self.build_manifest()
         if manifest.status != "complete":
             raise LocalEvidenceIntegrityError(
-                "local evidence cannot finalize: "
-                f"manifest status is {manifest.status}"
+                f"local evidence cannot finalize: manifest status is {manifest.status}"
             )
         with FileLock(self.lock_path, timeout=120):
             created = not self.manifest_path.exists()
@@ -1586,9 +1608,7 @@ class LocalEvidenceStore:
             raise FileNotFoundError(
                 f"local evidence manifest not found: {self.manifest_path}"
             )
-        manifest = local_evidence_manifest_from_dict(
-            _read_mapping(self.manifest_path)
-        )
+        manifest = local_evidence_manifest_from_dict(_read_mapping(self.manifest_path))
         recomputed = self.build_manifest()
         if manifest.to_dict() != recomputed.to_dict():
             raise LocalEvidenceIntegrityError(
@@ -1613,12 +1633,9 @@ class LocalEvidenceStore:
             and receipt.plan_digest == manifest.plan_digest
             and receipt.manifest_digest == manifest.manifest_digest
             and receipt.manifest_path == "manifest.json"
-            and receipt.manifest_file_sha256
-            == hashlib.sha256(manifest_raw).hexdigest()
-            and receipt.attempt_record_set_digest
-            == manifest.attempt_record_set_digest
-            and receipt.prediction_row_set_digest
-            == manifest.prediction_row_set_digest
+            and receipt.manifest_file_sha256 == hashlib.sha256(manifest_raw).hexdigest()
+            and receipt.attempt_record_set_digest == manifest.attempt_record_set_digest
+            and receipt.prediction_row_set_digest == manifest.prediction_row_set_digest
         )
         if not expected:
             raise LocalEvidenceIntegrityError(
@@ -1789,7 +1806,9 @@ class LocalEvidenceCoordinator:
         self.store = store
         self.plan = plan
         self.secret_values = tuple(
-            value for value in secret_values if isinstance(value, str) and len(value) >= 8
+            value
+            for value in secret_values
+            if isinstance(value, str) and len(value) >= 8
         )
         self.store.initialize(plan)
 
@@ -1833,8 +1852,7 @@ class LocalEvidenceCoordinator:
             if (
                 existing.terminal_status != terminal_status
                 or existing.prediction_row_sha256 != expected_prediction_digest
-                or existing.result_row_projection_digest
-                != expected_projection_digest
+                or existing.result_row_projection_digest != expected_projection_digest
                 or existing.agent_receipt != agent_receipt
             ):
                 raise LocalEvidenceIntegrityError(
@@ -2045,9 +2063,7 @@ def _require_unique_attempt_evidence_refs(
             )
     all_refs = [ref for refs in refs_by_kind.values() for ref in refs]
     if len(set(all_refs)) != len(all_refs):
-        raise ValueError(
-            "attempt-scoped local evidence refs must be globally unique"
-        )
+        raise ValueError("attempt-scoped local evidence refs must be globally unique")
 
 
 def local_evidence_destination_from_dict(
@@ -2139,9 +2155,7 @@ def local_evidence_run_plan_from_dict(
             value.get("evaluation_asset_lock_sha256") or ""
         ),
         attempts=tuple(
-            local_attempt_plan_from_dict(
-                _required_mapping(item, "local attempt plan")
-            )
+            local_attempt_plan_from_dict(_required_mapping(item, "local attempt plan"))
             for item in _required_sequence(value.get("attempts"), "attempts")
         ),
         require_run_conformance=_required_bool(
@@ -2204,9 +2218,7 @@ def agent_evidence_receipt_from_dict(
     transcript_artifact = value.get("transcript_artifact")
     return AgentEvidenceReceiptV1(
         attempt_id=str(value.get("attempt_id") or ""),
-        planned_conversation_id=str(
-            value.get("planned_conversation_id") or ""
-        ),
+        planned_conversation_id=str(value.get("planned_conversation_id") or ""),
         primary_session_id=(
             str(value["primary_session_id"])
             if value.get("primary_session_id") is not None
@@ -2305,7 +2317,10 @@ def local_evidence_edge_from_dict(raw: Mapping[str, Any]) -> LocalEvidenceEdgeV1
 def local_attempt_evidence_from_dict(
     raw: Mapping[str, Any],
 ) -> LocalAttemptEvidenceV1:
-    raw = {**raw, "result_row_projection_digest": raw.get("result_row_projection_digest")}
+    raw = {
+        **raw,
+        "result_row_projection_digest": raw.get("result_row_projection_digest"),
+    }
     value = _strict_mapping(
         raw,
         {
@@ -2383,7 +2398,10 @@ def local_attempt_evidence_from_dict(
 def local_attempt_record_ref_from_dict(
     raw: Mapping[str, Any],
 ) -> LocalAttemptRecordRefV1:
-    raw = {**raw, "result_row_projection_digest": raw.get("result_row_projection_digest")}
+    raw = {
+        **raw,
+        "result_row_projection_digest": raw.get("result_row_projection_digest"),
+    }
     value = _strict_mapping(
         raw,
         {
@@ -2455,9 +2473,7 @@ def local_evidence_manifest_from_dict(
 ) -> LocalEvidenceManifestV1:
     raw = {
         **raw,
-        "result_row_projection_set_digest": raw.get(
-            "result_row_projection_set_digest"
-        ),
+        "result_row_projection_set_digest": raw.get("result_row_projection_set_digest"),
     }
     value = _strict_mapping(
         raw,
@@ -2516,12 +2532,8 @@ def local_evidence_manifest_from_dict(
                 value.get("attempt_records"), "attempt record references"
             )
         ),
-        attempt_record_set_digest=str(
-            value.get("attempt_record_set_digest") or ""
-        ),
-        prediction_row_set_digest=str(
-            value.get("prediction_row_set_digest") or ""
-        ),
+        attempt_record_set_digest=str(value.get("attempt_record_set_digest") or ""),
+        prediction_row_set_digest=str(value.get("prediction_row_set_digest") or ""),
         result_row_projection_set_digest=(
             str(value["result_row_projection_set_digest"])
             if value.get("result_row_projection_set_digest") is not None
@@ -2627,9 +2639,7 @@ def local_evidence_event_from_dict(
         event=event,  # type: ignore[arg-type]
         recorded_at=str(value.get("recorded_at") or ""),
         attempt_id=(
-            str(value["attempt_id"])
-            if value.get("attempt_id") is not None
-            else None
+            str(value["attempt_id"]) if value.get("attempt_id") is not None else None
         ),
         details=dict(_required_mapping(value.get("details"), "event details")),
         event_digest=_required_digest(value.get("event_digest"), "event digest"),
@@ -2659,9 +2669,7 @@ def _expected_edges(
     }
 
 
-def _ref_kind(
-    ref: str, refs: Mapping[EvidenceNodeKind, str]
-) -> EvidenceNodeKind:
+def _ref_kind(ref: str, refs: Mapping[EvidenceNodeKind, str]) -> EvidenceNodeKind:
     matches = [kind for kind, value in refs.items() if value == ref]
     if len(matches) != 1:
         raise ValueError("local evidence ref does not identify one node")
@@ -2683,8 +2691,7 @@ def _verify_prediction_identity(
             raise ValueError(f"prediction row {key} disagrees with its run plan")
     identity = row.get("attempt_identity")
     if identity is not None and (
-        not isinstance(identity, Mapping)
-        or dict(identity) != attempt.attempt_identity
+        not isinstance(identity, Mapping) or dict(identity) != attempt.attempt_identity
     ):
         raise ValueError("prediction row attempt identity disagrees with its plan")
 
@@ -2706,7 +2713,9 @@ def _attempt_from_plan(
 ) -> LocalAttemptPlanV1:
     matches = [item for item in plan.attempts if item.attempt_id == attempt_id]
     if len(matches) != 1:
-        raise ValueError(f"attempt is not present exactly once in run plan: {attempt_id}")
+        raise ValueError(
+            f"attempt is not present exactly once in run plan: {attempt_id}"
+        )
     return matches[0]
 
 
@@ -2760,9 +2769,7 @@ def _read_mapping(path: Path) -> dict[str, Any]:
             f"local evidence is not valid JSON: {path}"
         ) from exc
     if not isinstance(value, Mapping):
-        raise LocalEvidenceIntegrityError(
-            f"local evidence is not an object: {path}"
-        )
+        raise LocalEvidenceIntegrityError(f"local evidence is not an object: {path}")
     return dict(value)
 
 
@@ -2917,6 +2924,5 @@ def _assert_public_payload(
         if redact_text(value) != value:
             location = ".".join(path) or "payload"
             raise ValueError(
-                "token-shaped credential is not allowed in local evidence: "
-                f"{location}"
+                f"token-shaped credential is not allowed in local evidence: {location}"
             )

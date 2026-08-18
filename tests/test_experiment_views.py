@@ -21,21 +21,75 @@ from fugue.research.experiment_views import (
 _A = "a" * 64
 _FIXTURE = Path(__file__).parent / "fixtures/experiment-view-v1-design.json"
 _V3_STUDY_CONSOLE_GOLDEN = (
-    Path(__file__).parent
-    / "fixtures/experiment-view-v3-study-console-golden.json"
+    Path(__file__).parent / "fixtures/experiment-view-v3-study-console-golden.json"
 )
 _REPO_ROOT = Path(__file__).parents[1]
 
 
 def test_v3_study_console_wire_golden_is_byte_structure_stable() -> None:
-    payload = json.loads(
-        _V3_STUDY_CONSOLE_GOLDEN.read_text(encoding="utf-8")
-    )
+    payload = json.loads(_V3_STUDY_CONSOLE_GOLDEN.read_text(encoding="utf-8"))
 
     parsed = experiment_view_from_dict(payload)
     normalized = json.loads(json.dumps(parsed.to_dict()))
 
     assert normalized == payload
+
+
+def test_v3_study_console_wire_keeps_pre_status_results_readable() -> None:
+    payload = json.loads(_V3_STUDY_CONSOLE_GOLDEN.read_text(encoding="utf-8"))
+    for arm in ("baseline", "candidate"):
+        attempt = payload["paired_cases"][0][arm]
+        attempt.pop("cost_reconciliation_status")
+        attempt.pop("latency_reconciliation_status")
+        attempt.pop("usage_reconciliation_status")
+
+    parsed = experiment_view_from_dict(payload)
+    normalized = json.loads(json.dumps(parsed.to_dict()))
+
+    assert normalized == payload
+
+
+def test_v3_study_console_wire_rejects_unknown_reconciliation_status() -> None:
+    payload = json.loads(_V3_STUDY_CONSOLE_GOLDEN.read_text(encoding="utf-8"))
+    payload["paired_cases"][0]["baseline"]["cost_reconciliation_status"] = "available"
+
+    with pytest.raises(ValueError, match="must be one of"):
+        experiment_view_from_dict(payload)
+
+
+@pytest.mark.parametrize(
+    ("status_field", "measurement_fields", "message"),
+    [
+        (
+            "cost_reconciliation_status",
+            ("cost_usd",),
+            "resolved cost reconciliation requires cost_usd",
+        ),
+        (
+            "latency_reconciliation_status",
+            ("latency_sec",),
+            "resolved latency reconciliation requires latency_sec",
+        ),
+        (
+            "usage_reconciliation_status",
+            ("input_tokens", "output_tokens"),
+            "resolved usage reconciliation requires input and output tokens",
+        ),
+    ],
+)
+def test_v3_study_console_wire_requires_measurements_for_resolved_status(
+    status_field: str,
+    measurement_fields: tuple[str, ...],
+    message: str,
+) -> None:
+    payload = json.loads(_V3_STUDY_CONSOLE_GOLDEN.read_text(encoding="utf-8"))
+    attempt = payload["paired_cases"][0]["candidate"]
+    attempt[status_field] = "resolved"
+    for field_name in measurement_fields:
+        attempt.pop(field_name)
+
+    with pytest.raises(ValueError, match=message):
+        experiment_view_from_dict(payload)
 
 
 def test_v3_judge_summary_is_safe_and_invalid_integrity_suppresses_it() -> None:
@@ -195,9 +249,7 @@ def test_v3_view_rejects_published_judge_rationale() -> None:
 
 
 def test_v3_view_rejects_attempt_identity_mismatch() -> None:
-    payload = json.loads(
-        _V3_STUDY_CONSOLE_GOLDEN.read_text(encoding="utf-8")
-    )
+    payload = json.loads(_V3_STUDY_CONSOLE_GOLDEN.read_text(encoding="utf-8"))
     payload["paired_cases"][0]["candidate"]["identity"]["candidate"] = (
         "forged-candidate"
     )
@@ -207,9 +259,7 @@ def test_v3_view_rejects_attempt_identity_mismatch() -> None:
 
 
 def test_v3_pair_coordinates_match_attempt_identity() -> None:
-    payload = json.loads(
-        _V3_STUDY_CONSOLE_GOLDEN.read_text(encoding="utf-8")
-    )
+    payload = json.loads(_V3_STUDY_CONSOLE_GOLDEN.read_text(encoding="utf-8"))
     candidate = payload["paired_cases"][0]["candidate"]
     candidate["identity"]["arm"] = "baseline"
     candidate["attempt_id"] = attempt_id(**candidate["identity"])
@@ -219,9 +269,7 @@ def test_v3_pair_coordinates_match_attempt_identity() -> None:
 
 
 def test_v3_evidence_eligible_requires_five_resolved_links() -> None:
-    payload = json.loads(
-        _V3_STUDY_CONSOLE_GOLDEN.read_text(encoding="utf-8")
-    )
+    payload = json.loads(_V3_STUDY_CONSOLE_GOLDEN.read_text(encoding="utf-8"))
     link = payload["paired_cases"][0]["candidate"]["evidence_links"][0]
     link["status"] = "missing"
     link["reason"] = "The object could not be resolved."
