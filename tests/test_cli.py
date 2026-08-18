@@ -94,7 +94,13 @@ def test_public_command_surface_is_intentionally_small() -> None:
     assert "--index-receipt" in publish_report_help
     assert "--project" not in publish_report_help
     assert "Public Preview" in publish_report_help
-    assert "local index and receipt remain authoritative" in publish_report_help
+    assert (
+        "local Research index and index-publication receipt remain authoritative"
+        in publish_report_help
+    )
+    assert "W&B project and application origin bound by this receipt" in (
+        publish_report_help
+    )
     assert "does not change access settings" in publish_report_help
     assert "request a public share link" in publish_report_help
     research_actions = next(

@@ -71,7 +71,7 @@ class RetryableWandbResearchReportPublicationError(WandbResearchReportPublicatio
 def wandb_research_report_publisher_from_environment(
     env: Mapping[str, str],
 ) -> ResearchIndexReportPublisher:
-    """Build the optional, digest-addressed W&B Report publisher.
+    """Build the optional W&B Report publisher bound to a projection digest.
 
     Importing this module never imports W&B. The factory loads and checks both
     optional packages before it creates an API client or performs any network
@@ -669,7 +669,8 @@ def _report_markdown(
         "## Fugue Research index",
         "",
         "**API status: Public Preview.** This W&B Report is an optional "
-        "presentation of a Fugue Research index. It is not a native `wandb.study`.",
+        "presentation of a Fugue Research index. It presents Fugue Study results. "
+        "The supported W&B SDK does not provide a native Study API.",
         "",
         "Access follows W&B project and Report settings. Fugue does not request "
         "a public share link.",
@@ -681,21 +682,23 @@ def _report_markdown(
         f"- Studies: {projection.study_count}",
         f"- Result rows: {projection.total_rows}",
         f"- [Index Run]({_safe_bound_url(projection.index_run_url)})",
-        f"- [Immutable index Artifact]({_safe_bound_url(projection.index_artifact_url)})",
+        f"- [Immutable index Artifact version]({_safe_bound_url(projection.index_artifact_url)})",
         "",
-        "| Study | Comparison | Finding | Recommendation | Rows | Candidates | Evidence | Links |",
+        "| Study | Comparison | Finding | Recommendation | Rows | Candidates | Evidence integrity (not task quality) | Links |",
         "|---|---|---|---|---:|---|---|---|",
     ]
     for study in sorted(projection.studies, key=lambda item: item.study_id):
         evidence = (
-            f"grade {_table_text(study.evidence_integrity_grade)}; "
-            f"{_table_text(study.evidence_backend)}; "
-            f"local {_table_text(study.local_chain_integrity)}; "
-            f"published {_table_text(study.published_chain_integrity)}"
+            f"grade {_table_text(study.evidence_integrity_grade)} — "
+            "link/privacy integrity; result backend: "
+            f"{_table_text(study.evidence_backend)}; local chain: "
+            f"{_table_text(study.local_chain_integrity)}; W&B publication: "
+            f"{_table_text(study.published_chain_integrity)}"
         )
         links = (
-            f"[project]({_safe_bound_url(study.evidence_project_url)}) · "
-            f"[primary evidence]({_safe_bound_url(study.primary_evidence_url)})"
+            f"[Weave project]({_safe_bound_url(study.evidence_project_url)}) · "
+            "[prediction-and-score call]"
+            f"({_safe_bound_url(study.primary_evidence_url)})"
         )
         lines.append(
             "| "

@@ -321,10 +321,10 @@ def _parser() -> FugueArgumentParser:
         help=("Publish a verified W&B Report view of one Research index"),
         description=(
             "Publish a W&B Report that presents one Research index. Fugue reads the "
-            "saved Report from W&B and verifies the fields and Markdown that it "
-            "wrote. The local index and receipt remain authoritative. The Reports "
-            "API is Public Preview. This command does not change access settings or "
-            "request a public share link."
+            "saved Report from W&B and compares its fields and Markdown with the "
+            "prepared projection. The local Research index and index-publication "
+            "receipt remain authoritative. The Reports API is Public Preview. This "
+            "command does not change access settings or request a public share link."
         ),
     )
     publish_report.add_argument("index", type=Path)
@@ -332,7 +332,10 @@ def _parser() -> FugueArgumentParser:
         "--index-receipt",
         required=True,
         type=Path,
-        help="Immutable receipt from fugue publish wandb-index",
+        help=(
+            "Immutable receipt from fugue publish wandb-index; the Report uses the "
+            "W&B project and application origin bound by this receipt"
+        ),
     )
     publish_report.add_argument("--receipt", type=Path)
     _add_common_args(publish_report, json_output=True)

@@ -356,26 +356,32 @@ fugue publish wandb-report research-index.json \
   --receipt research-index-report-publication-receipt.json
 ```
 
-`fugue publish wandb-index` creates a deterministic W&B Run and an immutable
-Artifact. Share the returned Run URL with colleagues who can access the target
-project. The Run contains a digest-bound table that shows each Study's behavioral status,
-recommendation, evidence integrity, exact result and qualification digests,
-candidate assignments, and primary evidence link. The Artifact preserves the
-exact Research index and its bound result and publication-receipt sources. The
-installed W&B SDK does not expose a native `wandb.study` service API. Fugue
-therefore describes this object as a Research index, not a native Study, and
-does not fabricate a Study Console link.
+First publish the index. The Report command uses the W&B project and
+application origin recorded in `--index-receipt`; it cannot select a different
+destination.
 
-`fugue publish wandb-report` creates a digest-addressed W&B Report for
-colleagues who have access under the W&B project and Report settings. W&B
-labels its Reports API Public Preview. This status describes the API maturity;
-it does not make the Report public. Fugue reads the saved Report from W&B and
-verifies the fields and Markdown that it wrote before it writes a local
+`fugue publish wandb-index` creates a deterministic W&B Run and an immutable
+Artifact version. Share the returned Run URL with colleagues who can access the
+target project. The Run contains a digest-bound table that shows each Study's
+behavioral status, recommendation, evidence integrity, exact result and
+qualification digests, candidate assignments, and primary prediction-and-score
+evidence link. The Artifact version preserves the exact Research index and its
+bound result and publication-receipt sources. The supported W&B SDK does not
+provide a native Study API. Fugue publishes a Research index and an optional
+W&B Report; it does not represent either object as a native W&B Study or
+fabricate a Study Console link.
+
+`fugue publish wandb-report` creates a W&B Report that is bound to the
+index-projection digest. Colleagues can read the Report if the W&B project and
+Report settings grant access. W&B labels its Reports API Public Preview. This
+status describes the API maturity; it does not make the Report public. Fugue
+reads the saved Report from W&B and compares the Report fields and Markdown
+with the prepared projection. Fugue then writes a local Report-publication
 receipt. This command does not change access settings or request a public share
-link. The local Research index and its publication receipt remain authoritative.
-The deterministic Run and immutable Artifact are the canonical hosted index
-publication. The Report is an optional presentation view and cannot change the
-local index or any result.
+link. The local Research index and index-publication receipt remain
+authoritative. The deterministic Run and immutable Artifact version are the
+canonical hosted index publication. The Report is an optional presentation
+view and cannot change the local index or any result.
 
 Normal MCP configurations and standard Agent Skills are candidate inputs, not
 special experiment types:

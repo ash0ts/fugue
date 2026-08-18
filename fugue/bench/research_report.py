@@ -35,7 +35,8 @@ RESEARCH_INDEX_REPORT_WIDTH = "readable"
 RESEARCH_INDEX_REPORT_WARNING = (
     "API status: Public Preview. This W&B Report is an optional presentation "
     "of the Fugue Research index. The local Research index and its publication "
-    "receipt remain authoritative. This Report is not a native wandb.study."
+    "receipt remain authoritative. This Report presents Fugue Study results. "
+    "The supported W&B SDK does not provide a native Study API."
 )
 
 _DIGEST = re.compile(r"^[0-9a-f]{64}$")

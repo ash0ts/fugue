@@ -606,7 +606,7 @@ def test_create_uses_one_controlled_block_and_authoritative_readback(
     assert marker in markdown
     assert "Public Preview" in markdown
     assert "optional presentation" in markdown
-    assert "not a native `wandb.study`" in markdown
+    assert "does not provide a native Study API" in markdown
     assert "project and Report settings" in markdown
     assert markdown.index("study-a") < markdown.index("study-b")
     assert "Advance to confirmation." in markdown
