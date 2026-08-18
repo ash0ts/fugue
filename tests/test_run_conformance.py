@@ -100,6 +100,34 @@ def _inventory(*container_ids: str) -> dict[str, object]:
     }
 
 
+def _durable_execution_scope(*, cleanup_verified: bool = True) -> dict[str, object]:
+    physical_id = "a" * 64
+    physical = {
+        "schema_version": 1,
+        "logical_attempt_id": "b" * 64,
+        "physical_execution_id": physical_id,
+        "retry_ordinal": 0,
+        "controller_id": "comparison-run",
+        "terminal_kind": "success",
+        "cleanup_verified": cleanup_verified,
+        "cleanup_scope_verified": cleanup_verified,
+        "cleanup_post_run_inventory": cleanup_verified,
+        "cleanup_receipt_reference": (
+            ".fugue/runtime/run/cleanup.json" if cleanup_verified else None
+        ),
+    }
+    scope = {
+        "schema_version": 1,
+        "schedule_digest": "c" * 64,
+        "event_chain_digest": "d" * 64,
+        "physical_execution_ids": [physical_id],
+        "physical_executions": [physical],
+        "physical_execution_set_digest": stable_digest([physical_id]),
+        "journal_complete": True,
+    }
+    return {**scope, "scope_digest": stable_digest(scope)}
+
+
 def _write_verified_input_lock(
     run_dir: Path,
     payload: dict[str, object],
@@ -1221,4 +1249,92 @@ def test_harbor_cleanup_is_unavailable_for_unattributed_new_container(
     assert result.status == "unavailable"
     assert value["docker_cleanup"]["unattributed_new_containers"] == [
         "unknown-new"
+    ]
+
+
+def test_durable_harbor_cleanup_ignores_unrelated_host_containers(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    job = _local_job(tmp_path, "run-durable-unrelated")
+
+    def run(command, **kwargs):
+        if command == ["docker", "container", "ls", "--all", "--quiet"]:
+            return subprocess.CompletedProcess(command, 0, "unknown-new\n", "")
+        return subprocess.CompletedProcess(command, 0, "", "")
+
+    monkeypatch.setattr(conformance_module.subprocess, "run", run)
+
+    result = write_harbor_run_conformance_receipt(
+        repo_root=tmp_path,
+        run_id="run-durable-unrelated",
+        jobs=[job],
+        env={"WANDB_API_KEY": "wandb-secret-value"},
+        pre_execution_inventory=_inventory(),
+        execution_scope=_durable_execution_scope(),
+    )
+
+    value = json.loads(result.path.read_text())
+    assert result.status == "passed"
+    assert value["docker_cleanup"]["scope"]["kind"] == (
+        "exact_physical_compose_projects"
+    )
+
+
+def test_durable_harbor_cleanup_rejects_unverified_physical_cleanup(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    job = _local_job(tmp_path, "run-durable-unverified")
+    monkeypatch.setattr(
+        conformance_module.subprocess,
+        "run",
+        lambda command, **kwargs: subprocess.CompletedProcess(command, 0, "", ""),
+    )
+
+    result = write_harbor_run_conformance_receipt(
+        repo_root=tmp_path,
+        run_id="run-durable-unverified",
+        jobs=[job],
+        env={"WANDB_API_KEY": "wandb-secret-value"},
+        pre_execution_inventory=_inventory(),
+        execution_scope=_durable_execution_scope(cleanup_verified=False),
+    )
+
+    value = json.loads(result.path.read_text())
+    assert result.status == "unavailable"
+    assert value["docker_cleanup"]["reason"] == (
+        "a physical execution lacks verified scoped cleanup"
+    )
+
+
+def test_durable_harbor_cleanup_fails_for_exact_project_orphan(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    job = _local_job(tmp_path, "run-durable-orphan")
+
+    def run(command, **kwargs):
+        if command[1:3] == ["container", "ls"]:
+            return subprocess.CompletedProcess(command, 0, "matching\n", "")
+        return subprocess.CompletedProcess(command, 0, "", "")
+
+    monkeypatch.setattr(conformance_module.subprocess, "run", run)
+
+    result = write_harbor_run_conformance_receipt(
+        repo_root=tmp_path,
+        run_id="run-durable-orphan",
+        jobs=[job],
+        env={"WANDB_API_KEY": "wandb-secret-value"},
+        pre_execution_inventory=_inventory(),
+        execution_scope=_durable_execution_scope(),
+    )
+
+    value = json.loads(result.path.read_text())
+    assert result.status == "failed"
+    assert value["docker_cleanup"]["matched_containers"] == [
+        {
+            "attribution": "exact_compose_project_label",
+            "compose_project": value["docker_cleanup"]["scope"][
+                "compose_projects"
+            ][0],
+            "container_id": "matching",
+        }
     ]

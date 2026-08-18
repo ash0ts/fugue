@@ -2771,6 +2771,10 @@ class OperatorService:
                 enforce=conformance_enforced,
                 execution_scope=conformance_scope,
             )
+            if harbor_conformance.enforced and harbor_conformance.status == "unavailable":
+                raise ExecutionFinalizationPending(
+                    _harbor_finalization_pending_reason(harbor_conformance.path)
+                )
             # The canonical manifest is closed only after the final run-scoped
             # privacy, execution-policy, and Harbor cleanup receipt exists.
             # This prevents a complete evidence chain from outliving a leaked
@@ -4273,6 +4277,29 @@ def _durable_physical_conformance_jobs(
         "journal_complete": snapshot.complete,
     }
     return jobs, {**scope, "scope_digest": stable_digest(scope)}
+
+
+def _harbor_finalization_pending_reason(path: Path) -> str:
+    """Return a concise, public reason for a retryable cleanup audit."""
+
+    try:
+        value = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return "Harbor conformance is unavailable; retry finalization."
+    cleanup = value.get("docker_cleanup") if isinstance(value, Mapping) else None
+    if not isinstance(cleanup, Mapping):
+        return "Harbor conformance is unavailable; retry finalization."
+    reason = str(cleanup.get("reason") or "").strip()
+    if reason:
+        return f"Harbor cleanup evidence is unavailable: {reason}"
+    unattributed = cleanup.get("unattributed_new_containers")
+    if isinstance(unattributed, list) and unattributed:
+        return (
+            "Harbor cleanup evidence is unavailable because "
+            f"{len(unattributed)} new Docker container(s) were not attributable "
+            "to this run. Retry finalization after the host inventory stabilizes."
+        )
+    return "Harbor cleanup evidence is unavailable; retry finalization."
 
 
 def _validate_approved_comparison_plan(

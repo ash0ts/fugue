@@ -309,14 +309,32 @@ def write_harbor_run_conformance_receipt(
         jobs=local_jobs,
         host_scorer_names=host_scorer_names,
     )
-    cleanup = _docker_cleanup_audit(
-        repo_root=root,
-        run_dir=run_dir,
-        run_id=run_id,
-        jobs=local_jobs,
-        pre_execution_inventory=pre_execution_inventory,
-        exact_compose_scope=False,
+    exact_cleanup_scope, scope_error = _verified_durable_cleanup_scope(
+        execution_scope
     )
+    if execution_scope is not None and scope_error is not None:
+        cleanup = {
+            "status": "unavailable",
+            "reason": scope_error,
+            "matched_containers": [],
+            "matched_networks": [],
+            "mutations_performed": False,
+            "errors": [],
+            "scope": {
+                "kind": "durable_execution_scope",
+                "run_id": run_id,
+                "excluded": ["unverified physical execution cleanup"],
+            },
+        }
+    else:
+        cleanup = _docker_cleanup_audit(
+            repo_root=root,
+            run_dir=run_dir,
+            run_id=run_id,
+            jobs=local_jobs,
+            pre_execution_inventory=pre_execution_inventory,
+            exact_compose_scope=exact_cleanup_scope,
+        )
     statuses = (
         str(identity["status"]),
         str(secret_scan["status"]),
@@ -377,6 +395,56 @@ def write_harbor_run_conformance_receipt(
         payload,
         secrets=configured_secrets,
     )
+
+
+def _verified_durable_cleanup_scope(
+    execution_scope: Mapping[str, Any] | None,
+) -> tuple[bool, str | None]:
+    """Verify that durable physical cleanup can replace a host-wide delta."""
+
+    if execution_scope is None:
+        return False, None
+    if execution_scope.get("schema_version") != 1:
+        return False, "durable execution scope has an unsupported schema"
+    if execution_scope.get("journal_complete") is not True:
+        return False, "durable execution journal is incomplete"
+    rows = execution_scope.get("physical_executions")
+    identifiers = execution_scope.get("physical_execution_ids")
+    if not isinstance(rows, list) or not rows:
+        return False, "durable execution scope has no physical executions"
+    if not isinstance(identifiers, list) or any(
+        not isinstance(value, str) or not value for value in identifiers
+    ):
+        return False, "durable execution scope has invalid physical identities"
+    observed = [
+        str(row.get("physical_execution_id") or "")
+        for row in rows
+        if isinstance(row, Mapping)
+    ]
+    if len(observed) != len(rows) or sorted(observed) != sorted(identifiers):
+        return False, "durable execution scope disagrees with its physical identities"
+    if len(set(observed)) != len(observed):
+        return False, "durable execution scope repeats a physical identity"
+    if execution_scope.get("physical_execution_set_digest") != _stable_digest(
+        sorted(observed)
+    ):
+        return False, "durable physical execution set digest does not match"
+    unsigned = {
+        key: value for key, value in execution_scope.items() if key != "scope_digest"
+    }
+    if execution_scope.get("scope_digest") != _stable_digest(unsigned):
+        return False, "durable execution scope digest does not match"
+    for row in rows:
+        assert isinstance(row, Mapping)
+        if not (
+            row.get("cleanup_verified") is True
+            and row.get("cleanup_scope_verified") is True
+            and row.get("cleanup_post_run_inventory") is True
+            and isinstance(row.get("cleanup_receipt_reference"), str)
+            and str(row.get("cleanup_receipt_reference")).strip()
+        ):
+            return False, "a physical execution lacks verified scoped cleanup"
+    return True, None
 
 
 def _configured_secrets(

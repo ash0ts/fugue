@@ -62,7 +62,13 @@ class RunSnapshotV1:
     snapshot_sha256: str = ""
 
     def to_dict(self) -> dict[str, Any]:
-        value = asdict(self)
+        # JSON is the durable snapshot contract. Normalize nested tuples here
+        # so an in-memory snapshot compares equal to the same snapshot after a
+        # JSON write/read cycle. Model routes contain tuple-valued capability
+        # fields, which previously made a completed run impossible to resume.
+        value = _json_container_types(asdict(self))
+        if not isinstance(value, dict):  # pragma: no cover - fixed dataclass
+            raise TypeError("run snapshot must serialize to an object")
         value["planned_matrix"] = list(self.planned_matrix)
         value["required_env"] = list(self.required_env)
         value["capability_plan"] = list(self.capability_plan)
@@ -80,6 +86,16 @@ class EvaluationAssetLockV1:
 
     def to_dict(self) -> dict[str, Any]:
         return asdict(self)
+
+
+def _json_container_types(value: Any) -> Any:
+    """Normalize container types without changing scalar values."""
+
+    if isinstance(value, dict):
+        return {key: _json_container_types(item) for key, item in value.items()}
+    if isinstance(value, (list, tuple)):
+        return [_json_container_types(item) for item in value]
+    return value
 
 
 def build_run_snapshot(

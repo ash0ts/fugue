@@ -73,6 +73,34 @@ def test_programmatic_experiment_with_hosted_destination_infers_weave() -> None:
     assert experiment.evidence_destination.project == "project"
 
 
+def test_run_snapshot_to_dict_uses_json_container_types() -> None:
+    snapshot = RunSnapshotV1(
+        schema_version=1,
+        identity_schema_version=1,
+        run_id="run-json-containers",
+        experiment={},
+        request={},
+        assets={},
+        candidates={},
+        candidate_runtime={
+            "candidate": {
+                "model_route": {"tool_result_modalities": ("text", "image")}
+            }
+        },
+        planned_matrix=(),
+        evaluation={},
+        runtime={},
+        required_env=(),
+    )
+
+    value = snapshot.to_dict()
+
+    assert value["candidate_runtime"]["candidate"]["model_route"][
+        "tool_result_modalities"
+    ] == ["text", "image"]
+    assert json.loads(json.dumps(value, sort_keys=True)) == value
+
+
 def make_operator_repo(tmp_path: Path) -> OperatorService:
     (tmp_path / "configs/fugue/experiments").mkdir(parents=True)
     (tmp_path / "configs/fugue/context-systems").mkdir(parents=True)
