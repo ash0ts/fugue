@@ -501,3 +501,24 @@ def fixture_repository_digest(root: Path) -> str:
         digest.update(len(body).to_bytes(8, "big"))
         digest.update(body)
     return digest.hexdigest()
+
+
+def resolve_fixture_repository_path(
+    repository: FixtureRepositorySpec,
+    repo_root: Path,
+) -> Path:
+    """Resolve and verify one immutable study-owned fixture repository."""
+
+    root = repo_root.resolve()
+    path = (root / repository.path).resolve()
+    try:
+        path.relative_to(root)
+    except ValueError as exc:
+        raise ValueError("fixture repository escapes the repository root") from exc
+    actual = fixture_repository_digest(path)
+    if actual != repository.sha256:
+        raise ValueError(
+            f"fixture repository digest changed: expected {repository.sha256}, "
+            f"got {actual}"
+        )
+    return path

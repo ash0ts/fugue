@@ -20,6 +20,7 @@ def test_wheel_runs_from_empty_directory_without_harbor_or_weave(
     subprocess.run(
         ["uv", "build", "--wheel", "--out-dir", wheel_dir.as_posix()],
         cwd=repo_root,
+        env={**os.environ, "UV_CACHE_DIR": (tmp_path / "uv-cache").as_posix()},
         check=True,
         capture_output=True,
         text=True,
@@ -35,6 +36,15 @@ def test_wheel_runs_from_empty_directory_without_harbor_or_weave(
         assert "fugue/resources/context-systems/none.yaml" in names
         assert "fugue/resources/runtime/claude-code/package.json" in names
         assert "fugue/resources/vendor/weave-node-sdk.tgz" in names
+        assert "fugue/resources/ci/standalone-comparison.yml" in names
+        for template in (
+            "prompt-change",
+            "skill-change",
+            "mcp-change",
+            "memory-change",
+            "harness-change",
+        ):
+            assert f"fugue/resources/templates/{template}/comparison.yaml" in names
         archive.extractall(installed)
 
     blocker = tmp_path / "blocker"
@@ -90,6 +100,46 @@ sys.meta_path.insert(0, OptionalDependencyBlocker())
     assert previewed.returncode in {0, 2}, previewed.stderr
     assert "ModuleNotFoundError" not in previewed.stderr
 
+    package_root = _wheel_python(
+        empty,
+        env,
+        "from fugue.bench.job_config import _installed_fugue_package_root; "
+        "print(_installed_fugue_package_root())",
+    )
+    assert package_root.returncode == 0, package_root.stderr
+    assert Path(package_root.stdout.strip()).is_relative_to(installed)
+
+    for template in (
+        "skill-change",
+        "mcp-change",
+        "memory-change",
+        "harness-change",
+    ):
+        destination = f"study-{template}"
+        initialized = _wheel_cli(
+            empty,
+            env,
+            "init",
+            destination,
+            "--template",
+            template,
+        )
+        assert initialized.returncode == 0, initialized.stderr
+        checked = _wheel_cli(
+            empty,
+            env,
+            "check",
+            f"{destination}/comparison.yaml",
+            "--json",
+        )
+        assert checked.returncode == 2, checked.stderr
+        readiness = json.loads(checked.stdout)
+        assert readiness["task_count"] == 2
+        assert readiness["estimated_cells"] == 8
+        assert readiness["base_failures"] == 2
+        assert readiness["gold_passes"] == 2
+        assert not any("not found" in item for item in readiness["blockers"])
+
 
 def _wheel_cli(
     cwd: Path,
@@ -100,6 +150,22 @@ def _wheel_cli(
         "from fugue.bench.cli import main; "
         f"raise SystemExit(main({list(arguments)!r}))"
     )
+    return subprocess.run(
+        [sys.executable, "-c", script],
+        cwd=cwd,
+        env=env,
+        capture_output=True,
+        text=True,
+        check=False,
+        timeout=60,
+    )
+
+
+def _wheel_python(
+    cwd: Path,
+    env: dict[str, str],
+    script: str,
+) -> subprocess.CompletedProcess[str]:
     return subprocess.run(
         [sys.executable, "-c", script],
         cwd=cwd,

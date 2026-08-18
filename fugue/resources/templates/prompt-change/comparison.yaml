@@ -1,0 +1,31 @@
+schema_version: 1
+id: prompt-change-local-v1
+question: Does an evidence-first system prompt improve exact, source-grounded maintenance answers?
+taskset:
+  tasks: tasks.jsonl
+  private_labels: private-labels.jsonl
+baseline:
+  label: Concise maintainer prompt
+  prompt_id: concise-maintainer-v1
+candidate:
+  label: Evidence-first maintainer prompt
+  prompt_id: evidence-first-maintainer-v2
+changed: [prompt_id]
+evaluators:
+  - id: exact-answer
+    type: deterministic
+    required: true
+    checks: [answer_present, expected_values]
+execution:
+  model: anthropic/claude-sonnet-5
+  harnesses: [claude-code]
+  attempts: 2
+  concurrency: 1
+  evidence_checkpoint_cells: 2
+  max_cost_usd: 10
+  reserve_per_attempt_usd: 1.25
+  approval_required: true
+  preparation_required: true
+  trace_content: full
+  evidence_mode: local
+  environment: {type: docker}

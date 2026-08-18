@@ -1,0 +1,7 @@
+openapi: 3.1.0
+paths:
+  /widgets:
+    post:
+      operationId: createWidget
+      responses:
+        "201": {description: Widget created}

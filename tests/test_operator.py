@@ -746,6 +746,171 @@ def test_setup_materializes_a_dataset_before_preparing_its_task_image(
     assert events == ["dataset", "task"]
 
 
+def test_static_agentsmd_prepare_does_not_build_portable_service_runtime(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    service = make_operator_repo(tmp_path)
+    (tmp_path / "configs/fugue/context-systems/agentsmd.yaml").write_text(
+        """
+id: agentsmd
+title: Repository map
+provider: fugue.bench.context:AgentsMdContextProvider
+version: "1"
+capabilities: [prepare, bind, serve]
+deliveries: [portable]
+serve_deliveries: [portable]
+license: Fugue
+config:
+  binding:
+    extra_instruction_paths: ["{artifact}/AGENTS.md"]
+"""
+    )
+    experiment = service.experiment("demo")
+    experiment = replace(
+        experiment,
+        variants=[
+            replace(
+                experiment.variants[0],
+                context=ContextSelection(system_id="agentsmd", delivery="portable"),
+            )
+        ],
+    )
+    request = service.request_for_experiment(experiment)
+    monkeypatch.setattr(
+        operator_module,
+        "materialize_manifest_dataset",
+        lambda *args, **kwargs: None,
+    )
+    monkeypatch.setattr(operator_module, "agent_runtime_spec", lambda _name: None)
+    monkeypatch.setattr(service, "prepare_context", lambda *args, **kwargs: ())
+    monkeypatch.setattr(
+        operator_module,
+        "prepare_task_runtime",
+        lambda *args, **kwargs: {
+            "image": "fugue-task:test",
+            "image_id": "sha256:" + "a" * 64,
+            "recipe_sha256": "b" * 64,
+        },
+    )
+    portable_calls: list[Path] = []
+
+    def reject_portable_runtime(repo_root: Path, **_kwargs):
+        portable_calls.append(repo_root)
+        raise AssertionError("agentsmd must not build the Fugue context service")
+
+    monkeypatch.setattr(
+        operator_module,
+        "prepare_portable_runtime",
+        reject_portable_runtime,
+    )
+
+    preview = service.resolve_run_plan(
+        request,
+        run_id="agentsmd-preview",
+        experiment=experiment,
+    )
+    [job] = service.rendered_jobs(
+        request,
+        run_id="agentsmd-binding",
+        write_configs=False,
+        experiment=experiment,
+    )
+    prepared = service.prepare(request, experiment=experiment)
+
+    assert len(preview.cells) == 1
+    assert job.config["fugue"]["context_runtime_required"] is False
+    assert prepared.portable_context_runtime is None
+    assert portable_calls == []
+
+
+def test_managed_portable_context_prepare_builds_service_runtime(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    service = make_operator_repo(tmp_path)
+    (tmp_path / "configs/fugue/context-systems/rag-bm25.yaml").write_text(
+        """
+id: rag-bm25
+title: Fugue RAG
+provider: fugue.bench.context:RagContextProvider
+version: "2"
+capabilities: [prepare, retrieve, bind]
+deliveries: [portable]
+license: Fugue
+config:
+  mode: bm25
+  binding: {managed_runtime: fugue_context}
+"""
+    )
+    experiment = service.experiment("demo")
+    experiment = replace(
+        experiment,
+        variants=[
+            replace(
+                experiment.variants[0],
+                context=ContextSelection(system_id="rag-bm25", delivery="portable"),
+            )
+        ],
+    )
+    request = service.request_for_experiment(experiment)
+    monkeypatch.setattr(
+        operator_module,
+        "materialize_manifest_dataset",
+        lambda *args, **kwargs: None,
+    )
+    monkeypatch.setattr(operator_module, "agent_runtime_spec", lambda _name: None)
+    monkeypatch.setattr(service, "prepare_context", lambda *args, **kwargs: ())
+    monkeypatch.setattr(
+        operator_module,
+        "prepare_task_runtime",
+        lambda *args, **kwargs: {
+            "image": "fugue-task:test",
+            "image_id": "sha256:" + "a" * 64,
+            "recipe_sha256": "b" * 64,
+        },
+    )
+    portable_calls: list[tuple[Path, bool]] = []
+    monkeypatch.setattr(
+        operator_module,
+        "portable_runtime_ready",
+        lambda _repo_root: (False, "not prepared"),
+    )
+
+    def prepare_portable(repo_root: Path, *, rebuild: bool = False):
+        portable_calls.append((repo_root, rebuild))
+        return {
+            "architecture": "linux/amd64",
+            "image": "fugue-context-runtime:test",
+            "image_id": "sha256:" + "c" * 64,
+            "recipe_sha256": "d" * 64,
+        }
+
+    monkeypatch.setattr(
+        operator_module,
+        "prepare_portable_runtime",
+        prepare_portable,
+    )
+
+    service.resolve_run_plan(
+        request,
+        run_id="managed-context-preview",
+        experiment=experiment,
+    )
+    [job] = service.rendered_jobs(
+        request,
+        run_id="managed-context-binding",
+        write_configs=False,
+        experiment=experiment,
+    )
+    prepared = service.prepare(request, experiment=experiment)
+
+    assert job.config["fugue"]["context_runtime_required"] is True
+    assert prepared.portable_context_runtime is not None
+    assert prepared.portable_context_runtime.image_id == "sha256:" + "c" * 64
+    assert portable_calls == [(tmp_path, False)]
+
+
 def test_generated_evaluation_preflight_requires_explicit_judge(
     tmp_path: Path,
 ) -> None:

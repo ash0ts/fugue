@@ -218,6 +218,10 @@ def test_graphiti_binding_passes_required_env_by_reference(tmp_path: Path) -> No
 def test_graphiti_retrieves_ranked_episodes_from_the_active_namespace(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
+    pytest.importorskip(
+        "graphiti_core",
+        reason="Graphiti is provided by the optional context extra",
+    )
     calls: list[tuple[str, object, list[str]]] = []
 
     class FakeGraph:

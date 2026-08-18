@@ -1,0 +1,12 @@
+id: offline-catalog-legacy
+version: "1"
+support: supported
+runtime:
+  type: builtin
+  command: [python, /workspace/resources/offline_catalog_mcp.py, --revision, legacy]
+interfaces:
+  - type: mcp
+    name: offline_catalog
+    transport: stdio
+    allowed_tools: [lookup_setting]
+capabilities: [read]

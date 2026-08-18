@@ -1,0 +1,31 @@
+schema_version: 1
+id: memory-change-local-v1
+question: Does a prepared AGENTS.md repository map improve grounded navigation of an unfamiliar maintenance fixture?
+taskset:
+  tasks: tasks.jsonl
+  private_labels: private-labels.jsonl
+baseline:
+  label: Claude Code without prepared repository memory
+  context: {system_id: none, delivery: portable}
+candidate:
+  label: Claude Code with prepared AGENTS.md repository map
+  context: {system_id: agentsmd, delivery: portable}
+changed: [context.system_id]
+evaluators:
+  - id: repository-answer
+    type: deterministic
+    required: true
+    checks: [answer_present, expected_values]
+execution:
+  model: anthropic/claude-sonnet-5
+  harnesses: [claude-code]
+  attempts: 2
+  concurrency: 1
+  evidence_checkpoint_cells: 2
+  max_cost_usd: 10
+  reserve_per_attempt_usd: 1.25
+  approval_required: true
+  preparation_required: true
+  trace_content: full
+  evidence_mode: local
+  environment: {type: docker}

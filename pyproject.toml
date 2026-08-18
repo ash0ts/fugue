@@ -107,6 +107,8 @@ fugue = [
     "resources/source-use-replay/*.yaml",
     "resources/source-use-replay/configs/fugue/context-systems/*.yaml",
     "resources/source-use-replay/configs/fugue/skills/*/*.md",
+    "resources/ci/*.yml",
+    "resources/templates/**/*",
     "resources/context-systems/*.yaml",
     "resources/build-provenance.json",
     "resources/runtime/**/*.json",

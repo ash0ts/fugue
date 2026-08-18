@@ -52,6 +52,7 @@ from fugue.bench.local_evidence import (
     LocalEvidenceStore,
     local_evidence_destination_from_dict,
 )
+from fugue.bench.manifest import fixture_repository_digest
 from fugue.bench.operator import (
     ExperimentRequest,
     OperatorService,
@@ -107,6 +108,7 @@ _PUBLIC_TASK_FIELDS = frozenset(
         "tags",
         "partition",
         "critical_dimensions",
+        "repository",
     }
 )
 _PRIVATE_LABEL_FIELDS = frozenset(
@@ -2958,6 +2960,7 @@ def compile_comparison(
     spec: ComparisonSpecV1, *, repo_root: Path
 ) -> tuple[ExperimentSpec, dict[str, Any], list[dict[str, Any]]]:
     tasks = _load_public_tasks(repo_root / spec.taskset.tasks)
+    _validate_public_fixture_repositories(tasks, repo_root)
     public_rows = [
         _public_case(task, spec=spec, index=index, repo_root=repo_root)
         for index, task in enumerate(tasks)
@@ -3022,6 +3025,11 @@ def compile_comparison(
                         "tags": row["tags"],
                     },
                 },
+                **(
+                    {"repository": row["repository"]}
+                    if row.get("repository") is not None
+                    else {}
+                ),
             }
             for index, row in enumerate(public_rows)
         ],
@@ -10132,116 +10140,21 @@ def _verify_v3_decision_gates(
         )
 
 
-def scaffold_comparison(destination: Path, *, force: bool = False) -> Path:
-    root = destination.resolve()
-    if root.exists() and any(root.iterdir()) and not force:
-        raise FileExistsError(
-            f"refusing to overwrite non-empty comparison directory: {root}"
-        )
-    root.mkdir(parents=True, exist_ok=True)
-    skill_root = (
-        root / "configs" / "fugue" / "skills" / "verify-current-source"
+def scaffold_comparison(
+    destination: Path,
+    *,
+    template: str = "skill-change",
+    force: bool = False,
+) -> Path:
+    """Create a complete installed-package study from a packaged template."""
+
+    from fugue.bench.templates import scaffold_standalone_template
+
+    return scaffold_standalone_template(
+        destination,
+        template_id=template,
+        force=force,
     )
-    skill_root.mkdir(parents=True, exist_ok=True)
-    _atomic_text(
-        root / "tasks.jsonl",
-        json.dumps(
-            {
-                "id": "policy-limit",
-                "input": {
-                    "question": (
-                        "Find the current expense limit and return JSON with "
-                        "amount and source."
-                    )
-                },
-                "tags": ["source-use"],
-                "partition": "holdout",
-            },
-            sort_keys=True,
-        )
-        + "\n",
-    )
-    _atomic_text(
-        root / "private-labels.jsonl",
-        json.dumps(
-            {
-                "id": "policy-limit",
-                "expected": {"amount": 125, "source": "expense-policy-v4.md"},
-                "base_output": {
-                    "amount": 100,
-                    "source": "expense-policy-v3.md",
-                },
-                "gold_output": {
-                    "amount": 125,
-                    "source": "expense-policy-v4.md",
-                },
-            },
-            sort_keys=True,
-        )
-        + "\n",
-    )
-    _atomic_text(
-        skill_root / "SKILL.md",
-        (
-            "---\n"
-            "name: verify-current-source\n"
-            "description: Inspect and cite the current authoritative source.\n"
-            "---\n\n"
-            "# Verify current source\n\n"
-            "Open the authoritative source before answering. Prefer a current, "
-            "effective document over a draft or superseded revision, and cite "
-            "the exact filename used.\n"
-        ),
-    )
-    config = {
-        "schema_version": 1,
-        "id": "source-use",
-        "question": "Does verifying the current source improve evidence use?",
-        "taskset": {
-            "tasks": "tasks.jsonl",
-            "private_labels": "private-labels.jsonl",
-        },
-        "baseline": {"label": "Current Agent"},
-        "candidate": {
-            "label": "Current Agent + source verification Skill",
-            "skills": ["verify-current-source"],
-        },
-        "changed": ["skills"],
-        "evaluators": [
-            {
-                "id": "fact-and-source",
-                "type": "deterministic",
-                "required": True,
-                "checks": ["answer_present", "expected_values"],
-            }
-        ],
-        "execution": {
-            "model": "wandb/zai-org/GLM-5.2",
-            "harnesses": ["codex"],
-            "attempts": 2,
-            "concurrency": 1,
-            "max_cost_usd": 40,
-            "reserve_per_attempt_usd": 10,
-            "approval_required": True,
-            "trace_content": "full",
-            "evidence_mode": "local",
-        },
-    }
-    _atomic_text(
-        root / "comparison.yaml",
-        yaml.safe_dump(config, sort_keys=False),
-    )
-    _atomic_text(
-        root / "README.md",
-        (
-            "# Fugue Agent-change comparison\n\n"
-            "Run from the repository root:\n\n"
-            "```bash\n"
-            f"uv run fugue check {root.as_posix()}/comparison.yaml\n"
-            "```\n"
-        ),
-    )
-    return root / "comparison.yaml"
 
 
 def score_comparison_rows(
@@ -13360,6 +13273,7 @@ def _public_case(
         "timeout_sec": 900,
     }
     interaction["controller_digest"] = stable_digest(interaction)
+    repository = _public_task_repository(task, repo_root)
     return {
         "schema_version": 1,
         "id": task_id,
@@ -13388,6 +13302,7 @@ def _public_case(
                 }
             ),
         },
+        **({"repository": repository} if repository is not None else {}),
         "interaction": interaction,
         "harness_applicability": applicability,
         "profile_digests": {},
@@ -13455,6 +13370,83 @@ def _task_attachments(
             }
         )
     return result
+
+
+def _public_task_repository(
+    task: Mapping[str, Any],
+    repo_root: Path,
+) -> dict[str, str] | None:
+    raw = task.get("repository")
+    if raw is None:
+        return None
+    repository = _mapping(raw, f"public task {task['id']} repository")
+    path = _safe_resource_relative_path(
+        repository.get("path"),
+        label=f"public task {task['id']} repository",
+    )
+    root = (repo_root / path).resolve()
+    try:
+        root.relative_to(repo_root.resolve())
+    except ValueError as exc:
+        raise ValueError("public task fixture repository escapes the study root") from exc
+    return {
+        "type": "fixture",
+        "path": path,
+        "sha256": fixture_repository_digest(root),
+    }
+
+
+def _validate_public_fixture_repositories(
+    tasks: Sequence[Mapping[str, Any]],
+    repo_root: Path,
+) -> None:
+    resources_by_repository: dict[str, set[str]] = {}
+    for task in tasks:
+        repository = task.get("repository")
+        if repository is None:
+            continue
+        value = _mapping(repository, f"public task {task['id']} repository")
+        repository_path = _safe_resource_relative_path(
+            value.get("path"),
+            label=f"public task {task['id']} repository",
+        )
+        root = PurePosixPath(repository_path)
+        declared = resources_by_repository.setdefault(repository_path, set())
+        for resource in task.get("resources") or ():
+            resource_path = PurePosixPath(
+                _safe_resource_relative_path(
+                    resource.get("path"),
+                    label=f"public task {task['id']} resource",
+                )
+            )
+            try:
+                relative = resource_path.relative_to(root)
+            except ValueError as exc:
+                raise ValueError(
+                    f"public task {task['id']} fixture repository may contain only "
+                    "its declared public resource tree"
+                ) from exc
+            declared.add(relative.as_posix())
+
+    for repository_path, declared in resources_by_repository.items():
+        root = (repo_root / repository_path).resolve()
+        try:
+            root.relative_to(repo_root.resolve())
+        except ValueError as exc:
+            raise ValueError(
+                "public task fixture repository escapes the study root"
+            ) from exc
+        fixture_repository_digest(root)
+        observed = {
+            path.relative_to(root).as_posix()
+            for path in root.rglob("*")
+            if path.is_file()
+        }
+        if observed != declared:
+            raise ValueError(
+                f"public fixture repository {repository_path} must contain exactly "
+                "the declared public task resources"
+            )
 
 
 def _safe_resource_relative_path(value: Any, *, label: str) -> str:
@@ -13619,6 +13611,25 @@ def _load_public_tasks(path: Path) -> list[dict[str, Any]]:
             _safe_resource_relative_path(
                 resource.get("path"),
                 label=f"public task {task_id} resource {resource_index}",
+            )
+        repository = row.get("repository")
+        if repository is not None:
+            if not isinstance(repository, dict):
+                raise ValueError(
+                    f"public task {task_id} repository must be an object"
+                )
+            _reject_unknown(
+                repository,
+                {"type", "path"},
+                f"public task {task_id} repository",
+            )
+            if repository.get("type") != "fixture":
+                raise ValueError(
+                    f"public task {task_id} repository type must be fixture"
+                )
+            _safe_resource_relative_path(
+                repository.get("path"),
+                label=f"public task {task_id} repository",
             )
         row["id"] = task_id
         row["partition"] = partition

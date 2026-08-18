@@ -1,0 +1,6 @@
+[project]
+name = "ledger-fixture"
+version = "1.0.0"
+
+[project.scripts]
+ledger = "ledger.cli:main"

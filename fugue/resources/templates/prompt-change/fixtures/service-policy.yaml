@@ -1,0 +1,6 @@
+schema_version: 1
+service: checkout
+status: current
+recovery:
+  rpo_minutes: 15
+  rto_minutes: 45

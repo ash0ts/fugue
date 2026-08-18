@@ -1,0 +1,30 @@
+schema_version: 1
+id: skill-change-local-v1
+question: Does a reviewed current-source Skill improve policy answers without changing the task or runtime?
+taskset:
+  tasks: tasks.jsonl
+  private_labels: private-labels.jsonl
+baseline:
+  label: Claude Code without the Skill
+candidate:
+  label: Claude Code with verify-current-source
+  skills: [verify-current-source]
+changed: [skills]
+evaluators:
+  - id: current-source-answer
+    type: deterministic
+    required: true
+    checks: [answer_present, expected_values]
+execution:
+  model: anthropic/claude-sonnet-5
+  harnesses: [claude-code]
+  attempts: 2
+  concurrency: 1
+  evidence_checkpoint_cells: 2
+  max_cost_usd: 10
+  reserve_per_attempt_usd: 1.25
+  approval_required: true
+  preparation_required: true
+  trace_content: full
+  evidence_mode: local
+  environment: {type: docker}

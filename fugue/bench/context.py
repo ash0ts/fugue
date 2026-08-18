@@ -1304,25 +1304,40 @@ def context_system_root(repo_root: Path | None = None) -> Path:
     requested = (repo_root or Path.cwd()) / CONTEXT_SYSTEMS_DIR
     if requested.exists():
         return requested
-    bundled = Path(str(files("fugue").joinpath("resources", "context-systems")))
+    bundled = _bundled_context_system_root()
     return bundled if bundled.exists() else requested
 
 
 def list_context_systems(repo_root: Path | None = None) -> list[ContextSystemSpec]:
-    root = context_system_root(repo_root)
-    if not root.exists():
-        return []
-    return [load_context_system(path) for path in sorted(root.glob("*.yaml"))]
+    bundled = _bundled_context_system_root()
+    requested = (repo_root or Path.cwd()) / CONTEXT_SYSTEMS_DIR
+    paths = {
+        path.stem: path
+        for path in bundled.glob("*.yaml")
+        if bundled.exists()
+    }
+    if requested.exists():
+        paths.update({path.stem: path for path in requested.glob("*.yaml")})
+    return [load_context_system(paths[item]) for item in sorted(paths)]
 
 
 def get_context_system(
     system_id: str, repo_root: Path | None = None
 ) -> ContextSystemSpec:
     system_id = validate_id(system_id, kind="context system id")
-    path = context_system_root(repo_root) / f"{system_id}.yaml"
+    requested = (repo_root or Path.cwd()) / CONTEXT_SYSTEMS_DIR / f"{system_id}.yaml"
+    path = (
+        requested
+        if requested.is_file()
+        else _bundled_context_system_root() / f"{system_id}.yaml"
+    )
     if not path.is_file():
         raise FileNotFoundError(f"context system not found: {system_id}")
     return load_context_system(path)
+
+
+def _bundled_context_system_root() -> Path:
+    return Path(str(files("fugue").joinpath("resources", "context-systems")))
 
 
 def load_context_system(path: Path) -> ContextSystemSpec:

@@ -1,0 +1,5 @@
+.env
+.fugue/
+private-labels.jsonl
+__pycache__/
+*.pyc

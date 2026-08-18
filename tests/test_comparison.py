@@ -1182,6 +1182,7 @@ def test_v3_result_round_trips_source_topology_and_canonical_view(
             }
         }
         row["source_pre_run_drift"] = drift
+        row["source_checkpoint_drift"] = drift
         row["source_post_run_drift"] = drift
         row["prediction_id"] = f"{variant}-prediction-row"
         row["agent_response"] = {
@@ -3725,8 +3726,20 @@ def test_scaffold_refuses_non_empty_destination(tmp_path: Path) -> None:
         repo_root=destination,
     )
     preview = preview_comparison(spec, repo_root=destination)
-    assert preview.readiness["status"] == "ready"
-    assert preview.matrix["estimated_trials"] == 4
+    assert preview.readiness["status"] == "blocked"
+    assert preview.readiness["task_count"] == 2
+    assert preview.readiness["estimated_cells"] == 8
+    assert preview.readiness["base_failures"] == 2
+    assert preview.readiness["gold_passes"] == 2
+    assert preview.matrix["estimated_trials"] == 8
+    blockers = preview.readiness["blockers"]
+    assert len(blockers) == 4
+    assert all(
+        blocker.startswith("local agent:")
+        or blocker.startswith("local task:")
+        or blocker.startswith("comparison preparation is missing or drifted;")
+        for blocker in blockers
+    )
     assert not (destination / ".fugue").exists()
     with pytest.raises(FileExistsError, match="non-empty"):
         scaffold_comparison(destination)
@@ -3871,6 +3884,8 @@ def test_execute_local_comparison_never_requires_or_fetches_weave(
     raw["execution"]["model"] = "anthropic/claude-sonnet-5"
     raw["execution"]["attempts"] = 1
     raw["execution"]["approval_required"] = False
+    raw["execution"]["preparation_required"] = False
+    raw["execution"]["evidence_checkpoint_cells"] = 0
     comparison_path.write_text(
         yaml.safe_dump(raw, sort_keys=False),
         encoding="utf-8",
@@ -4075,9 +4090,9 @@ def test_execute_local_comparison_never_requires_or_fetches_weave(
         "local"
     )
     assert result.hosted_chain_integrity == "not_applicable"
-    assert result.operational_summary["evidence_states"] == {"reconciled": 2}
+    assert result.operational_summary["evidence_states"] == {"reconciled": 4}
     assert result.evidence_links == ()
-    assert captured["local_rows"] == 2
+    assert captured["local_rows"] == 4
     assert result_path.is_file()
     markdown = markdown_path.read_text(encoding="utf-8")
     assert "]()" not in markdown
