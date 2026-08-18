@@ -1,9 +1,46 @@
 from __future__ import annotations
 
+import asyncio
 import sys
 from types import SimpleNamespace
 
 from fugue import weave_support
+
+
+def test_local_evidence_mode_never_initializes_weave_with_a_wandb_key(
+    monkeypatch,
+) -> None:
+    initialized = False
+    calls = 0
+
+    def unexpected_initialize(*args, **kwargs):
+        nonlocal initialized
+        initialized = True
+        raise AssertionError(f"local mode initialized Weave: {args}, {kwargs}")
+
+    async def operation() -> str:
+        nonlocal calls
+        calls += 1
+        return "local-result"
+
+    monkeypatch.setattr(weave_support, "initialize_weave", unexpected_initialize)
+
+    result = asyncio.run(
+        weave_support.trace_async_operation(
+            "local-operation",
+            {},
+            {
+                "FUGUE_EVIDENCE_MODE": "local",
+                "WANDB_API_KEY": "integration-only-key",
+            },
+            operation,
+            lambda value: {"value": value},
+        )
+    )
+
+    assert result == "local-result"
+    assert calls == 1
+    assert initialized is False
 
 
 def test_initialize_weave_reactivates_destination_after_a_b_a_switch(

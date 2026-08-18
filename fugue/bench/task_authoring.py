@@ -176,6 +176,7 @@ class ScorerRuntimeProfileV1:
     id: str
     title: str
     image: str
+    platform: str
     command: tuple[str, ...]
     profile_digest: str = ""
 
@@ -1525,6 +1526,8 @@ def run_inline_scorer(
             "--rm",
             "--pull",
             "never",
+            "--platform",
+            profile.platform,
             "--network",
             "none",
             "--read-only",
@@ -1749,12 +1752,24 @@ def _scorer_runtime_profile(raw: Any) -> ScorerRuntimeProfileV1:
     value = _mapping(raw, "scorer runtime")
     _reject_unknown(
         value,
-        {"id", "title", "image", "command", "profile_digest"},
+        {"id", "title", "image", "platform", "command", "profile_digest"},
         "scorer runtime",
     )
     image = _bounded_text(value.get("image"), "scorer image", 500)
     if "@sha256:" not in image or not _DIGEST.fullmatch(image.rsplit("@sha256:", 1)[1]):
         raise ValueError("scorer runtime image must use an exact sha256 digest")
+    # Schema-V1 profile catalogs predate explicit scorer-platform locking.
+    # Keep those catalogs readable with the historical canonical amd64
+    # runtime, while every parsed/rewritten profile emits the platform and
+    # therefore receives a new identity. Old preparation receipts remain
+    # unusable because they do not bind this field.
+    platform = _bounded_text(
+        value.get("platform") or "linux/amd64",
+        "scorer platform",
+        50,
+    )
+    if platform not in {"linux/amd64", "linux/arm64"}:
+        raise ValueError("scorer runtime platform must be linux/amd64 or linux/arm64")
     command = _bounded_text_tuple(value.get("command"), "scorer command")
     if any("/input/" not in item and item.startswith("/") for item in command):
         raise ValueError("scorer runtime command may address only /input assets")
@@ -1762,6 +1777,7 @@ def _scorer_runtime_profile(raw: Any) -> ScorerRuntimeProfileV1:
         id=validate_id(value.get("id") or "", kind="scorer runtime id"),
         title=_bounded_text(value.get("title"), "scorer runtime title", 200),
         image=image,
+        platform=platform,
         command=command,
         profile_digest=str(value.get("profile_digest") or ""),
     )

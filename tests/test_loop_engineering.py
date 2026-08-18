@@ -208,6 +208,8 @@ def _pair(
                 status=dimension_status,  # type: ignore[arg-type]
                 baseline=baseline_passed,
                 candidate=candidate_passed,
+                baseline_explanation="safe deterministic explanation",
+                candidate_explanation="safe deterministic explanation",
                 critical=True,
                 role="outcome",
             ),
@@ -268,6 +270,8 @@ def _exact_history_pair(
                 status="unchanged" if candidate_answer_correct else "regressed",
                 baseline=True,
                 candidate=candidate_answer_correct,
+                baseline_explanation="safe deterministic explanation",
+                candidate_explanation="safe deterministic explanation",
                 critical=True,
                 role="outcome",
             ),
@@ -277,6 +281,8 @@ def _exact_history_pair(
                 status="unchanged" if not candidate_bounded else "improved",
                 baseline=False,
                 candidate=candidate_bounded,
+                baseline_explanation="safe deterministic explanation",
+                candidate_explanation="safe deterministic explanation",
                 critical=True,
                 role="safety_gate",
             ),
@@ -286,6 +292,8 @@ def _exact_history_pair(
                 status="unchanged",
                 baseline=False,
                 candidate=False,
+                baseline_explanation="safe deterministic explanation",
+                candidate_explanation="safe deterministic explanation",
                 critical=True,
                 role="safety_gate",
             ),
@@ -428,6 +436,10 @@ def _result(
         status: sum(pair.status == status for pair in resolved_pairs)
         for status in ("improved", "regressed", "mixed", "unchanged", "incomplete")
     }
+    candidate_definitions = {
+        stable_digest({"arm": arm}): {"arm": arm}
+        for arm in ("baseline", "candidate")
+    }
     preliminary = ComparisonResultV3(
         schema_version=3,
         comparison_id=COMPARISON_ID,
@@ -489,6 +501,7 @@ def _result(
             ),
         ),
         cohort_lineage=cohort_lineage,
+        candidate_definitions=candidate_definitions,
         evidence_destination=resolved_topology.result_destination.to_dict(),
         candidate_source_revisions=(
             CandidateSourceRevisionV1(

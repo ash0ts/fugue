@@ -37,7 +37,7 @@ def _run_commands(job: dict[str, Any]) -> str:
     )
 
 
-def test_standalone_workflow_plans_automatically_but_executes_only_when_gated(
+def test_standalone_workflow_keeps_private_truth_in_protected_jobs(
 ) -> None:
     workflow = _workflow()
     events = _events(workflow)
@@ -47,13 +47,20 @@ def test_standalone_workflow_plans_automatically_but_executes_only_when_gated(
     assert "pull_request" in events
     assert inputs["study_root"]["default"] == "."
     assert inputs["comparison"]["default"] == "comparison.yaml"
+    assert "private_labels_path" not in inputs
     assert inputs["execute"]["default"] is False
     assert inputs["fugue_requirement"]["default"] == (
         f"fugue[local-runner]=={version('fugue')}"
     )
 
-    assert jobs["plan"].get("environment") is None
-    assert "secrets." not in yaml.safe_dump(jobs["plan"], sort_keys=True)
+    smoke = jobs["pull-request-smoke"]
+    assert "pull_request" in str(smoke["if"])
+    assert smoke.get("environment") is None
+    assert "secrets." not in yaml.safe_dump(smoke, sort_keys=True)
+    assert 'test "$status" -eq 2' in _run_commands(smoke)
+
+    assert jobs["plan"]["environment"] == "fugue-local-experiment"
+    assert "workflow_dispatch" in str(jobs["plan"]["if"])
     assert jobs["execute"]["environment"] == "fugue-local-experiment"
     execution_gate = str(jobs["execute"]["if"])
     assert "workflow_dispatch" in execution_gate
@@ -79,6 +86,22 @@ def test_standalone_workflow_plans_automatically_but_executes_only_when_gated(
     assert run_step["env"]["ANTHROPIC_API_KEY"] == (
         "${{ secrets.ANTHROPIC_API_KEY }}"
     )
+    assert "--require local-runner" in run_step["run"]
+    assert "--model anthropic/claude-sonnet-5" in run_step["run"]
+
+    for job_name in ("plan", "execute"):
+        restore = next(
+            step
+            for step in jobs[job_name]["steps"]
+            if step.get("name")
+            == "Restore host-only labels inside the protected environment"
+        )
+        assert restore["env"]["FUGUE_PRIVATE_LABELS_B64"] == (
+            "${{ secrets.FUGUE_PRIVATE_LABELS_B64 }}"
+        )
+        assert "python -m fugue.bench.private_inputs" in restore["run"]
+        assert "--encoded-env FUGUE_PRIVATE_LABELS_B64" in restore["run"]
+        assert "base64.b64decode" not in restore["run"]
 
 
 def test_standalone_workflow_uses_wheel_and_the_canonical_local_cli() -> None:
@@ -87,7 +110,7 @@ def test_standalone_workflow_uses_wheel_and_the_canonical_local_cli() -> None:
     plan_commands = _run_commands(jobs["plan"])
     execute_commands = _run_commands(jobs["execute"])
 
-    for job in jobs.values():
+    for job in (jobs["plan"], jobs["execute"]):
         setup = next(
             step
             for step in job["steps"]
@@ -113,23 +136,62 @@ def test_standalone_workflow_uses_wheel_and_the_canonical_local_cli() -> None:
     assert "--fetch-weave" not in _workflow_text()
     assert "WANDB" not in _workflow_text().upper()
     assert "WEAVE" not in _workflow_text().upper()
+    shell_lines = _workflow_text().replace("\\\n", " ").splitlines()
+    for line in shell_lines:
+        if "fugue check" in line or "fugue compare" in line:
+            assert "--repo-root" not in line
+
+    smoke_commands = _run_commands(jobs["pull-request-smoke"])
+    assert "fugue doctor" in smoke_commands
+    assert "fugue check" in smoke_commands
+    assert "--prepare" not in smoke_commands
+    assert "--preview" not in smoke_commands
+    assert "fugue approve" not in smoke_commands
 
 
 def test_standalone_workflow_preserves_and_uploads_the_local_ledger() -> None:
     workflow = _workflow()
 
-    for job in workflow["jobs"].values():
+    for name, job in workflow["jobs"].items():
         uploads = [
             step
             for step in job["steps"]
             if "actions/upload-artifact@" in str(step.get("uses", ""))
         ]
-        assert len(uploads) == 1
-        upload = uploads[0]
-        assert upload["if"] == "always()"
-        assert upload["with"]["path"] == "${{ env.STUDY_ROOT }}/.fugue"
-        assert upload["with"]["include-hidden-files"] is True
-        assert upload["with"]["if-no-files-found"] == "error"
+        if name == "pull-request-smoke":
+            assert len(uploads) == 1
+            upload = uploads[0]
+            assert upload["if"] == "always()"
+            upload_path = str(upload["with"]["path"])
+            assert upload_path == "${{ env.STUDY_ROOT }}/.fugue/ci"
+        elif name == "plan":
+            assert len(uploads) == 1
+            upload = uploads[0]
+            assert upload["if"] == "success()"
+            upload_path = str(upload["with"]["path"])
+            assert upload_path == "${{ env.STUDY_ROOT }}/.fugue/ci"
+        else:
+            assert len(uploads) == 2
+            success_upload = next(
+                item for item in uploads if item["if"] == "success()"
+            )
+            failure_upload = next(
+                item for item in uploads if item["if"] == "failure()"
+            )
+            upload_path = str(success_upload["with"]["path"])
+            assert "${{ env.STUDY_ROOT }}/.fugue" in upload_path
+            assert "!${{ env.STUDY_ROOT }}/.fugue/private/**" in upload_path
+            assert failure_upload["with"]["path"] == (
+                "${{ env.STUDY_ROOT }}/.fugue/ci/failure-summary.json"
+            )
+            assert "failure-summary.json" in _run_commands(job)
+        for upload in uploads:
+            assert upload["with"].get("include-hidden-files", True) is True
+            assert upload["with"]["if-no-files-found"] == "error"
+
+    workflow_text = _workflow_text()
+    assert "private-labels.jsonl" not in workflow_text
+    assert "fugue/private/**" in workflow_text
 
     for job in workflow["jobs"].values():
         for step in job["steps"]:

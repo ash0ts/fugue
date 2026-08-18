@@ -33,6 +33,10 @@ _MAX_SCAN_TOTAL_BYTES = 128 * 1024 * 1024
 _MAX_NEW_CONTAINER_INSPECTIONS = 512
 _MAX_HOSTED_PAYLOADS = 50_000
 _MAX_HOSTED_PAYLOAD_BYTES = 256 * 1024 * 1024
+_MAX_PRIVATE_TAINT_NODES = 100_000
+_MAX_PRIVATE_TAINT_BYTES = 32 * 1024 * 1024
+_MAX_PRIVATE_TAINT_DEPTH = 64
+_MAX_AGENT_INPUT_TAINT_NODES = 100_000
 _HEX_SHA256 = re.compile(r"^[0-9a-f]{64}$")
 _IMAGE_SHA256 = re.compile(r"^sha256:[0-9a-f]{64}$")
 _PRIVATE_INPUT_KEYS = frozenset(
@@ -568,8 +572,8 @@ def write_hosted_evidence_privacy_receipt(
         "project_sha256": hashlib.sha256(evidence_project.encode()).hexdigest(),
         "attempt_count": len(attempt_ids),
         "attempt_set_sha256": _stable_digest(attempt_ids),
-        "configured_secret_count": len(secrets),
-        "configured_secret_set_sha256": _stable_digest(
+        "configured_sensitive_value_count": len(secrets),
+        "configured_sensitive_value_set_sha256": _stable_digest(
             sorted(hashlib.sha256(value.encode()).hexdigest() for value in secrets)
         ),
         "private_label_record_count": len(label_rows),
@@ -1255,7 +1259,7 @@ def _scan_run_artifacts(  # noqa: C901 - one bounded audit reports every gap
                     "removed container filesystems",
                 ],
             },
-            "configured_secret_count": 0,
+            "configured_sensitive_value_count": 0,
             "files_scanned": 0,
             "bytes_scanned": 0,
             "files_with_matches": [],
@@ -1343,7 +1347,7 @@ def _scan_run_artifacts(  # noqa: C901 - one bounded audit reports every gap
                 "removed container filesystems",
             ],
         },
-        "configured_secret_count": len(secrets),
+        "configured_sensitive_value_count": len(secrets),
         "files_scanned": scanned,
         "bytes_scanned": total_bytes,
         "files_with_matches": matched,
@@ -1360,19 +1364,55 @@ def _private_label_boundary(  # noqa: C901 - one fail-closed taint boundary
     def canonical(value: Any) -> str:
         return json.dumps(value, sort_keys=True, separators=(",", ":"), default=str)
 
-    def structural_taints(value: Any) -> set[str]:
-        taints: set[str] = set()
+    taint_nodes = 0
+    taint_bytes = 0
+
+    def taint_token(value: Any) -> str | None:
+        if isinstance(value, bool):
+            return f"boolean:{canonical(value)}"
+        if isinstance(value, (int, float)):
+            return f"number:{canonical(value)}"
+        if isinstance(value, str) and value:
+            return f"string:{canonical(value)}"
+        return None
+
+    def add_taints(
+        value: Any,
+        taints: set[str],
+        *,
+        depth: int = 0,
+        ignored_root_scalar_keys: frozenset[str] = frozenset(),
+    ) -> None:
+        nonlocal taint_bytes, taint_nodes
+        taint_nodes += 1
+        if (
+            taint_nodes > _MAX_PRIVATE_TAINT_NODES
+            or depth > _MAX_PRIVATE_TAINT_DEPTH
+        ):
+            raise ValueError("private-label taint input exceeds the node/depth bound")
+
+        token: str | None = None
         if isinstance(value, Mapping):
             if value:
-                taints.add(canonical(value))
-            for item in value.values():
-                taints.update(structural_taints(item))
+                token = f"compound:{canonical(value)}"
+            for raw_key, item in value.items():
+                if depth == 0 and str(raw_key) in ignored_root_scalar_keys:
+                    continue
+                add_taints(item, taints, depth=depth + 1)
         elif isinstance(value, list):
             if value:
-                taints.add(canonical(value))
+                token = f"compound:{canonical(value)}"
             for item in value:
-                taints.update(structural_taints(item))
-        return taints
+                add_taints(item, taints, depth=depth + 1)
+        else:
+            token = taint_token(value)
+
+        if token is None or token in taints:
+            return
+        taint_bytes += len(token.encode("utf-8"))
+        if taint_bytes > _MAX_PRIVATE_TAINT_BYTES:
+            raise ValueError("private-label taint input exceeds the byte bound")
+        taints.add(token)
 
     def private_label_digests(value: Any) -> set[str]:
         digests: set[str] = set()
@@ -1396,23 +1436,48 @@ def _private_label_boundary(  # noqa: C901 - one fail-closed taint boundary
         taints: set[str],
         private_paths: set[Path],
         repo_root: Path,
+        scalar_match_allowed: bool = True,
+        depth: int = 0,
     ) -> list[str]:
+        nonlocal agent_input_nodes
+        agent_input_nodes += 1
+        if (
+            agent_input_nodes > _MAX_AGENT_INPUT_TAINT_NODES
+            or depth > _MAX_PRIVATE_TAINT_DEPTH
+        ):
+            raise ValueError("rendered Agent input exceeds the node/depth bound")
         matches: list[str] = []
         if isinstance(value, Mapping):
-            if value and canonical(value) in taints:
+            if value and f"compound:{canonical(value)}" in taints:
                 matches.append(prefix)
             for raw_key, item in value.items():
+                child_prefix = f"{prefix}.{raw_key}"
+                child_scalar_allowed = scalar_match_allowed and not (
+                    prefix == "$"
+                    and str(raw_key)
+                    in {
+                        "debug",
+                        "fugue",
+                        "job_name",
+                        "jobs_dir",
+                        "n_attempts",
+                        "n_concurrent_trials",
+                        "quiet",
+                    }
+                )
                 matches.extend(
                     scan_agent_input(
                         item,
-                        prefix=f"{prefix}.{raw_key}",
+                        prefix=child_prefix,
                         taints=taints,
                         private_paths=private_paths,
                         repo_root=repo_root,
+                        scalar_match_allowed=child_scalar_allowed,
+                        depth=depth + 1,
                     )
                 )
         elif isinstance(value, list):
-            if value and canonical(value) in taints:
+            if value and f"compound:{canonical(value)}" in taints:
                 matches.append(prefix)
             for index, item in enumerate(value):
                 matches.extend(
@@ -1422,12 +1487,16 @@ def _private_label_boundary(  # noqa: C901 - one fail-closed taint boundary
                         taints=taints,
                         private_paths=private_paths,
                         repo_root=repo_root,
+                        scalar_match_allowed=scalar_match_allowed,
+                        depth=depth + 1,
                     )
                 )
-        elif isinstance(value, str):
-            rendered = value.strip()
-            if rendered in taints:
+        else:
+            token = taint_token(value)
+            if scalar_match_allowed and token is not None and token in taints:
                 matches.append(prefix)
+        if isinstance(value, str):
+            rendered = value.strip()
             if ".fugue/private/" in rendered.replace("\\", "/"):
                 matches.append(prefix)
             try:
@@ -1482,7 +1551,33 @@ def _private_label_boundary(  # noqa: C901 - one fail-closed taint boundary
         }
 
     private_paths = {asset_lock.resolve()}
-    taints = structural_taints(asset_payload.get("predictions") or {})
+    taints: set[str] = set()
+    predictions = asset_payload.get("predictions") or {}
+    try:
+        if isinstance(predictions, Mapping):
+            if predictions:
+                add_taints(
+                    predictions,
+                    taints,
+                    ignored_root_scalar_keys=frozenset(predictions),
+                )
+            for prediction in predictions.values():
+                add_taints(
+                    prediction,
+                    taints,
+                    ignored_root_scalar_keys=frozenset(
+                        {"attempt_id", "prediction_id", "task_id"}
+                    ),
+                )
+        else:
+            add_taints(predictions, taints)
+    except ValueError:
+        return {
+            "status": "unavailable",
+            "reason": "the private-label taint scan exceeded its deterministic bound",
+            "scope": "rendered Harbor Agent-input structures only",
+            "rendered_private_fields": sorted(findings),
+        }
     declared_private_missing: list[str] = []
     input_lock = run_dir / "input-lock.json"
     if input_lock.is_file():
@@ -1515,11 +1610,20 @@ def _private_label_boundary(  # noqa: C901 - one fail-closed taint boundary
             try:
                 for line in path.read_text(encoding="utf-8").splitlines():
                     if line.strip():
-                        taints.update(structural_taints(json.loads(line)))
-            except (OSError, UnicodeDecodeError, json.JSONDecodeError):
+                        add_taints(
+                            json.loads(line),
+                            taints,
+                            ignored_root_scalar_keys=frozenset(
+                                {"attempt_id", "id", "prediction_id", "task_id"}
+                            ),
+                        )
+            except (OSError, UnicodeDecodeError, json.JSONDecodeError, ValueError):
                 return {
                     "status": "failed",
-                    "reason": "a frozen private-label bundle is malformed",
+                    "reason": (
+                        "a frozen private-label bundle is malformed or exceeds "
+                        "the deterministic taint bound"
+                    ),
                     "scope": "rendered Harbor Agent-input structures only",
                     "rendered_private_fields": sorted(findings),
                 }
@@ -1533,17 +1637,26 @@ def _private_label_boundary(  # noqa: C901 - one fail-closed taint boundary
         }
 
     tainted_inputs: list[str] = []
-    for job in jobs:
-        tainted_inputs.extend(
-            f"{job.job_name}:{path}"
-            for path in scan_agent_input(
-                job.config,
-                prefix="$",
-                taints=taints,
-                private_paths=private_paths,
-                repo_root=repo_root,
+    agent_input_nodes = 0
+    try:
+        for job in jobs:
+            tainted_inputs.extend(
+                f"{job.job_name}:{path}"
+                for path in scan_agent_input(
+                    job.config,
+                    prefix="$",
+                    taints=taints,
+                    private_paths=private_paths,
+                    repo_root=repo_root,
+                )
             )
-        )
+    except ValueError:
+        return {
+            "status": "unavailable",
+            "reason": "the rendered Agent-input scan exceeded its deterministic bound",
+            "scope": "rendered Harbor Agent-input structures only",
+            "rendered_private_fields": sorted(findings),
+        }
     mode = asset_lock.stat().st_mode & 0o777
     restricted = mode & 0o077 == 0
     if findings or tainted_inputs or not restricted:

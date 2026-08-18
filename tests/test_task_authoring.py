@@ -136,6 +136,7 @@ def _profiles(tmp_path: Path):
                     "id": "scorer-v1",
                     "title": "Pinned scorer",
                     "image": "example/scorer@sha256:" + "b" * 64,
+                    "platform": "linux/amd64",
                     "command": ["python", "/input/scorer.py", "/input/input.json"],
                 }
             ],
@@ -567,6 +568,8 @@ def test_inline_scorer_runs_with_a_locked_isolated_docker_contract(
     command = observed["command"]
     assert isinstance(command, list)
     for expected in (
+        "--platform",
+        "linux/amd64",
         "--network",
         "none",
         "--read-only",
@@ -580,6 +583,42 @@ def test_inline_scorer_runs_with_a_locked_isolated_docker_contract(
     assert isinstance(kwargs, dict)
     assert set(kwargs["env"]) == {"PATH"}
     assert kwargs["timeout"] == limits.scorer_timeout_sec
+
+
+def test_scorer_runtime_platform_is_strict_and_identity_bound(tmp_path: Path) -> None:
+    catalog = _profiles(tmp_path)
+    profile = catalog.scorer_runtime("scorer-v1")
+    assert profile.platform == "linux/amd64"
+
+    raw = profile.to_dict()
+    raw.pop("profile_digest")
+    raw["platform"] = "linux/arm64"
+    catalog_raw = catalog.to_dict()
+    catalog_raw.pop("catalog_digest")
+    catalog_raw.pop("source_sha256")
+    catalog_raw["scorer_runtimes"] = [raw]
+    changed = task_profile_catalog_from_dict(
+        catalog_raw,
+        source_sha256="c" * 64,
+    ).scorer_runtime("scorer-v1")
+    assert changed.profile_digest != profile.profile_digest
+
+    raw.pop("platform")
+    catalog_raw["scorer_runtimes"] = [raw]
+    legacy = task_profile_catalog_from_dict(
+        catalog_raw,
+        source_sha256="d" * 64,
+    ).scorer_runtime("scorer-v1")
+    assert legacy.platform == "linux/amd64"
+    assert legacy.to_dict()["platform"] == "linux/amd64"
+
+    raw["platform"] = "linux/riscv64"
+    catalog_raw["scorer_runtimes"] = [raw]
+    with pytest.raises(ValueError, match="linux/amd64 or linux/arm64"):
+        task_profile_catalog_from_dict(
+            catalog_raw,
+            source_sha256="e" * 64,
+        )
 
 
 def test_adaptive_task_preview_rejects_non_discovery_partitions(

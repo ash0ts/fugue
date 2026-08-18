@@ -299,6 +299,17 @@ def test_manifest_recomputation_detects_artifact_tampering(tmp_path: Path) -> No
         coordinator.store.read_manifest()
 
 
+def test_diagnostic_event_journal_is_not_canonical_evidence(tmp_path: Path) -> None:
+    coordinator, (attempt,) = _coordinator(tmp_path)
+    _finish(coordinator, tmp_path, attempt)
+    manifest = coordinator.finalize()
+
+    coordinator.store.events_path.unlink()
+
+    assert coordinator.store.read_manifest() == manifest
+    assert coordinator.store.read_events() == ()
+
+
 def test_manifest_cannot_finalize_an_incomplete_run(tmp_path: Path) -> None:
     run_id = "incomplete-local-run"
     attempts = (

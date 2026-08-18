@@ -769,15 +769,11 @@ def _job_config(
     if _needs_mcp_proxy(selected_mcp_servers) and not is_wandb:
         mounts = list(environment.get("mounts", []))
         if not any(
-            isinstance(item, dict) and item.get("target") == "/fugue-src/fugue"
+            isinstance(item, dict)
+            and item.get("target") == "/fugue-src/fugue/mcp_proxy.py"
             for item in mounts
         ):
-            mounts.append(
-                _read_only_mount(
-                    _installed_fugue_package_root(),
-                    "/fugue-src/fugue",
-                )
-            )
+            mounts.extend(_installed_fugue_proxy_mounts())
         environment["mounts"] = mounts
     expected_artifacts = _dedupe_values(
         [
@@ -1382,10 +1378,7 @@ def _context_binding(
         elif binding.mcp_servers:
             mounts.extend(
                 [
-                    _read_only_mount(
-                        _installed_fugue_package_root(),
-                        "/fugue-src/fugue",
-                    ),
+                    *_installed_fugue_proxy_mounts(),
                     _read_only_mount(
                         runtime.repo_root / "configs" / "fugue" / "context-systems",
                         "/fugue-configs/configs/fugue/context-systems",
@@ -1928,6 +1921,32 @@ def _installed_fugue_package_root() -> Path:
             + ", ".join(sorted(missing))
         )
     return package_root
+
+
+def _installed_fugue_proxy_mounts() -> tuple[dict[str, Any], ...]:
+    """Expose only the dependency-free proxy runtime to an active trial.
+
+    The installed distribution also contains template private labels and
+    reference-study authoring assets. Mounting the package directory would
+    make those host-only resources readable to the Agent. Four explicit file
+    mounts keep the proxy runnable through ``python -m fugue.mcp_proxy`` while
+    preventing the distribution resource tree from crossing the trial
+    boundary.
+    """
+
+    package_root = _installed_fugue_package_root()
+    return tuple(
+        _read_only_mount(
+            package_root / name,
+            f"/fugue-src/fugue/{name}",
+        )
+        for name in (
+            "__init__.py",
+            "mcp_proxy.py",
+            "mcp_evidence.py",
+            "redaction.py",
+        )
+    )
 
 
 def _content_hashes(

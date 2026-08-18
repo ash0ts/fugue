@@ -1,0 +1,32 @@
+{
+  "schema_version": 1,
+  "repository_url": "https://github.com/wandb/WandBAgentFactory.git",
+  "source_commit": "e2d8d670017bc426b68a311c5777c3b9084023f3",
+  "source_tree": "7776ac62bbe32da5c6824809893d70ea6725a42e",
+  "role": "task_design_reference",
+  "runtime_dependency": false,
+  "files": [
+    {
+      "schema_version": 1,
+      "path": "data/evals/mcp-all.yaml",
+      "git_blob": "6165211befa7b5af60468f41b195d29c7c29a7ed",
+      "sha256": "d0dc3ea830cb9ccb2e5d57bbef54712f46e335ca731bb873072201c43a305624",
+      "byte_count": 1016
+    },
+    {
+      "schema_version": 1,
+      "path": "data/evals/mcp-ci.yaml",
+      "git_blob": "201a0f0cb1b77845378e834e4e2db08b89570d2d",
+      "sha256": "777985c511d405795e93b2df75ba6c6d6f7d723e6a43123b0d483fa84f91ba6e",
+      "byte_count": 471
+    },
+    {
+      "schema_version": 1,
+      "path": "docs/tasks.md",
+      "git_blob": "52bf9f093503ae3ab022942302a54d5d1df142a7",
+      "sha256": "133bd8924378dede4ba73a30a9cd5298a9beb741f6d8bdd9e57e8a4939b59033",
+      "byte_count": 8985
+    }
+  ],
+  "provenance_digest": "06217bae1c31aa445045dc4022d1cd65d98ce8581d87a924f38fdc81fd05dfaa"
+}

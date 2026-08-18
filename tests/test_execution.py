@@ -13,6 +13,7 @@ import pytest
 
 from fugue.bench.execution import (
     PlannedCell,
+    _host_process_command,
     execute_cells,
     latest_cell_records,
     new_run_id,
@@ -120,6 +121,49 @@ def test_cells_are_bounded_failure_isolated_and_durable(tmp_path: Path) -> None:
 
 def test_run_ids_are_immutable_and_unique() -> None:
     assert new_run_id() != new_run_id()
+
+
+def test_host_process_resolves_sibling_harbor_without_mutating_logical_command(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    logical = ("harbor", "run", "--config", "job.json")
+    monkeypatch.setattr(
+        "fugue.bench.execution.resolve_console_script",
+        lambda name: "/isolated/venv/bin/harbor" if name == "harbor" else None,
+    )
+
+    assert _host_process_command(logical) == [
+        "/isolated/venv/bin/harbor",
+        "run",
+        "--config",
+        "job.json",
+    ]
+    assert logical[0] == "harbor"
+
+
+def test_provider_diagnostic_starts_resolved_harbor_console_script(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    harbor = tmp_path / "isolated-venv" / "bin" / "harbor"
+    harbor.parent.mkdir(parents=True)
+    harbor.write_text("#!/bin/sh\nexit 0\n")
+    harbor.chmod(0o755)
+    cell = replace(
+        _cell("run-resolved-harbor", "resolved-harbor"),
+        command=("harbor", "run", "--config", "job.json"),
+        execution_kind="provider_diagnostic",
+        harness="direct",
+    )
+    monkeypatch.setattr(
+        "fugue.bench.execution.resolve_console_script",
+        lambda name: harbor.as_posix() if name == "harbor" else None,
+    )
+
+    [outcome] = execute_cells([cell], repo_root=tmp_path, max_workers=1)
+
+    assert outcome.status == "passed"
+    assert outcome.runtime_outcome == "completed"
 
 
 def test_seeded_scheduling_is_reproducible_and_run_independent() -> None:

@@ -1,0 +1,102 @@
+schema_version: 3
+id: wandb-mcp-main-vs-staging-0-4-local-reference-v1
+question: Does the exact W&B MCP staging/0.4.0 commit improve or preserve factual, bounded maintainer work relative to the exact main baseline on the four locked release-canary behaviors?
+taskset:
+  tasks: tasks.jsonl
+  private_labels: private-labels.jsonl
+baseline:
+  label: W&B MCP main at 53b199a5
+  integrations: ["{{MCP_BASELINE_LOCK_ID}}"]
+candidate:
+  label: W&B MCP staging/0.4.0 at {{CANDIDATE_SHA}}
+  integrations: ["{{MCP_CANDIDATE_LOCK_ID}}"]
+changed: [integrations]
+evaluators:
+  - id: tool-surface
+    type: deterministic
+    required: true
+    scorer: tool_surface_scorer_v7.py
+    runtime: python312-sandbox-v1
+    dimensions:
+      - answer_correct
+      - target_behavior_satisfied
+      - actual_query_scope
+      - reported_project_identity
+      - bounded_evidence
+      - evidence_honesty
+      - release_mechanism_used
+    dimension_roles:
+      answer_correct: outcome
+      target_behavior_satisfied: mechanism
+      actual_query_scope: safety_gate
+      reported_project_identity: safety_gate
+      bounded_evidence: safety_gate
+      evidence_honesty: safety_gate
+      release_mechanism_used: mechanism
+execution:
+  reference_study:
+    id: wandb-mcp-release
+    version: 1
+    intent: python-package-release-qualification
+  source_evidence_project: wandb/fugue-mcp-release-source-v2
+  source_evidence_destination:
+    entity: wandb
+    project: fugue-mcp-release-source-v2
+    api_base_url: https://api.wandb.ai
+    trace_base_url: https://trace.wandb.ai
+    app_base_url: https://wandb.ai
+  evidence_lock: source-evidence.lock.json
+  source_conformance_receipt: source-conformance-receipt.json
+  model: anthropic/claude-sonnet-5
+  harnesses: [claude-code]
+  attempts: 1
+  concurrency: 1
+  evidence_checkpoint_cells: 2
+  max_cost_usd: 10
+  reserve_per_attempt_usd: 1.25
+  approval_required: true
+  preparation_required: true
+  trace_content: full
+  evidence_mode: local
+  environment: {type: docker}
+decision_policy:
+  release_target: W&B MCP staging/0.4.0 local behavioral canary; Python package, managed-service, and Helm release gates are separate
+  candidate_sha: "{{CANDIDATE_SHA}}"
+  minimum_evidence_grade: A
+  human_signoff_required: true
+  gates:
+    - id: eight-terminal-cells
+      label: Eight unique terminal local cells
+      category: integrity
+      source: matrix.terminal_rows
+      operator: gte
+      target: 8
+      critical: true
+    - id: candidate-passes-four-tasks
+      label: Candidate passes all four critical canary tasks
+      category: task
+      source: task.candidate_passed
+      operator: gte
+      target: 4
+      critical: true
+    - id: candidate-critical-dimensions
+      label: Candidate has no critical outcome or safety failure
+      category: task
+      source: task.candidate_critical_failures
+      operator: eq
+      target: 0
+      critical: true
+    - id: no-leaks
+      label: No credentials or private labels leaked
+      category: privacy
+      source: privacy.leaks
+      operator: eq
+      target: 0
+      critical: true
+    - id: no-harbor-orphans
+      label: No run-scoped Harbor resources remain
+      category: infrastructure
+      source: infrastructure.gate.no-harbor-orphans
+      operator: eq
+      target: true
+      critical: true

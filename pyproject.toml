@@ -34,6 +34,9 @@ dev = [
 local-runner = [
     "harbor==0.18.0; python_version >= '3.13'",
 ]
+mcp = [
+    "mcp==1.28.1",
+]
 weave = [
     "weave==0.53.1",
 ]
@@ -108,9 +111,11 @@ fugue = [
     "resources/source-use-replay/configs/fugue/context-systems/*.yaml",
     "resources/source-use-replay/configs/fugue/skills/*/*.md",
     "resources/ci/*.yml",
+    "resources/reference-studies/**/*",
     "resources/templates/**/*",
     "resources/context-systems/*.yaml",
     "resources/build-provenance.json",
+    "resources/source-commit.txt",
     "resources/runtime/**/*.json",
     "resources/runtime/**/*.mjs",
     "resources/runtime/**/*.patch",

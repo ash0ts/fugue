@@ -4,14 +4,33 @@ import hashlib
 import json
 import os
 import subprocess
-from importlib.metadata import PackageNotFoundError, version
+from importlib.metadata import Distribution, PackageNotFoundError, distribution
 from importlib.resources import files
 from importlib.resources.abc import Traversable
 from pathlib import Path, PurePosixPath
 from typing import Any
 
 SOURCE_PROVENANCE_SCHEMA_VERSION = 1
-DISTRIBUTION_PROVENANCE_SCHEMA_VERSION = 1
+DISTRIBUTION_PROVENANCE_SCHEMA_VERSION = 2
+_INSTALLED_DISTRIBUTION_DIGEST_KIND = "installed_distribution_contract_v1"
+_PACKAGE_CONTENT_FALLBACK_DIGEST_KIND = "package_content_fallback_v1"
+_DIST_INFO_CONTRACT_FILES = {
+    "METADATA",
+    "PKG-INFO",
+    "WHEEL",
+    "entry_points.txt",
+    "namespace_packages.txt",
+    "top_level.txt",
+}
+_DIST_INFO_EXCLUDED_FILES = {
+    "direct_url.json",
+    "INSTALLER",
+    "RECORD",
+    "REQUESTED",
+}
+_DIST_INFO_EXCLUDED_FILE_CASEFOLDS = {
+    name.casefold() for name in _DIST_INFO_EXCLUDED_FILES
+}
 _FALLBACK_EXCLUDED_ROOTS = {
     ".fugue",
     ".git",
@@ -70,34 +89,154 @@ def resolve_workspace_source_provenance(repo_root: Path) -> dict[str, Any]:
 
 
 def resolve_fugue_distribution_provenance() -> dict[str, Any]:
-    """Resolve the installed Fugue code and bundled assets without using cwd."""
+    """Resolve Fugue's executable installed-distribution contract.
 
-    digest = hashlib.sha256()
-    count = 0
-    for package in ("fugue",):
-        root = files(package)
-        for relative, item in _distribution_files(root):
-            digest.update(package.encode())
-            digest.update(b"\0")
-            digest.update(relative.encode())
-            digest.update(b"\0")
-            digest.update(item.read_bytes())
-            digest.update(b"\0")
-            count += 1
+    The digest covers the importable package (including bundled resources) and
+    the deterministic distribution metadata that controls installation and
+    entry points.  Installer-local records are deliberately excluded: their
+    contents describe where or how a particular environment installed the
+    wheel, not which Fugue distribution contract is executing.
+    """
+
+    entries = _package_contract_entries()
     try:
-        installed_version = version("fugue")
+        installed_distribution = distribution("fugue")
     except PackageNotFoundError:
+        installed_distribution = None
         installed_version = "0+uninstalled"
+        provenance_kind = "package_content_fallback"
+        digest_kind = _PACKAGE_CONTENT_FALLBACK_DIGEST_KIND
+        metadata_count = 0
+    else:
+        installed_version = installed_distribution.version
+        provenance_kind = "installed_distribution"
+        metadata_entries = _distribution_metadata_contract_entries(
+            installed_distribution
+        )
+        entries.extend(metadata_entries)
+        digest_kind = _INSTALLED_DISTRIBUTION_DIGEST_KIND
+        metadata_count = len(metadata_entries)
+    entries = _unique_contract_entries(entries)
     build = _embedded_build_provenance()
     return {
         "schema_version": DISTRIBUTION_PROVENANCE_SCHEMA_VERSION,
-        "kind": "installed_distribution",
+        "kind": provenance_kind,
         "name": "fugue",
         "version": installed_version,
         "source_commit": build.get("source_commit"),
-        "digest": digest.hexdigest(),
-        "files": count,
+        "digest_kind": digest_kind,
+        "digest": _contract_digest(entries, digest_kind=digest_kind),
+        "files": len(entries),
+        "package_files": len(entries) - metadata_count,
+        "metadata_files": metadata_count,
     }
+
+
+def _package_contract_entries() -> list[tuple[str, bytes]]:
+    root = files("fugue")
+    return [
+        (f"package/fugue/{relative}", item.read_bytes())
+        for relative, item in _distribution_files(root)
+    ]
+
+
+def _distribution_metadata_contract_entries(
+    installed: Distribution,
+) -> list[tuple[str, bytes]]:
+    selected: list[tuple[str, bytes]] = []
+    declared_files = installed.files
+    if declared_files is not None:
+        for declared in declared_files:
+            relative = PurePosixPath(str(declared))
+            contract_path = _metadata_contract_path(relative)
+            if contract_path is None:
+                continue
+            located = Path(installed.locate_file(declared))
+            if not located.is_file() or located.is_symlink():
+                raise ValueError(
+                    "installed Fugue distribution metadata is missing or unsafe: "
+                    f"{relative}"
+                )
+            selected.append((contract_path, located.read_bytes()))
+    # Some Distribution providers do not expose ``files``.  Preserve the
+    # semantic metadata contract through their standard text API.  It also
+    # fills a missing core file from an incomplete provider manifest.
+    for source_name, contract_name in (
+        ("METADATA", "METADATA"),
+        ("PKG-INFO", "METADATA"),
+        ("WHEEL", "WHEEL"),
+        ("entry_points.txt", "entry_points.txt"),
+        ("namespace_packages.txt", "namespace_packages.txt"),
+        ("top_level.txt", "top_level.txt"),
+    ):
+        value = installed.read_text(source_name)
+        if value is None:
+            continue
+        entry = (f"metadata/{contract_name}", value.encode("utf-8"))
+        if any(path == entry[0] for path, _ in selected):
+            continue
+        selected.append(entry)
+    normalized = _unique_contract_entries(selected)
+    if not any(path == "metadata/METADATA" for path, _ in normalized):
+        raise ValueError("installed Fugue distribution exposes no core metadata")
+    return normalized
+
+
+def _metadata_contract_path(relative: PurePosixPath) -> str | None:
+    if relative.is_absolute() or ".." in relative.parts or not relative.parts:
+        return None
+    metadata_root = relative.parts[0]
+    if not metadata_root.endswith((".dist-info", ".egg-info")):
+        return None
+    metadata_relative = relative.parts[1:]
+    if not metadata_relative:
+        return None
+    name = metadata_relative[-1]
+    if name.casefold() in _DIST_INFO_EXCLUDED_FILE_CASEFOLDS:
+        return None
+    if len(metadata_relative) == 1 and name in _DIST_INFO_CONTRACT_FILES:
+        normalized = "METADATA" if name == "PKG-INFO" else name
+        return f"metadata/{normalized}"
+    if metadata_relative[0] == "licenses" and len(metadata_relative) > 1:
+        return "metadata/" + PurePosixPath(*metadata_relative).as_posix()
+    return None
+
+
+def _unique_contract_entries(
+    entries: list[tuple[str, bytes]],
+) -> list[tuple[str, bytes]]:
+    selected: dict[str, bytes] = {}
+    for path, content in entries:
+        previous = selected.get(path)
+        if previous is not None and previous != content:
+            raise ValueError(f"conflicting installed distribution content: {path}")
+        selected[path] = content
+    return sorted(selected.items())
+
+
+def _contract_digest(
+    entries: list[tuple[str, bytes]],
+    *,
+    digest_kind: str,
+) -> str:
+    manifest = [
+        {
+            "path": path,
+            "sha256": hashlib.sha256(content).hexdigest(),
+            "size": len(content),
+        }
+        for path, content in entries
+    ]
+    encoded = json.dumps(
+        {
+            "digest_kind": digest_kind,
+            "files": manifest,
+        },
+        ensure_ascii=True,
+        separators=(",", ":"),
+        sort_keys=True,
+    ).encode("utf-8")
+    return hashlib.sha256(encoded).hexdigest()
 
 
 def _embedded_build_provenance() -> dict[str, Any]:

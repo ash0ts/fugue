@@ -10,6 +10,7 @@ from pathlib import Path
 
 import httpx
 
+from fugue.bench.executables import resolve_console_script
 from fugue.bridge import bridge_status
 from fugue.model_plane import (
     ModelRoute,
@@ -55,6 +56,12 @@ class PreflightCheck:
     detail: str
 
 
+def _harbor_executable() -> str | None:
+    """Compatibility wrapper around the shared console-script resolver."""
+
+    return resolve_console_script("harbor")
+
+
 def run_preflight(
     model: str | None = None,
     *,
@@ -64,7 +71,10 @@ def run_preflight(
     harnesses: tuple[str, ...] | None = None,
     builder_model: str | None = None,
     judge_model: str | None = None,
+    evidence_mode: str = "weave_required",
 ) -> list[PreflightCheck]:
+    if evidence_mode not in {"local", "weave_required"}:
+        raise ValueError(f"unsupported evidence mode: {evidence_mode}")
     values = env if env is not None else os.environ
     root = Path.cwd() if repo_root is None else Path(repo_root)
     checks: list[PreflightCheck] = []
@@ -81,7 +91,12 @@ def run_preflight(
             f"{route.display_model} via {route.provider} at {_route_endpoint(route)}",
         )
     )
-    _append_env_checks(checks, route, values)
+    _append_env_checks(
+        checks,
+        route,
+        values,
+        require_trace=evidence_mode == "weave_required",
+    )
     _append_local_tool_checks(checks, root)
 
     if not live:
@@ -89,7 +104,7 @@ def run_preflight(
 
     if not missing_model_env(route, values):
         checks.append(_check_provider_metadata(route, values))
-    if not missing_trace_env(values):
+    if evidence_mode == "weave_required" and not missing_trace_env(values):
         checks.append(_check_weave_endpoint(values))
 
     bridge_required = harnesses is None or any(
@@ -148,18 +163,31 @@ def _route_endpoint(route: ModelRoute) -> str:
 
 
 def _append_env_checks(
-    checks: list[PreflightCheck], route: ModelRoute, env: Mapping[str, str]
+    checks: list[PreflightCheck],
+    route: ModelRoute,
+    env: Mapping[str, str],
+    *,
+    require_trace: bool,
 ) -> None:
-    trace_missing = missing_trace_env(env)
-    checks.append(
-        PreflightCheck(
-            "trace env",
-            not trace_missing,
-            f"WANDB trace env present; target {trace_project_slug(env)}"
-            if not trace_missing
-            else "missing " + ", ".join(trace_missing),
+    if require_trace:
+        trace_missing = missing_trace_env(env)
+        checks.append(
+            PreflightCheck(
+                "trace env",
+                not trace_missing,
+                f"WANDB trace env present; target {trace_project_slug(env)}"
+                if not trace_missing
+                else "missing " + ", ".join(trace_missing),
+            )
         )
-    )
+    else:
+        checks.append(
+            PreflightCheck(
+                "trace env",
+                True,
+                "not applicable; local evidence is canonical",
+            )
+        )
     model_missing = missing_model_env(route, env)
     checks.append(
         PreflightCheck(
@@ -182,7 +210,7 @@ def _append_local_tool_checks(
             "docker CLI found" if shutil.which("docker") else "docker CLI not found",
         )
     )
-    harbor = shutil.which("harbor")
+    harbor = _harbor_executable()
     checks.append(
         PreflightCheck(
             "harbor",
@@ -195,7 +223,7 @@ def _append_local_tool_checks(
 
 
 def harbor_version_check() -> PreflightCheck:
-    harbor = shutil.which("harbor")
+    harbor = _harbor_executable()
     if not harbor:
         return PreflightCheck(
             "harbor version", False, f"harbor=={HARBOR_VERSION} is required"
@@ -224,7 +252,7 @@ def validate_harbor_job_configs(paths: list[Path]) -> None:
     """Validate rendered JSON with the exact Python environment Harbor will use."""
     if not paths:
         return
-    harbor = shutil.which("harbor")
+    harbor = _harbor_executable()
     if not harbor:
         raise RuntimeError(f"harbor=={HARBOR_VERSION} CLI is required")
     harbor_py = Path(harbor).resolve().parent / "python"
@@ -293,7 +321,7 @@ def _check_weave_endpoint(
 
 
 def harbor_import_check(repo_root: Path | str) -> PreflightCheck:
-    harbor = shutil.which("harbor")
+    harbor = _harbor_executable()
     if not harbor:
         return PreflightCheck("adapters", False, "harbor CLI not found")
     harbor_py = Path(harbor).resolve().parent / "python"

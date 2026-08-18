@@ -15,6 +15,7 @@ from typing import Any, Literal
 import toml
 from filelock import FileLock
 
+from fugue.bench.executables import resolve_console_script
 from fugue.bench.files import atomic_write_json, docker_build_command
 from fugue.bench.files import inspect_docker_image as _inspect_image
 from fugue.bench.manifest import (
@@ -759,7 +760,7 @@ def _resolve_task_source(
     task_name = task.id
     if manifest.dataset.ref and "/" in manifest.dataset.ref and "/" not in task_name:
         task_name = f"{manifest.dataset.ref.split('/', 1)[0]}/{task_name}"
-    harbor = shutil.which("harbor")
+    harbor = resolve_console_script("harbor")
     if harbor is None:
         raise RuntimeError("harbor is required to prepare remote task images")
     first_line = Path(harbor).read_text(encoding="utf-8").splitlines()[0]

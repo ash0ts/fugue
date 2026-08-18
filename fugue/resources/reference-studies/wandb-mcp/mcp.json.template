@@ -1,0 +1,74 @@
+{
+  "mcpServers": {
+    "wandb-main": {
+      "command": "uvx",
+      "args": [
+        "--from",
+        "git+https://github.com/wandb/wandb-mcp-server@53b199a5f4af29aa82077e2c7f1e2c5e5e0c2ca0",
+        "wandb_mcp_server"
+      ],
+      "env": {
+        "WANDB_API_KEY": "${WANDB_API_KEY}",
+        "WANDB_BASE_URL": "https://api.wandb.ai",
+        "MCP_ANALYTICS_LOG_STREAM": "stderr",
+        "WANDB_MCP_READ_ONLY": "true"
+      },
+      "allowed_tools": [
+        "compare_artifact_versions_tool",
+        "compare_runs_tool",
+        "count_weave_traces_tool",
+        "diagnose_run_tool",
+        "get_artifact_details_tool",
+        "get_run_history_tool",
+        "infer_trace_schema_tool",
+        "list_artifact_versions_tool",
+        "probe_project_tool",
+        "query_wandb_tool",
+        "query_weave_traces_tool",
+        "resolve_trace_roots_tool",
+        "summarize_evaluation_tool"
+      ],
+      "allowed_hosts": [
+        "api.wandb.ai",
+        "app.wandb.ai",
+        "trace.wandb.ai"
+      ],
+      "version": "git:53b199a5f4af29aa82077e2c7f1e2c5e5e0c2ca0"
+    },
+    "wandb-0-4-staging": {
+      "command": "uvx",
+      "args": [
+        "--from",
+        "git+https://github.com/wandb/wandb-mcp-server@{{CANDIDATE_SHA}}",
+        "wandb_mcp_server"
+      ],
+      "env": {
+        "WANDB_API_KEY": "${WANDB_API_KEY}",
+        "WANDB_BASE_URL": "https://api.wandb.ai",
+        "MCP_ANALYTICS_LOG_STREAM": "stderr",
+        "WANDB_MCP_READ_ONLY": "true"
+      },
+      "allowed_tools": [
+        "compare_artifact_versions_tool",
+        "compare_runs_tool",
+        "count_weave_traces_tool",
+        "diagnose_run_tool",
+        "get_artifact_details_tool",
+        "get_run_history_tool",
+        "infer_trace_schema_tool",
+        "list_artifact_versions_tool",
+        "probe_project_tool",
+        "query_wandb_tool",
+        "query_weave_traces_tool",
+        "resolve_trace_roots_tool",
+        "summarize_evaluation_tool"
+      ],
+      "allowed_hosts": [
+        "api.wandb.ai",
+        "app.wandb.ai",
+        "trace.wandb.ai"
+      ],
+      "version": "git:{{CANDIDATE_SHA}}"
+    }
+  }
+}

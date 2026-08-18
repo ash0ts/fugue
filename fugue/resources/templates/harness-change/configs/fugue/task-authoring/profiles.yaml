@@ -1,0 +1,21 @@
+schema_version: 1
+environments:
+  - id: standalone-local-v1
+    title: Standalone local workspace
+    kind: artifact
+    base_image: python:3.12.10-slim-bookworm@sha256:fd95fa221297a88e1cf49c55ec1828edd7c5a428187e67b5d1805692d11588db
+    supported_harnesses: [hermes, openclaw, claude-code, codex]
+    capabilities: [text, file, resource, artifact]
+    allowed_integration_ids: []
+    cpus: 1
+    memory_mb: 1024
+    storage_mb: 1024
+resources: []
+interactors: []
+judges: []
+scorer_runtimes:
+  - id: python312-sandbox-v1
+    title: Isolated Python 3.12 scorer
+    image: python:3.12.10-slim-bookworm@sha256:fd95fa221297a88e1cf49c55ec1828edd7c5a428187e67b5d1805692d11588db
+    platform: "{{FUGUE_SCORER_PLATFORM}}"
+    command: [python, /input/scorer.py, /input/input.json]

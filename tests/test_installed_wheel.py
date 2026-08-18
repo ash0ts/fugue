@@ -37,6 +37,9 @@ def test_wheel_runs_from_empty_directory_without_harbor_or_weave(
         assert "fugue/resources/runtime/claude-code/package.json" in names
         assert "fugue/resources/vendor/weave-node-sdk.tgz" in names
         assert "fugue/resources/ci/standalone-comparison.yml" in names
+        assert archive.read("fugue/resources/source-commit.txt").decode() == (
+            _git_head(repo_root) + "\n"
+        )
         for template in (
             "prompt-change",
             "skill-change",
@@ -45,6 +48,11 @@ def test_wheel_runs_from_empty_directory_without_harbor_or_weave(
             "harness-change",
         ):
             assert f"fugue/resources/templates/{template}/comparison.yaml" in names
+            assert f"fugue/resources/templates/{template}/scorer.py" in names
+            assert (
+                "fugue/resources/templates/"
+                f"{template}/configs/fugue/task-authoring/profiles.yaml"
+            ) in names
         archive.extractall(installed)
 
     blocker = tmp_path / "blocker"
@@ -66,9 +74,13 @@ sys.meta_path.insert(0, OptionalDependencyBlocker())
     )
     empty = tmp_path / "empty"
     empty.mkdir()
+    fake_bin = tmp_path / "fake-bin"
+    fake_bin.mkdir()
+    _write_fake_scorer_docker(fake_bin / "docker")
     env = {
         **os.environ,
         "PYTHONPATH": os.pathsep.join((blocker.as_posix(), installed.as_posix())),
+        "PATH": os.pathsep.join((fake_bin.as_posix(), os.environ.get("PATH", ""))),
     }
 
     doctor = _wheel_cli(empty, env, "doctor", "--json")
@@ -185,3 +197,31 @@ def _git_head(repo_root: Path) -> str:
         capture_output=True,
         text=True,
     ).stdout.strip()
+
+
+def _write_fake_scorer_docker(path: Path) -> None:
+    path.write_text(
+        f"""#!{sys.executable}
+import os
+import sys
+
+arguments = sys.argv[1:]
+if arguments and arguments[0] == "info":
+    print("standalone-scorer-test")
+    raise SystemExit(0)
+if not arguments or arguments[0] != "run":
+    raise SystemExit(2)
+mount = arguments[arguments.index("--mount") + 1]
+source = next(
+    item.removeprefix("src=")
+    for item in mount.split(",")
+    if item.startswith("src=")
+)
+os.execv(
+    sys.executable,
+    [sys.executable, source + "/scorer.py", source + "/input.json"],
+)
+""",
+        encoding="utf-8",
+    )
+    path.chmod(0o755)

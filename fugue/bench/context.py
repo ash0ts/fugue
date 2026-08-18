@@ -1300,14 +1300,6 @@ class RagContextProvider(BaseContextProvider):
         }
 
 
-def context_system_root(repo_root: Path | None = None) -> Path:
-    requested = (repo_root or Path.cwd()) / CONTEXT_SYSTEMS_DIR
-    if requested.exists():
-        return requested
-    bundled = _bundled_context_system_root()
-    return bundled if bundled.exists() else requested
-
-
 def list_context_systems(repo_root: Path | None = None) -> list[ContextSystemSpec]:
     bundled = _bundled_context_system_root()
     requested = (repo_root or Path.cwd()) / CONTEXT_SYSTEMS_DIR

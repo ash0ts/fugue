@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import os
+import platform
 import tempfile
 from dataclasses import dataclass
 from importlib.resources import files
@@ -45,6 +46,7 @@ _RENAMED_ROOT_FILES = {
     "fugue-study.marker": ".fugue-study.json",
     "gitignore.template": ".gitignore",
 }
+_SCORER_PLATFORM_MARKER = b"{{FUGUE_SCORER_PLATFORM}}"
 
 
 def standalone_templates() -> tuple[StandaloneTemplate, ...]:
@@ -103,7 +105,10 @@ def scaffold_standalone_template(
             raise ValueError(
                 f"packaged template has duplicate output path: {output_relative}"
             )
-        rendered[output_relative] = source.read_bytes()
+        rendered[output_relative] = source.read_bytes().replace(
+            _SCORER_PLATFORM_MARKER,
+            _native_scorer_platform().encode("ascii"),
+        )
     workflow = files("fugue").joinpath("resources", "ci", "standalone-comparison.yml")
     if not workflow.is_file():
         raise FileNotFoundError("packaged standalone comparison workflow is missing")
@@ -137,6 +142,23 @@ def scaffold_standalone_template(
             mode=0o600 if relative.name == "private-labels.jsonl" else 0o644,
         )
     return destination / "comparison.yaml"
+
+
+def _native_scorer_platform() -> str:
+    machine = platform.machine().lower()
+    aliases = {
+        "amd64": "linux/amd64",
+        "x86_64": "linux/amd64",
+        "aarch64": "linux/arm64",
+        "arm64": "linux/arm64",
+    }
+    try:
+        return aliases[machine]
+    except KeyError as exc:
+        raise RuntimeError(
+            "standalone scorer runtime supports only amd64 and arm64 hosts; "
+            f"observed architecture {machine or 'unknown'}"
+        ) from exc
 
 
 def _resource_files(

@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import math
 import os
 import re
 from collections.abc import Mapping, Sequence
@@ -91,6 +92,346 @@ _SECRET_FIELD = re.compile(
     r"(?:^|_)(?:api_?key|token|secret|password|credential|private_?key)(?:$|_)",
     re.IGNORECASE,
 )
+
+
+def local_result_row_projection_v1(row: Mapping[str, Any]) -> dict[str, Any]:
+    """Return the decision-bearing V3 attempt projection for one prediction.
+
+    The projection is deliberately smaller than the full prediction row, but
+    includes every attempt field that can change a behavioral or efficiency
+    conclusion.  Local attempt evidence commits to its digest before the
+    convenience JSONL export exists.  Comparison construction and reload use
+    the same projection, so copied digest strings cannot authorize altered
+    pass/fail, score, explanation, excerpt, or cost data.
+    """
+
+    deterministic = _projection_mapping(row.get("comparison_deterministic_scores"))
+    judge = {
+        f"comparison.judge.{dimension}": value
+        for dimension, value in _projection_mapping(
+            row.get("comparison_judge_scores")
+        ).items()
+        if _projection_number(value) is not None
+    }
+    scores = {**deterministic, **judge}
+    queried_projects = tuple(sorted(_projection_queried_projects(row)))
+    tools, tool_calls = _projection_tool_activity(row)
+    usage = _projection_mapping(row.get("usage"))
+    return {
+        "schema_version": 1,
+        "attempt_id": str(row.get("attempt_id") or ""),
+        "prediction_id": str(row.get("prediction_id") or "") or None,
+        "passed": _projection_bool(row.get("pass")),
+        "execution_status": _projection_execution_status(row),
+        "evaluation_status": str(
+            row.get("comparison_evaluation_status") or "unknown"
+        ),
+        "cost_usd": _projection_first_number(
+            row, "cost_usd", "observed_cost_usd", "total_cost_usd"
+        ),
+        "latency_sec": _projection_latency_sec(row),
+        "input_tokens": _projection_number(
+            usage.get("input_tokens") or row.get("input_tokens")
+        ),
+        "output_tokens": _projection_number(
+            usage.get("output_tokens") or row.get("output_tokens")
+        ),
+        "tool_calls": tool_calls,
+        "tools": list(tools),
+        "queried_projects": list(queried_projects),
+        "scores": scores,
+        "score_explanations": {
+            dimension: _projection_score_explanation(
+                dimension,
+                _projection_bool(value),
+                row=row,
+            )
+            for dimension, value in scores.items()
+        },
+        "sanitized_answer_excerpt": _projection_answer_excerpt(row),
+        "actual_query_scope": list(queried_projects),
+        "reported_project_identity": _projection_reported_project(row),
+        "execution_fingerprint": str(row.get("execution_fingerprint") or "")
+        or None,
+        "runtime_lock_digest": str(
+            row.get("runtime_lock_digest") or row.get("runtime_digest") or ""
+        )
+        or None,
+    }
+
+
+def local_result_attempt_projection_v1(
+    *,
+    attempt_id: str,
+    prediction_id: str | None,
+    passed: bool | None,
+    execution_status: str,
+    evaluation_status: str,
+    cost_usd: float | None,
+    latency_sec: float | None,
+    input_tokens: float | None,
+    output_tokens: float | None,
+    tool_calls: int,
+    tools: Sequence[str],
+    queried_projects: Sequence[str],
+    scores: Mapping[str, Any],
+    score_explanations: Mapping[str, str],
+    sanitized_answer_excerpt: str | None,
+    actual_query_scope: Sequence[str],
+    reported_project_identity: str | None,
+    execution_fingerprint: str | None,
+    runtime_lock_digest: str | None,
+) -> dict[str, Any]:
+    """Project an already-normalized V3 attempt using the canonical shape."""
+
+    return {
+        "schema_version": 1,
+        "attempt_id": attempt_id,
+        "prediction_id": prediction_id,
+        "passed": passed,
+        "execution_status": execution_status,
+        "evaluation_status": evaluation_status,
+        "cost_usd": cost_usd,
+        "latency_sec": latency_sec,
+        "input_tokens": input_tokens,
+        "output_tokens": output_tokens,
+        "tool_calls": tool_calls,
+        "tools": list(tools),
+        "queried_projects": list(queried_projects),
+        "scores": dict(scores),
+        "score_explanations": dict(score_explanations),
+        "sanitized_answer_excerpt": sanitized_answer_excerpt,
+        "actual_query_scope": list(actual_query_scope),
+        "reported_project_identity": reported_project_identity,
+        "execution_fingerprint": execution_fingerprint,
+        "runtime_lock_digest": runtime_lock_digest,
+    }
+
+
+def local_result_row_projection_digest(row: Mapping[str, Any]) -> str:
+    return stable_digest(local_result_row_projection_v1(row))
+
+
+def _projection_mapping(value: Any) -> dict[str, Any]:
+    return dict(value) if isinstance(value, Mapping) else {}
+
+
+def _projection_number(value: Any) -> float | None:
+    if isinstance(value, int | float) and not isinstance(value, bool):
+        number = float(value)
+        return number if math.isfinite(number) else None
+    return None
+
+
+def _projection_first_number(row: Mapping[str, Any], *keys: str) -> float | None:
+    for key in keys:
+        value = _projection_number(row.get(key))
+        if value is not None:
+            return value
+    return None
+
+
+def _projection_latency_sec(row: Mapping[str, Any]) -> float | None:
+    direct = _projection_first_number(row, "latency_sec", "wall_time_sec")
+    if direct is not None:
+        return direct
+    milliseconds = _projection_first_number(row, "latency_ms")
+    return round(milliseconds / 1000, 6) if milliseconds is not None else None
+
+
+def _projection_bool(value: Any) -> bool | None:
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, int | float) and not isinstance(value, bool):
+        if value == 1:
+            return True
+        if value == 0:
+            return False
+    if isinstance(value, Mapping):
+        passed = value.get("passed")
+        return passed if isinstance(passed, bool) else None
+    return None
+
+
+def _projection_execution_status(row: Mapping[str, Any]) -> str:
+    status = str(row.get("status") or row.get("execution_status") or "").lower()
+    if status in {"passed", "success", "succeeded", "completed"}:
+        return "completed"
+    if status in {
+        "failed",
+        "error",
+        "infrastructure_failed",
+        "timed_out",
+        "timeout",
+    }:
+        return "failed"
+    if status in {"cancelled", "interrupted", "not_applicable"}:
+        return status
+    return str(row.get("status") or row.get("execution_status") or "unknown")
+
+
+def _projection_queried_projects(row: Mapping[str, Any]) -> set[str]:
+    result: set[str] = set()
+    for key in ("queried_projects", "mcp_queried_projects", "project_reads"):
+        raw = row.get(key) or ()
+        if isinstance(raw, str):
+            result.add(raw)
+        elif isinstance(raw, Sequence):
+            result.update(str(item) for item in raw if str(item))
+    return result
+
+
+def _projection_tool_activity(row: Mapping[str, Any]) -> tuple[tuple[str, ...], int]:
+    local_names: list[str] = []
+    local_count = 0
+    for item in row.get("tool_calls") or ():
+        if isinstance(item, str):
+            local_names.append(item)
+            local_count += 1
+        elif isinstance(item, Mapping):
+            name = str(item.get("name") or item.get("tool_name") or "")
+            if name:
+                local_names.append(name)
+            local_count += 1
+    normalized_mcp_count = 0
+    for item in row.get("mcp_tool_calls") or ():
+        if not isinstance(item, Mapping):
+            continue
+        name = str(item.get("tool") or item.get("name") or item.get("tool_name") or "")
+        if name:
+            local_names.append(name)
+        normalized_mcp_count += 1
+    explicit = row.get("mcp_tool_names") or ()
+    if isinstance(explicit, str):
+        local_names.append(explicit)
+    elif isinstance(explicit, Sequence):
+        local_names.extend(str(item) for item in explicit if str(item))
+    traced = row.get("weave_tool_names")
+    traced_names: list[str] = []
+    traced_count = 0
+    if isinstance(traced, Mapping):
+        for raw_name, raw_count in traced.items():
+            name = str(raw_name)
+            count = (
+                max(raw_count, 0)
+                if isinstance(raw_count, int) and not isinstance(raw_count, bool)
+                else 0
+            )
+            if name and count:
+                traced_names.append(name)
+            traced_count += count
+    declared = row.get("tool_call_count")
+    if isinstance(declared, int) and not isinstance(declared, bool):
+        local_count = max(local_count, declared)
+    if normalized_mcp_count:
+        return tuple(sorted(set(local_names))), normalized_mcp_count
+    if traced_names:
+        return tuple(sorted(set(traced_names))), traced_count
+    return tuple(sorted(set(local_names))), local_count
+
+
+def _projection_structured_result(output: Any) -> Any:
+    if not isinstance(output, str):
+        return output
+    text = output.strip()
+    if not text:
+        return output
+    try:
+        return json.loads(text)
+    except json.JSONDecodeError:
+        pass
+    decoder = json.JSONDecoder()
+    fenced: list[Any] = []
+    index = 0
+    while True:
+        start = text.find("```", index)
+        if start < 0:
+            break
+        line_end = text.find("\n", start + 3)
+        if line_end < 0:
+            break
+        fence_end = text.find("```", line_end + 1)
+        if fence_end < 0:
+            break
+        language = text[start + 3 : line_end].strip().lower()
+        body = text[line_end + 1 : fence_end].strip()
+        if language in {"", "json"}:
+            try:
+                parsed, end = decoder.raw_decode(body)
+            except json.JSONDecodeError:
+                pass
+            else:
+                if not body[end:].strip():
+                    fenced.append(parsed)
+        index = fence_end + 3
+    return fenced[0] if len(fenced) == 1 else output
+
+
+def _projection_answer(row: Mapping[str, Any]) -> Any:
+    for key in ("agent_response", "final_output", "answer"):
+        if row.get(key) is not None:
+            return row.get(key)
+    return None
+
+
+def _projection_answer_excerpt(row: Mapping[str, Any]) -> str | None:
+    raw = _projection_answer(row)
+    if raw is None:
+        return None
+    structured = _projection_structured_result(raw)
+    if isinstance(structured, Mapping | list | tuple):
+        text = json.dumps(structured, sort_keys=True, separators=(",", ":"))
+    else:
+        text = str(raw)
+    text = " ".join(text.strip().split())
+    if not text:
+        return None
+    return text.encode()[:1000].decode("utf-8", errors="ignore").rstrip()
+
+
+def _projection_reported_project(row: Mapping[str, Any]) -> str | None:
+    raw = _projection_structured_result(_projection_answer(row))
+    if not isinstance(raw, Mapping):
+        return None
+    value = raw.get("source_project")
+    if value is None:
+        value = raw.get("project")
+    return str(value).strip() or None if value is not None else None
+
+
+def _projection_score_explanation(
+    dimension: str,
+    passed: bool | None,
+    *,
+    row: Mapping[str, Any],
+) -> str:
+    label = dimension.rsplit(".", 1)[-1].replace("_", " ")
+    if dimension.startswith("comparison.judge."):
+        return "Blind judge score; no rationale or private truth is published."
+    if passed is None:
+        return f"{label}: the required evidence was unavailable."
+    if dimension.endswith(("locked_project_scope", "locked_source_scope")):
+        actual = sorted(_projection_queried_projects(row))
+        reported = _projection_reported_project(row)
+        if passed:
+            return (
+                "locked project scope passed; actual MCP reads stayed in "
+                f"{', '.join(actual) if actual else 'the locked scope'}."
+            )
+        if actual and reported:
+            return (
+                "locked project scope failed in the serialized answer; "
+                f"actual MCP scope was {', '.join(actual)}, while the answer "
+                f"reported {reported}."
+            )
+        return (
+            "locked project scope failed; the answer or normalized MCP evidence "
+            "did not prove the exact locked source project."
+        )
+    return (
+        f"{label} {'passed' if passed else 'failed'} under the pinned "
+        "deterministic scorer."
+    )
 
 
 class LocalEvidenceIntegrityError(ValueError):
@@ -460,6 +801,7 @@ class LocalAttemptEvidenceV1:
     nodes: tuple[LocalEvidenceNodeV1, ...]
     edges: tuple[LocalEvidenceEdgeV1, ...]
     prediction_row_sha256: str | None
+    result_row_projection_digest: str | None
     agent_receipt: AgentEvidenceReceiptV1
     receipts: dict[str, dict[str, Any]]
     recorded_at: str
@@ -474,6 +816,11 @@ class LocalAttemptEvidenceV1:
             raise ValueError("unsupported local evidence terminal status")
         if self.prediction_row_sha256 is not None:
             _digest(self.prediction_row_sha256, "prediction row digest")
+        if self.result_row_projection_digest is not None:
+            _digest(
+                self.result_row_projection_digest,
+                "result row projection digest",
+            )
         if self.terminal_status in {"passed", "failed"} and not self.prediction_row_sha256:
             raise ValueError("executed attempts require a prediction row digest")
         if self.agent_receipt.attempt_id != self.attempt.attempt_id:
@@ -566,6 +913,15 @@ class LocalAttemptEvidenceV1:
             "nodes": [item.to_dict() for item in self.nodes],
             "edges": [item.to_dict() for item in self.edges],
             "prediction_row_sha256": self.prediction_row_sha256,
+            **(
+                {
+                    "result_row_projection_digest": (
+                        self.result_row_projection_digest
+                    )
+                }
+                if self.result_row_projection_digest is not None
+                else {}
+            ),
             "agent_receipt": self.agent_receipt.to_dict(),
             "receipts": self.receipts,
             "recorded_at": self.recorded_at,
@@ -584,6 +940,7 @@ class LocalAttemptRecordRefV1:
     integrity_status: AttemptIntegrityStatus
     terminal_status: AttemptTerminalStatus
     prediction_row_sha256: str | None
+    result_row_projection_digest: str | None = None
 
     def __post_init__(self) -> None:
         _digest(self.attempt_id, "attempt record attempt id")
@@ -596,9 +953,17 @@ class LocalAttemptRecordRefV1:
             raise ValueError("unsupported local attempt terminal status")
         if self.prediction_row_sha256 is not None:
             _digest(self.prediction_row_sha256, "attempt prediction row digest")
+        if self.result_row_projection_digest is not None:
+            _digest(
+                self.result_row_projection_digest,
+                "attempt result row projection digest",
+            )
 
     def to_dict(self) -> dict[str, Any]:
-        return asdict(self)
+        value = asdict(self)
+        if self.result_row_projection_digest is None:
+            value.pop("result_row_projection_digest")
+        return value
 
 
 @dataclass(frozen=True)
@@ -645,8 +1010,9 @@ class LocalEvidenceManifestV1:
     created_at: str
     schema_version: Literal[1] = LOCAL_EVIDENCE_SCHEMA_VERSION
     manifest_digest: str = ""
+    result_row_projection_set_digest: str | None = None
 
-    def __post_init__(self) -> None:
+    def __post_init__(self) -> None:  # noqa: C901 - validates one immutable graph
         if self.schema_version != LOCAL_EVIDENCE_SCHEMA_VERSION:
             raise ValueError("unsupported local evidence manifest schema")
         _run_id(self.run_id)
@@ -658,6 +1024,11 @@ class LocalEvidenceManifestV1:
             ("prediction row set digest", self.prediction_row_set_digest),
         ):
             _digest(value, label)
+        if self.result_row_projection_set_digest is not None:
+            _digest(
+                self.result_row_projection_set_digest,
+                "result row projection set digest",
+            )
         _timestamp(self.created_at, "local evidence manifest timestamp")
         if self.status not in _MANIFEST_STATUSES:
             raise ValueError("unsupported local evidence manifest status")
@@ -691,6 +1062,26 @@ class LocalEvidenceManifestV1:
             ]
         ):
             raise ValueError("local evidence prediction row set digest does not match")
+        projection_digests = tuple(
+            item.result_row_projection_digest for item in self.attempt_records
+        )
+        if self.result_row_projection_set_digest is None:
+            if any(projection_digests):
+                raise ValueError(
+                    "local evidence result row projections require a set digest"
+                )
+        elif not all(projection_digests) or (
+            self.result_row_projection_set_digest
+            != stable_digest(
+                [
+                    [item.attempt_id, item.result_row_projection_digest]
+                    for item in self.attempt_records
+                ]
+            )
+        ):
+            raise ValueError(
+                "local evidence result row projection set digest does not match"
+            )
         if self.run_conformance_required and self.run_conformance is None:
             conformance_status = "missing"
         elif self.run_conformance is None:
@@ -740,6 +1131,15 @@ class LocalEvidenceManifestV1:
             "attempt_records": [item.to_dict() for item in self.attempt_records],
             "attempt_record_set_digest": self.attempt_record_set_digest,
             "prediction_row_set_digest": self.prediction_row_set_digest,
+            **(
+                {
+                    "result_row_projection_set_digest": (
+                        self.result_row_projection_set_digest
+                    )
+                }
+                if self.result_row_projection_set_digest is not None
+                else {}
+            ),
             "run_conformance": (
                 self.run_conformance.to_dict()
                 if self.run_conformance is not None
@@ -813,6 +1213,13 @@ class LocalEvidencePublicationReceiptV1:
 
 @dataclass(frozen=True)
 class LocalEvidenceEventV1:
+    """One best-effort lifecycle journal entry.
+
+    Events aid operator diagnostics and recovery, but they are not part of the
+    canonical evidence chain. The immutable plan, attempt records, artifact
+    digests, manifest, and publication receipt are the authoritative ledger.
+    """
+
     run_id: str
     event: Literal[
         "run_initialized",
@@ -873,7 +1280,13 @@ class LocalEvidenceEventV1:
 
 
 class LocalEvidenceStore:
-    """Digest-verified append-only evidence owned by one Fugue run."""
+    """Digest-verified canonical evidence owned by one Fugue run.
+
+    ``events.jsonl`` is a non-authoritative diagnostic journal. It is parsed
+    only when explicitly requested and cannot create, erase, or invalidate a
+    behavioral claim; canonical integrity is recomputed from immutable records
+    and their artifacts.
+    """
 
     def __init__(self, repo_root: Path, run_id: str) -> None:
         _run_id(run_id)
@@ -1022,6 +1435,9 @@ class LocalEvidenceStore:
                     integrity_status=record.integrity_status,
                     terminal_status=record.terminal_status,
                     prediction_row_sha256=record.prediction_row_sha256,
+                    result_row_projection_digest=(
+                        record.result_row_projection_digest
+                    ),
                 )
             )
         records = tuple(sorted(record_refs, key=lambda item: item.attempt_id))
@@ -1071,6 +1487,20 @@ class LocalEvidenceStore:
                     [item.attempt_id, item.prediction_row_sha256]
                     for item in records
                 ]
+            ),
+            result_row_projection_set_digest=(
+                stable_digest(
+                    [
+                        [item.attempt_id, item.result_row_projection_digest]
+                        for item in records
+                    ]
+                )
+                if records
+                and all(
+                    item.result_row_projection_digest is not None
+                    for item in records
+                )
+                else None
             ),
             run_conformance=run_conformance,
             run_conformance_required=plan.require_run_conformance,
@@ -1144,7 +1574,6 @@ class LocalEvidenceStore:
             raise LocalEvidenceIntegrityError(
                 "local evidence manifest disagrees with run artifacts"
             )
-        self.read_events()
         return manifest
 
     def read_publication_receipt(self) -> LocalEvidencePublicationReceiptV1:
@@ -1221,6 +1650,20 @@ class LocalEvidenceStore:
                 raise LocalEvidenceIntegrityError(
                     f"local evidence artifact digest changed: {node.artifact.path}"
                 )
+            if node.kind == "prediction" and record.result_row_projection_digest:
+                try:
+                    prediction = json.loads(raw)
+                except json.JSONDecodeError as exc:
+                    raise LocalEvidenceIntegrityError(
+                        "local prediction artifact is not valid JSON"
+                    ) from exc
+                if not isinstance(prediction, Mapping) or (
+                    local_result_row_projection_digest(prediction)
+                    != record.result_row_projection_digest
+                ):
+                    raise LocalEvidenceIntegrityError(
+                        "local prediction result projection digest changed"
+                    )
         for artifact in record.agent_receipt.artifacts:
             target = (self.repo_root / artifact.path).resolve()
             if self.repo_root != target and self.repo_root not in target.parents:
@@ -1351,9 +1794,16 @@ class LocalEvidenceCoordinator:
                 if terminal_status in {"passed", "failed"}
                 else None
             )
+            expected_projection_digest = (
+                local_result_row_projection_digest(safe_prediction)
+                if terminal_status in {"passed", "failed"}
+                else None
+            )
             if (
                 existing.terminal_status != terminal_status
                 or existing.prediction_row_sha256 != expected_prediction_digest
+                or existing.result_row_projection_digest
+                != expected_projection_digest
                 or existing.agent_receipt != agent_receipt
             ):
                 raise LocalEvidenceIntegrityError(
@@ -1428,6 +1878,9 @@ class LocalEvidenceCoordinator:
             ),
         }
         prediction_row_sha256 = stable_digest(safe_prediction)
+        result_row_projection_digest = local_result_row_projection_digest(
+            safe_prediction
+        )
         artifacts["prediction_and_score"] = self.store.write_artifact(
             f"attempts/{attempt.attempt_id}/prediction-and-score.json",
             {
@@ -1482,6 +1935,11 @@ class LocalEvidenceCoordinator:
             edges=edges,
             prediction_row_sha256=(
                 prediction_row_sha256
+                if terminal_status in {"passed", "failed"}
+                else None
+            ),
+            result_row_projection_digest=(
+                result_row_projection_digest
                 if terminal_status in {"passed", "failed"}
                 else None
             ),
@@ -1773,6 +2231,7 @@ def local_evidence_edge_from_dict(raw: Mapping[str, Any]) -> LocalEvidenceEdgeV1
 def local_attempt_evidence_from_dict(
     raw: Mapping[str, Any],
 ) -> LocalAttemptEvidenceV1:
+    raw = {**raw, "result_row_projection_digest": raw.get("result_row_projection_digest")}
     value = _strict_mapping(
         raw,
         {
@@ -1783,6 +2242,7 @@ def local_attempt_evidence_from_dict(
             "nodes",
             "edges",
             "prediction_row_sha256",
+            "result_row_projection_digest",
             "agent_receipt",
             "receipts",
             "recorded_at",
@@ -1822,6 +2282,11 @@ def local_attempt_evidence_from_dict(
             if value.get("prediction_row_sha256") is not None
             else None
         ),
+        result_row_projection_digest=(
+            str(value["result_row_projection_digest"])
+            if value.get("result_row_projection_digest") is not None
+            else None
+        ),
         agent_receipt=agent_evidence_receipt_from_dict(
             _required_mapping(value.get("agent_receipt"), "Agent evidence receipt")
         ),
@@ -1844,6 +2309,7 @@ def local_attempt_evidence_from_dict(
 def local_attempt_record_ref_from_dict(
     raw: Mapping[str, Any],
 ) -> LocalAttemptRecordRefV1:
+    raw = {**raw, "result_row_projection_digest": raw.get("result_row_projection_digest")}
     value = _strict_mapping(
         raw,
         {
@@ -1854,6 +2320,7 @@ def local_attempt_record_ref_from_dict(
             "integrity_status",
             "terminal_status",
             "prediction_row_sha256",
+            "result_row_projection_digest",
         },
         "local attempt record reference",
     )
@@ -1879,6 +2346,11 @@ def local_attempt_record_ref_from_dict(
         prediction_row_sha256=(
             str(value["prediction_row_sha256"])
             if value.get("prediction_row_sha256") is not None
+            else None
+        ),
+        result_row_projection_digest=(
+            str(value["result_row_projection_digest"])
+            if value.get("result_row_projection_digest") is not None
             else None
         ),
     )
@@ -1907,6 +2379,12 @@ def local_run_conformance_ref_from_dict(
 def local_evidence_manifest_from_dict(
     raw: Mapping[str, Any],
 ) -> LocalEvidenceManifestV1:
+    raw = {
+        **raw,
+        "result_row_projection_set_digest": raw.get(
+            "result_row_projection_set_digest"
+        ),
+    }
     value = _strict_mapping(
         raw,
         {
@@ -1921,6 +2399,7 @@ def local_evidence_manifest_from_dict(
             "attempt_records",
             "attempt_record_set_digest",
             "prediction_row_set_digest",
+            "result_row_projection_set_digest",
             "run_conformance",
             "run_conformance_required",
             "status",
@@ -1968,6 +2447,11 @@ def local_evidence_manifest_from_dict(
         ),
         prediction_row_set_digest=str(
             value.get("prediction_row_set_digest") or ""
+        ),
+        result_row_projection_set_digest=(
+            str(value["result_row_projection_set_digest"])
+            if value.get("result_row_projection_set_digest") is not None
+            else None
         ),
         run_conformance=(
             local_run_conformance_ref_from_dict(

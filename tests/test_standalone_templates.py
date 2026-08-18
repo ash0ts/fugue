@@ -44,11 +44,33 @@ def _jsonl(path: Path) -> list[dict[str, Any]]:
     return [json.loads(line) for line in path.read_text().splitlines() if line]
 
 
+def _run_packaged_scorer(*, source, evidence, reference, profile, limits):
+    namespace: dict[str, Any] = {"__name__": "fugue_template_scorer_test"}
+    exec(source, namespace)
+    scorer_evidence = {**evidence, "expected": reference["expected"]}
+    details = namespace["score"](
+        reference["task"],
+        reference["output"],
+        scorer_evidence,
+    )
+    values = [1.0 if value is True else float(value) for value in details.values()]
+    return {
+        "score": min(values),
+        "reason": "packaged deterministic scorer",
+        "details": details,
+    }
+
+
 @pytest.mark.parametrize("template_id", TEMPLATE_IDS)
 def test_packaged_template_is_a_complete_local_eight_cell_study(
     template_id: str,
     tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
+    monkeypatch.setattr(
+        "fugue.bench.task_authoring.run_inline_scorer",
+        _run_packaged_scorer,
+    )
     root = tmp_path / template_id
     comparison_path = scaffold_standalone_template(
         root,
@@ -104,6 +126,19 @@ def test_packaged_template_is_a_complete_local_eight_cell_study(
     assert all(
         {"expected", "base_output", "gold_output"} <= set(label) for label in labels
     )
+    [evaluator] = raw["evaluators"]
+    assert evaluator["scorer"] == "scorer.py"
+    assert evaluator["runtime"] == "python312-sandbox-v1"
+    assert evaluator["dimensions"] == ["answer_present", "expected_values"]
+    assert (root / evaluator["scorer"]).is_file()
+    profiles = yaml.safe_load(
+        (root / "configs/fugue/task-authoring/profiles.yaml").read_text()
+    )
+    [scorer_runtime] = profiles["scorer_runtimes"]
+    assert scorer_runtime["id"] == evaluator["runtime"]
+    assert "@sha256:" in scorer_runtime["image"]
+    assert scorer_runtime["platform"] in {"linux/amd64", "linux/arm64"}
+    assert "{{" not in json.dumps(profiles)
 
     spec = load_comparison(comparison_path, repo_root=root)
     readiness = check_comparison(spec, repo_root=root)
@@ -119,6 +154,79 @@ def test_packaged_template_is_a_complete_local_eight_cell_study(
         "not locked and usable" in blocker
         or "declared candidate changes" in blocker
         or "local comparison runtime cannot be resolved" in blocker
+        for blocker in readiness.blockers
+    )
+
+
+def test_standalone_scorer_source_is_part_of_the_evaluator_identity(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(
+        "fugue.bench.task_authoring.run_inline_scorer",
+        _run_packaged_scorer,
+    )
+    root = tmp_path / "prompt-change"
+    comparison_path = scaffold_standalone_template(
+        root,
+        template_id="prompt-change",
+    )
+    spec = load_comparison(comparison_path, repo_root=root)
+    before = check_comparison(spec, repo_root=root)
+
+    scorer = root / "scorer.py"
+    scorer.write_text(scorer.read_text() + "\n# pinned revision change\n")
+    after = check_comparison(spec, repo_root=root)
+
+    assert before.evaluator_digests != after.evaluator_digests
+
+
+@pytest.mark.parametrize(
+    ("machine", "expected"),
+    [("x86_64", "linux/amd64"), ("aarch64", "linux/arm64")],
+)
+def test_standalone_scorer_platform_is_resolved_per_study(
+    machine: str,
+    expected: str,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr("fugue.bench.templates.platform.machine", lambda: machine)
+    root = tmp_path / machine
+    scaffold_standalone_template(root, template_id="prompt-change")
+    profiles = yaml.safe_load(
+        (root / "configs/fugue/task-authoring/profiles.yaml").read_text()
+    )
+    assert profiles["scorer_runtimes"][0]["platform"] == expected
+
+
+def test_standalone_scorer_rejects_unsupported_host_architecture(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr("fugue.bench.templates.platform.machine", lambda: "riscv64")
+    with pytest.raises(RuntimeError, match="supports only amd64 and arm64"):
+        scaffold_standalone_template(tmp_path / "study", template_id="prompt-change")
+
+
+def test_standalone_check_fails_closed_without_private_labels(
+    tmp_path: Path,
+) -> None:
+    root = tmp_path / "prompt-change"
+    comparison_path = scaffold_standalone_template(
+        root,
+        template_id="prompt-change",
+    )
+    (root / "private-labels.jsonl").unlink()
+
+    spec = load_comparison(comparison_path, repo_root=root)
+    readiness = check_comparison(spec, repo_root=root)
+
+    assert readiness.status == "blocked"
+    assert readiness.base_failures == 0
+    assert readiness.gold_passes == 0
+    assert any(
+        "host-only private labels are unavailable" in blocker
         for blocker in readiness.blockers
     )
 

@@ -23,11 +23,12 @@ def _trial(
     exception_type: str,
     *,
     agent_started: bool = False,
+    exception_message: str = "untrusted provider detail",
 ) -> dict[str, object]:
     return {
         "exception_info": {
             "exception_type": exception_type,
-            "exception_message": "untrusted provider detail",
+            "exception_message": exception_message,
         },
         "agent_execution": (
             {"started_at": "2026-01-01T00:00:00Z"}
@@ -120,6 +121,24 @@ def test_unknown_pre_agent_failure_is_fatal_not_behavioral_or_retryable() -> Non
 
     assert outcome["terminal_kind"] == "execution_failure"
     assert outcome["runtime_outcome"] == "not_started"
+
+
+def test_exhausted_docker_network_pool_is_typed_infrastructure() -> None:
+    outcome = classify_harbor_terminal(
+        _job(),
+        cell_id="cell",
+        trial=_trial(
+            "RuntimeError",
+            exception_message=(
+                "Docker compose failed: all predefined address pools have "
+                "been fully subnetted"
+            ),
+        ),
+    )
+
+    assert outcome["terminal_kind"] == "sandbox_lost"
+    assert outcome["runtime_outcome"] == "not_started"
+    assert "fully subnetted" not in str(outcome["error"])
 
 
 def test_agent_timeout_and_cancellation_remain_non_retryable_behavior() -> None:

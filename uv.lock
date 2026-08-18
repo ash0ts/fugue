@@ -811,6 +811,9 @@ dev = [
 local-runner = [
     { name = "harbor", marker = "python_full_version >= '3.13'" },
 ]
+mcp = [
+    { name = "mcp" },
+]
 research = [
     { name = "fastapi" },
     { name = "mcp" },
@@ -863,6 +866,7 @@ requires-dist = [
     { name = "lancedb", marker = "extra == 'research-worker'", specifier = "==0.34.0" },
     { name = "lancedb", marker = "extra == 'serve'", specifier = "==0.34.0" },
     { name = "mcp", marker = "extra == 'context'", specifier = "==1.28.1" },
+    { name = "mcp", marker = "extra == 'mcp'", specifier = "==1.28.1" },
     { name = "mcp", marker = "extra == 'research'", specifier = "==1.28.1" },
     { name = "mcp", marker = "extra == 'research-worker'", specifier = "==1.28.1" },
     { name = "mcp", marker = "extra == 'serve'", specifier = "==1.28.1" },
@@ -890,7 +894,7 @@ requires-dist = [
     { name = "weave", marker = "extra == 'serve'", specifier = "==0.53.1" },
     { name = "weave", marker = "extra == 'weave'", specifier = "==0.53.1" },
 ]
-provides-extras = ["dev", "local-runner", "weave", "context", "serve", "research", "research-worker"]
+provides-extras = ["dev", "local-runner", "mcp", "weave", "context", "serve", "research", "research-worker"]
 
 [[package]]
 name = "googleapis-common-protos"
@@ -1220,7 +1224,7 @@ dependencies = [
     { name = "click" },
     { name = "filelock" },
     { name = "fsspec" },
-    { name = "hf-xet", marker = "platform_machine == 'AMD64' or platform_machine == 'aarch64' or platform_machine == 'amd64' or platform_machine == 'arm64' or platform_machine == 'x86_64' or (extra == 'extra-5-fugue-context' and extra == 'extra-5-fugue-local-runner') or (extra == 'extra-5-fugue-context' and extra == 'extra-5-fugue-research-worker') or (extra == 'extra-5-fugue-context' and extra == 'extra-5-fugue-serve')" },
+    { name = "hf-xet", marker = "platform_machine == 'AMD64' or platform_machine == 'aarch64' or platform_machine == 'amd64' or platform_machine == 'arm64' or platform_machine == 'x86_64'" },
     { name = "httpx" },
     { name = "packaging" },
     { name = "pyyaml" },
@@ -1489,8 +1493,8 @@ name = "loguru"
 version = "0.7.3"
 source = { registry = "https://pypi.org/simple" }
 dependencies = [
-    { name = "colorama", marker = "sys_platform == 'win32' or (extra == 'extra-5-fugue-context' and extra == 'extra-5-fugue-local-runner') or (extra == 'extra-5-fugue-context' and extra == 'extra-5-fugue-research-worker') or (extra == 'extra-5-fugue-context' and extra == 'extra-5-fugue-serve')" },
-    { name = "win32-setctime", marker = "sys_platform == 'win32' or (extra == 'extra-5-fugue-context' and extra == 'extra-5-fugue-local-runner') or (extra == 'extra-5-fugue-context' and extra == 'extra-5-fugue-research-worker') or (extra == 'extra-5-fugue-context' and extra == 'extra-5-fugue-serve')" },
+    { name = "colorama", marker = "sys_platform == 'win32'" },
+    { name = "win32-setctime", marker = "sys_platform == 'win32'" },
 ]
 sdist = { url = "https://files.pythonhosted.org/packages/3a/05/a1dae3dffd1116099471c643b8924f5aa6524411dc6c63fdae648c4f1aca/loguru-0.7.3.tar.gz", hash = "sha256:19480589e77d47b8d85b2c827ad95d49bf31b0dcde16593892eb51dd18706eb6", size = 63559, upload-time = "2024-12-06T11:20:56.608Z" }
 wheels = [
@@ -3422,7 +3426,7 @@ name = "tqdm"
 version = "4.68.4"
 source = { registry = "https://pypi.org/simple" }
 dependencies = [
-    { name = "colorama", marker = "sys_platform == 'win32' or (extra == 'extra-5-fugue-context' and extra == 'extra-5-fugue-local-runner') or (extra == 'extra-5-fugue-context' and extra == 'extra-5-fugue-research-worker') or (extra == 'extra-5-fugue-context' and extra == 'extra-5-fugue-serve')" },
+    { name = "colorama", marker = "sys_platform == 'win32'" },
 ]
 sdist = { url = "https://files.pythonhosted.org/packages/ae/5f/57ff8b434839e70dab45601284ea413e947a63799891b7553e5960a793a8/tqdm-4.68.4.tar.gz", hash = "sha256:19829c9673638f2a0b8617da4cdcb927e831cd88bcfcb6e78d42a4d1af131520", size = 792418, upload-time = "2026-07-07T09:58:18.369Z" }
 wheels = [

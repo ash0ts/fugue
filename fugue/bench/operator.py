@@ -54,6 +54,7 @@ from fugue.bench.evaluation_assets import (
     prepare_evaluation_assets,
 )
 from fugue.bench.evaluations import evaluation_asset_path, load_cases, load_rubric
+from fugue.bench.executables import resolve_console_script
 from fugue.bench.execution import (
     CellOutcome,
     PlannedCell,
@@ -687,7 +688,7 @@ class OperatorService:
             model_key_present=bool(provider_api_key(route, env)),
             trace_key_present=bool(trace_api_key(env)),
             docker_present=shutil.which("docker") is not None,
-            harbor_present=shutil.which("harbor") is not None,
+            harbor_present=resolve_console_script("harbor") is not None,
             bridge_ready=bool(bridge.get("ok")),
             trace_content=trace_content,
             experiments=len(list_experiments(self.repo_root)),
@@ -737,6 +738,7 @@ class OperatorService:
             harnesses=tuple(selected.harnesses),
             builder_model=builder_model,
             judge_model=judge_model,
+            evidence_mode=str(selected.evidence_mode),
         )
         for role, model in (("builder", builder_model), ("judge", judge_model)):
             if not model:
@@ -754,7 +756,11 @@ class OperatorService:
                 detail = str(exc)
             checks.append(PreflightCheck(f"{role} model", present, detail))
         trace_content = request.trace_content or selected.trace_content
-        if trace_content == "metadata" and "claude-code" in selected.harnesses:
+        if (
+            selected.evidence_mode == "weave_required"
+            and trace_content == "metadata"
+            and "claude-code" in selected.harnesses
+        ):
             checks.append(
                 PreflightCheck(
                     "Claude Code trace content",

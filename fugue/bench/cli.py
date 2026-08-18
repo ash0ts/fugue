@@ -116,6 +116,23 @@ def _parser() -> FugueArgumentParser:
     doctor.add_argument("--json", action="store_true")
     doctor.add_argument("--workspace", type=Path, default=Path.cwd())
     doctor.add_argument("--model")
+    doctor.add_argument(
+        "--require",
+        action="append",
+        choices=("local-runner",),
+        default=[],
+        metavar="CAPABILITY",
+        help=(
+            "Fail unless the requested capability is ready; repeatable. "
+            "local-runner checks Python, architecture, Harbor, Docker, assets, "
+            "and the selected model credential."
+        ),
+    )
+    doctor.add_argument(
+        "--env-file",
+        type=Path,
+        help="Read the selected model credential from a dotenv file",
+    )
     doctor.set_defaults(handler=_doctor)
 
     init = subparsers.add_parser(
@@ -370,6 +387,35 @@ def _parser() -> FugueArgumentParser:
     mcp_actions = mcp_component.add_subparsers(
         dest="mcp_action", metavar="ACTION", required=True
     )
+    mcp_prepare_wandb = mcp_actions.add_parser(
+        "prepare-wandb-release",
+        help=(
+            "Resolve and freeze the W&B MCP staging/0.4.0 reference study "
+            "without running Agent cells"
+        ),
+    )
+    mcp_prepare_wandb.add_argument(
+        "--repo-root",
+        type=Path,
+        default=Path.cwd(),
+        help="Workspace that will receive the immutable reference-study bundle",
+    )
+    mcp_prepare_wandb.add_argument(
+        "--env-file",
+        type=Path,
+        default=None,
+        help=(
+            "Credential file recorded only as an operator input; values are "
+            "never copied into the source lock"
+        ),
+    )
+    mcp_prepare_wandb.add_argument(
+        "--platform",
+        choices=("linux/amd64", "linux/arm64"),
+        default="linux/amd64",
+        help="Target platform for the immutable MCP runtime locks",
+    )
+    mcp_prepare_wandb.set_defaults(handler=_component_mcp)
     mcp_import = mcp_actions.add_parser(
         "import", help="Import one selected server from Codex TOML or mcpServers JSON"
     )
@@ -818,7 +864,13 @@ def _comparison_init(args: argparse.Namespace) -> int:
 def _doctor(args: argparse.Namespace) -> int:
     from fugue.doctor import doctor_report
 
-    report = doctor_report(args.workspace, model=args.model)
+    environment = load_env(args.env_file) if args.env_file is not None else None
+    report = doctor_report(
+        args.workspace,
+        model=args.model,
+        env=environment,
+        required_capabilities=args.require,
+    )
     if args.json:
         print(json.dumps(report, indent=2, sort_keys=True))
     else:
@@ -827,11 +879,25 @@ def _doctor(args: argparse.Namespace) -> int:
         table.add_column("Status")
         table.add_column("Detail")
         distribution = report["distribution"]
+        readiness = report["readiness"]
+        assets_ready = readiness["requirements"]["packaged_assets"]["ready"]
         table.add_row(
             "distribution",
-            "ready" if report["ok"] else "invalid",
+            "ready" if assets_ready else "invalid",
             f"fugue {distribution['version']} · {distribution['digest'][:12]}",
         )
+        if readiness["mode"] == "required":
+            table.add_row(
+                "requested readiness",
+                "ready" if readiness["ready"] else "blocked",
+                ", ".join(readiness["requested_capabilities"]),
+            )
+            for name, requirement in readiness["requirements"].items():
+                table.add_row(
+                    name.replace("_", " "),
+                    "ready" if requirement["ready"] else "blocked",
+                    requirement["detail"],
+                )
         for name, item in report["optional_features"].items():
             ready = item.get("ready", item["installed"])
             detail = item.get("version") or "install the matching Fugue extra"
@@ -1993,6 +2059,43 @@ def _tui(args: argparse.Namespace) -> int:
 
 
 def _component_mcp(args: argparse.Namespace) -> int:
+    if args.mcp_action == "prepare-wandb-release":
+        from fugue.reference_studies.wandb_mcp import (
+            prepare_wandb_mcp_reference_study,
+        )
+
+        receipt = prepare_wandb_mcp_reference_study(
+            repo_root=args.repo_root.resolve(),
+            env_file=args.env_file.resolve() if args.env_file is not None else None,
+            platform=args.platform,
+        )
+        payload = receipt.to_dict()
+        materialization = payload.get("materialization")
+        artifact_paths = {
+            str(item.get("path") or "")
+            for item in (
+                materialization.get("artifacts")
+                if isinstance(materialization, Mapping)
+                else ()
+            )
+            if isinstance(item, Mapping)
+        }
+        if "comparison.yaml" not in artifact_paths:
+            raise RuntimeError(
+                "W&B MCP preparation did not materialize a runnable comparison"
+            )
+        comparison_path = (
+            args.repo_root.resolve()
+            / str(payload["destination"])
+            / "comparison.yaml"
+        )
+        payload.update(
+            candidate_sha=str(payload["source_commit"]),
+            comparison_path=comparison_path.as_posix(),
+        )
+        print(json.dumps(payload, indent=2, sort_keys=True))
+        return 0
+
     from fugue.bench.component_imports import (
         add_mcp_command,
         import_mcp_config,

@@ -2213,6 +2213,11 @@ class FugueOpenClaw(_TrialMetaMixin, OpenClaw):
         native_ids = self._regex_ids(
             self.logs_dir / "openclaw.txt", r'"sessionId"\s*:\s*"([^"]+)"'
         )
+        if not native_ids:
+            native_ids = self._regex_ids(
+                self.logs_dir / "openclaw.session.jsonl",
+                r'"(?:sessionId|session_id)"\s*:\s*"([^"]+)"',
+            )
         if _evidence_mode() == "local":
             return native_ids
         return list(dict.fromkeys([self.trace_conversation_id, *native_ids]))

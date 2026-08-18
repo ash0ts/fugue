@@ -19,6 +19,7 @@ from fugue.bench.operator import (
     load_env,
 )
 from fugue.bench.services import GRAPHITI_SERVICE, ManagedServiceStatus
+from fugue.bench.templates import scaffold_standalone_template
 
 
 def test_bare_fugue_is_noninteractive_when_not_attached_to_tty(capsys) -> None:
@@ -84,6 +85,17 @@ def test_local_preview_without_required_credentials_is_not_approvable(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
 ) -> None:
+    monkeypatch.setattr(
+        "fugue.bench.comparison._run_custom_scorer",
+        lambda _evaluator, *, output, expected, **_kwargs: {
+            "score": 1.0 if output == expected else 0.0,
+            "reason": "isolated scorer test double",
+            "details": {
+                "answer_present": output is not None,
+                "expected_values": output == expected,
+            },
+        },
+    )
     comparison = scaffold_comparison(tmp_path / "comparison")
     raw = yaml.safe_load(comparison.read_text(encoding="utf-8"))
     raw["execution"]["model"] = "anthropic/claude-sonnet-5"
@@ -149,6 +161,37 @@ def test_local_preview_without_required_credentials_is_not_approvable(
     assert payload["approval_eligible"] is False
     assert payload["matrix"]["applicable_cells"] == 0
     assert payload["matrix"]["estimated_trials"] == 0
+
+
+def test_check_reports_missing_host_only_labels_without_traceback(
+    capsys: pytest.CaptureFixture[str],
+    tmp_path: Path,
+) -> None:
+    root = tmp_path / "study"
+    comparison = scaffold_standalone_template(
+        root,
+        template_id="prompt-change",
+    )
+    (root / "private-labels.jsonl").unlink()
+
+    assert (
+        main(
+            [
+                "check",
+                comparison.as_posix(),
+                "--repo-root",
+                root.as_posix(),
+                "--json",
+            ]
+        )
+        == 2
+    )
+    payload = json.loads(capsys.readouterr().out)
+    assert payload["status"] == "blocked"
+    assert any(
+        "host-only private labels are unavailable" in blocker
+        for blocker in payload["blockers"]
+    )
 
 
 @pytest.mark.parametrize(

@@ -66,6 +66,15 @@ class _FakeComparisonResultV3:
             "run_conformance_file_sha256": (
                 conformance.sha256 if conformance is not None else "0" * 64
             ),
+            **(
+                {
+                    "result_row_projection_set_digest": (
+                        manifest.result_row_projection_set_digest
+                    )
+                }
+                if manifest.result_row_projection_set_digest is not None
+                else {}
+            ),
         }
         self.rows = len(manifest.planned_attempt_ids)
         records = {item.attempt_id: item for item in manifest.attempt_records}
@@ -80,12 +89,27 @@ class _FakeComparisonResultV3:
                         "candidate": stable_digest({"candidate": "baseline"}),
                         "runtime": stable_digest({"runtime": "harbor-local-v1"}),
                     },
-                    execution_status="passed",
+                    prediction_id=stable_digest(
+                        {"record_type": "prediction", "attempt_id": attempt}
+                    ),
+                    execution_status="unknown",
+                    evaluation_status="unknown",
                     evidence_status="reconciled",
-                    passed=True,
-                    scores={"answer_correct": True},
-                    score_explanations={"answer_correct": "The answer matched."},
+                    passed=None,
+                    cost_usd=None,
+                    latency_sec=None,
+                    input_tokens=None,
+                    output_tokens=None,
+                    tool_calls=0,
+                    tools=(),
+                    queried_projects=(),
+                    scores={},
+                    score_explanations={},
                     sanitized_answer_excerpt="bounded public answer",
+                    actual_query_scope=(),
+                    reported_project_identity=None,
+                    execution_fingerprint=None,
+                    runtime_lock_digest=None,
                     local_evidence_record_digest=(
                         records[attempt].record_digest
                         if attempt in records
@@ -93,6 +117,11 @@ class _FakeComparisonResultV3:
                     ),
                     local_prediction_row_sha256=(
                         records[attempt].prediction_row_sha256
+                        if attempt in records
+                        else "0" * 64
+                    ),
+                    local_result_row_projection_digest=(
+                        records[attempt].result_row_projection_digest
                         if attempt in records
                         else "0" * 64
                     ),
@@ -458,6 +487,43 @@ def test_publication_recomputes_per_attempt_local_digests(
     assert called is False
 
 
+@pytest.mark.parametrize(
+    ("attribute", "value"),
+    (
+        ("passed", False),
+        ("scores", {"answer_correct": False}),
+        ("score_explanations", {"answer_correct": "altered explanation"}),
+        ("sanitized_answer_excerpt", "altered excerpt"),
+        ("cost_usd", 42.0),
+    ),
+)
+def test_publication_rejects_decision_field_mutation_against_prediction_artifact(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    attribute: str,
+    value: Any,
+) -> None:
+    manifest_path, manifest = _canonical_manifest(tmp_path)
+    result_path, result = _result_fixture(tmp_path, manifest)
+    setattr(result.paired_cases[0].baseline, attribute, value)
+    _patch_v3_reader(monkeypatch, result)
+    called = False
+
+    def publisher(*_args: Any) -> WeavePublicationOutcomeV1:
+        nonlocal called
+        called = True
+        raise AssertionError("publisher must not run")
+
+    with pytest.raises(LocalResultPublicationError, match="decision fields"):
+        publish_local_result_to_weave(
+            result_path,
+            manifest_path,
+            target="wandb/local-result",
+            publisher=publisher,
+        )
+    assert called is False
+
+
 def test_publication_detects_manifest_raw_byte_drift(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -682,63 +748,129 @@ def test_weave_publisher_is_lazy_and_has_actionable_missing_extra(
         weave_publisher_from_environment({})
 
 
-def test_real_weave_adapter_emits_nested_five_object_chain(
-    tmp_path: Path,
+class _FakeWeaveClient:
+    def __init__(self, target: WeavePublicationTargetV1) -> None:
+        self.project_id = target.project_slug
+        self.target = target
+        self.calls: dict[str, SimpleNamespace] = {}
+        self.objects: dict[str, dict[str, Any]] = {}
+        self.created_call_ids: list[str] = []
+        self.finished_call_ids: list[str] = []
+        self.published_object_refs: list[str] = []
+        self.fail_after_finish: int | None = None
+        self.tamper_call_kind: str | None = None
+        self.tamper_call_field = "output"
+        self.tamper_dataset = False
+
+    def create_call(
+        self,
+        _op,
+        inputs,
+        parent=None,
+        attributes=None,
+        display_name=None,
+        *,
+        use_stack=True,
+        _call_id_override=None,
+    ):
+        del display_name, use_stack
+        assert _call_id_override not in self.calls
+        call = SimpleNamespace(
+            id=_call_id_override,
+            parent_id=getattr(parent, "id", None),
+            project_id=self.target.project_slug,
+            trace_id=(
+                getattr(parent, "trace_id", None) or _call_id_override
+            ),
+            inputs=dict(inputs),
+            attributes=dict(attributes or {}),
+            output=None,
+            ended_at=None,
+            exception=None,
+        )
+        self.calls[call.id] = call
+        self.created_call_ids.append(call.id)
+        return call
+
+    def finish_call(self, call, output=None):
+        call.output = dict(output or {})
+        call.ended_at = "2026-08-17T12:00:00+00:00"
+        self.finished_call_ids.append(call.id)
+        if self.fail_after_finish == len(self.finished_call_ids):
+            self.fail_after_finish = None
+            raise RuntimeError("simulated controller interruption")
+
+    @staticmethod
+    def flush() -> None:
+        return None
+
+    def get_call(self, call_id):
+        if call_id not in self.calls:
+            raise ValueError(f"Call not found: {call_id}")
+        call = self.calls[call_id]
+        if (
+            self.tamper_call_kind is not None
+            and call.ended_at is not None
+            and call.attributes.get("fugue.evidence.object_kind")
+            == self.tamper_call_kind
+        ):
+            overrides: dict[str, Any]
+            if self.tamper_call_field == "parent":
+                overrides = {"parent_id": "forged-parent"}
+            elif self.tamper_call_field == "project":
+                overrides = {"project_id": "wandb/another-project"}
+            elif self.tamper_call_field == "identity":
+                overrides = {
+                    "attributes": {
+                        **call.attributes,
+                        "fugue.result_digest": "f" * 64,
+                    }
+                }
+            else:
+                overrides = {"output": {"forged": True}}
+            return SimpleNamespace(
+                **{
+                    **vars(call),
+                    **overrides,
+                }
+            )
+        return call
+
+    def get(self, ref, *, objectify=True):
+        del objectify
+        value = dict(self.objects[ref.uri])
+        if self.tamper_dataset:
+            value["attempt_id"] = "f" * 64
+        return value
+
+    def publish(self, value, *, name):
+        digest = stable_digest(value)
+        uri = f"weave:///{self.target.project_slug}/object/{name}:{digest}"
+        self.objects[uri] = dict(value)
+        self.published_object_refs.append(uri)
+        return SimpleNamespace(uri=uri)
+
+
+def _install_fake_weave(
     monkeypatch: pytest.MonkeyPatch,
-) -> None:
+    target: WeavePublicationTargetV1,
+    client: _FakeWeaveClient,
+):
     from fugue import weave_support
 
-    _manifest_path, manifest = _canonical_manifest(tmp_path)
-    _result_path, result = _result_fixture(tmp_path, manifest)
-    target = WeavePublicationTargetV1(entity="wandb", project="local-result")
-    finished: list[tuple[str, dict[str, Any]]] = []
-
-    class FakeClient:
-        project_id = target.project_slug
-
-        @staticmethod
-        def create_call(
-            op,
-            inputs,
-            parent=None,
-            attributes=None,
-            display_name=None,
-            *,
-            use_stack=True,
-            _call_id_override=None,
-        ):
-            del op, inputs, attributes, display_name, use_stack
-            return SimpleNamespace(
-                id=_call_id_override,
-                parent_id=getattr(parent, "id", None),
-                project_id=target.project_slug,
-                ref=SimpleNamespace(
-                    uri=(
-                        f"weave:///{target.project_slug}/call/"
-                        f"{_call_id_override}"
-                    )
-                ),
-            )
-
-        @staticmethod
-        def finish_call(call, output=None):
-            finished.append((call.id, dict(output or {})))
-
-        @staticmethod
-        def flush() -> None:
-            return None
-
-    client = FakeClient()
-
-    def publish_object(_value, *, name):
-        return SimpleNamespace(
-            uri=f"weave:///{target.project_slug}/object/{name}:digest-v1"
+    def parse_ref(uri: str):
+        prefix = "weave:///"
+        assert uri.startswith(prefix)
+        entity, project, _kind, _object_id = uri.removeprefix(prefix).split(
+            "/", 3
         )
+        return SimpleNamespace(entity=entity, project=project, uri=uri)
 
     fake_weave = SimpleNamespace(
         __version__="test-sdk",
         get_client=lambda: client,
-        publish=publish_object,
+        publish=client.publish,
+        ref=parse_ref,
     )
     monkeypatch.setattr(
         publication.importlib,
@@ -750,16 +882,91 @@ def test_real_weave_adapter_emits_nested_five_object_chain(
         "initialize_weave",
         lambda _project, _env: fake_weave,
     )
+    return fake_weave
+
+
+def test_real_weave_adapter_emits_nested_five_object_chain(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _manifest_path, manifest = _canonical_manifest(tmp_path)
+    _result_path, result = _result_fixture(tmp_path, manifest)
+    target = WeavePublicationTargetV1(entity="wandb", project="local-result")
+    client = _FakeWeaveClient(target)
+    _install_fake_weave(monkeypatch, target, client)
 
     publisher = weave_publisher_from_environment({"WANDB_API_KEY": "test-only-key"})
     outcome = publisher(result, manifest, target)
 
     assert isinstance(outcome, WeavePublicationOutcomeV1)
     assert len(outcome.objects) == 5
-    assert len(finished) == 4
-    assert finished[0][1]["native_agent_call"] is False
+    assert len(client.finished_call_ids) == 4
+    assert len(set(client.created_call_ids)) == 4
+    assert all(call.ended_at is not None for call in client.calls.values())
+    agent_call = next(
+        call
+        for call in client.calls.values()
+        if call.attributes["fugue.evidence.object_kind"]
+        == "agent_evidence_receipt"
+    )
+    assert agent_call.output["native_agent_call"] is False
     by_kind = {item.kind: item for item in outcome.objects}
     assert by_kind["agent_evidence_receipt"].native_agent_call is False
     assert by_kind["dataset"].ref.startswith(
         f"weave:///{target.project_slug}/object/"
     )
+    assert outcome.publisher_revision == "v2-readback+weave-test-sdk"
+
+
+@pytest.mark.parametrize(
+    "tamper",
+    ["dataset", "prediction_output", "parent", "project", "identity"],
+)
+def test_real_weave_adapter_requires_authoritative_matching_readback(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    tamper: str,
+) -> None:
+    _manifest_path, manifest = _canonical_manifest(tmp_path)
+    _result_path, result = _result_fixture(tmp_path, manifest)
+    target = WeavePublicationTargetV1(entity="wandb", project="local-result")
+    client = _FakeWeaveClient(target)
+    client.tamper_dataset = tamper == "dataset"
+    client.tamper_call_kind = "prediction" if tamper != "dataset" else None
+    client.tamper_call_field = tamper.removeprefix("prediction_")
+    _install_fake_weave(monkeypatch, target, client)
+
+    publisher = weave_publisher_from_environment({"WANDB_API_KEY": "test-only-key"})
+    with pytest.raises(
+        RuntimeError,
+        match=(
+            "readback.*disagrees|conflicting Call|another project|"
+            "lost its evidence parent|attributes disagree"
+        ),
+    ):
+        publisher(result, manifest, target)
+
+
+def test_real_weave_adapter_resumes_partial_deterministic_publication(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _manifest_path, manifest = _canonical_manifest(tmp_path)
+    _result_path, result = _result_fixture(tmp_path, manifest)
+    target = WeavePublicationTargetV1(entity="wandb", project="local-result")
+    client = _FakeWeaveClient(target)
+    client.fail_after_finish = 2
+    _install_fake_weave(monkeypatch, target, client)
+    publisher = weave_publisher_from_environment({"WANDB_API_KEY": "test-only-key"})
+
+    with pytest.raises(RuntimeError, match="simulated controller interruption"):
+        publisher(result, manifest, target)
+    created_before_retry = tuple(client.created_call_ids)
+    assert len(created_before_retry) == 4
+
+    outcome = publisher(result, manifest, target)
+
+    assert tuple(client.created_call_ids) == created_before_retry
+    assert len(set(client.published_object_refs)) == 1
+    assert len(outcome.objects) == 5
+    assert len({(item.attempt_id, item.kind) for item in outcome.objects}) == 5

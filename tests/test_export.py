@@ -4909,6 +4909,11 @@ def test_generated_evaluation_closes_canonical_local_evidence_chain(
                     "cost_usd": 0.02,
                 },
                 "verifier_result": {"rewards": {"reward": 1.0}},
+                # Local Agent wrappers have no hosted trace destination.  The
+                # host coordinator must replace this legacy null value with
+                # the approved canonical local destination.
+                "trace_receipt": None,
+                "evidence_backend": "local",
                 "started_at": "2026-08-17T12:00:00Z",
                 "finished_at": "2026-08-17T12:00:02Z",
             }
@@ -5011,6 +5016,8 @@ def test_generated_evaluation_closes_canonical_local_evidence_chain(
     assert {link["system"] for link in row["local_evidence_links"]} == {
         "local_artifact"
     }
+    assert row["trace_receipt"] == export.LocalEvidenceDestinationV1().to_dict()
+    assert row["trace_project"] is None
     assert {link["kind"] for link in row["local_evidence_links"]} == {
         "evaluation_root",
         "prediction_and_score",
@@ -5029,6 +5036,262 @@ def test_generated_evaluation_closes_canonical_local_evidence_chain(
     assert attempt["attempt"]["receipts"]["policy"]["status"] == "passed"
     assert attempt["attempt"]["receipts"]["usage"]["status"] == "passed"
     assert attempt["attempt"]["receipts"]["cleanup"]["status"] == "passed"
+
+
+def _write_realistic_local_harness_transcript(
+    agent_dir: Path,
+    *,
+    harness: str,
+    session_id: str,
+) -> str:
+    if harness == "hermes":
+        path = agent_dir / "hermes-session.jsonl"
+        path.write_text(
+            json.dumps(
+                {
+                    "session_id": session_id,
+                    "role": "assistant",
+                    "content": "completed",
+                    "tool_calls": [{"name": "read_file", "arguments": {}}],
+                }
+            )
+            + "\n"
+        )
+        return path.name
+    if harness == "openclaw":
+        (agent_dir / "openclaw.txt").write_text(
+            "Config warning: optional channel is disabled\n"
+            + json.dumps(
+                {
+                    "sessionId": session_id,
+                    "meta": {
+                        "agentMeta": {
+                            "sessionFile": "/home/agent/.openclaw/session.jsonl"
+                        }
+                    },
+                }
+            )
+            + "\n"
+        )
+        path = agent_dir / "openclaw.session.jsonl"
+        path.write_text(
+            json.dumps(
+                {
+                    "type": "message",
+                    "message": {"role": "assistant", "content": "completed"},
+                }
+            )
+            + "\n"
+            + json.dumps(
+                {"type": "tool_call", "name": "read_file", "arguments": {}}
+            )
+            + "\n"
+        )
+        return path.name
+    if harness == "claude-code":
+        (agent_dir / "claude-code.txt").write_text(
+            "Optional MCP server emitted a startup diagnostic\n"
+            + json.dumps(
+                {"type": "system", "subtype": "init", "session_id": session_id}
+            )
+            + "\n"
+            + json.dumps(
+                {
+                    "type": "assistant",
+                    "session_id": session_id,
+                    "message": {"content": [{"type": "text", "text": "completed"}]},
+                }
+            )
+            + "\n"
+        )
+        path = agent_dir / "sessions" / "projects" / "-app" / f"{session_id}.jsonl"
+        path.parent.mkdir(parents=True)
+        path.write_text(
+            json.dumps(
+                {
+                    "type": "assistant",
+                    "sessionId": session_id,
+                    "message": {
+                        "content": [
+                            {"type": "tool_use", "name": "Read", "input": {}}
+                        ]
+                    },
+                }
+            )
+            + "\n"
+        )
+        return path.name
+    if harness == "codex":
+        (agent_dir / "codex.txt").write_text(
+            json.dumps({"type": "thread.started", "thread_id": session_id}) + "\n"
+        )
+        path = (
+            agent_dir
+            / "sessions"
+            / "2026"
+            / "08"
+            / "17"
+            / f"rollout-2026-08-17T12-00-00-{session_id}.jsonl"
+        )
+        path.parent.mkdir(parents=True)
+        path.write_text(
+            json.dumps(
+                {
+                    "type": "session_meta",
+                    "payload": {"id": session_id},
+                }
+            )
+            + "\n"
+            + json.dumps(
+                {"type": "function_call", "name": "read_file", "arguments": {}}
+            )
+            + "\n"
+        )
+        return path.name
+    raise AssertionError(f"unsupported harness fixture: {harness}")
+
+
+@pytest.mark.parametrize("harness", ["hermes", "openclaw", "claude-code", "codex"])
+def test_each_local_harness_finalizes_one_complete_five_link_manifest(
+    harness: str,
+    tmp_path: Path,
+) -> None:
+    root = tmp_path / harness
+    trial_dir = root / "jobs" / "cell-a"
+    agent_dir = trial_dir / "agent"
+    agent_dir.mkdir(parents=True)
+    session_id = "11111111-2222-4333-8444-555555555555"
+    expected_transcript_name = _write_realistic_local_harness_transcript(
+        agent_dir,
+        harness=harness,
+        session_id=session_id,
+    )
+    run_id = f"run-{harness}"
+    cell = PlannedCell(
+        id="cell-a",
+        run_id=run_id,
+        run_name=run_id,
+        workload_id="suite",
+        task_id="task-a",
+        harness=harness,
+        context_system_id="none",
+        variant_id="baseline",
+        model_provider="anthropic",
+        model="anthropic/claude-test",
+        trial_index=1,
+        comparison_example_id="example-a",
+        candidate_id="candidate-a",
+        execution_fingerprint="execution-a",
+        config_path=root / "config.json",
+        result_path=trial_dir / "result.json",
+        command=("harbor", "run"),
+        env={"FUGUE_EVIDENCE_MODE": "local", "FUGUE_DATASET": "suite@v1"},
+        n_attempts=1,
+        evaluation_asset_lock_sha256="e" * 64,
+        run_snapshot_sha256="a" * 64,
+    )
+    run_key = ":".join(
+        (
+            cell.run_id,
+            cell.workload_id,
+            "trial",
+            cell.task_id,
+            cell.harness,
+            cell.context_system_id,
+            cell.variant_id,
+            f"t{cell.trial_index:03d}",
+        )
+    )
+    planned_conversation_id = agent_conversation_id(harness, run_key)
+    (agent_dir / "fugue-meta.json").write_text(
+        json.dumps(
+            {
+                "candidate_id": cell.candidate_id,
+                "run_id": cell.run_id,
+                "trial_index": cell.trial_index,
+                "native_session_ids": [session_id],
+                "planned_conversation_id": planned_conversation_id,
+                "conversation_correlation": {
+                    "status": "isolated_trial_directory",
+                    "planned_conversation_id": planned_conversation_id,
+                    "native_session_ids": [session_id],
+                },
+            }
+        )
+    )
+    (trial_dir / "result.json").write_text(
+        json.dumps(
+            {
+                "task_name": "suite/task-a",
+                "trial_name": "cell-a",
+                "agent_result": {
+                    "n_input_tokens": 12,
+                    "n_output_tokens": 3,
+                    "cost_usd": 0.02,
+                },
+                "verifier_result": {"rewards": {"reward": 1.0}},
+                "started_at": "2026-08-17T12:00:00Z",
+                "finished_at": "2026-08-17T12:00:02Z",
+            }
+        )
+    )
+    conformance = {
+        "status": "passed",
+        "execution_identity": {"status": "passed", "digest": "x" * 64},
+        "local_artifact_privacy_scan": {"status": "passed", "matches": 0},
+        "private_label_boundary": {"status": "passed"},
+        "docker_cleanup": {"status": "passed", "matched_containers": []},
+    }
+    coordinator = GeneratedEvaluationCoordinator(
+        [cell],
+        repo_root=root,
+        env={"ANTHROPIC_API_KEY": "not-a-real-secret-value"},
+        cell_conformance=lambda _cell: conformance,
+        require_complete_evidence=True,
+        evidence_mode="local",
+    )
+
+    coordinator.begin_cell(cell)
+    row = coordinator.finish_cell(
+        cell,
+        CellOutcome(cell.id, "passed", returncode=0),
+    )
+    conformance_receipt = {
+        "schema_version": 2,
+        "run_id": run_id,
+        "backend": "local_harbor_docker",
+        "status": "passed",
+        "enforced": True,
+        "receipt_sha256": "",
+    }
+    conformance_receipt["receipt_sha256"] = stable_digest(conformance_receipt)
+    (root / f".fugue/runtime/{run_id}/harbor-conformance.json").write_text(
+        json.dumps(conformance_receipt, sort_keys=True) + "\n"
+    )
+    manifest = coordinator.finalize()
+
+    assert row is not None
+    assert manifest is not None and manifest.status == "complete"
+    assert len(manifest.attempt_records) == 1
+    assert {link["kind"] for link in row["local_evidence_links"]} == {
+        "evaluation_root",
+        "prediction_and_score",
+        "prediction",
+        "agent_root",
+        "dataset",
+    }
+    assert {link["system"] for link in row["local_evidence_links"]} == {
+        "local_artifact"
+    }
+    agent_receipt_path = next(
+        (root / f".fugue/runtime/{run_id}/evidence/agents").glob("*.json")
+    )
+    receipt = json.loads(agent_receipt_path.read_text())
+    assert receipt["status"] == "resolved"
+    assert receipt["native_weave_call"] is False
+    assert receipt["transcript_artifact"]["path"].endswith(
+        expected_transcript_name
+    )
 
 
 def _local_agent_receipt_fixture(
@@ -5132,6 +5395,85 @@ def test_local_agent_receipt_binds_transcript_tools_and_response(
     assert receipt.tool_event_count == 1
     assert receipt.tool_events_sha256 != hashlib.sha256(b"[]").hexdigest()
     assert receipt.response_sha256 == row["agent_response_sha256"]
+
+
+@pytest.mark.parametrize("wrapper_name", ["claude-code.txt", "openclaw.txt"])
+def test_local_agent_receipt_accepts_one_json_suffix_after_benign_stderr(
+    wrapper_name: str,
+    tmp_path: Path,
+) -> None:
+    cell, row = _local_agent_receipt_fixture(tmp_path, transcript=None)
+    if wrapper_name == "openclaw.txt":
+        cell = replace(cell, harness="openclaw")
+    wrapper = Path(str(row["trial_dir"])) / "agent" / wrapper_name
+    wrapper.write_text(
+        "Optional integration emitted a startup diagnostic\n"
+        + json.dumps(
+            {
+                "type": "assistant",
+                "session_id": "native-session-a",
+                "text": "bounded answer",
+            }
+        )
+        + "\n"
+    )
+
+    receipt = export._local_agent_receipt(tmp_path, cell, row)
+
+    assert receipt.status == "resolved"
+    assert receipt.transcript_artifact is not None
+    assert receipt.transcript_artifact.path.endswith(wrapper_name)
+
+
+def test_local_agent_receipt_tries_canonical_transcript_after_malformed_wrapper(
+    tmp_path: Path,
+) -> None:
+    cell, row = _local_agent_receipt_fixture(tmp_path, transcript=None)
+    agent_dir = Path(str(row["trial_dir"])) / "agent"
+    (agent_dir / "claude-code.txt").write_text("{malformed-wrapper-json}\n")
+    transcript = agent_dir / "sessions" / "projects" / "native-session-a.jsonl"
+    transcript.parent.mkdir(parents=True)
+    transcript.write_text(
+        json.dumps(
+            {
+                "type": "assistant",
+                "session_id": "native-session-a",
+                "text": "bounded answer",
+            }
+        )
+        + "\n"
+    )
+
+    receipt = export._local_agent_receipt(tmp_path, cell, row)
+
+    assert receipt.status == "resolved"
+    assert receipt.transcript_artifact is not None
+    assert receipt.transcript_artifact.path.endswith("native-session-a.jsonl")
+
+
+def test_local_agent_receipt_rejects_ambiguous_canonical_transcripts(
+    tmp_path: Path,
+) -> None:
+    cell, row = _local_agent_receipt_fixture(tmp_path, transcript=None)
+    agent_dir = Path(str(row["trial_dir"])) / "agent"
+    for project in ("project-a", "project-b"):
+        transcript = agent_dir / "sessions" / project / "native-session-a.jsonl"
+        transcript.parent.mkdir(parents=True)
+        transcript.write_text(
+            json.dumps(
+                {
+                    "type": "assistant",
+                    "session_id": "native-session-a",
+                    "text": "bounded answer",
+                }
+            )
+            + "\n"
+        )
+
+    receipt = export._local_agent_receipt(tmp_path, cell, row)
+
+    assert receipt.status == "invalid"
+    assert "multiple native Agent transcripts" in str(receipt.reason)
 
 
 @pytest.mark.parametrize(

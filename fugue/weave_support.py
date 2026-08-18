@@ -115,6 +115,8 @@ async def trace_async_operation(
     operation: Callable[[], Awaitable[Any]],
     summarize: Callable[[Any], Any],
 ) -> Any:
+    if str(env.get("FUGUE_EVIDENCE_MODE") or "").strip() == "local":
+        return await operation()
     if not trace_api_key(env):
         return await operation()
     from fugue.model_plane import trace_project_slug

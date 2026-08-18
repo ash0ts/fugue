@@ -429,11 +429,10 @@ class ExperimentSpec:
             or self.require_live_evidence
         )
         if mode is None:
-            # Direct constructors predate evidence modes and historically
-            # represented live Weave runs. Config parsing always supplies an
-            # explicit inferred mode, so newly authored specs still default
-            # to local without silently changing programmatic legacy callers.
-            mode = "weave_required"
+            # New programmatic studies are standalone unless they explicitly
+            # declare a hosted result destination. The document reader below
+            # keeps missing legacy fields on their historical Weave semantics.
+            mode = "weave_required" if hosted_result_declared else "local"
             object.__setattr__(self, "evidence_mode", mode)
         if mode not in {"local", "weave_required"}:
             raise ValueError("evidence_mode must be local or weave_required")
@@ -465,6 +464,23 @@ class ExperimentSpec:
                     self,
                     "evidence_destination",
                     default_evidence_destination(self.evidence_project),
+                )
+        else:
+            if self.source_evidence_destination is None:
+                object.__setattr__(
+                    self,
+                    "source_evidence_destination",
+                    (
+                        default_evidence_destination(self.source_evidence_project)
+                        if self.source_evidence_project is not None
+                        else LocalEvidenceDestinationV1()
+                    ),
+                )
+            if self.evidence_destination is None:
+                object.__setattr__(
+                    self,
+                    "evidence_destination",
+                    LocalEvidenceDestinationV1(),
                 )
         if mode == "local" and self.require_live_evidence:
             raise ValueError("local evidence mode rejects require_live_evidence")
