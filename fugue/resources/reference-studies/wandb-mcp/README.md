@@ -23,7 +23,7 @@ python -m pip install "fugue[local-runner,mcp,weave]"
 
 Run the preparation command. It observes `staging/0.4.0` before it fetches the
 candidate. It materializes and locks the packaged study. It then observes the
-branch again. If the two observations differ, Fugue publishes no reference
+branch again. If the two observations differ, Fugue does not write a reference
 lock.
 
 ```bash
@@ -60,7 +60,8 @@ source project. The selected model route requires `ANTHROPIC_API_KEY`.
 Credential values and the host-only private labels are never copied into task
 inputs, locks, traces, results, or CI artifacts.
 
-If desired, publish the unchanged completed result after the fact:
+If desired, publish a sanitized, digest-bound projection of the completed local
+result. Fugue keeps the canonical local result unchanged:
 
 ```bash
 fugue publish weave /path/to/result.json \

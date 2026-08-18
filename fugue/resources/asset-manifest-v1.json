@@ -113,8 +113,8 @@
     },
     {
       "path": "reference-studies/wandb-mcp/README.md",
-      "sha256": "2cbdbf95470ce838b20a0f98590616059c1f579b759dde0bf99dd50a51229b94",
-      "size_bytes": 3762
+      "sha256": "30d13febe6a4943c9fd77b774890f5829022373d790bcdc1712d14281efa0925",
+      "size_bytes": 3837
     },
     {
       "path": "reference-studies/wandb-mcp/comparison.yaml.template",
@@ -303,8 +303,8 @@
     },
     {
       "path": "templates/harness-change/README.md",
-      "sha256": "7414654b0ffb7fe9b4d0c849a8d4f68a5a630e2d9ef051eb82e2ca646b161966",
-      "size_bytes": 945
+      "sha256": "c85d8200bba970fb64d73985f698c5bef6556604b73903759693560c28128f76",
+      "size_bytes": 954
     },
     {
       "path": "templates/harness-change/comparison.yaml",
@@ -368,8 +368,8 @@
     },
     {
       "path": "templates/mcp-change/README.md",
-      "sha256": "d4d8c0aaefcd1e4e13ec41062f183a5bf89004e9565fd1f74a0d6fd255d8d00d",
-      "size_bytes": 965
+      "sha256": "ecf5fa0218ae88b567de221ddd49301683a4c62a57e4cbcae8508fcd23d9fd38",
+      "size_bytes": 974
     },
     {
       "path": "templates/mcp-change/comparison.yaml",
@@ -428,8 +428,8 @@
     },
     {
       "path": "templates/memory-change/README.md",
-      "sha256": "225d99bce7187202f99b2bf940aa369397992061c3058bc013ab347a218a09cb",
-      "size_bytes": 954
+      "sha256": "8fb63e67a2233bd74ba8ea6453b868c82afb34cd939601e870b398ede21813fb",
+      "size_bytes": 963
     },
     {
       "path": "templates/memory-change/comparison.yaml",
@@ -498,8 +498,8 @@
     },
     {
       "path": "templates/prompt-change/README.md",
-      "sha256": "69bad789f42c51138b6bfd40300661b43f2c663e55d53e38ed3da2ee9234f3bf",
-      "size_bytes": 960
+      "sha256": "7c16163083c7a2015475dea57ca08cbf95a55a14c0bccc1306eb98b414ef24a8",
+      "size_bytes": 969
     },
     {
       "path": "templates/prompt-change/comparison.yaml",
@@ -563,8 +563,8 @@
     },
     {
       "path": "templates/skill-change/README.md",
-      "sha256": "9bedb9725484ae558ff38773cdd6ef08ea2988f60cc9c30d199376d6acf1ec97",
-      "size_bytes": 923
+      "sha256": "6040c34f07135fd929d241af4aba1f1b53b51555052c43b81a09f0acd96f7671",
+      "size_bytes": 932
     },
     {
       "path": "templates/skill-change/comparison.yaml",

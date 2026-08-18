@@ -82,6 +82,12 @@ def test_public_command_surface_is_intentionally_small() -> None:
     assert "Raw local transcript and tool-event artifact files remain local" in (
         publish_weave_help
     )
+    assert "inspect each sanitized_answer_excerpt" in publish_weave_help
+    publish_index_help = " ".join(
+        publish_actions.choices["wandb-index"].format_help().split()
+    )
+    assert "Table lists the indexed Studies" in publish_index_help
+    assert "does not create a native W&B Study or Report" in publish_index_help
     research_actions = next(
         action
         for action in subparsers.choices["research"]._actions

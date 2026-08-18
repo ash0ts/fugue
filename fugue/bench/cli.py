@@ -277,8 +277,9 @@ def _parser() -> FugueArgumentParser:
         description=(
             "Publish sanitized result and evidence-chain projections to W&B Weave. "
             "Raw local transcript and tool-event artifact files remain local, and "
-            "the canonical local result digest does not change. Review publishable "
-            "excerpts and evidence metadata for sensitive data first."
+            "the canonical local result digest does not change. Before you publish, "
+            "inspect each sanitized_answer_excerpt and the evidence metadata in "
+            "result.json for sensitive data."
         ),
     )
     publish_weave.add_argument("result", type=Path)
@@ -300,7 +301,15 @@ def _parser() -> FugueArgumentParser:
     publish_weave.set_defaults(handler=_publish_local_result)
     publish_index = publish_actions.add_parser(
         "wandb-index",
-        help=("Publish an unchanged Research index as a W&B index Run and Artifact"),
+        help=(
+            "Publish a W&B index Run and immutable Artifact from an unchanged "
+            "Research index"
+        ),
+        description=(
+            "Publish a deterministic W&B Run whose Table lists the indexed Studies. "
+            "Also publish an immutable Artifact that contains the unchanged Research "
+            "index. This command does not create a native W&B Study or Report."
+        ),
     )
     publish_index.add_argument("index", type=Path)
     publish_index.add_argument("--project", required=True, metavar="ENTITY/PROJECT")
@@ -1767,7 +1776,7 @@ def _publish_research_index(args: argparse.Namespace) -> int:
                         f"Receipt: {receipt.receipt_digest}",
                     )
                 ),
-                title="Published unchanged Research index",
+                title="Published W&B Research index",
                 border_style="fugue.success",
             )
         )

@@ -188,8 +188,9 @@ class HelpScreen(ModalScreen[None]):
                 "a Agents      w Trace      ? Help\n\n"
                 "Plan defines the comparison. Runs operates it. Every run writes "
                 "a canonical local evidence ledger. Hosted actions are available "
-                "when Weave is required. For a published local result, use the URL "
-                "returned by the publish command."
+                "when Weave is required. To create hosted evidence for a completed "
+                "local result, run `fugue publish weave` and inspect its publication "
+                "receipt."
             )
             yield Button("Close", id="close-help", variant="primary")
 
@@ -1909,8 +1910,8 @@ class FugueApp(App[None]):
                 else "Fugue cannot verify a hosted evidence mode for this run."
             )
             self.notify(
-                f"{reason} Export the run evidence or use the URL returned by an "
-                "explicit publish command.",
+                f"{reason} Export the local evidence. To create hosted evidence, "
+                "publish the completed result with `fugue publish weave`.",
                 severity="warning",
             )
             return
@@ -1931,8 +1932,8 @@ class FugueApp(App[None]):
                 else "Fugue cannot verify a hosted evidence mode for this run."
             )
             self.notify(
-                f"{reason} Export the run evidence or use the URL returned by an "
-                "explicit publish command.",
+                f"{reason} Export the local evidence. To create hosted evidence, "
+                "publish the completed result with `fugue publish weave`.",
                 severity="warning",
             )
             return

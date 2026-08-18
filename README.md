@@ -73,7 +73,7 @@ The outer loop remains the researcher. Fugue remains the laboratory.
 | Fugue | Experiment validation, immutable identity, matrix expansion, preparation, approval checks, admission, scheduling, recovery, evaluation, evidence reconciliation | Hypothesis generation, winner selection, writable application code, raw trace storage |
 | Harbor | One isolated environment for each admitted Agent cell | Experiment design, scoring, research memory |
 | Local evidence ledger | Dataset, evaluation, prediction, transcript/tool digests, policy, privacy, usage, and cleanup receipts | Admission policy, runtime isolation, optional hosted publication |
-| W&B Weave | Optional hosted copy of an unchanged completed result and its evidence | Canonical scoring, classification, or identity |
+| W&B Weave | Optional hosted, digest-bound projection of a completed local result and its sanitized evidence-chain metadata | Canonical scoring, classification, or identity |
 | Study Console or another sink | A public-safe view of why the Study exists, its design, live progress, result, and evidence links | Execution, approval, retries, copied trace bodies |
 
 This division is important. An Agent can say, “these production traces suggest
@@ -259,6 +259,7 @@ python -m pip install "fugue[local-runner]"
 fugue init my-study --template prompt-change
 cd my-study
 install -m 600 .env.example .env
+# Set ANTHROPIC_API_KEY in .env.
 fugue doctor --require local-runner \
   --model anthropic/claude-sonnet-5 --env-file .env
 fugue check comparison.yaml --env-file .env
@@ -349,9 +350,9 @@ fugue publish wandb-index research-index.json \
   --project ENTITY/INDEX_PROJECT
 ```
 
-The last command creates a deterministic W&B index Run and an immutable
+`fugue publish wandb-index` creates a deterministic W&B Run and an immutable
 Artifact. Share the returned Run URL with colleagues who can access the target
-project. Its digest-bound table shows each Study's behavioral status,
+project. The Run contains a digest-bound table that shows each Study's behavioral status,
 recommendation, evidence integrity, exact result and qualification digests,
 candidate assignments, and primary evidence link. The Artifact preserves the
 exact Research index and its bound result and publication-receipt sources. The

@@ -5,11 +5,13 @@ This local study compares no prepared context with Fugue's deterministic
 this is a context intervention, not a harness ranking. The matrix contains
 eight logical cells.
 
-Create a private credential file, add `ANTHROPIC_API_KEY`, then run:
+Create `.env` with mode `0600`:
 
 ```bash
 install -m 600 .env.example .env
 ```
+
+Set `ANTHROPIC_API_KEY` in `.env`. Then run:
 
 ```bash
 fugue doctor --require local-runner --model anthropic/claude-sonnet-5 --env-file .env
