@@ -522,7 +522,7 @@ class _FakeApi:
         self._sdk.api_runs_queries.append((path, dict(filters), per_page))
         if self._sdk.run is None:
             return []
-        return [self._sdk.run] if filters == {"id": self._sdk.run.id} else []
+        return [self._sdk.run] if filters == {"name": self._sdk.run.id} else []
 
     def artifacts(
         self,
@@ -798,7 +798,7 @@ def test_publisher_writes_one_deterministic_safe_run_and_reads_it_back(
     assert sdk.wait_calls == 1
     assert sdk.api_run_paths == [f"wandb/community-studies/{call['id']}"]
     assert sdk.api_runs_queries == [
-        ("wandb/community-studies", {"id": call["id"]}, 2)
+        ("wandb/community-studies", {"name": call["id"]}, 2)
     ]
     assert len(sdk.api_artifacts_queries) == 1
     assert sdk.api_artifact_refs == [artifact.qualified_name]
@@ -827,6 +827,36 @@ def test_publisher_writes_one_deterministic_safe_run_and_reads_it_back(
     assert outcome.report_url is None
     assert outcome.report_status == "unavailable"
     assert outcome.publisher_revision == "v1+wandb-9.9.9"
+
+
+def test_run_preflight_filters_by_documented_unique_name() -> None:
+    run = SimpleNamespace(id="fugue-index-run")
+    calls: list[tuple[str, dict[str, str], int]] = []
+
+    class _NameFilteredApi:
+        def runs(
+            self,
+            path: str,
+            *,
+            filters: dict[str, str],
+            per_page: int,
+        ) -> list[SimpleNamespace]:
+            calls.append((path, dict(filters), per_page))
+            if "id" in filters:
+                raise AssertionError("Api.runs does not support an id filter")
+            return [run] if filters == {"name": run.id} else []
+
+    observed = adapter._find_run(
+        _NameFilteredApi(),
+        entity="wandb",
+        project_id="community-studies",
+        run_id=run.id,
+    )
+
+    assert observed is run
+    assert calls == [
+        ("wandb/community-studies", {"name": "fugue-index-run"}, 2)
+    ]
 
 
 @pytest.mark.parametrize("exists", [False, True])

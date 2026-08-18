@@ -564,7 +564,7 @@ def _find_run(
     observed = tuple(
         runs(
             f"{entity}/{project_id}",
-            filters={"id": run_id},
+            filters={"name": run_id},
             per_page=2,
         )
     )
