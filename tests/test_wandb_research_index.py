@@ -553,6 +553,26 @@ class _FakeApi:
         return self._sdk.logged_artifact
 
 
+class _ModernArtifactApi:
+    def __init__(self, artifact: _FakeArtifact | None) -> None:
+        self._artifact = artifact
+        self.exists_calls: list[tuple[str, str]] = []
+        self.artifact_calls: list[tuple[str, str]] = []
+
+    def artifact_exists(self, name: str, *, type: str) -> bool:
+        self.exists_calls.append((name, type))
+        return self._artifact is not None
+
+    def artifact(self, name: str, *, type: str) -> _FakeArtifact:
+        self.artifact_calls.append((name, type))
+        if self._artifact is None:
+            raise AssertionError("artifact lookup followed a negative preflight")
+        return self._artifact
+
+    def artifacts(self, **_kwargs: Any) -> list[_FakeArtifact]:
+        raise ValueError("an empty artifact collection is not iterable")
+
+
 class _FakeWandb:
     __version__ = "9.9.9"
 
@@ -807,6 +827,41 @@ def test_publisher_writes_one_deterministic_safe_run_and_reads_it_back(
     assert outcome.report_url is None
     assert outcome.report_status == "unavailable"
     assert outcome.publisher_revision == "v1+wandb-9.9.9"
+
+
+@pytest.mark.parametrize("exists", [False, True])
+def test_artifact_preflight_uses_supported_single_artifact_api(
+    exists: bool,
+) -> None:
+    sdk = _FakeWandb()
+    artifact = (
+        _FakeArtifact(
+            sdk,
+            "fugue-research-index-community-studies-deadbeef0000",
+            type=WANDB_STUDY_INDEX_JOB_TYPE,
+            metadata={},
+        )
+        if exists
+        else None
+    )
+    api = _ModernArtifactApi(artifact)
+
+    observed = adapter._find_artifact(
+        api,
+        entity="wandb",
+        project_id="community-studies",
+        artifact_name="fugue-research-index-community-studies-deadbeef0000",
+    )
+
+    expected_ref = (
+        "wandb/community-studies/"
+        "fugue-research-index-community-studies-deadbeef0000:latest"
+    )
+    assert api.exists_calls == [(expected_ref, WANDB_STUDY_INDEX_JOB_TYPE)]
+    assert api.artifact_calls == (
+        [(expected_ref, WANDB_STUDY_INDEX_JOB_TYPE)] if exists else []
+    )
+    assert observed is artifact
 
 
 @pytest.mark.parametrize("mismatch", ["run", "artifact", "table"])

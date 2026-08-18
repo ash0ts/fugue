@@ -587,6 +587,26 @@ def _find_artifact(
     project_id: str,
     artifact_name: str,
 ) -> Any | None:
+    artifact_ref = f"{entity}/{project_id}/{artifact_name}:latest"
+    artifact_exists = getattr(api, "artifact_exists", None)
+    artifact = getattr(api, "artifact", None)
+    if callable(artifact_exists) and callable(artifact):
+        if not artifact_exists(
+            artifact_ref,
+            type=WANDB_STUDY_INDEX_JOB_TYPE,
+        ):
+            return None
+        observed = artifact(
+            artifact_ref,
+            type=WANDB_STUDY_INDEX_JOB_TYPE,
+        )
+        if observed is None:
+            raise WandbResearchIndexPublicationError(
+                "W&B reported that the Research-index artifact exists but "
+                "did not return it"
+            )
+        return observed
+
     artifacts = getattr(api, "artifacts", None)
     if not callable(artifacts):
         raise WandbResearchIndexPublicationError(
