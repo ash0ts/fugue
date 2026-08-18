@@ -1376,6 +1376,11 @@ def test_operator_resolves_source_provenance_once_per_plan(
         job.resolved_candidate.execution_definition["fugue_source"] == provenance
         for job in jobs
     )
+    assert all(
+        job.resolved_candidate.execution_definition["fugue_distribution"]["kind"]
+        == "installed_distribution"
+        for job in jobs
+    )
 
 
 def test_snapshot_locks_generated_context_runtime_per_cell(tmp_path: Path) -> None:
@@ -1448,6 +1453,9 @@ config:
     assert fugue_source["kind"] == "unversioned"
     assert fugue_source["dirty"] is True
     assert snapshot["runtime"]["fugue_source"] == fugue_source
+    assert snapshot["runtime"]["fugue_distribution"]["kind"] == (
+        "installed_distribution"
+    )
     assert snapshot["candidate_runtime"][job.candidate_id]["fugue_source"] == (
         fugue_source
     )

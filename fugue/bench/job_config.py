@@ -57,7 +57,10 @@ from fugue.bench.library import (
 from fugue.bench.manifest import BenchmarkManifest, HarnessSpec, TaskSpec
 from fugue.bench.portable_runtime import read_runtime_lock as read_portable_runtime_lock
 from fugue.bench.runtime_manager import read_runtime_lock, render_runtime_compose
-from fugue.bench.runtime_provenance import resolve_fugue_source_provenance
+from fugue.bench.runtime_provenance import (
+    resolve_fugue_distribution_provenance,
+    resolve_fugue_source_provenance,
+)
 from fugue.bench.sandbox_policy import (
     SANDBOX_POLICY_VERSION,
     attest_harbor_job,
@@ -185,9 +188,10 @@ def _build_jobs(
     source_provenance: dict[str, Any] | None = None,
     scheduling_seed: str | None = None,
 ) -> list[RenderedJob]:
-    selected_source_provenance = source_provenance or resolve_fugue_source_provenance(
-        repo_root
+    selected_source_provenance = source_provenance or (
+        resolve_fugue_source_provenance(repo_root)
     )
+    distribution_provenance = resolve_fugue_distribution_provenance()
     runtime_root = repo_root / ".fugue" / "runtime" / run_id
     config_dir = runtime_root / "job-configs"
     if write_configs:
@@ -439,6 +443,7 @@ def _build_jobs(
                     "scheduling_seed": scheduling_seed,
                     "sandbox_policy_version": SANDBOX_POLICY_VERSION,
                     "fugue_source": selected_source_provenance,
+                    "fugue_distribution": distribution_provenance,
                     **(
                         {"execution_limits": experiment.execution_limits.to_dict()}
                         if experiment.execution_limits is not None

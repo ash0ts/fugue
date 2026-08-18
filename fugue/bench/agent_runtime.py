@@ -11,6 +11,11 @@ from typing import Any
 
 from filelock import FileLock
 
+from fugue.bench.distribution_assets import (
+    DistributionAsset,
+    runtime_assets,
+    vendor_asset,
+)
 from fugue.bench.files import atomic_write_json, docker_build_command
 from fugue.bench.files import inspect_docker_image as _inspect_image
 
@@ -58,8 +63,8 @@ class AgentRuntimeSpec:
             {
                 "spec": asdict(self),
                 "assets": {
-                    path.name: hashlib.sha256(path.read_bytes()).hexdigest()
-                    for path in _build_assets(self.harness)
+                    asset.name: asset.sha256
+                    for asset in _build_assets(self.harness)
                 },
             }
         )
@@ -305,7 +310,7 @@ def prepare_runtime(
         try:
             (build / "Dockerfile").write_text(spec.dockerfile)
             for asset in _build_assets(harness):
-                shutil.copy2(asset, build / asset.name)
+                (build / asset.name).write_bytes(asset.body)
             subprocess.run(
                 docker_build_command(
                     "--platform",
@@ -404,11 +409,10 @@ def runtime_mount(
     }
 
 
-def _build_assets(harness: str) -> tuple[Path, ...]:
-    root = Path(__file__).resolve().parents[2] / "configs/fugue/runtime" / harness
-    assets = [path for path in sorted(root.iterdir()) if path.is_file()]
+def _build_assets(harness: str) -> tuple[DistributionAsset, ...]:
+    assets = list(runtime_assets(harness))
     if harness == "openclaw":
-        assets.append(Path(__file__).resolve().parents[2] / "vendor/weave-node-sdk.tgz")
+        assets.append(vendor_asset("weave-node-sdk.tgz"))
     return tuple(assets)
 
 

@@ -1,0 +1,80 @@
+{
+  "$id": "https://fugue.local/schemas/provider/preparation-receipt-v1.json",
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "additionalProperties": false,
+  "properties": {
+    "candidate_digest": {
+      "pattern": "^[0-9a-f]{64}$",
+      "type": "string"
+    },
+    "cleanup_obligations": {
+      "items": {
+        "type": "object"
+      },
+      "type": "array"
+    },
+    "frozen_references": {
+      "items": {
+        "type": "object"
+      },
+      "type": "array"
+    },
+    "lifecycle_outputs": {
+      "items": {
+        "type": "object"
+      },
+      "type": "array"
+    },
+    "materialized_resources": {
+      "items": {
+        "type": "object"
+      },
+      "type": "array"
+    },
+    "prepared_at": {
+      "minLength": 1,
+      "type": "string"
+    },
+    "provider_id": {
+      "minLength": 1,
+      "type": "string"
+    },
+    "provider_lock_digest": {
+      "pattern": "^[0-9a-f]{64}$",
+      "type": "string"
+    },
+    "receipt_digest": {
+      "pattern": "^[0-9a-f]{64}$",
+      "type": "string"
+    },
+    "runtime_artifacts": {
+      "items": {
+        "type": "object"
+      },
+      "type": "array"
+    },
+    "schema_version": {
+      "const": 1
+    },
+    "suite_digest": {
+      "pattern": "^[0-9a-f]{64}$",
+      "type": "string"
+    }
+  },
+  "required": [
+    "schema_version",
+    "provider_id",
+    "provider_lock_digest",
+    "candidate_digest",
+    "suite_digest",
+    "frozen_references",
+    "materialized_resources",
+    "lifecycle_outputs",
+    "runtime_artifacts",
+    "cleanup_obligations",
+    "prepared_at",
+    "receipt_digest"
+  ],
+  "title": "preparation-receipt",
+  "type": "object"
+}

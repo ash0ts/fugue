@@ -1,0 +1,107 @@
+{
+  "$id": "https://fugue.local/schemas/provider/cell-result-v1.json",
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "additionalProperties": false,
+  "properties": {
+    "cell_id": {
+      "minLength": 1,
+      "type": "string"
+    },
+    "cleanup": {
+      "type": "object"
+    },
+    "conversation": {
+      "items": {
+        "type": "object"
+      },
+      "type": "array"
+    },
+    "evidence_refs": {
+      "items": {
+        "type": "object"
+      },
+      "type": "array"
+    },
+    "failure": {
+      "type": [
+        "object",
+        "null"
+      ]
+    },
+    "output": {
+      "type": "object"
+    },
+    "provider_id": {
+      "minLength": 1,
+      "type": "string"
+    },
+    "request_digest": {
+      "pattern": "^[0-9a-f]{64}$",
+      "type": "string"
+    },
+    "result_digest": {
+      "pattern": "^[0-9a-f]{64}$",
+      "type": "string"
+    },
+    "schema_version": {
+      "const": 1
+    },
+    "status": {
+      "enum": [
+        "cancelled",
+        "failed",
+        "succeeded",
+        "timed_out"
+      ]
+    },
+    "tool_calls": {
+      "items": {
+        "type": "object"
+      },
+      "type": "array"
+    },
+    "usage": {
+      "additionalProperties": false,
+      "properties": {
+        "cost_usd": {
+          "minimum": 0,
+          "type": "number"
+        },
+        "input_tokens": {
+          "minimum": 0,
+          "type": "number"
+        },
+        "latency_ms": {
+          "minimum": 0,
+          "type": "number"
+        },
+        "output_tokens": {
+          "minimum": 0,
+          "type": "number"
+        },
+        "tool_calls": {
+          "minimum": 0,
+          "type": "number"
+        }
+      },
+      "type": "object"
+    }
+  },
+  "required": [
+    "schema_version",
+    "provider_id",
+    "cell_id",
+    "request_digest",
+    "status",
+    "output",
+    "conversation",
+    "tool_calls",
+    "usage",
+    "evidence_refs",
+    "failure",
+    "cleanup",
+    "result_digest"
+  ],
+  "title": "cell-result",
+  "type": "object"
+}

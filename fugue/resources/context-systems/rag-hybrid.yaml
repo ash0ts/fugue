@@ -1,0 +1,21 @@
+id: rag-hybrid
+title: Fugue RAG (hybrid)
+description: Controlled reciprocal-rank fusion of shared BM25 and dense indexes.
+provider: fugue.bench.context:RagContextProvider
+version: "4"
+capabilities: [prepare, retrieve, bind, ingest, sequence]
+deliveries: [portable, native_mcp]
+required_packages: [fastembed, lancedb]
+license: Fugue
+config:
+  mode: hybrid
+  lines_per_chunk: 80
+  line_overlap: 20
+  embedding_model: BAAI/bge-small-en-v1.5
+  embedding_dimensions: 384
+  binding:
+    managed_runtime: fugue_context
+    mcp_servers:
+      - name: fugue-context
+        command: python
+        args: [-m, fugue.context_server, --system, rag-hybrid, --prepared, .fugue-context]

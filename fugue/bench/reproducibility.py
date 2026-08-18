@@ -108,6 +108,7 @@ def build_run_snapshot(
     assets: dict[str, dict[str, Any]] = {}
     generated_runtime_assets_by_config: dict[str, tuple[str, ...]] = {}
     fugue_source: dict[str, Any] | None = None
+    fugue_distribution: dict[str, Any] | None = None
     for job in jobs:
         resolved = job.resolved_candidate
         store_consistent(
@@ -131,6 +132,18 @@ def build_run_snapshot(
             if fugue_source is not None and fugue_source != selected_fugue_source:
                 raise ValueError("jobs resolved from different Fugue source states")
             fugue_source = selected_fugue_source
+        selected_distribution = resolved.execution_definition.get(
+            "fugue_distribution"
+        )
+        if selected_distribution is not None:
+            if not isinstance(selected_distribution, dict):
+                raise ValueError("Fugue distribution provenance must be an object")
+            if (
+                fugue_distribution is not None
+                and fugue_distribution != selected_distribution
+            ):
+                raise ValueError("jobs resolved from different Fugue distributions")
+            fugue_distribution = selected_distribution
         generated_runtime_asset_ids: list[str] = []
         for runtime_file in job.generated_runtime_files:
             if not runtime_file.is_file():
@@ -245,6 +258,8 @@ def build_run_snapshot(
             runtime["agent_runtime"] = agent_runtime
         if selected_fugue_source is not None:
             runtime["fugue_source"] = selected_fugue_source
+        if selected_distribution is not None:
+            runtime["fugue_distribution"] = selected_distribution
         required_env.update(candidate_required_env)
         runtime["configuration_sha256"] = stable_digest(runtime)
         store_consistent(
@@ -376,6 +391,7 @@ def build_run_snapshot(
             ),
             "executions": executions,
             "fugue_source": fugue_source,
+            "fugue_distribution": fugue_distribution,
             "bridge": dict(bridge_runtime) if bridge_runtime is not None else None,
         },
         required_env=tuple(sorted(name for name in required_env if name)),
