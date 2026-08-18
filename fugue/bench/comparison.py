@@ -10976,6 +10976,11 @@ def _comparison_evidence_links(
             if link.status != "resolved":
                 continue
             value = str(link.url or "")
+            # Local artifact refs remain available on each paired attempt, but
+            # this overview is a list of browser-safe URLs.  Never render a
+            # URL-less local receipt as an empty Markdown link.
+            if not value:
+                continue
             kind = str(link.kind)
             if value in seen:
                 continue
@@ -11129,10 +11134,14 @@ def _operational_summary(
             or "unknown"
         )
         execution[status] = execution.get(status, 0) + 1
-        evidence_status = str(
-            row.get("trace_link_status")
-            or row.get("evidence_status")
-            or "unknown"
+        evidence_status = (
+            _attempt_evidence_status(row)
+            if row.get("local_evidence_links")
+            else str(
+                row.get("trace_link_status")
+                or row.get("evidence_status")
+                or "unknown"
+            )
         )
         evidence[evidence_status] = evidence.get(evidence_status, 0) + 1
         if status in {"failed", "error", "infrastructure_failed"} or row.get(

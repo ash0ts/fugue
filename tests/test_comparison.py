@@ -3701,7 +3701,7 @@ def test_execute_local_comparison_never_requires_or_fetches_weave(
         forbidden_hosted,
     )
 
-    result, result_path, _markdown_path = execute_comparison(
+    result, result_path, markdown_path = execute_comparison(
         preview,
         approval_digest="",
         repo_root=root,
@@ -3718,8 +3718,13 @@ def test_execute_local_comparison_never_requires_or_fetches_weave(
         "local"
     )
     assert result.hosted_chain_integrity == "not_applicable"
+    assert result.operational_summary["evidence_states"] == {"reconciled": 2}
+    assert result.evidence_links == ()
     assert captured["local_rows"] == 2
     assert result_path.is_file()
+    markdown = markdown_path.read_text(encoding="utf-8")
+    assert "]()" not in markdown
+    assert "No safe evidence links were available." in markdown
 
 
 def test_local_execution_binding_reconciles_manifest_and_run_receipt(
