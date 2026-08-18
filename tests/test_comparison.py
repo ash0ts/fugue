@@ -4,6 +4,7 @@ import hashlib
 import json
 from dataclasses import replace
 from pathlib import Path
+from types import SimpleNamespace
 
 import httpx
 import pytest
@@ -17,6 +18,7 @@ from fugue.bench.comparison import (
     ComparisonSpecV1,
     DecisionAttestationV1,
     _apply_decision_attestation,
+    _bind_local_execution_evidence,
     _canonical_decision_gate_policies,
     _comparison_qualification_digest,
     _comparison_result_digest,
@@ -80,6 +82,16 @@ def test_source_use_comparison_is_ready_and_exact() -> None:
     assert readiness.estimated_cost_usd == 0
     assert preview.matrix["estimated_trials"] == 16
     assert preview.matrix["applicable_cells"] == 16
+    assert set(preview.matrix["candidate_definitions"]) == {
+        str(item["candidate_id"])
+        for item in preview.matrix["matrix_cells"]
+    }
+    assert all(
+        stable_digest(definition) == candidate_id
+        for candidate_id, definition in preview.matrix[
+            "candidate_definitions"
+        ].items()
+    )
     assert reparsed == spec
     assert isinstance(preview.comparison["evaluators"], list)
     assert isinstance(preview.comparison["execution"]["harnesses"], list)
@@ -387,6 +399,63 @@ def test_comparison_declared_destination_overrides_legacy_test_endpoint(
         "trace_base_url": "https://trace.wandb.ai",
         "app_base_url": "https://wandb.ai",
     }
+
+
+def test_comparison_defaults_to_canonical_local_evidence(tmp_path: Path) -> None:
+    comparison_path = scaffold_comparison(tmp_path)
+    raw = yaml.safe_load(comparison_path.read_text())
+    spec = comparison_from_dict(raw, repo_root=tmp_path, source=tmp_path)
+
+    assert spec.execution.evidence_mode == "local"
+    assert spec.execution.evidence_project is None
+    assert spec.execution.evidence_destination is not None
+    assert spec.execution.evidence_destination.to_dict()["kind"] == "local"
+
+    experiment, _manifest, _rows = compile_comparison(spec, repo_root=tmp_path)
+    assert experiment.evidence_mode == "local"
+    assert experiment.agent_env["FUGUE_EVIDENCE_MODE"] == "local"
+    assert experiment.evidence_project is None
+
+    raw["execution"]["evidence_mode"] = "local"
+    raw["execution"]["source_evidence_project"] = "wandb/source-project"
+    raw["execution"]["source_evidence_destination"] = {
+        "schema_version": 1,
+        "entity": "wandb",
+        "project": "source-project",
+        "api_base_url": "https://api.wandb.ai",
+        "trace_base_url": "https://trace.wandb.ai",
+        "app_base_url": "https://wandb.ai",
+    }
+    source_backed = comparison_from_dict(
+        raw,
+        repo_root=tmp_path,
+        source=tmp_path,
+    )
+    assert source_backed.execution.evidence_mode == "local"
+    assert source_backed.execution.source_evidence_project == (
+        "wandb/source-project"
+    )
+    assert source_backed.execution.evidence_project is None
+    assert source_backed.execution.evidence_destination is not None
+    assert source_backed.execution.evidence_destination.to_dict()["kind"] == (
+        "local"
+    )
+    source_experiment, _manifest, _rows = compile_comparison(
+        source_backed,
+        repo_root=tmp_path,
+    )
+    assert source_experiment.evidence_mode == "local"
+    assert source_experiment.source_evidence_project == "wandb/source-project"
+    assert source_experiment.evidence_project is None
+    assert source_experiment.agent_env["FUGUE_EVIDENCE_MODE"] == "local"
+    assert source_experiment.agent_env["FUGUE_SOURCE_EVIDENCE_PROJECT"] == (
+        "wandb/source-project"
+    )
+
+    raw["execution"]["evidence_mode"] = "local"
+    raw["execution"]["evidence_project"] = "wandb/not-local"
+    with pytest.raises(ValueError, match="does not accept W&B"):
+        comparison_from_dict(raw, repo_root=tmp_path, source=tmp_path)
 
 
 def test_comparison_evaluation_projects_aligned_attempts_and_weave_links() -> None:
@@ -876,6 +945,7 @@ def test_v3_result_round_trips_source_topology_and_canonical_view(
     result_project = "wandb/result-project"
     raw["schema_version"] = 3
     raw["execution"]["source_evidence_project"] = source_project
+    raw["execution"]["evidence_mode"] = "weave_required"
     raw["execution"]["source_evidence_destination"] = {
         "entity": "wandb",
         "project": "source-project",
@@ -1050,6 +1120,49 @@ def test_v3_result_round_trips_source_topology_and_canonical_view(
         result.paired_cases[0].candidate.actual_query_scope
         == (source_project,)
     )
+
+    dual_chain_rows = json.loads(json.dumps(rows))
+    for row in dual_chain_rows:
+        attempt = str(row["attempt_id"])
+        row["local_evidence_links"] = [
+            {
+                "kind": kind,
+                "status": "resolved",
+                "system": "local_artifact",
+                "ref": f"fugue://evidence/{attempt}/{kind}",
+            }
+            for kind in (
+                "evaluation_root",
+                "prediction_and_score",
+                "prediction",
+                "agent_root",
+                "dataset",
+            )
+        ]
+    dual_chain = analyze_comparison_rows(
+        comparison_id=spec.id,
+        preview_digest=preview.preview_digest,
+        rows=dual_chain_rows,
+        source="v3-run",
+        expected_evidence_project=result_project,
+        expected_source_evidence_project=source_project,
+        approved_comparison=approved,
+        result_schema_version=3,
+        study_intent="mcp_release_maintenance",
+        supersedes=spec.supersedes,
+    )
+    assert isinstance(dual_chain, ComparisonResultV3)
+    assert dual_chain.evidence_backend == "weave"
+    assert dual_chain.local_chain_integrity == "reconciled"
+    assert dual_chain.hosted_chain_integrity == "reconciled"
+    assert {
+        item.system
+        for item in dual_chain.paired_cases[0].candidate.evidence_links
+    } == {"local_artifact"}
+    assert {
+        item.system
+        for item in dual_chain.paired_cases[0].candidate.hosted_evidence_links
+    } == {"weave"}
 
     role_drift = json.loads(json.dumps(rows))
     candidate_row = next(
@@ -1995,6 +2108,9 @@ def test_approved_comparison_manifest_reconciles_exact_run_and_coordinates(
     assert approved["approved_inputs_digest"] == stable_digest(
         approved["approved_inputs"]
     )
+    assert approved["candidate_definitions"] == preview.matrix[
+        "candidate_definitions"
+    ]
     assert approved["candidate_source_revisions_required"] is False
     rows = [
         {
@@ -2106,7 +2222,10 @@ def test_approved_comparison_manifest_reconciles_exact_run_and_coordinates(
         }
         for cell in drifted["expected_cells"]
     ]
-    with pytest.raises(ValueError, match="per-arm identity drift"):
+    with pytest.raises(
+        ValueError,
+        match="candidate definitions|per-arm identity drift",
+    ):
         analyze_comparison_rows(
             comparison_id=spec.id,
             preview_digest=preview.preview_digest,
@@ -3263,6 +3382,7 @@ def _local_preparation_spec(
 ) -> tuple[Path, ComparisonSpecV1]:
     comparison_path = scaffold_comparison(tmp_path / "comparison")
     raw = yaml.safe_load(comparison_path.read_text(encoding="utf-8"))
+    raw["execution"]["evidence_mode"] = "weave_required"
     raw["execution"]["evidence_project"] = "wandb/fugue-test"
     raw["execution"]["approval_required"] = False
     raw["execution"]["preparation_required"] = preparation_required
@@ -3383,3 +3503,335 @@ def test_execute_comparison_never_prepares_after_preview(
             fetch_weave=False,
             publish_research=False,
         )
+
+
+def test_execute_local_comparison_never_requires_or_fetches_weave(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    comparison_path = scaffold_comparison(tmp_path / "comparison")
+    raw = yaml.safe_load(comparison_path.read_text(encoding="utf-8"))
+    raw["execution"]["model"] = "anthropic/claude-sonnet-5"
+    raw["execution"]["attempts"] = 1
+    raw["execution"]["approval_required"] = False
+    comparison_path.write_text(
+        yaml.safe_dump(raw, sort_keys=False),
+        encoding="utf-8",
+    )
+    root = comparison_path.parent
+    spec = load_comparison(comparison_path, repo_root=root)
+    preview = preview_comparison(spec, repo_root=root)
+    captured: dict[str, object] = {}
+
+    for name in (
+        "WANDB_API_KEY",
+        "WANDB_ENTITY",
+        "WANDB_PROJECT",
+        "FUGUE_WEAVE_PROJECT",
+        "WEAVE_PROJECT",
+    ):
+        monkeypatch.delenv(name, raising=False)
+
+    def fake_execute_run(
+        self: OperatorService,
+        request: object,
+        **_kwargs: object,
+    ) -> object:
+        assert "WANDB_API_KEY" not in self.env
+        captured["approved"] = request.approved_comparison  # type: ignore[attr-defined]
+        return SimpleNamespace(status="passed")
+
+    def fake_export_run(
+        _self: OperatorService,
+        run_id: str,
+        *,
+        out: Path,
+        fetch_weave: bool,
+        to_weave: bool,
+        **_kwargs: object,
+    ) -> object:
+        assert fetch_weave is False
+        assert to_weave is False
+        approved = dict(captured["approved"])  # type: ignore[arg-type]
+        provenance_by_attempt = {
+            str(item["attempt_id"]): list(
+                item.get("integration_provenance") or []
+            )
+            for item in preview.matrix["matrix_cells"]
+        }
+        rows: list[dict[str, object]] = []
+        for cell in approved["expected_cells"]:
+            cell = dict(cell)
+            attempt = str(cell["attempt_id"])
+            passed = str(cell["variant_id"]) == "candidate"
+            rows.append(
+                {
+                    **cell,
+                    "run_id": run_id,
+                    "approved_comparison": approved,
+                    "trace_receipt": approved["evidence_destination"],
+                    "candidate_definition": approved[
+                        "candidate_definitions"
+                    ][str(cell["candidate_id"])],
+                    "integration_provenance": provenance_by_attempt[attempt],
+                    "prediction_id": f"prediction-{attempt}",
+                    "pass": passed,
+                    "status": "passed",
+                    "comparison_evaluation_status": "completed",
+                    "comparison_required_evaluation_complete": True,
+                    "comparison_deterministic_scores": {
+                        "fact-and-source.answer_present": passed,
+                        "fact-and-source.expected_values": passed,
+                    },
+                    "comparison_deterministic_criticality": {
+                        "fact-and-source.answer_present": True,
+                        "fact-and-source.expected_values": True,
+                    },
+                    "comparison_dimension_roles": {
+                        "fact-and-source.answer_present": "outcome",
+                        "fact-and-source.expected_values": "outcome",
+                    },
+                    "agent_response": {
+                        "amount": 125 if passed else 100,
+                        "source": (
+                            "expense-policy-v4.md"
+                            if passed
+                            else "expense-policy-v3.md"
+                        ),
+                    },
+                    "queried_projects": [],
+                    "cost_usd": 0.1,
+                    "latency_sec": 1.0,
+                    "local_evidence_links": [
+                        {
+                            "kind": kind,
+                            "status": "resolved",
+                            "system": "local_artifact",
+                            "ref": f"fugue://evidence/{attempt}/{kind}",
+                        }
+                        for kind in (
+                            "evaluation_root",
+                            "prediction_and_score",
+                            "prediction",
+                            "agent_root",
+                            "dataset",
+                        )
+                    ],
+                    "local_evidence_integrity": "resolved",
+                    "privacy_contract_version": 2,
+                    "local_artifact_privacy_scan_status": "passed",
+                    "local_artifact_privacy_scan_digest": "1" * 64,
+                    "local_artifact_privacy_match_count": 0,
+                    "hosted_evidence_privacy_scan_status": "not_applicable",
+                    "private_label_boundary_verified": True,
+                    "harbor_environment": "local_harbor_docker",
+                    "harbor_conformance_status": "passed",
+                    "harbor_conformance_receipt_digest": "2" * 64,
+                    "harbor_policy_attestation_verified": True,
+                    "sandbox_cleanup_verified": True,
+                    "sandbox_deleted": True,
+                    "orphaned_sandbox": False,
+                }
+            )
+        out.parent.mkdir(parents=True, exist_ok=True)
+        out.write_text(
+            "".join(json.dumps(row, sort_keys=True) + "\n" for row in rows),
+            encoding="utf-8",
+        )
+        return SimpleNamespace(path=out)
+
+    def bind_local(
+        rows: list[dict[str, object]],
+        *,
+        repo_root: Path,
+        run_id: str,
+        hosted_evidence_expected: bool,
+    ) -> None:
+        assert repo_root == root
+        assert run_id
+        assert hosted_evidence_expected is False
+        captured["local_rows"] = len(rows)
+        for index, row in enumerate(rows, start=1):
+            row.update(
+                {
+                    "local_evidence_record_digest": f"{index:x}" * 64,
+                    "local_evidence_prediction_row_sha256": (
+                        f"{index + 2:x}" * 64
+                    ),
+                    "local_evidence_manifest_digest": "4" * 64,
+                    "local_evidence_manifest_file_sha256": "5" * 64,
+                    "local_evidence_plan_digest": "6" * 64,
+                    "local_evidence_attempt_record_set_digest": "7" * 64,
+                    "local_evidence_prediction_row_set_digest": "8" * 64,
+                    "local_evidence_run_receipt_digest": "9" * 64,
+                    "local_evidence_run_receipt_file_sha256": "a" * 64,
+                }
+            )
+
+    def forbidden_hosted(*_args: object, **_kwargs: object) -> object:
+        raise AssertionError("local comparison attempted hosted evidence work")
+
+    def bind_scored_rows(**kwargs: object) -> list[dict[str, object]]:
+        rows = list(kwargs["rows"])  # type: ignore[arg-type]
+        for row in rows:
+            row["source_pre_run_drift"] = kwargs[
+                "source_pre_run_drift"
+            ].to_dict()
+            row["source_post_run_drift"] = kwargs[
+                "source_post_run_drift"
+            ].to_dict()
+        return rows
+
+    monkeypatch.setattr(OperatorService, "execute_run", fake_execute_run)
+    monkeypatch.setattr(OperatorService, "export_run", fake_export_run)
+    monkeypatch.setattr(
+        "fugue.bench.comparison._bind_local_execution_evidence",
+        bind_local,
+    )
+    monkeypatch.setattr(
+        "fugue.bench.comparison._score_and_bind_exported_comparison_rows",
+        bind_scored_rows,
+    )
+    monkeypatch.setattr(
+        "fugue.bench.comparison.trace_project_slug",
+        forbidden_hosted,
+    )
+    monkeypatch.setattr(
+        "fugue.bench.comparison._apply_hosted_evidence_privacy",
+        forbidden_hosted,
+    )
+
+    result, result_path, _markdown_path = execute_comparison(
+        preview,
+        approval_digest="",
+        repo_root=root,
+        # Even an old caller requesting hosted hydration cannot make local
+        # execution contact Weave.
+        fetch_weave=True,
+        publish_research=False,
+    )
+
+    assert isinstance(result, ComparisonResultV3)
+    assert result.evidence_project is None
+    assert result.evidence_backend == "local"
+    assert result.evidence_topology.result_destination.to_dict()["kind"] == (
+        "local"
+    )
+    assert result.hosted_chain_integrity == "not_applicable"
+    assert captured["local_rows"] == 2
+    assert result_path.is_file()
+
+
+def test_local_execution_binding_reconciles_manifest_and_run_receipt(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    attempts = ("1" * 64, "2" * 64)
+    records = tuple(
+        SimpleNamespace(
+            attempt_id=attempt,
+            record_digest=str(index) * 64,
+            prediction_row_sha256=str(index + 2) * 64,
+        )
+        for index, attempt in enumerate(attempts, start=1)
+    )
+    manifest = SimpleNamespace(
+        run_id="local-run",
+        status="complete",
+        terminal_attempt_ids=attempts,
+        manifest_digest="3" * 64,
+        plan_digest="7" * 64,
+        attempt_record_set_digest="4" * 64,
+        prediction_row_set_digest="5" * 64,
+        attempt_records=records,
+        run_conformance=SimpleNamespace(
+            receipt_sha256="6" * 64,
+            status="passed",
+            enforced=True,
+        ),
+    )
+
+    class FakeStore:
+        def __init__(self, repo_root: Path, run_id: str) -> None:
+            assert repo_root == tmp_path
+            assert run_id == "local-run"
+            self.manifest_path = tmp_path / "manifest.json"
+            self.run_conformance_path = tmp_path / "conformance.json"
+            self.manifest_path.write_text("manifest", encoding="utf-8")
+            self.run_conformance_path.write_text("receipt", encoding="utf-8")
+
+        def read_manifest(self) -> object:
+            return manifest
+
+    rows = [
+        {
+            "attempt_id": attempt,
+            "local_evidence_links": [{"system": "local_artifact"}],
+            "local_evidence_record_digest": record.record_digest,
+        }
+        for attempt, record in zip(attempts, records, strict=True)
+    ]
+
+    def apply_conformance(
+        bound_rows: list[dict[str, object]],
+        *,
+        repo_root: Path,
+        run_id: str,
+    ) -> None:
+        assert repo_root == tmp_path
+        assert run_id == "local-run"
+        for row in bound_rows:
+            row["harbor_conformance_status"] = "passed"
+
+    monkeypatch.setattr(
+        "fugue.bench.comparison.LocalEvidenceStore",
+        FakeStore,
+    )
+    monkeypatch.setattr(
+        "fugue.bench.run_conformance.read_harbor_run_conformance_receipt",
+        lambda **_kwargs: {
+            "backend": "local_harbor_docker",
+            "status": "passed",
+            "receipt_sha256": "6" * 64,
+        },
+    )
+    monkeypatch.setattr(
+        "fugue.bench.comparison._apply_harbor_conformance",
+        apply_conformance,
+    )
+
+    _bind_local_execution_evidence(
+        rows,
+        repo_root=tmp_path,
+        run_id="local-run",
+    )
+
+    assert {row["local_evidence_manifest_digest"] for row in rows} == {
+        "3" * 64
+    }
+    assert {row["local_evidence_run_receipt_digest"] for row in rows} == {
+        "6" * 64
+    }
+    assert {row["hosted_evidence_privacy_scan_status"] for row in rows} == {
+        "not_applicable"
+    }
+
+    hosted_rows = [dict(row, trace_project="wandb/hosted-evidence") for row in rows]
+    for row in hosted_rows:
+        row.pop("hosted_evidence_privacy_scan_status", None)
+    _bind_local_execution_evidence(
+        hosted_rows,
+        repo_root=tmp_path,
+        run_id="local-run",
+        hosted_evidence_expected=True,
+    )
+
+    assert {row["trace_project"] for row in hosted_rows} == {
+        "wandb/hosted-evidence"
+    }
+    assert all(
+        "hosted_evidence_privacy_scan_status" not in row for row in hosted_rows
+    )
+    assert {row["local_evidence_manifest_digest"] for row in hosted_rows} == {
+        "3" * 64
+    }

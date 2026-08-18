@@ -477,6 +477,81 @@ def test_first_cell_conformance_proves_cleanup_and_private_boundary(
     assert "wandb-secret-value" not in json.dumps(receipt)
 
 
+def test_private_boundary_rejects_neutral_key_private_bundle_copy(
+    tmp_path: Path,
+) -> None:
+    run_id = "run-neutral-private-copy"
+    job = _local_job(tmp_path, run_id)
+    private_bundle = {
+        "prediction-a": {
+            "task_id": "task-a",
+            "expected_evidence_paths": ["host-only/answer.json"],
+        }
+    }
+    asset_lock = tmp_path / ".fugue/runtime" / run_id / "evaluation-assets.json"
+    asset_lock.write_text(
+        json.dumps({"schema_version": 1, "predictions": private_bundle}) + "\n"
+    )
+    asset_lock.chmod(0o600)
+    job.config["context"] = {"innocent_name": private_bundle}
+
+    receipt = conformance_module._private_label_boundary(
+        run_dir=asset_lock.parent,
+        jobs=[job],
+        host_scorer_names=("comparison.deterministic.answer",),
+    )
+
+    assert receipt["status"] == "failed"
+    assert receipt["rendered_private_fields"] == []
+    assert receipt["tainted_agent_inputs"]
+
+
+def test_private_boundary_rejects_host_only_bundle_mount(tmp_path: Path) -> None:
+    run_id = "run-private-mount"
+    job = _local_job(tmp_path, run_id)
+    asset_lock = tmp_path / ".fugue/runtime" / run_id / "evaluation-assets.json"
+    job.config["environment"] = {
+        "mounts": [{"source": asset_lock.as_posix(), "target": "/input/data.json"}]
+    }
+
+    receipt = conformance_module._private_label_boundary(
+        run_dir=asset_lock.parent,
+        jobs=[job],
+        host_scorer_names=("comparison.deterministic.answer",),
+    )
+
+    assert receipt["status"] == "failed"
+    assert any("source" in path for path in receipt["tainted_agent_inputs"])
+
+
+def test_private_boundary_does_not_treat_correct_output_as_input_leakage(
+    tmp_path: Path,
+) -> None:
+    run_id = "run-correct-output"
+    job = _local_job(tmp_path, run_id)
+    asset_lock = tmp_path / ".fugue/runtime" / run_id / "evaluation-assets.json"
+    private_bundle = {
+        "prediction-a": {
+            "task_id": "task-a",
+            "expected_evidence_paths": ["host-only/answer.json"],
+        }
+    }
+    asset_lock.write_text(
+        json.dumps({"schema_version": 1, "predictions": private_bundle}) + "\n"
+    )
+    asset_lock.chmod(0o600)
+    job.result_path.write_text(json.dumps({"answer": private_bundle}) + "\n")
+
+    receipt = conformance_module._private_label_boundary(
+        run_dir=asset_lock.parent,
+        jobs=[job],
+        host_scorer_names=("comparison.deterministic.answer",),
+    )
+
+    assert receipt["status"] == "passed"
+    assert receipt["tainted_agent_inputs"] == []
+
+
 def test_harbor_cleanup_attributes_new_container_from_exact_run_environment(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:

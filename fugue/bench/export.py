@@ -23,10 +23,21 @@ import httpx
 from filelock import FileLock
 
 from fugue.agent_tracing import agent_conversation_id, stable_agent_name
-from fugue.bench.candidates import CANDIDATE_IDENTITY_SCHEMA_VERSION
-from fugue.bench.evaluations import apply_generated_evaluation
+from fugue.bench.candidates import CANDIDATE_IDENTITY_SCHEMA_VERSION, stable_digest
+from fugue.bench.evaluations import apply_generated_evaluation, public_evaluation_case
 from fugue.bench.execution import CellOutcome, PlannedCell
 from fugue.bench.files import atomic_write_json
+from fugue.bench.local_evidence import (
+    AgentEvidenceReceiptV1,
+    LocalArtifactRefV1,
+    LocalAttemptPlanV1,
+    LocalEvidenceCoordinator,
+    LocalEvidenceDestinationV1,
+    LocalEvidenceManifestV1,
+    LocalEvidenceStore,
+    build_local_evidence_run_plan,
+    local_attempt_refs,
+)
 from fugue.bench.reproducibility import (
     EVALUATION_ASSET_LOCK_NAME,
     read_evaluation_asset_lock,
@@ -223,6 +234,7 @@ class LiveEvaluationCoordinator:
         checkpoint_conformance: (
             Callable[[PlannedCell], Mapping[str, Any]] | None
         ) = None,
+        results_filename: str = "evaluation-results.jsonl",
     ) -> None:
         if not trace_api_key(env):
             raise RuntimeError(
@@ -235,7 +247,12 @@ class LiveEvaluationCoordinator:
         self.run_dir = repo_root / ".fugue" / "runtime" / self.run_id
         self.run_dir.mkdir(parents=True, exist_ok=True)
         self.events_path = self.run_dir / "evaluations.jsonl"
-        self.results_path = self.run_dir / "evaluation-results.jsonl"
+        if results_filename not in {
+            "evaluation-results.jsonl",
+            "hosted-evaluation-results.jsonl",
+        }:
+            raise ValueError("unsupported live evaluation results filename")
+        self.results_path = self.run_dir / results_filename
         self._event_lock = threading.Lock()
         self._predictions: dict[str, _LivePrediction] = {}
         self._prediction_lock = threading.Lock()
@@ -333,6 +350,22 @@ class LiveEvaluationCoordinator:
         self._unique_sessions = tuple(
             {id(value): value for value in self._sessions_by_cell.values()}.values()
         )
+
+    def terminal_row(self, cell_id: str) -> dict[str, Any] | None:
+        """Return the hosted row for coordination, never as a second result."""
+
+        session = self._sessions_by_cell.get(cell_id)
+        if session is None:
+            return None
+        with session.lock:
+            matches = [
+                row
+                for row in session.rows
+                if str(row.get("cell_id") or "") == cell_id
+            ]
+        if len(matches) > 1:
+            raise RuntimeError(f"duplicate hosted terminal rows for cell: {cell_id}")
+        return dict(matches[0]) if matches else None
 
     def begin_cell(self, cell: PlannedCell) -> Mapping[str, str] | None:
         session = self._sessions_by_cell.get(cell.id)
@@ -1111,12 +1144,23 @@ class LiveEvaluationCoordinator:
             attach_span_ref=False,
         )
 
-    def finish_cell(self, cell: PlannedCell, outcome: CellOutcome) -> None:
+    def finish_cell(
+        self,
+        cell: PlannedCell,
+        outcome: CellOutcome,
+        *,
+        canonical_row: Mapping[str, Any] | None = None,
+    ) -> None:
         with self._prediction_lock:
             active = self._predictions.get(cell.id)
         if active is None:
             return
-        row = _completed_evaluation_row(cell, outcome, active.row)
+        row = (
+            dict(canonical_row)
+            if canonical_row is not None
+            else _completed_evaluation_row(cell, outcome, active.row)
+        )
+        _verify_coordinated_row_identity(row, cell)
         _merge_error_events(row)
         row["evaluation_publication_mode"] = "live"
         row["evaluation_prediction_latency_sec"] = max(
@@ -1162,7 +1206,7 @@ class LiveEvaluationCoordinator:
                         predict_and_score_call_id=call_id,
                         attach_span_ref=True,
                     )
-            if cell.evaluation_case is not None:
+            if canonical_row is None and cell.evaluation_case is not None:
                 try:
                     apply_generated_evaluation(
                         row,
@@ -1184,7 +1228,8 @@ class LiveEvaluationCoordinator:
                     raise RuntimeError(
                         "Agent evidence appeared in a forbidden legacy project"
                     )
-            self._apply_host_evaluator(row)
+            if canonical_row is None:
+                self._apply_host_evaluator(row)
             _set_adapter_outcome(row)
             if not self._pop_prediction(cell.id, active):
                 return
@@ -1763,7 +1808,7 @@ class LiveEvaluationCoordinator:
 
 
 class GeneratedEvaluationCoordinator:
-    """Run generated scorers locally when live Weave publication is unavailable."""
+    """Own canonical local scoring and evidence before optional publication."""
 
     def __init__(
         self,
@@ -1772,10 +1817,20 @@ class GeneratedEvaluationCoordinator:
         repo_root: Path,
         env: Mapping[str, str],
         host_evaluator: Callable[[dict[str, Any]], None] | None = None,
+        cell_conformance: Callable[[PlannedCell], Mapping[str, Any]] | None = None,
+        require_complete_evidence: bool = False,
+        evidence_mode: str = "local",
     ) -> None:
         self.repo_root = repo_root
         self.env = dict(env)
         self._host_evaluator = host_evaluator
+        self._cell_conformance = cell_conformance
+        self._require_complete_evidence = require_complete_evidence
+        if evidence_mode not in {"local", "weave_required"}:
+            raise ValueError(f"unsupported evidence mode: {evidence_mode}")
+        self._evidence_mode = evidence_mode
+        self._rows_by_attempt: dict[str, dict[str, Any]] = {}
+        self._local_attempt_ids: set[str] = set()
         self.path = (
             repo_root
             / ".fugue"
@@ -1786,14 +1841,125 @@ class GeneratedEvaluationCoordinator:
         self.path.parent.mkdir(parents=True, exist_ok=True)
         self._lock = threading.Lock()
 
-    def finish_cell(self, cell: PlannedCell, outcome: CellOutcome) -> None:
-        if cell.evaluation_case is None and self._host_evaluator is None:
-            return
+        planned_rows = [
+            _planned_evaluation_row(cell)
+            for cell in cells
+            if cell.applicable and cell.execution_kind == "agent"
+        ]
+        candidates = _publication_candidates(planned_rows) if planned_rows else []
+        scopes: dict[str, tuple[str, str, list[dict[str, Any]]]] = {}
+        for candidate in candidates:
+            dataset_id = _stable_digest(
+                {
+                    "schema_version": 1,
+                    "evaluation_scope_id": candidate["evaluation_scope_id"],
+                    "examples": candidate["dataset_examples"],
+                }
+            )
+            for row in candidate["rows"]:
+                scopes[str(row["attempt_id"])] = (
+                    str(candidate["evaluation_scope_id"]),
+                    dataset_id,
+                    list(candidate["dataset_examples"]),
+                )
+        agent_cells = tuple(
+            cell
+            for cell in cells
+            if cell.applicable and cell.execution_kind == "agent"
+        )
+        attempts = tuple(
+            LocalAttemptPlanV1(
+                run_id=cell.run_id,
+                cell_id=cell.id,
+                attempt_id=cell.attempt_id,
+                attempt_identity=cell.attempt_identity,
+                prediction_id=str(_planned_evaluation_row(cell)["prediction_id"]),
+                evaluation_scope_id=scopes[cell.attempt_id][0],
+                dataset_id=scopes[cell.attempt_id][1],
+            )
+            for cell in agent_cells
+        )
+        self._dataset_examples = {
+            attempt_id: examples
+            for attempt_id, (_, _, examples) in scopes.items()
+        }
+        self._local: LocalEvidenceCoordinator | None = None
+        snapshot_digests = {
+            str(cell.run_snapshot_sha256) for cell in agent_cells
+        }
+        evaluation_lock_digests = {
+            str(cell.evaluation_asset_lock_sha256) for cell in agent_cells
+        }
+        has_exact_locks = (
+            len(snapshot_digests) == 1
+            and len(evaluation_lock_digests) == 1
+            and all(
+                re.fullmatch(r"[0-9a-f]{64}", digest)
+                for digest in (*snapshot_digests, *evaluation_lock_digests)
+            )
+        )
+        if attempts and has_exact_locks:
+            plan = build_local_evidence_run_plan(
+                run_id=attempts[0].run_id,
+                run_snapshot_sha256=next(iter(snapshot_digests)),
+                evaluation_asset_lock_sha256=next(
+                    iter(evaluation_lock_digests)
+                ),
+                attempts=attempts,
+                require_run_conformance=self._require_complete_evidence,
+            )
+            self._local = LocalEvidenceCoordinator(
+                LocalEvidenceStore(repo_root, attempts[0].run_id),
+                plan,
+                secret_values=secrets_from_env(self.env),
+            )
+            self._local_attempt_ids = {item.attempt_id for item in attempts}
+        elif attempts and self._require_complete_evidence:
+            raise ValueError(
+                "canonical local evidence requires one exact run snapshot "
+                "and evaluation asset lock digest"
+            )
+
+    def begin_cell(self, cell: PlannedCell) -> Mapping[str, str] | None:
+        if (
+            self._local is None
+            or not cell.applicable
+            or cell.attempt_id not in self._local_attempt_ids
+        ):
+            return None
+        return {
+            **self._local.begin_attempt(cell.attempt_id),
+            "FUGUE_EVIDENCE_MODE": self._evidence_mode,
+        }
+
+    def finish_cell(
+        self,
+        cell: PlannedCell,
+        outcome: CellOutcome,
+    ) -> dict[str, Any] | None:
+        has_local_attempt = (
+            self._local is not None
+            and cell.attempt_id in self._local_attempt_ids
+        )
+        if (
+            not has_local_attempt
+            and cell.evaluation_case is None
+            and self._host_evaluator is None
+        ):
+            return None
         row = _completed_evaluation_row(
             cell,
             outcome,
             _planned_evaluation_row(cell),
         )
+        _verify_coordinated_row_identity(row, cell)
+        candidate_definition = _run_candidate_definition(
+            self.repo_root,
+            cell.run_id,
+            cell.candidate_id,
+        )
+        if candidate_definition is not None:
+            row["candidate_definition"] = candidate_definition
         row["evaluation_publication_mode"] = "local"
         if cell.evaluation_case is not None:
             apply_generated_evaluation(
@@ -1805,6 +1971,16 @@ class GeneratedEvaluationCoordinator:
                 trial_dir=Path(str(row.get("trial_dir") or cell.result_path.parent)),
             )
         _set_adapter_outcome(row)
+        if self._cell_conformance is not None:
+            try:
+                row["local_cell_conformance"] = dict(
+                    self._cell_conformance(cell)
+                )
+            except Exception as exc:
+                row["local_cell_conformance"] = {
+                    "status": "unavailable",
+                    "reason": f"{type(exc).__name__}: {exc}",
+                }
         if self._host_evaluator is not None:
             try:
                 self._host_evaluator(row)
@@ -1819,15 +1995,546 @@ class GeneratedEvaluationCoordinator:
                         "comparison_required_evaluation_complete": False,
                     }
                 )
+        public_row = _public_generated_evaluation_row(row)
+        if has_local_attempt and self._local is not None:
+            receipt = _local_agent_receipt(
+                self.repo_root,
+                cell,
+                public_row,
+            )
+            local_plan_attempt = next(
+                item
+                for item in self._local.plan.attempts
+                if item.attempt_id == cell.attempt_id
+            )
+            refs = local_attempt_refs(local_plan_attempt)
+            public_row["local_evidence_links"] = [
+                {
+                    "kind": kind,
+                    "status": (
+                        receipt.status if kind == "agent_root" else "resolved"
+                    ),
+                    "system": "local_artifact",
+                    "ref": refs[kind],
+                    **(
+                        {"reason": receipt.reason}
+                        if kind == "agent_root" and receipt.status != "resolved"
+                        else {}
+                    ),
+                }
+                for kind in (
+                    "evaluation_root",
+                    "prediction_and_score",
+                    "prediction",
+                    "agent_root",
+                    "dataset",
+                )
+            ]
+            record = self._local.finish_attempt(
+                cell.attempt_id,
+                terminal_status=outcome.status,
+                prediction_row=public_row,
+                scores=_evaluation_scores(row),
+                agent_receipt=receipt,
+                evaluation_payload={
+                    "run_id": cell.run_id,
+                    "candidate_id": cell.candidate_id,
+                    "evaluation_scope_id": (
+                        local_plan_attempt.evaluation_scope_id
+                    ),
+                    "dataset_id": local_plan_attempt.dataset_id,
+                    "evidence_mode": self._evidence_mode,
+                },
+                attempt_payload={
+                    "attempt_id": cell.attempt_id,
+                    "terminal_status": outcome.status,
+                    "evaluation_status": public_row.get(
+                        "comparison_evaluation_status"
+                    ),
+                    "conformance": public_row.get("local_cell_conformance"),
+                    "receipts": _local_attempt_receipts(row),
+                },
+                dataset_payload={
+                    "dataset_id": local_plan_attempt.dataset_id,
+                    "examples": self._dataset_examples[cell.attempt_id],
+                    "evaluation_asset_lock_sha256": (
+                        cell.evaluation_asset_lock_sha256
+                    ),
+                },
+            )
+            public_row["local_evidence_record_digest"] = record.record_digest
+            public_row["local_evidence_integrity"] = record.integrity_status
+            self._rows_by_attempt[cell.attempt_id] = public_row
         with self._lock:
             with self.path.open("a") as handle:
                 handle.write(
-                    json.dumps(redact_value(row), sort_keys=True, default=str) + "\n"
+                    json.dumps(redact_value(public_row), sort_keys=True, default=str)
+                    + "\n"
                 )
+        return public_row
+
+    def finalize(self) -> LocalEvidenceManifestV1 | None:
+        if self._local is None:
+            return None
+        manifest = self._local.store.build_manifest()
+        if manifest.status == "complete":
+            return self._local.finalize()
+        if self._require_complete_evidence:
+            raise RuntimeError(f"required local evidence is {manifest.status}")
+        return manifest
+
+
+def _local_agent_receipt(  # noqa: C901 - one fail-closed receipt boundary
+    repo_root: Path,
+    cell: PlannedCell,
+    row: Mapping[str, Any],
+) -> AgentEvidenceReceiptV1:
+    def artifact_ref(path: Path, raw: bytes) -> LocalArtifactRefV1:
+        suffix = path.suffix.lower()
+        media_type = (
+            "application/json"
+            if suffix == ".json"
+            else "application/x-ndjson"
+            if suffix == ".jsonl"
+            else "text/plain"
+        )
+        return LocalArtifactRefV1(
+            path=path.relative_to(root).as_posix(),
+            sha256=hashlib.sha256(raw).hexdigest(),
+            size_bytes=len(raw),
+            media_type=media_type,
+        )
+
+    def structured_values(path: Path) -> tuple[list[Any], str | None]:
+        try:
+            text = path.read_text(encoding="utf-8")
+        except (OSError, UnicodeDecodeError) as exc:
+            return [], f"{path.name} is unreadable: {type(exc).__name__}"
+        if not text.strip():
+            return [], f"{path.name} is empty"
+        try:
+            return [json.loads(text)], None
+        except json.JSONDecodeError:
+            values: list[Any] = []
+            for line_number, line in enumerate(text.splitlines(), start=1):
+                if not line.strip():
+                    continue
+                try:
+                    values.append(json.loads(line))
+                except json.JSONDecodeError:
+                    return (
+                        [],
+                        f"{path.name} has malformed JSON at line {line_number}",
+                    )
+            return (
+                (values, None)
+                if values
+                else ([], f"{path.name} has no structured transcript records")
+            )
+
+    def keyed_values(value: Any, keys: frozenset[str]) -> list[str]:
+        found: list[str] = []
+        if isinstance(value, Mapping):
+            for raw_key, item in value.items():
+                key = str(raw_key).strip().lower().replace("-", "_")
+                if key in keys and isinstance(item, (str, int)):
+                    rendered = str(item).strip()
+                    if rendered:
+                        found.append(rendered)
+                found.extend(keyed_values(item, keys))
+        elif isinstance(value, list):
+            for item in value:
+                found.extend(keyed_values(item, keys))
+        return found
+
+    def transcript_tool_events(values: list[Any]) -> list[dict[str, Any]]:
+        events: list[dict[str, Any]] = []
+
+        def visit(value: Any) -> None:
+            if isinstance(value, Mapping):
+                calls = value.get("tool_calls")
+                if isinstance(calls, list):
+                    events.extend(dict(item) for item in calls if isinstance(item, Mapping))
+                event_type = str(value.get("type") or "").strip().lower()
+                if event_type in {"tool_use", "tool_call", "function_call"}:
+                    events.append(dict(value))
+                    return
+                for key, item in value.items():
+                    if key != "tool_calls":
+                        visit(item)
+            elif isinstance(value, list):
+                for item in value:
+                    visit(item)
+
+        for value in values:
+            visit(value)
+        return events
+
+    def trajectory_tool_events(value: Any) -> list[dict[str, Any]]:
+        if not isinstance(value, Mapping):
+            return []
+        events: list[dict[str, Any]] = []
+        for step in value.get("steps") or ():
+            if not isinstance(step, Mapping):
+                continue
+            events.extend(
+                dict(item)
+                for item in step.get("tool_calls") or ()
+                if isinstance(item, Mapping)
+            )
+        return events
+
+    def trajectory_response(value: Any) -> str | None:
+        if not isinstance(value, Mapping):
+            return None
+        for step in reversed(list(value.get("steps") or ())):
+            if not isinstance(step, Mapping):
+                continue
+            if str(step.get("source") or "").lower() not in {
+                "agent",
+                "assistant",
+            }:
+                continue
+            message = step.get("message") or step.get("content") or step.get("text")
+            if isinstance(message, str) and message.strip():
+                return message.strip()
+        return None
+
+    def is_transcript_candidate(path: Path) -> bool:
+        relative_parts = {
+            part.lower() for part in path.relative_to(agent_dir).parts[:-1]
+        }
+        name = path.name.lower()
+        return bool(
+            name in {
+                "claude-code.txt",
+                "openclaw.txt",
+                "hermes-session.jsonl",
+            }
+            or "transcript" in name
+            or ("sessions" in relative_parts and path.suffix.lower() == ".jsonl")
+        )
+
+    root = repo_root.resolve()
+    trial_dir = Path(str(row.get("trial_dir") or cell.result_path.parent)).resolve()
+    agent_dir = trial_dir / "agent"
+    artifacts: list[LocalArtifactRefV1] = []
+    artifact_by_path: dict[Path, LocalArtifactRefV1] = {}
+    if agent_dir.is_dir() and root in agent_dir.parents:
+        for path in sorted(agent_dir.rglob("*")):
+            suffix = path.suffix.lower()
+            if (
+                not path.is_file()
+                or path.is_symlink()
+                or suffix not in {".json", ".jsonl", ".log", ".txt", ".md"}
+            ):
+                continue
+            raw = path.read_bytes()
+            reference = artifact_ref(path, raw)
+            artifacts.append(reference)
+            artifact_by_path[path] = reference
+
+    meta: Mapping[str, Any] = {}
+    meta_error: str | None = None
+    meta_path = agent_dir / "fugue-meta.json"
+    try:
+        loaded_meta = json.loads(meta_path.read_text(encoding="utf-8"))
+        if not isinstance(loaded_meta, Mapping):
+            meta_error = "Agent metadata is not an object"
+        else:
+            meta = loaded_meta
+    except (OSError, UnicodeDecodeError, json.JSONDecodeError):
+        meta_error = "Agent metadata is missing or malformed"
+
+    row_native_sessions = tuple(
+        dict.fromkeys(
+            str(value).strip()
+            for value in (row.get("native_session_ids") or ())
+            if str(value or "").strip()
+        )
+    )
+    meta_native_sessions = tuple(
+        dict.fromkeys(
+            str(value).strip()
+            for value in (meta.get("native_session_ids") or ())
+            if str(value or "").strip()
+        )
+    )
+    native_sessions = row_native_sessions or meta_native_sessions
+    primary_session_id = native_sessions[0] if native_sessions else None
+    planned_conversation_id = str(
+        row.get("planned_conversation_id")
+        or meta.get("planned_conversation_id")
+        or agent_conversation_id(
+            cell.harness,
+            str(row.get("run_key") or cell.attempt_id),
+        )
+    )
+
+    correlation = meta.get("conversation_correlation")
+    correlation_failures: list[str] = []
+    if meta_error:
+        correlation_failures.append(meta_error)
+    if not isinstance(correlation, Mapping):
+        correlation_failures.append("planned/native Agent correlation is missing")
+    else:
+        if correlation.get("status") != "isolated_trial_directory":
+            correlation_failures.append("Agent correlation status is not verified")
+        if str(correlation.get("planned_conversation_id") or "") != (
+            planned_conversation_id
+        ):
+            correlation_failures.append("planned conversation identity disagrees")
+        correlated_sessions = {
+            str(value).strip()
+            for value in (correlation.get("native_session_ids") or ())
+            if str(value or "").strip()
+        }
+        if not primary_session_id or primary_session_id not in correlated_sessions:
+            correlation_failures.append("primary native session is not correlated")
+    if row_native_sessions and meta_native_sessions != row_native_sessions:
+        correlation_failures.append("row and Agent metadata session identities disagree")
+    if str(meta.get("planned_conversation_id") or "") != planned_conversation_id:
+        correlation_failures.append("Agent metadata planned conversation disagrees")
+    if meta.get("candidate_id") not in {None, "", cell.candidate_id}:
+        correlation_failures.append("Agent metadata candidate identity disagrees")
+    if meta.get("run_id") not in {None, "", cell.run_id}:
+        correlation_failures.append("Agent metadata run identity disagrees")
+    if meta.get("trial_index") not in {None, cell.trial_index}:
+        correlation_failures.append("Agent metadata attempt ordinal disagrees")
+
+    transcript_artifact: LocalArtifactRefV1 | None = None
+    transcript_values: list[Any] = []
+    transcript_failure: str | None = None
+    transcript_candidates = [
+        path for path in sorted(artifact_by_path) if is_transcript_candidate(path)
+    ]
+    for path in transcript_candidates:
+        values, error = structured_values(path)
+        if error:
+            transcript_failure = error
+            break
+        attempt_ids = keyed_values(
+            values,
+            frozenset({"attempt_id", "fugue.attempt_id"}),
+        )
+        if any(value != cell.attempt_id for value in attempt_ids):
+            transcript_failure = f"{path.name} belongs to another Fugue attempt"
+            break
+        session_ids = keyed_values(
+            values,
+            frozenset({"session_id", "sessionid"}),
+        )
+        matches_session = bool(
+            primary_session_id
+            and (
+                primary_session_id in session_ids
+                or primary_session_id in path.name
+            )
+        )
+        if matches_session:
+            transcript_artifact = artifact_by_path[path]
+            transcript_values = values
+            break
+    if transcript_artifact is None and transcript_failure is None:
+        transcript_failure = (
+            "native Agent transcript artifact is unavailable"
+            if not transcript_candidates
+            else "native Agent transcript does not match the primary session"
+        )
+
+    trajectory: Any = None
+    trajectory_error: str | None = None
+    trajectory_path = agent_dir / "trajectory.json"
+    if trajectory_path.is_file():
+        try:
+            trajectory = json.loads(trajectory_path.read_text(encoding="utf-8"))
+        except (OSError, UnicodeDecodeError, json.JSONDecodeError):
+            trajectory_error = "Agent trajectory is malformed"
+    tool_events = (
+        trajectory_tool_events(trajectory)
+        if trajectory is not None
+        else transcript_tool_events(transcript_values)
+    )
+    encoded_tool_events = json.dumps(
+        tool_events,
+        sort_keys=True,
+        separators=(",", ":"),
+        default=str,
+    ).encode("utf-8")
+    tool_events_sha256 = hashlib.sha256(encoded_tool_events).hexdigest()
+
+    observed_response_sha256 = str(row.get("agent_response_sha256") or "") or None
+    response = trajectory_response(trajectory)
+    response_sha256 = (
+        hashlib.sha256(response.encode("utf-8")).hexdigest() if response else None
+    )
+    response_error: str | None = None
+    if observed_response_sha256 and response_sha256 != observed_response_sha256:
+        response_error = "Agent response digest does not match the transcript receipt"
+
+    failures = [
+        *correlation_failures,
+        *([transcript_failure] if transcript_failure else []),
+        *([trajectory_error] if trajectory_error else []),
+        *([response_error] if response_error else []),
+    ]
+    missing = not primary_session_id or not transcript_candidates
+    status = "resolved" if not failures else "missing" if missing else "invalid"
+    return AgentEvidenceReceiptV1(
+        attempt_id=cell.attempt_id,
+        planned_conversation_id=planned_conversation_id,
+        primary_session_id=primary_session_id,
+        child_session_ids=native_sessions[1:],
+        artifacts=tuple(artifacts),
+        transcript_artifact=transcript_artifact,
+        transcript_session_id=(primary_session_id if transcript_artifact else None),
+        correlation_verified=not correlation_failures,
+        tool_event_count=len(tool_events),
+        tool_events_sha256=tool_events_sha256,
+        response_sha256=response_sha256,
+        status=status,  # type: ignore[arg-type]
+        reason=None if status == "resolved" else "; ".join(dict.fromkeys(failures)),
+    )
+
+
+def _verify_coordinated_row_identity(
+    row: Mapping[str, Any],
+    cell: PlannedCell,
+) -> None:
+    expected = _planned_evaluation_row(cell)
+    for key in (
+        "cell_id",
+        "attempt_id",
+        "attempt_identity",
+        "candidate_id",
+        "execution_fingerprint",
+        "task_id",
+        "harness",
+        "variant_id",
+        "trial_index",
+        "prediction_id",
+    ):
+        if row.get(key) != expected.get(key):
+            raise RuntimeError(
+                f"hosted and local evidence disagree on {key} for cell {cell.id}"
+            )
+
+
+def _run_candidate_definition(
+    repo_root: Path,
+    run_id: str,
+    candidate_id: str,
+) -> dict[str, Any] | None:
+    path = repo_root / ".fugue" / "runtime" / run_id / "input-lock.json"
+    try:
+        snapshot = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return None
+    candidates = snapshot.get("candidates")
+    if not isinstance(candidates, Mapping):
+        raise ValueError("run snapshot candidate definitions must be a mapping")
+    definition = candidates.get(candidate_id)
+    if definition is None:
+        raise ValueError(
+            f"run snapshot is missing candidate definition: {candidate_id}"
+        )
+    if not isinstance(definition, Mapping):
+        raise ValueError("run snapshot candidate definition must be a mapping")
+    value = dict(definition)
+    if stable_digest(value) != candidate_id:
+        raise ValueError("run snapshot candidate definition digest changed")
+    return value
+
+
+def _local_attempt_receipts(row: Mapping[str, Any]) -> dict[str, Any]:
+    """Project the canonical privacy/policy/usage/cleanup receipt surface.
+
+    The underlying conformance payload and prediction row remain authoritative;
+    this named projection makes the four required local receipts easy to audit
+    without creating a second evidence path.
+    """
+
+    conformance = row.get("local_cell_conformance")
+    conformance = conformance if isinstance(conformance, Mapping) else {}
+    privacy = conformance.get("local_artifact_privacy_scan")
+    privacy = privacy if isinstance(privacy, Mapping) else {}
+    execution_identity = conformance.get("execution_identity")
+    execution_identity = (
+        execution_identity if isinstance(execution_identity, Mapping) else {}
+    )
+    private_boundary = conformance.get("private_label_boundary")
+    private_boundary = (
+        private_boundary if isinstance(private_boundary, Mapping) else {}
+    )
+    cleanup = conformance.get("docker_cleanup")
+    cleanup = cleanup if isinstance(cleanup, Mapping) else {}
+    usage_fields = {
+        key: row.get(key)
+        for key in (
+            "cost_usd",
+            "latency_sec",
+            "observed_tokens",
+            "tool_calls",
+            "usage",
+        )
+        if row.get(key) is not None
+    }
+    policy_statuses = {
+        str(value.get("status") or "unavailable")
+        for value in (execution_identity, private_boundary)
+    }
+    policy_status = (
+        "failed"
+        if "failed" in policy_statuses
+        else "passed"
+        if policy_statuses and policy_statuses <= {"passed", "not_applicable"}
+        else "unavailable"
+    )
+    return {
+        "privacy": {
+            "status": str(privacy.get("status") or "unavailable"),
+            "payload": dict(privacy),
+        },
+        "policy": {
+            "status": policy_status,
+            "execution_identity": dict(execution_identity),
+            "private_label_boundary": dict(private_boundary),
+        },
+        "usage": {
+            "status": "passed" if usage_fields else "unavailable",
+            "payload": usage_fields,
+        },
+        "cleanup": {
+            "status": str(cleanup.get("status") or "unavailable"),
+            "payload": dict(cleanup),
+        },
+    }
+
+
+def _public_generated_evaluation_row(row: Mapping[str, Any]) -> dict[str, Any]:
+    """Return the canonical public prediction without host-only truth.
+
+    Deterministic scores are retained, but assertion maps may contain literal
+    expected facts as keys and therefore stay inside the trusted evaluator.
+    """
+
+    value = dict(row)
+    case = value.get("evaluation_case")
+    if isinstance(case, Mapping):
+        public_case = public_evaluation_case(case)
+        if public_case:
+            value["evaluation_case"] = public_case
+        else:
+            value.pop("evaluation_case", None)
+    else:
+        value.pop("evaluation_case", None)
+    value.pop("evaluation_assertions", None)
+    return value
 
 
 def _planned_evaluation_row(cell: PlannedCell) -> dict[str, Any]:
     env = cell.env
+    local_mode = env.get("FUGUE_EVIDENCE_MODE", "weave_required") == "local"
     run_key = ":".join(
         (
             cell.run_id,
@@ -1896,8 +2603,13 @@ def _planned_evaluation_row(cell: PlannedCell) -> dict[str, Any]:
             if cell.model_provider == "wandb"
             else None
         ),
-        "trace_project": trace_project_slug(env),
-        "trace_receipt": trace_destination_identity(env),
+        "trace_project": None if local_mode else trace_project_slug(env),
+        "trace_receipt": (
+            LocalEvidenceDestinationV1().to_dict()
+            if local_mode
+            else trace_destination_identity(env)
+        ),
+        "evidence_backend": "local" if local_mode else "weave",
         "wandb_research_id": env.get("FUGUE_WANDB_RESEARCH_ID"),
         "wandb_study_id": env.get("FUGUE_WANDB_STUDY_ID"),
         "research_experiment_id": env.get("FUGUE_RESEARCH_EXPERIMENT_ID"),
@@ -1906,7 +2618,11 @@ def _planned_evaluation_row(cell: PlannedCell) -> dict[str, Any]:
         "study_console_backlink": env.get("FUGUE_STUDY_CONSOLE_BACKLINK"),
         "trace_content": env.get("FUGUE_TRACE_CONTENT", "full"),
         "context_assigned": cell.context_system_id != "none",
-        "evaluation_case": cell.evaluation_case,
+        "evaluation_case": (
+            public_evaluation_case(cell.evaluation_case)
+            if isinstance(cell.evaluation_case, Mapping)
+            else None
+        ),
         "evaluation_scorers": list(cell.scorer_refs),
         "evaluation_rubrics": list(cell.evaluation_rubrics),
         "evaluation_scorer_hashes": cell.scorer_hashes or {},
@@ -3789,7 +4505,11 @@ def _evaluation_inputs(row: dict[str, Any]) -> dict[str, Any]:
         "repository": row.get("repository"),
         "base_commit": row.get("base_commit"),
         "evaluation_asset_lock_sha256": row.get("evaluation_asset_lock_sha256") or None,
-        "evaluation_case": row.get("evaluation_case") or None,
+        "evaluation_case": (
+            public_evaluation_case(row["evaluation_case"])
+            if isinstance(row.get("evaluation_case"), Mapping)
+            else None
+        ),
         "evaluation_scorers": row.get("evaluation_scorers") or None,
         "evaluation_rubrics": row.get("evaluation_rubrics") or None,
         "evaluation_scorer_hashes": row.get("evaluation_scorer_hashes") or None,

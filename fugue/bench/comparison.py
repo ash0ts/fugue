@@ -9,7 +9,7 @@ import re
 import tempfile
 import urllib.parse
 from collections import Counter
-from collections.abc import Callable, Mapping, Sequence
+from collections.abc import Callable, Iterable, Mapping, Sequence
 from dataclasses import asdict, dataclass, field, replace
 from pathlib import Path, PurePosixPath
 from typing import Any, Literal
@@ -38,6 +38,11 @@ from fugue.bench.analysis_contracts import (
 from fugue.bench.candidates import attempt_id, attempt_identity, stable_digest
 from fugue.bench.files import atomic_write_json
 from fugue.bench.library import ExperimentSpec, experiment_from_data, validate_id
+from fugue.bench.local_evidence import (
+    LocalEvidenceDestinationV1,
+    LocalEvidenceStore,
+    local_evidence_destination_from_dict,
+)
 from fugue.bench.operator import (
     ExperimentRequest,
     OperatorService,
@@ -45,6 +50,8 @@ from fugue.bench.operator import (
 )
 from fugue.model_plane import (
     EvidenceDestinationV1,
+    EvidenceMode,
+    default_evidence_destination,
     evidence_destination_environment,
     evidence_destination_from_dict,
     trace_project_environment,
@@ -70,6 +77,14 @@ _HARNESS_AGENTS = {
     "claude-code": "fugue.agents:FugueClaudeCode",
     "codex": "fugue.agents:FugueCodex",
 }
+EvidenceDestination = EvidenceDestinationV1 | LocalEvidenceDestinationV1
+EvidenceBackend = Literal["local", "weave"]
+EvidenceChainIntegrity = Literal[
+    "reconciled", "incomplete", "invalid", "not_applicable"
+]
+PublicationStatus = Literal[
+    "not_requested", "published", "failed", "not_applicable"
+]
 _READINESS = frozenset(
     {"ready", "needs_review", "blocked", "no_comparison_justified"}
 )
@@ -180,10 +195,11 @@ class ComparisonExecutionPolicyV1:
     reserve_per_attempt_usd: float
     approval_required: bool
     trace_content: Literal["full", "metadata"]
+    evidence_mode: EvidenceMode = "weave_required"
     source_evidence_project: str | None = None
-    source_evidence_destination: EvidenceDestinationV1 | None = None
+    source_evidence_destination: EvidenceDestination | None = None
     evidence_project: str | None = None
-    evidence_destination: EvidenceDestinationV1 | None = None
+    evidence_destination: EvidenceDestination | None = None
     study_console_base_url: str | None = None
     research_id: str | None = None
     infrastructure_receipt: str | None = None
@@ -198,6 +214,52 @@ class ComparisonExecutionPolicyV1:
     preparation_required: bool = False
     evidence_checkpoint_cells: int = 0
     environment: dict[str, Any] = field(default_factory=dict)
+
+    def __post_init__(self) -> None:
+        hosted_result_declared = bool(
+            self.evidence_project
+            or isinstance(self.evidence_destination, EvidenceDestinationV1)
+        )
+        if self.evidence_mode == "local" and hosted_result_declared:
+            # Older callers use ``dataclasses.replace`` to bind a W&B project
+            # onto a comparison that was parsed before local evidence became
+            # the default. Parsing an explicitly local document remains
+            # fail-closed; this only preserves the programmatic migration path.
+            object.__setattr__(self, "evidence_mode", "weave_required")
+            if isinstance(
+                self.source_evidence_destination,
+                LocalEvidenceDestinationV1,
+            ):
+                object.__setattr__(self, "source_evidence_destination", None)
+            if isinstance(self.evidence_destination, LocalEvidenceDestinationV1):
+                object.__setattr__(self, "evidence_destination", None)
+        if self.evidence_mode == "weave_required" and isinstance(
+            self.evidence_destination,
+            LocalEvidenceDestinationV1,
+        ):
+            raise ValueError(
+                "weave_required evidence mode requires a W&B result destination"
+            )
+        if self.evidence_mode == "weave_required":
+            if (
+                self.source_evidence_project is not None
+                and self.source_evidence_destination is None
+            ):
+                object.__setattr__(
+                    self,
+                    "source_evidence_destination",
+                    default_evidence_destination(self.source_evidence_project),
+                )
+            if self.evidence_project is not None and self.evidence_destination is None:
+                object.__setattr__(
+                    self,
+                    "evidence_destination",
+                    default_evidence_destination(self.evidence_project),
+                )
+        _validate_comparison_source_destination(
+            self.source_evidence_project,
+            self.source_evidence_destination,
+        )
 
     def to_dict(self) -> dict[str, Any]:
         return _drop_empty(asdict(self), preserve_false=True)
@@ -314,7 +376,7 @@ EvidenceLinkKind = Literal[
 class AttemptEvidenceLinkV1:
     kind: EvidenceLinkKind
     status: EvidenceLinkStatus
-    system: Literal["weave"] = "weave"
+    system: Literal["local_artifact", "weave"] = "weave"
     ref: str | None = None
     url: str | None = None
     reason: str | None = None
@@ -406,9 +468,36 @@ class PairedAttemptV3:
     execution_fingerprint: str | None = None
     runtime_lock_digest: str | None = None
     infrastructure: dict[str, Any] = field(default_factory=dict)
+    hosted_evidence_status: str = "not_applicable"
+    hosted_evidence_links: tuple[AttemptEvidenceLinkV1, ...] = ()
+    local_evidence_record_digest: str | None = None
+    local_prediction_row_sha256: str | None = None
+
+    def __post_init__(self) -> None:
+        local_digests = (
+            self.local_evidence_record_digest,
+            self.local_prediction_row_sha256,
+        )
+        if any(local_digests) and not all(local_digests):
+            raise ValueError(
+                "local paired attempt requires record and prediction digests"
+            )
+        if any(
+            value is not None and not re.fullmatch(r"[0-9a-f]{64}", value)
+            for value in local_digests
+        ):
+            raise ValueError("local paired attempt evidence digest is invalid")
 
     def to_dict(self) -> dict[str, Any]:
-        return _drop_empty(_json_value(asdict(self)), preserve_false=True)
+        value = _json_value(asdict(self))
+        hosted_status = value.pop("hosted_evidence_status")
+        hosted_links = value.pop("hosted_evidence_links")
+        infrastructure = dict(value.get("infrastructure") or {})
+        infrastructure["hosted_evidence_status"] = hosted_status
+        if hosted_links:
+            infrastructure["hosted_evidence_links"] = hosted_links
+        value["infrastructure"] = infrastructure
+        return _drop_empty(value, preserve_false=True)
 
 
 @dataclass(frozen=True)
@@ -446,7 +535,10 @@ class PairedCaseV3:
     task_label: str | None = None
 
     def to_dict(self) -> dict[str, Any]:
-        return _drop_empty(_json_value(asdict(self)), preserve_false=True)
+        value = _json_value(asdict(self))
+        value["baseline"] = self.baseline.to_dict() if self.baseline else None
+        value["candidate"] = self.candidate.to_dict() if self.candidate else None
+        return _drop_empty(value, preserve_false=True)
 
 
 @dataclass(frozen=True)
@@ -681,6 +773,12 @@ class ComparisonResultV3:
     scorer_revisions: tuple[LockDescriptorV1, ...]
     runtime_locks: tuple[LockDescriptorV1, ...]
     cohort_lineage: dict[str, Any]
+    candidate_definitions: dict[str, dict[str, Any]] = field(default_factory=dict)
+    local_evidence: dict[str, Any] | None = None
+    evidence_backend: EvidenceBackend = "weave"
+    publication_status: PublicationStatus = "published"
+    local_chain_integrity: EvidenceChainIntegrity = "not_applicable"
+    hosted_chain_integrity: EvidenceChainIntegrity = "reconciled"
     supersedes: tuple[SupersededResultV1, ...] = ()
     candidate_source_revisions: tuple[CandidateSourceRevisionV1, ...] = ()
     evidence_destination: dict[str, Any] = field(default_factory=dict)
@@ -699,15 +797,40 @@ class ComparisonResultV3:
         if not self.runtime_locks:
             raise ValueError("ComparisonResultV3 requires runtime locks")
         _verify_cohort_lineage(self.cohort_lineage)
-        if self.evidence_project != (
-            self.evidence_topology.result_destination.project_slug
-        ):
+        for candidate_id, definition in self.candidate_definitions.items():
+            if stable_digest(definition) != candidate_id:
+                raise ValueError(
+                    "ComparisonResultV3 candidate definition digest does not match"
+                )
+        if self.local_evidence is not None:
+            _verify_local_evidence_binding(self.local_evidence)
+        result_project = _destination_project_slug(
+            self.evidence_topology.result_destination
+        )
+        if self.evidence_project != result_project:
             raise ValueError(
                 "ComparisonResultV3 evidence project disagrees with its topology"
+            )
+        local = isinstance(
+            self.evidence_topology.result_destination,
+            LocalEvidenceDestinationV1,
+        )
+        if local != (self.evidence_backend == "local"):
+            raise ValueError(
+                "ComparisonResultV3 evidence backend disagrees with its topology"
+            )
+        if local and self.publication_status == "published":
+            raise ValueError(
+                "local ComparisonResultV3 publication requires a separate receipt"
+            )
+        if local and self.hosted_chain_integrity != "not_applicable":
+            raise ValueError(
+                "unpublished local ComparisonResultV3 hosted chain is not applicable"
             )
 
     def to_dict(self) -> dict[str, Any]:
         value = _json_value(asdict(self))
+        value["paired_cases"] = [item.to_dict() for item in self.paired_cases]
         value["evidence_topology"] = self.evidence_topology.to_dict()
         value["aligned_analysis"] = self.aligned_analysis.to_dict()
         value["task_validity"] = [
@@ -720,6 +843,10 @@ class ComparisonResultV3:
             item.to_dict() for item in self.runtime_locks
         ]
         value["supersedes"] = [item.to_dict() for item in self.supersedes]
+        value["candidate_definitions"] = {
+            key: dict(item)
+            for key, item in sorted(self.candidate_definitions.items())
+        }
         serialized = _drop_empty(value, preserve_false=True)
         serialized["deterministic_summary"] = dict(self.deterministic_summary)
         serialized["judge_summary"] = dict(self.judge_summary)
@@ -739,6 +866,33 @@ class ComparisonResultV3:
 
 ComparisonResult = ComparisonResultV1 | ComparisonResultV2 | ComparisonResultV3
 ComparisonPreviewV2 = ComparisonPreviewV1
+
+
+def _verify_local_evidence_binding(value: Mapping[str, Any]) -> None:
+    required = {
+        "schema_version",
+        "run_id",
+        "manifest_digest",
+        "manifest_file_sha256",
+        "plan_digest",
+        "attempt_record_set_digest",
+        "prediction_row_set_digest",
+        "run_conformance_receipt_digest",
+        "run_conformance_file_sha256",
+    }
+    if set(value) != required:
+        raise ValueError(
+            "ComparisonResultV3 local evidence binding fields do not match"
+        )
+    if value.get("schema_version") != 1:
+        raise ValueError("unsupported ComparisonResultV3 local evidence binding")
+    if not str(value.get("run_id") or "").strip():
+        raise ValueError("ComparisonResultV3 local evidence run id is required")
+    for key in required - {"schema_version", "run_id"}:
+        if not re.fullmatch(r"[0-9a-f]{64}", str(value.get(key) or "")):
+            raise ValueError(
+                f"ComparisonResultV3 local evidence {key} must be a digest"
+            )
 
 
 @dataclass(frozen=True)
@@ -869,10 +1023,9 @@ def comparison_from_dict(
         source=base,
         repo_root=repo_root,
     )
-    if version >= 3 and (
+    if version >= 3 and execution.evidence_mode == "weave_required" and (
         execution.evidence_project is None
-        or execution.evidence_destination is None
-        or execution.source_evidence_project is None
+        or not isinstance(execution.evidence_destination, EvidenceDestinationV1)
         or execution.source_evidence_destination is None
     ):
         raise ValueError(
@@ -1935,6 +2088,7 @@ def _comparison_cohort_lineage(
             "model": spec.execution.model,
             "harnesses": list(spec.execution.harnesses),
             "trace_content": spec.execution.trace_content,
+            "evidence_mode": spec.execution.evidence_mode,
             "environment_digest": stable_digest(spec.execution.environment),
             "source_evidence_project": (
                 spec.execution.source_evidence_project
@@ -2821,6 +2975,7 @@ def compile_comparison(
             "n_tasks": len(tasks),
             "jobs_dir": f".fugue/runtime/jobs/{spec.id}",
             "trace_content": spec.execution.trace_content,
+            "evidence_mode": spec.execution.evidence_mode,
             "source_evidence_project": spec.execution.source_evidence_project,
             "source_evidence_destination": (
                 asdict(spec.execution.source_evidence_destination)
@@ -2836,6 +2991,7 @@ def compile_comparison(
             "environment": spec.execution.environment,
             "agent_env": _drop_empty(
                 {
+                    "FUGUE_EVIDENCE_MODE": spec.execution.evidence_mode,
                     "FUGUE_SOURCE_EVIDENCE_PROJECT": (
                         spec.execution.source_evidence_project
                     ),
@@ -3403,6 +3559,11 @@ def _approved_comparison_execution_lock(
     )
     readiness = _mapping(preview.readiness, "preview readiness")
     matrix = _mapping(preview.matrix, "preview matrix")
+    evidence_mode = str(
+        comparison_execution.get("evidence_mode") or "weave_required"
+    )
+    if evidence_mode not in {"local", "weave_required"}:
+        raise ValueError("preview comparison evidence mode is invalid")
     evidence_destination = _evidence_destination(
         matrix.get("evidence_destination"),
         "preview evidence destination",
@@ -3413,7 +3574,7 @@ def _approved_comparison_execution_lock(
             matrix.get("source_evidence_destination"),
             "preview source evidence destination",
         )
-        if source_project
+        if matrix.get("source_evidence_destination")
         else None
     )
     cells: list[dict[str, Any]] = []
@@ -3507,6 +3668,26 @@ def _approved_comparison_execution_lock(
         raise ValueError(
             "integration-changing comparison must resolve one candidate identity"
         )
+    all_candidate_ids = sorted(
+        {str(item.get("candidate_id") or "") for item in cells}
+    )
+    candidate_definitions = _mapping(
+        matrix.get("candidate_definitions"),
+        "preview candidate definitions",
+    )
+    if sorted(candidate_definitions) != all_candidate_ids:
+        raise ValueError(
+            "preview candidate definitions do not cover the exact matrix candidates"
+        )
+    for candidate_id, raw_definition in candidate_definitions.items():
+        definition = _mapping(
+            raw_definition,
+            f"preview candidate {candidate_id} definition",
+        )
+        if stable_digest(definition) != candidate_id:
+            raise ValueError(
+                f"preview candidate {candidate_id} definition digest does not match"
+            )
     unsigned = {
         "schema_version": 1,
         "kind": "approved_comparison_execution",
@@ -3526,13 +3707,14 @@ def _approved_comparison_execution_lock(
         ),
         "approved_inputs": approved_inputs,
         "approved_inputs_digest": stable_digest(approved_inputs),
+        "evidence_mode": evidence_mode,
         "source_evidence_project": source_project,
         "source_evidence_destination": source_destination,
         "source_lock_digest": str(
             qualification_input_digests.get("evidence_lock")
             or (
                 readiness.get("taskset_digest")
-                if source_project and source_destination
+                if source_destination
                 else ""
             )
             or ""
@@ -3554,6 +3736,10 @@ def _approved_comparison_execution_lock(
                 ],
             }
         ),
+        "candidate_definitions": {
+            candidate_id: dict(candidate_definitions[candidate_id])
+            for candidate_id in all_candidate_ids
+        },
         "expected_cell_count": len(cells),
         "expected_cells_digest": stable_digest(cells),
         "expected_cells": cells,
@@ -3594,7 +3780,7 @@ def _approved_comparison_execution_lock(
         or any(char not in "0123456789abcdef" for char in approval_digest)
     ):
         raise ValueError("approved comparison approval_digest must be an exact digest")
-    if not unsigned["evidence_project"]:
+    if evidence_mode == "weave_required" and not unsigned["evidence_project"]:
         raise ValueError("approved comparison must lock an exact evidence project")
     locked = {**unsigned, "lock_digest": stable_digest(unsigned)}
     _verify_approved_comparison_execution_lock(locked)
@@ -3695,6 +3881,7 @@ def analyze_comparison_rows(
         normalized,
         execution_lock=execution_lock,
     )
+    local_result = bool(resolved_destination.get("kind") == "local")
     observed_evidence_projects = sorted(
         {
             str(row.get("trace_project") or "")
@@ -3734,6 +3921,7 @@ def analyze_comparison_rows(
     paired = _analyze_aligned_pairs(
         normalized,
         result_schema_version=result_schema_version,
+        require_hosted_evidence=not local_result,
     )
     paired_cases_v2 = list(paired.v2)
     paired_cases_v3 = list(paired.v3)
@@ -3757,10 +3945,33 @@ def analyze_comparison_rows(
     )
     operational = _operational_summary(normalized)
     evidence_statuses = [_attempt_evidence_status(row) for row in normalized]
+    hosted_evidence_statuses = [
+        (
+            "not_applicable"
+            if local_result
+            else _evidence_link_set_status(_weave_attempt_evidence_links(row))
+            if row.get("local_evidence_links")
+            else status
+        )
+        for row, status in zip(normalized, evidence_statuses, strict=True)
+    ]
     unresolved_evidence = sum(
-        status in {"missing", "invalid"} for status in evidence_statuses
+        local_status in {"missing", "invalid"}
+        or hosted_status in {"missing", "invalid"}
+        for local_status, hosted_status in zip(
+            evidence_statuses,
+            hosted_evidence_statuses,
+            strict=True,
+        )
     )
-    invalid_evidence = sum(status == "invalid" for status in evidence_statuses)
+    invalid_evidence = sum(
+        local_status == "invalid" or hosted_status == "invalid"
+        for local_status, hosted_status in zip(
+            evidence_statuses,
+            hosted_evidence_statuses,
+            strict=True,
+        )
+    )
     cross_project_attempts = sum(
         bool(
             _cross_project_queries(
@@ -3919,6 +4130,34 @@ def analyze_comparison_rows(
             topology=topology,
             release_note_coverage=resolved_release_note_coverage,
         )
+    local_chain: EvidenceChainIntegrity = (
+        "invalid"
+        if any(status == "invalid" for status in evidence_statuses)
+        else "incomplete"
+        if any(status == "missing" for status in evidence_statuses)
+        else "reconciled"
+    )
+    hosted_chain: EvidenceChainIntegrity = (
+        "not_applicable"
+        if local_result
+        else "invalid"
+        if any(status == "invalid" for status in hosted_evidence_statuses)
+        else "incomplete"
+        if any(status == "missing" for status in hosted_evidence_statuses)
+        else "reconciled"
+    )
+    historical_hosted_without_local = bool(
+        not local_result and not any(row.get("local_evidence_links") for row in normalized)
+    )
+    resolved_candidate_definitions = _result_candidate_definitions(
+        normalized,
+        execution_lock=execution_lock,
+    )
+    local_evidence_binding = (
+        _local_evidence_binding_from_rows(normalized)
+        if any(row.get("local_evidence_links") for row in normalized)
+        else None
+    )
     common = {
         "comparison_id": validate_id(comparison_id, kind="comparison id"),
         "preview_digest": preview_digest,
@@ -3973,12 +4212,24 @@ def analyze_comparison_rows(
                     "approved comparison cohort lineage",
                 )
             ),
+            candidate_definitions=resolved_candidate_definitions,
+            local_evidence=local_evidence_binding,
             supersedes=tuple(
                 item
                 if isinstance(item, SupersededResultV1)
                 else superseded_result_from_dict(item)
                 for item in supersedes
             ),
+            evidence_backend="local" if local_result else "weave",
+            publication_status=(
+                "not_requested" if local_result else "published"
+            ),
+            local_chain_integrity=(
+                local_chain
+                if local_result or not historical_hosted_without_local
+                else "not_applicable"
+            ),
+            hosted_chain_integrity=hosted_chain,
             **common,
         )
     else:
@@ -4014,6 +4265,7 @@ def _analyze_aligned_pairs(
     rows: Sequence[Mapping[str, Any]],
     *,
     result_schema_version: Literal[2, 3],
+    require_hosted_evidence: bool = False,
 ) -> _PairedAnalysis:
     grouped: dict[tuple[str, str, int], dict[str, dict[str, Any]]] = {}
     baseline_passed = 0
@@ -4081,8 +4333,14 @@ def _analyze_aligned_pairs(
                     attempt=attempt,
                     status=status,
                     dimension_changes=dimension_changes_v3,
-                    baseline=_paired_attempt_view_v3(base),
-                    candidate=_paired_attempt_view_v3(candidate),
+                    baseline=_paired_attempt_view_v3(
+                        base,
+                        require_hosted_evidence=require_hosted_evidence,
+                    ),
+                    candidate=_paired_attempt_view_v3(
+                        candidate,
+                        require_hosted_evidence=require_hosted_evidence,
+                    ),
                     task_label=task_label,
                 )
             )
@@ -4176,13 +4434,17 @@ def _resolve_evidence_topology_v3(
         else None
     )
     if execution_lock is not None:
-        source_destination = evidence_destination_from_dict(
+        source_destination = _evidence_destination_contract(
             _mapping(
                 execution_lock.get("source_evidence_destination"),
                 "approved source evidence destination",
-            )
+            ),
+            "approved source evidence destination",
         )
-        result = evidence_destination_from_dict(result_destination)
+        result = _evidence_destination_contract(
+            result_destination,
+            "approved result evidence destination",
+        )
         source_lock_digest = str(
             execution_lock.get("source_lock_digest") or ""
         )
@@ -4240,9 +4502,9 @@ def _resolve_evidence_topology_v3(
             "V3 evidence topology result destination disagrees with rows"
         )
     if execution_lock is not None:
-        if topology.source_destination.project_slug != execution_lock.get(
-            "source_evidence_project"
-        ):
+        if _destination_project_slug(
+            topology.source_destination
+        ) != (execution_lock.get("source_evidence_project") or None):
             raise ValueError(
                 "V3 evidence topology source project disagrees with approval"
             )
@@ -4846,7 +5108,7 @@ def _resolve_approved_comparison_execution_lock(
     return expected
 
 
-def _verify_approved_comparison_execution_lock(
+def _verify_approved_comparison_execution_lock(  # noqa: C901
     approved: Mapping[str, Any],
 ) -> None:
     if approved.get("schema_version") != 1:
@@ -4885,13 +5147,29 @@ def _verify_approved_comparison_execution_lock(
         or any(char not in "0123456789abcdef" for char in approval_digest)
     ):
         raise ValueError("approved comparison approval_digest must be an exact digest")
-    if not str(approved.get("evidence_project") or ""):
+    evidence_mode = str(approved.get("evidence_mode") or "weave_required")
+    if evidence_mode not in {"local", "weave_required"}:
+        raise ValueError("approved comparison evidence mode is invalid")
+    if evidence_mode == "weave_required" and not str(
+        approved.get("evidence_project") or ""
+    ):
         raise ValueError("approved comparison evidence project must be exact")
     evidence_destination = _evidence_destination(
         approved.get("evidence_destination"),
         "approved evidence destination",
     )
-    if evidence_destination["project_slug"] != approved.get("evidence_project"):
+    destination = _evidence_destination_contract(
+        evidence_destination,
+        "approved evidence destination",
+    )
+    if evidence_mode == "local":
+        if not isinstance(destination, LocalEvidenceDestinationV1):
+            raise ValueError("local comparison requires a local evidence destination")
+        if approved.get("evidence_project"):
+            raise ValueError("local comparison cannot lock a W&B evidence project")
+    elif not isinstance(destination, EvidenceDestinationV1) or (
+        destination.project_slug != approved.get("evidence_project")
+    ):
         raise ValueError(
             "approved evidence destination disagrees with its project lock"
         )
@@ -4942,6 +5220,29 @@ def _verify_approved_comparison_execution_lock(
             "approved comparison cohort lineage",
         )
     )
+    expected_candidate_ids = sorted(
+        {
+            str(_mapping(item, "approved comparison expected cell").get("candidate_id") or "")
+            for item in expected_cells
+        }
+    )
+    candidate_definitions = _mapping(
+        approved.get("candidate_definitions"),
+        "approved candidate definitions",
+    )
+    if sorted(candidate_definitions) != expected_candidate_ids:
+        raise ValueError(
+            "approved candidate definitions do not cover the exact candidates"
+        )
+    for candidate_id, raw_definition in candidate_definitions.items():
+        definition = _mapping(
+            raw_definition,
+            f"approved candidate {candidate_id} definition",
+        )
+        if stable_digest(definition) != candidate_id:
+            raise ValueError(
+                f"approved candidate {candidate_id} definition digest does not match"
+            )
     for item in expected_cells:
         _verify_approved_expected_cell(
             _mapping(item, "approved comparison expected cell")
@@ -4956,13 +5257,30 @@ def _verified_source_topology_lock(
     source_lock_digest = str(approved.get("source_lock_digest") or "")
     if not any((source_project, source_destination_raw, source_lock_digest)):
         return source_project, source_destination_raw, source_lock_digest
-    if not all((source_project, source_destination_raw, source_lock_digest)):
+    local_destination = bool(
+        isinstance(source_destination_raw, Mapping)
+        and source_destination_raw.get("kind") == "local"
+    )
+    if not source_destination_raw or not source_lock_digest or (
+        not local_destination and not source_project
+    ):
         raise ValueError("approved source evidence topology is incomplete")
     source_destination = _evidence_destination(
         source_destination_raw,
         "approved source evidence destination",
     )
-    if source_destination["project_slug"] != source_project:
+    destination = _evidence_destination_contract(
+        source_destination,
+        "approved source evidence destination",
+    )
+    if local_destination:
+        if source_project or not isinstance(destination, LocalEvidenceDestinationV1):
+            raise ValueError(
+                "approved local source destination cannot name a W&B project"
+            )
+    elif not isinstance(destination, EvidenceDestinationV1) or (
+        destination.project_slug != source_project
+    ):
         raise ValueError(
             "approved source evidence destination disagrees with its project"
         )
@@ -5324,7 +5642,9 @@ def write_comparison_result(
             source=result.source,
             expected_evidence_project=result.evidence_project,
             expected_source_evidence_project=(
-                result.evidence_topology.source_destination.project_slug
+                _destination_project_slug(
+                    result.evidence_topology.source_destination
+                )
                 if is_v3
                 else None
             ),
@@ -5441,6 +5761,12 @@ def read_comparison_result(path: Path) -> ComparisonResult:
         value.setdefault("qualification_digest", "")
         result = ComparisonResultV2(**value)
     elif version == 3:
+        legacy_v3_evidence_contract = not {
+            "evidence_backend",
+            "publication_status",
+            "local_chain_integrity",
+            "hosted_chain_integrity",
+        } <= set(raw)
         allowed = {
             item.name for item in ComparisonResultV3.__dataclass_fields__.values()
         }
@@ -5526,6 +5852,33 @@ def read_comparison_result(path: Path) -> ComparisonResult:
             )
             for item in value.get("supersedes") or ()
         )
+        value["candidate_definitions"] = {
+            str(key): dict(_mapping(item, "candidate definition"))
+            for key, item in _mapping_or_empty(
+                value.get("candidate_definitions")
+            ).items()
+        }
+        value["local_evidence"] = (
+            dict(_mapping(value.get("local_evidence"), "local evidence binding"))
+            if value.get("local_evidence") is not None
+            else None
+        )
+        local_destination = value["evidence_destination"].get("kind") == "local"
+        value.setdefault(
+            "evidence_backend", "local" if local_destination else "weave"
+        )
+        value.setdefault(
+            "publication_status",
+            "not_requested" if local_destination else "published",
+        )
+        value.setdefault(
+            "local_chain_integrity",
+            "reconciled" if local_destination else "not_applicable",
+        )
+        value.setdefault(
+            "hosted_chain_integrity",
+            "not_applicable" if local_destination else "reconciled",
+        )
         value.setdefault("evidence_project", None)
         value.setdefault("decision_policy", None)
         if value["decision_policy"] is not None:
@@ -5540,6 +5893,12 @@ def read_comparison_result(path: Path) -> ComparisonResult:
         _verify_v2_result_integrity(
             result,
             has_qualification_digest=has_qualification_digest,
+            legacy_serialized=(
+                raw
+                if isinstance(result, ComparisonResultV3)
+                and legacy_v3_evidence_contract
+                else None
+            ),
         )
     elif result.result_digest != _legacy_comparison_result_digest(result.to_dict()):
         raise ValueError("comparison result digest does not match")
@@ -5891,7 +6250,9 @@ def _paired_attempt_view(
         scores=dict(_mapping_or_empty(row.get("comparison_deterministic_scores"))),
         evidence_links=_attempt_evidence_links(row),
         weave_agent_root_call_id=(
-            _row_text(row, "weave_agent_root_call_id")
+            None
+            if row.get("local_evidence_links")
+            else _row_text(row, "weave_agent_root_call_id")
             or _row_text(row, "native_agent_root_call_id")
         ),
         otel_root_span_id=(
@@ -5910,6 +6271,8 @@ def _paired_attempt_view(
 
 def _paired_attempt_view_v3(
     row: Mapping[str, Any] | None,
+    *,
+    require_hosted_evidence: bool = False,
 ) -> PairedAttemptV3 | None:
     legacy = _paired_attempt_view(row)
     if legacy is None or row is None:
@@ -5927,6 +6290,12 @@ def _paired_attempt_view_v3(
         and math.isfinite(float(value))
     }
     scores = {**deterministic_scores, **judge_scores}
+    hosted_links = (
+        _weave_attempt_evidence_links(row)
+        if row.get("local_evidence_links")
+        and require_hosted_evidence
+        else ()
+    )
     return PairedAttemptV3(
         attempt_id=legacy.attempt_id,
         identity=legacy.identity,
@@ -5964,6 +6333,14 @@ def _paired_attempt_view_v3(
         execution_fingerprint=legacy.execution_fingerprint,
         runtime_lock_digest=legacy.runtime_lock_digest,
         infrastructure=legacy.infrastructure,
+        hosted_evidence_status=_evidence_link_set_status(hosted_links),
+        hosted_evidence_links=hosted_links,
+        local_evidence_record_digest=_row_text(
+            row, "local_evidence_record_digest"
+        ),
+        local_prediction_row_sha256=_row_text(
+            row, "local_evidence_prediction_row_sha256"
+        ),
     )
 
 
@@ -6112,6 +6489,26 @@ def _reported_project_identity(row: Mapping[str, Any]) -> str | None:
 
 
 def _attempt_evidence_links(
+    row: Mapping[str, Any],
+) -> tuple[AttemptEvidenceLinkV1, ...]:
+    local_links = row.get("local_evidence_links")
+    if local_links is not None:
+        parsed = tuple(
+            _attempt_evidence_link(item)
+            for item in _sequence(
+                local_links,
+                "local attempt evidence links",
+            )
+        )
+        if any(item.system != "local_artifact" for item in parsed):
+            raise ValueError(
+                "local attempt evidence links must use local_artifact refs"
+            )
+        return parsed
+    return _weave_attempt_evidence_links(row)
+
+
+def _weave_attempt_evidence_links(
     row: Mapping[str, Any],
 ) -> tuple[AttemptEvidenceLinkV1, ...]:
     project = str(row.get("trace_project") or "")
@@ -6376,16 +6773,21 @@ def _privacy_scan_status(
 
 
 def _privacy_scans_complete(row: Mapping[str, Any]) -> bool:
+    local_only = bool(
+        row.get("local_evidence_links")
+        and not str(row.get("trace_project") or "")
+    )
+    hosted_status = _privacy_scan_status(
+        row, "hosted_evidence_privacy_scan_status"
+    )
     return bool(
         row.get("privacy_contract_version") == 2
         and _privacy_scan_status(
             row, "local_artifact_privacy_scan_status"
         )
         == "passed"
-        and _privacy_scan_status(
-            row, "hosted_evidence_privacy_scan_status"
-        )
-        == "passed"
+        and hosted_status
+        in ({"passed", "not_applicable"} if local_only else {"passed"})
         and row.get("private_label_boundary_verified") is True
     )
 
@@ -6406,25 +6808,56 @@ def _privacy_scans_failed(row: Mapping[str, Any]) -> bool:
 def _privacy_scan_evidence_available(row: Mapping[str, Any]) -> bool:
     if row.get("privacy_contract_version") != 2:
         return False
+    local_only = bool(
+        row.get("local_evidence_links")
+        and not str(row.get("trace_project") or "")
+    )
     return bool(
         _privacy_scan_status(row, "local_artifact_privacy_scan_status")
         in {"passed", "failed"}
         and _privacy_scan_status(
             row, "hosted_evidence_privacy_scan_status"
         )
-        in {"passed", "failed"}
+        in (
+            {"passed", "failed", "not_applicable"}
+            if local_only
+            else {"passed", "failed"}
+        )
         and isinstance(row.get("private_label_boundary_verified"), bool)
     )
 
 
 def _attempt_evidence_status(row: Mapping[str, Any]) -> str:
     links = _attempt_evidence_links(row)
-    if not str(row.get("trace_project") or ""):
+    if not str(row.get("trace_project") or "") and not row.get(
+        "local_evidence_links"
+    ):
         return "not_applicable"
+    return _evidence_link_set_status(links)
+
+
+def _evidence_link_set_status(
+    links: Sequence[AttemptEvidenceLinkV1],
+) -> str:
     statuses = {item.status for item in links}
     if statuses == {"resolved"} and len(links) == 5:
         return "reconciled"
+    if not links:
+        return "not_applicable"
     return "invalid" if "invalid" in statuses else "missing"
+
+
+def _chain_integrity_from_statuses(
+    statuses: Iterable[str],
+) -> EvidenceChainIntegrity:
+    observed = tuple(str(item) for item in statuses)
+    if not observed or all(item == "not_applicable" for item in observed):
+        return "not_applicable"
+    if any(item == "invalid" for item in observed):
+        return "invalid"
+    if any(item != "reconciled" for item in observed):
+        return "incomplete"
+    return "reconciled"
 
 
 def _queried_projects(row: Mapping[str, Any]) -> set[str]:
@@ -6692,15 +7125,18 @@ def _attempt_evidence_link(raw: Any) -> AttemptEvidenceLinkV1:
     if status not in {"resolved", "missing", "invalid"}:
         raise ValueError(f"unknown attempt evidence link status: {status}")
     system = str(value.get("system") or "weave")
-    if system != "weave":
-        raise ValueError("attempt evidence link system must be weave")
+    if system not in {"local_artifact", "weave"}:
+        raise ValueError(
+            "attempt evidence link system must be local_artifact or weave"
+        )
     ref = _optional_text(value.get("ref"), "attempt evidence ref", 2_000)
     url = _optional_text(value.get("url"), "attempt evidence URL", 2_000)
     reason = _optional_text(value.get("reason"), "attempt evidence reason", 1_000)
     if status == "resolved":
-        if not ref or not url:
+        if not ref or (system == "weave" and not url):
             raise ValueError(
-                "resolved attempt evidence requires a stable ref and URL"
+                "resolved attempt evidence requires a stable ref; Weave links "
+                "also require a URL"
             )
         if reason:
             raise ValueError(
@@ -6711,7 +7147,7 @@ def _attempt_evidence_link(raw: Any) -> AttemptEvidenceLinkV1:
     return AttemptEvidenceLinkV1(
         kind=kind,  # type: ignore[arg-type]
         status=status,  # type: ignore[arg-type]
-        system="weave",
+        system=system,  # type: ignore[arg-type]
         ref=ref,
         url=url,
         reason=reason,
@@ -6864,11 +7300,16 @@ def _paired_attempt_v3(raw: Any) -> PairedAttemptV3 | None:
     value = _mapping(raw, "V3 paired attempt")
     allowed = {
         item.name for item in PairedAttemptV3.__dataclass_fields__.values()
-    }
+    } - {"hosted_evidence_status", "hosted_evidence_links"}
     _reject_unknown(value, allowed, "V3 paired attempt")
     score_explanations = _mapping(
         value.get("score_explanations"), "V3 score explanations"
     )
+    infrastructure = dict(_mapping_or_empty(value.get("infrastructure")))
+    hosted_evidence_status = infrastructure.pop(
+        "hosted_evidence_status", "not_applicable"
+    )
+    hosted_evidence_links = infrastructure.pop("hosted_evidence_links", ())
     return PairedAttemptV3(
         attempt_id=_text(value.get("attempt_id"), "V3 attempt id", 200),
         identity=dict(_mapping(value.get("identity"), "V3 attempt identity")),
@@ -6922,6 +7363,15 @@ def _paired_attempt_v3(raw: Any) -> PairedAttemptV3 | None:
             _attempt_evidence_link(item)
             for item in value.get("evidence_links") or ()
         ),
+        hosted_evidence_status=_text(
+            hosted_evidence_status or "not_applicable",
+            "V3 hosted evidence status",
+            100,
+        ),
+        hosted_evidence_links=tuple(
+            _attempt_evidence_link(item)
+            for item in hosted_evidence_links or ()
+        ),
         weave_agent_root_call_id=(
             str(value.get("weave_agent_root_call_id") or "") or None
         ),
@@ -6932,7 +7382,13 @@ def _paired_attempt_v3(raw: Any) -> PairedAttemptV3 | None:
         runtime_lock_digest=(
             str(value.get("runtime_lock_digest") or "") or None
         ),
-        infrastructure=dict(_mapping_or_empty(value.get("infrastructure"))),
+        infrastructure=infrastructure,
+        local_evidence_record_digest=(
+            str(value.get("local_evidence_record_digest") or "") or None
+        ),
+        local_prediction_row_sha256=(
+            str(value.get("local_prediction_row_sha256") or "") or None
+        ),
     )
 
 
@@ -7103,6 +7559,86 @@ def _candidate_source_revisions(
         required=False,
         label="candidate result",
     )
+
+
+def _result_candidate_definitions(
+    rows: Sequence[Mapping[str, Any]],
+    *,
+    execution_lock: Mapping[str, Any] | None,
+) -> dict[str, dict[str, Any]]:
+    locked = _mapping_or_empty(
+        execution_lock.get("candidate_definitions")
+        if execution_lock is not None
+        else None
+    )
+    observed: dict[str, dict[str, Any]] = {}
+    for row in rows:
+        candidate_id = str(row.get("candidate_id") or "")
+        definition = row.get("candidate_definition")
+        if not candidate_id or not isinstance(definition, Mapping):
+            continue
+        materialized = dict(definition)
+        if stable_digest(materialized) != candidate_id:
+            raise ValueError("attempt candidate definition digest does not match")
+        existing = observed.setdefault(candidate_id, materialized)
+        if existing != materialized:
+            raise ValueError("attempt candidate definitions disagree")
+    source = locked or observed
+    result = {
+        str(key): dict(_mapping(value, "candidate definition"))
+        for key, value in source.items()
+    }
+    expected = {str(row.get("candidate_id") or "") for row in rows}
+    if result and set(result) != expected:
+        raise ValueError("candidate definitions do not cover all result candidates")
+    for candidate_id, definition in result.items():
+        if stable_digest(definition) != candidate_id:
+            raise ValueError("locked candidate definition digest does not match")
+        if candidate_id in observed and observed[candidate_id] != definition:
+            raise ValueError("attempt candidate definition changed after approval")
+    return dict(sorted(result.items()))
+
+
+def _local_evidence_binding_from_rows(
+    rows: Sequence[Mapping[str, Any]],
+) -> dict[str, Any] | None:
+    fields = {
+        "manifest_digest": "local_evidence_manifest_digest",
+        "manifest_file_sha256": "local_evidence_manifest_file_sha256",
+        "plan_digest": "local_evidence_plan_digest",
+        "attempt_record_set_digest": "local_evidence_attempt_record_set_digest",
+        "prediction_row_set_digest": "local_evidence_prediction_row_set_digest",
+        "run_conformance_receipt_digest": "local_evidence_run_receipt_digest",
+        "run_conformance_file_sha256": (
+            "local_evidence_run_receipt_file_sha256"
+        ),
+    }
+    bound_fields = {
+        source
+        for source in fields.values()
+        if any(row.get(source) is not None for row in rows)
+    }
+    if not bound_fields:
+        # Migration-only direct V3 analysis can still read pre-local-ledger
+        # rows. Canonical Operator execution always supplies the complete
+        # binding and the publisher rejects results without it.
+        return None
+    if bound_fields != set(fields.values()):
+        raise ValueError("local result rows have a partial evidence binding")
+    run_ids = {str(row.get("run_id") or "") for row in rows}
+    if len(run_ids) != 1 or not next(iter(run_ids)):
+        raise ValueError("local result rows must bind one run id")
+    value: dict[str, Any] = {
+        "schema_version": 1,
+        "run_id": next(iter(run_ids)),
+    }
+    for target, source in fields.items():
+        observed = {str(row.get(source) or "") for row in rows}
+        if len(observed) != 1:
+            raise ValueError(f"local result rows disagree on {source}")
+        value[target] = next(iter(observed))
+    _verify_local_evidence_binding(value)
+    return value
 
 
 def _integration_change_required(comparison: Mapping[str, Any]) -> bool:
@@ -8012,9 +8548,13 @@ def _evidence_grade(
         return "invalid"
     if int(integrity.get("cross_project_attempts") or 0):
         return "C"
-    live_rows = [row for row in rows if str(row.get("trace_project") or "")]
+    evidenced_rows = [
+        row
+        for row in rows
+        if str(row.get("trace_project") or "") or row.get("local_evidence_links")
+    ]
     missing = int(integrity.get("unresolved_evidence_attempts") or 0)
-    if live_rows and missing == 0:
+    if evidenced_rows and missing == 0:
         return "A"
     if missing == 0:
         return "B"
@@ -8126,6 +8666,7 @@ def _verify_v2_result_integrity(
     result: ComparisonResultV2 | ComparisonResultV3,
     *,
     has_qualification_digest: bool,
+    legacy_serialized: Mapping[str, Any] | None = None,
 ) -> None:
     if isinstance(result, ComparisonResultV3):
         _verify_v3_result_shape(result)
@@ -8142,7 +8683,8 @@ def _verify_v2_result_integrity(
         return
     if not re.fullmatch(r"[0-9a-f]{64}", result.qualification_digest):
         raise ValueError("comparison qualification digest is invalid")
-    expected_qualification = _comparison_qualification_digest(result.to_dict())
+    serialized = legacy_serialized or result.to_dict()
+    expected_qualification = _comparison_qualification_digest(serialized)
     if result.qualification_digest != expected_qualification:
         raise ValueError("comparison qualification digest does not match")
     if attestation is None:
@@ -8153,7 +8695,7 @@ def _verify_v2_result_integrity(
                 "unsigned comparison result must expose its qualification digest"
             )
         return
-    expected_envelope = _comparison_result_digest(result.to_dict())
+    expected_envelope = _comparison_result_digest(serialized)
     if result.result_digest != expected_envelope:
         raise ValueError("attested comparison result envelope digest does not match")
     if result.decision.status == "go":
@@ -8165,15 +8707,84 @@ def _verify_v2_result_integrity(
             )
 
 
+def _verify_local_attempt_links(
+    links: Sequence[AttemptEvidenceLinkV1],
+) -> None:
+    for link in links:
+        if link.status != "resolved":
+            continue
+        if (
+            link.system != "local_artifact"
+            or not link.ref
+            or not link.ref.startswith("fugue://")
+        ):
+            raise ValueError(
+                "local ComparisonResultV3 evidence ref is not portable"
+            )
+
+
+def _verify_weave_attempt_links(
+    links: Sequence[AttemptEvidenceLinkV1],
+    *,
+    project: str,
+    app_base_url: str,
+) -> dict[str, str]:
+    result: dict[str, str] = {}
+    for link in links:
+        if link.status != "resolved":
+            continue
+        if link.system != "weave" or not link.ref or not link.url:
+            raise ValueError(
+                "hosted ComparisonResultV3 evidence must use Weave links"
+            )
+        if link.kind == "dataset":
+            expected_url = _weave_object_url_from_ref(
+                project,
+                link.ref,
+                app_base_url=app_base_url,
+            )
+            if not expected_url or link.url != expected_url:
+                raise ValueError(
+                    "ComparisonResultV3 Dataset link disagrees with the "
+                    "result topology"
+                )
+            continue
+        prefix = f"weave:///{project}/call/"
+        if not link.ref.startswith(prefix):
+            raise ValueError(
+                "ComparisonResultV3 Call ref disagrees with the result topology"
+            )
+        call_id = link.ref.removeprefix(prefix)
+        if (
+            not call_id
+            or link.url
+            != _weave_call_url(
+                project,
+                call_id,
+                app_base_url=app_base_url,
+            )
+        ):
+            raise ValueError(
+                "ComparisonResultV3 Call link disagrees with its stable Weave ref"
+            )
+        result[link.kind] = call_id
+    return result
+
+
 def _v3_canonical_attempt_rows(  # noqa: C901 - one bounded audit checks every V3 edge
     result: ComparisonResultV3,
 ) -> list[dict[str, Any]]:
     """Rebuild the safe decision-bearing row surface from canonical V3 pairs."""
 
     rows: list[dict[str, Any]] = []
-    project = result.evidence_topology.result_destination.project_slug
-    source_project = result.evidence_topology.source_destination.project_slug
-    app_base_url = result.evidence_topology.result_destination.app_base_url
+    result_destination = result.evidence_topology.result_destination
+    source_destination = result.evidence_topology.source_destination
+    local_backend = isinstance(
+        result_destination, LocalEvidenceDestinationV1
+    )
+    project = _destination_project_slug(result_destination) or ""
+    source_project = _destination_project_slug(source_destination)
+    app_base_url = _destination_app_base_url(result_destination) or ""
     aligned_by_id = {
         item.alignment_id: item
         for item in result.aligned_analysis.aligned_attempts
@@ -8364,46 +8975,51 @@ def _v3_canonical_attempt_rows(  # noqa: C901 - one bounded audit checks every V
                     "with its five-link chain"
                 )
 
-            resolved_call_ids: dict[str, str] = {}
-            for kind, link in links_by_kind.items():
-                if link.status != "resolved":
-                    continue
-                assert link.ref is not None and link.url is not None
-                if kind == "dataset":
-                    expected_url = _weave_object_url_from_ref(
-                        project,
-                        link.ref,
-                        app_base_url=app_base_url,
-                    )
-                    if not expected_url or link.url != expected_url:
-                        raise ValueError(
-                            "ComparisonResultV3 Dataset link disagrees with "
-                            "the result topology"
-                        )
-                    continue
-                prefix = f"weave:///{project}/call/"
-                if not link.ref.startswith(prefix):
-                    raise ValueError(
-                        "ComparisonResultV3 Call ref disagrees with the result "
-                        "topology"
-                    )
-                call_id = link.ref.removeprefix(prefix)
+            canonical_systems = {item.system for item in attempt.evidence_links}
+            if canonical_systems == {"local_artifact"}:
+                _verify_local_attempt_links(attempt.evidence_links)
+                resolved_call_ids: dict[str, str] = {}
+            elif canonical_systems == {"weave"} and not local_backend:
+                # Historical hosted V3 results predate the canonical local
+                # chain and remain readable without fabricating local refs.
+                resolved_call_ids = _verify_weave_attempt_links(
+                    attempt.evidence_links,
+                    project=project,
+                    app_base_url=app_base_url,
+                )
+            else:
+                raise ValueError(
+                    "ComparisonResultV3 canonical evidence links mix backends"
+                )
+
+            hosted_links = attempt.hosted_evidence_links
+            expected_hosted_status = _evidence_link_set_status(hosted_links)
+            if attempt.hosted_evidence_status != expected_hosted_status:
+                raise ValueError(
+                    "ComparisonResultV3 hosted evidence status disagrees with "
+                    "its link chain"
+                )
+            if hosted_links:
+                hosted_by_kind = {item.kind: item for item in hosted_links}
                 if (
-                    not call_id
-                    or link.url
-                    != _weave_call_url(
-                        project,
-                        call_id,
-                        app_base_url=app_base_url,
-                    )
+                    len(hosted_links) != 5
+                    or set(hosted_by_kind) != expected_link_kinds
+                    or any(item.system != "weave" for item in hosted_links)
+                    or local_backend
                 ):
                     raise ValueError(
-                        "ComparisonResultV3 Call link disagrees with its "
-                        "stable Weave ref"
+                        "ComparisonResultV3 hosted chain must contain five "
+                        "unique Weave links"
                     )
-                resolved_call_ids[kind] = call_id
+                resolved_call_ids = _verify_weave_attempt_links(
+                    hosted_links,
+                    project=project,
+                    app_base_url=app_base_url,
+                )
             agent_call_id = resolved_call_ids.get("agent_root")
             if (
+                not local_backend
+                and
                 agent_call_id is not None
                 and attempt.weave_agent_root_call_id != agent_call_id
             ):
@@ -8414,6 +9030,7 @@ def _v3_canonical_attempt_rows(  # noqa: C901 - one bounded audit checks every V
             if attempt.otel_root_span_id and attempt.otel_root_span_id in {
                 *resolved_call_ids.values(),
                 *(item.ref or "" for item in attempt.evidence_links),
+                *(item.ref or "" for item in hosted_links),
             }:
                 raise ValueError(
                     "ComparisonResultV3 OTel span ID cannot be a Weave Call ID"
@@ -8448,7 +9065,18 @@ def _v3_canonical_attempt_rows(  # noqa: C901 - one bounded audit checks every V
                 "comparison_deterministic_criticality": {
                     item.id: item.critical for item in pair.dimension_changes
                 },
-                "trace_project": project,
+                "trace_project": project or None,
+                "local_evidence_links": (
+                    [item.to_dict() for item in attempt.evidence_links]
+                    if canonical_systems == {"local_artifact"}
+                    else None
+                ),
+                "local_evidence_record_digest": (
+                    attempt.local_evidence_record_digest
+                ),
+                "local_evidence_prediction_row_sha256": (
+                    attempt.local_prediction_row_sha256
+                ),
                 "queried_projects": list(attempt.queried_projects),
                 "cost_usd": attempt.cost_usd,
                 "latency_sec": attempt.latency_sec,
@@ -8542,15 +9170,23 @@ def _v3_semantic_integrity(
     duplicate_attempt_ids = sorted(
         value for value, count in Counter(attempt_ids).items() if count > 1
     )
+    attempts_by_id = {
+        attempt.attempt_id: attempt
+        for pair in result.paired_cases
+        for attempt in (pair.baseline, pair.candidate)
+        if attempt is not None
+    }
     evidence_statuses = [
-        str(
-            next(
-                attempt.evidence_status
-                for pair in result.paired_cases
-                for attempt in (pair.baseline, pair.candidate)
-                if attempt is not None
-                and attempt.attempt_id == row["attempt_id"]
-            )
+        attempts_by_id[str(row["attempt_id"])].evidence_status for row in rows
+    ]
+    hosted_evidence_statuses = [
+        (
+            attempts_by_id[str(row["attempt_id"])].hosted_evidence_status
+            if result.evidence_backend == "weave"
+            and attempts_by_id[str(row["attempt_id"])].hosted_evidence_links
+            else attempts_by_id[str(row["attempt_id"])].evidence_status
+            if result.evidence_backend == "weave"
+            else "not_applicable"
         )
         for row in rows
     ]
@@ -8558,7 +9194,9 @@ def _v3_semantic_integrity(
         bool(
             _cross_project_queries(
                 row,
-                result.evidence_topology.source_destination.project_slug,
+                _destination_project_slug(
+                    result.evidence_topology.source_destination
+                ),
             )
         )
         for row in rows
@@ -8587,7 +9225,14 @@ def _v3_semantic_integrity(
         in {"legacy", "unavailable", "not_applicable"}
         for row in rows
     )
-    invalid_evidence = sum(status == "invalid" for status in evidence_statuses)
+    invalid_evidence = sum(
+        status == "invalid" or hosted == "invalid"
+        for status, hosted in zip(
+            evidence_statuses,
+            hosted_evidence_statuses,
+            strict=True,
+        )
+    )
     return {
         "status": (
             "invalid"
@@ -8605,7 +9250,13 @@ def _v3_semantic_integrity(
         "unique_attempts": len(set(attempt_ids)),
         "duplicate_attempt_ids": duplicate_attempt_ids,
         "unresolved_evidence_attempts": sum(
-            status in {"missing", "invalid"} for status in evidence_statuses
+            status in {"missing", "invalid"}
+            or hosted in {"missing", "invalid"}
+            for status, hosted in zip(
+                evidence_statuses,
+                hosted_evidence_statuses,
+                strict=True,
+            )
         ),
         "invalid_evidence_attempts": invalid_evidence,
         "cross_project_attempts": cross_project_attempts,
@@ -8662,9 +9313,9 @@ def _v3_decision_facts(
     return facts
 
 
-def _verify_v3_result_shape(result: ComparisonResultV3) -> None:
-    if result.evidence_project != (
-        result.evidence_topology.result_destination.project_slug
+def _verify_v3_result_shape(result: ComparisonResultV3) -> None:  # noqa: C901
+    if result.evidence_project != _destination_project_slug(
+        result.evidence_topology.result_destination
     ):
         raise ValueError(
             "ComparisonResultV3 evidence project disagrees with its topology"
@@ -8693,9 +9344,13 @@ def _verify_v3_result_shape(result: ComparisonResultV3) -> None:
     )
     if (
         lineage_execution.get("source_evidence_project")
-        != result.evidence_topology.source_destination.project_slug
+        != _destination_project_slug(
+            result.evidence_topology.source_destination
+        )
         or lineage_execution.get("result_evidence_project")
-        != result.evidence_topology.result_destination.project_slug
+        != _destination_project_slug(
+            result.evidence_topology.result_destination
+        )
     ):
         raise ValueError(
             "ComparisonResultV3 cohort lineage project topology disagrees"
@@ -8708,6 +9363,85 @@ def _verify_v3_result_shape(result: ComparisonResultV3) -> None:
                 "ComparisonResultV3 integrity field "
                 f"{key!r} disagrees with canonical attempts"
             )
+    attempts = tuple(
+        attempt
+        for pair in result.paired_cases
+        for attempt in (pair.baseline, pair.candidate)
+        if attempt is not None
+    )
+    result_candidate_ids = {
+        str(attempt.identity.get("candidate") or "") for attempt in attempts
+    }
+    if result.candidate_definitions and set(result.candidate_definitions) != (
+        result_candidate_ids
+    ):
+        raise ValueError(
+            "ComparisonResultV3 candidate definitions do not cover attempts"
+        )
+    local_attempts = tuple(
+        attempt
+        for attempt in attempts
+        if {link.system for link in attempt.evidence_links}
+        == {"local_artifact"}
+    )
+    if result.evidence_backend == "local":
+        if result.local_evidence is None:
+            raise ValueError(
+                "canonical local ComparisonResultV3 requires its ledger binding"
+            )
+        if result.local_evidence.get("run_id") != result.source:
+            raise ValueError(
+                "local ComparisonResultV3 ledger run disagrees with its source"
+            )
+        if len(local_attempts) != len(attempts) or any(
+            attempt.local_evidence_record_digest is None
+            or attempt.local_prediction_row_sha256 is None
+            for attempt in local_attempts
+        ):
+            raise ValueError(
+                "local ComparisonResultV3 attempts require bound ledger digests"
+            )
+    # Hosted V3 artifacts written before the standalone ledger contract can
+    # contain local-style links without a manifest-set binding. They remain
+    # readable as historical evidence; every new Operator execution binds the
+    # manifest before hosted enrichment.
+    historical_hosted = bool(
+        result.evidence_backend == "weave"
+        and attempts
+        and all(
+            {link.system for link in attempt.evidence_links} == {"weave"}
+            for attempt in attempts
+        )
+    )
+    expected_local_chain = (
+        "not_applicable"
+        if historical_hosted
+        else _chain_integrity_from_statuses(
+            attempt.evidence_status for attempt in attempts
+        )
+    )
+    expected_hosted_chain = (
+        "not_applicable"
+        if result.evidence_backend == "local"
+        else _chain_integrity_from_statuses(
+            (
+                attempt.evidence_status
+                if historical_hosted
+                else attempt.hosted_evidence_status
+            )
+            for attempt in attempts
+        )
+    )
+    if result.local_chain_integrity != expected_local_chain:
+        raise ValueError(
+            "ComparisonResultV3 local-chain integrity disagrees with "
+            "canonical attempts"
+        )
+    if result.hosted_chain_integrity != expected_hosted_chain:
+        raise ValueError(
+            "ComparisonResultV3 hosted-chain integrity disagrees with "
+            "canonical attempts"
+        )
     expected_runtime_locks = _runtime_locks_v3(canonical_rows)
     if tuple(item.to_dict() for item in result.runtime_locks) != tuple(
         item.to_dict() for item in expected_runtime_locks
@@ -9357,6 +10091,7 @@ def scaffold_comparison(destination: Path, *, force: bool = False) -> Path:
             "reserve_per_attempt_usd": 10,
             "approval_required": True,
             "trace_content": "full",
+            "evidence_mode": "local",
         },
     }
     _atomic_text(
@@ -10698,6 +11433,8 @@ def execute_comparison(
         repo_root=repo_root,
         source=repo_root,
     )
+    local_mode = spec.execution.evidence_mode == "local"
+    result_schema_version = 3 if local_mode or spec.schema_version >= 3 else 2
     service = OperatorService(repo_root, env_file)
     current = preview_comparison(
         spec,
@@ -10766,6 +11503,17 @@ def execute_comparison(
         request.approved_comparison,
         repo_root=repo_root,
     )
+    if (
+        local_mode
+        and source_pre_run_drift is None
+        and isinstance(
+            spec.execution.source_evidence_destination,
+            LocalEvidenceDestinationV1,
+        )
+    ):
+        source_pre_run_drift = _matched_local_source_drift(
+            request.approved_comparison
+        )
     from fugue.bench.execution import new_run_id
 
     run_id = new_run_id()
@@ -10838,17 +11586,45 @@ def execute_comparison(
         repo_root=repo_root,
         env=service.env,
     )
+    if (
+        local_mode
+        and source_post_run_drift is None
+        and isinstance(
+            spec.execution.source_evidence_destination,
+            LocalEvidenceDestinationV1,
+        )
+    ):
+        # Re-verify the frozen host-only inputs after execution before calling
+        # the unchanged local source lock matched.
+        _verified_approved_inputs(
+            request.approved_comparison,
+            repo_root=repo_root,
+        )
+        source_post_run_drift = _matched_local_source_drift(
+            request.approved_comparison
+        )
     export_path = (
         repo_root / COMPARISON_RESULT_ROOT / preview.preview_digest / "attempts.jsonl"
     )
     summary = service.export_run(
         run_id,
         out=export_path,
-        fetch_weave=fetch_weave,
+        # Local evidence is already canonical and must never turn an ambient
+        # W&B credential into an implicit hosted read. Publication is a
+        # separate, explicit command over the immutable local result.
+        fetch_weave=False if local_mode else fetch_weave,
         to_weave=False,
     )
     rows = _read_jsonl(summary.path, "comparison attempt rows")
-    _apply_harbor_conformance(rows, repo_root=repo_root, run_id=run_id)
+    _bind_local_execution_evidence(
+        rows,
+        repo_root=repo_root,
+        run_id=run_id,
+        # Weave-required execution enriches the already-canonical local rows.
+        # It may carry a hosted project and still needs the local manifest and
+        # Harbor receipt bound before hosted privacy/link qualification.
+        hosted_evidence_expected=not local_mode,
+    )
     scored = _score_and_bind_exported_comparison_rows(
         spec=spec,
         rows=rows,
@@ -10861,78 +11637,77 @@ def execute_comparison(
         release_note_coverage=release_note_coverage,
         infrastructure_receipt=infrastructure_receipt,
     )
-    draft_result = analyze_comparison_rows(
-        comparison_id=spec.id,
-        preview_digest=preview.preview_digest,
-        rows=scored,
-        source=run_id,
-        expected_evidence_project=trace_project_slug(
+    expected_evidence_project: str | None = None
+    if not local_mode:
+        expected_evidence_project = trace_project_slug(
             _comparison_evidence_environment(spec, service.env)
-        ),
-        approved_comparison=getattr(request, "approved_comparison", None),
-        decision_policy=spec.decision_policy,
-        expected_source_evidence_project=(
-            spec.execution.source_evidence_project
-        ),
-        result_schema_version=3 if spec.schema_version >= 3 else 2,
-        study_intent="mcp_release_qualification",
-        release_note_coverage=release_note_coverage,
-        supersedes=spec.supersedes,
-    )
-    publication_payloads: dict[str, Any] = {
-        "result": draft_result.to_dict(),
-    }
-    if publish_research and spec.execution.research_id:
-        from fugue.research.experiment_views import (
-            build_comparison_evaluation_view,
+        )
+        draft_result = analyze_comparison_rows(
+            comparison_id=spec.id,
+            preview_digest=preview.preview_digest,
+            rows=scored,
+            source=run_id,
+            expected_evidence_project=expected_evidence_project,
+            approved_comparison=getattr(request, "approved_comparison", None),
+            decision_policy=spec.decision_policy,
+            expected_source_evidence_project=(
+                spec.execution.source_evidence_project
+            ),
+            result_schema_version=result_schema_version,
+            study_intent="mcp_release_qualification",
+            release_note_coverage=release_note_coverage,
+            supersedes=spec.supersedes,
+        )
+        publication_payloads: dict[str, Any] = {
+            "result": draft_result.to_dict(),
+        }
+        if publish_research and spec.execution.research_id:
+            from fugue.research.experiment_views import (
+                build_comparison_evaluation_view,
+            )
+
+            publication_payloads["study"] = build_comparison_evaluation_view(
+                draft_result.to_dict(),
+                result_ref=(
+                    destination.resolve() / "result.json"
+                ).relative_to(repo_root.resolve()).as_posix(),
+            ).to_dict()
+        from fugue.bench.run_conformance import (
+            write_hosted_evidence_privacy_receipt,
         )
 
-        publication_payloads["study"] = build_comparison_evaluation_view(
-            draft_result.to_dict(),
-            result_ref=(
-                destination.resolve() / "result.json"
-            ).relative_to(repo_root.resolve()).as_posix(),
-        ).to_dict()
-    from fugue.bench.run_conformance import (
-        write_hosted_evidence_privacy_receipt,
-    )
-
-    hosted_privacy = write_hosted_evidence_privacy_receipt(
-        repo_root=repo_root,
-        run_id=run_id,
-        rows=scored,
-        env=service.env,
-        evidence_project=trace_project_slug(
-            _comparison_evidence_environment(spec, service.env)
-        ),
-        private_labels_path=_frozen_private_labels_path(
-            repo_root,
-            str(approved_inputs["private_labels_sha256"]),
-        ),
-        publication_payloads=publication_payloads,
-        fetch_hosted=fetch_weave,
-    )
-    _apply_hosted_evidence_privacy(
-        scored,
-        repo_root=repo_root,
-        run_id=run_id,
-        receipt_digest=hosted_privacy.sha256,
-    )
+        hosted_privacy = write_hosted_evidence_privacy_receipt(
+            repo_root=repo_root,
+            run_id=run_id,
+            rows=scored,
+            env=service.env,
+            evidence_project=expected_evidence_project,
+            private_labels_path=_frozen_private_labels_path(
+                repo_root,
+                str(approved_inputs["private_labels_sha256"]),
+            ),
+            publication_payloads=publication_payloads,
+            fetch_hosted=fetch_weave,
+        )
+        _apply_hosted_evidence_privacy(
+            scored,
+            repo_root=repo_root,
+            run_id=run_id,
+            receipt_digest=hosted_privacy.sha256,
+        )
     _atomic_text(summary.path, _jsonl(scored))
     result = analyze_comparison_rows(
         comparison_id=spec.id,
         preview_digest=preview.preview_digest,
         rows=scored,
         source=run_id,
-        expected_evidence_project=trace_project_slug(
-            _comparison_evidence_environment(spec, service.env)
-        ),
+        expected_evidence_project=expected_evidence_project,
         approved_comparison=getattr(request, "approved_comparison", None),
         decision_policy=spec.decision_policy,
         expected_source_evidence_project=(
             spec.execution.source_evidence_project
         ),
-        result_schema_version=3 if spec.schema_version >= 3 else 2,
+        result_schema_version=result_schema_version,
         study_intent="mcp_release_qualification",
         release_note_coverage=release_note_coverage,
         supersedes=spec.supersedes,
@@ -10952,6 +11727,124 @@ def execute_comparison(
         repo_root=repo_root,
     )
     return result, json_path, markdown_path
+
+
+def _matched_local_source_drift(
+    approved_comparison: Mapping[str, Any],
+) -> EvidenceDriftCheckV1:
+    digest = str(approved_comparison.get("source_lock_digest") or "")
+    if not re.fullmatch(r"[0-9a-f]{64}", digest):
+        raise RuntimeError("local comparison source lock is unavailable")
+    return EvidenceDriftCheckV1(
+        status="matched",
+        expected_digest=digest,
+        observed_digest=digest,
+    )
+
+
+def _bind_local_execution_evidence(
+    rows: Sequence[dict[str, Any]],
+    *,
+    repo_root: Path,
+    run_id: str,
+    hosted_evidence_expected: bool = False,
+) -> None:
+    """Reconcile the canonical local ledger and Harbor run receipt.
+
+    This is deliberately independent of W&B.  The local manifest is
+    recomputed from its immutable attempt records, while the Harbor receipt
+    proves the run-scoped policy, privacy, and cleanup boundary.
+    """
+
+    store = LocalEvidenceStore(repo_root, run_id)
+    manifest = store.read_manifest()
+    if manifest.run_id != run_id or manifest.status != "complete":
+        raise RuntimeError(
+            "local comparison evidence manifest is not complete for the run"
+        )
+    observed_attempt_ids = tuple(
+        sorted(str(row.get("attempt_id") or "") for row in rows)
+    )
+    if (
+        not observed_attempt_ids
+        or any(not re.fullmatch(r"[0-9a-f]{64}", item) for item in observed_attempt_ids)
+        or len(set(observed_attempt_ids)) != len(observed_attempt_ids)
+        or observed_attempt_ids != manifest.terminal_attempt_ids
+    ):
+        raise RuntimeError(
+            "local comparison rows disagree with the canonical evidence manifest"
+        )
+
+    from fugue.bench.run_conformance import (
+        read_harbor_run_conformance_receipt,
+    )
+
+    receipt = read_harbor_run_conformance_receipt(
+        repo_root=repo_root,
+        run_id=run_id,
+    )
+    receipt_digest = str(receipt.get("receipt_sha256") or "")
+    if (
+        receipt.get("backend") != "local_harbor_docker"
+        or receipt.get("status") != "passed"
+        or not re.fullmatch(r"[0-9a-f]{64}", receipt_digest)
+    ):
+        raise RuntimeError(
+            "local comparison Harbor policy/privacy/cleanup receipt did not pass"
+        )
+    if (
+        manifest.run_conformance is None
+        or manifest.run_conformance.receipt_sha256 != receipt_digest
+        or manifest.run_conformance.status != "passed"
+        or not manifest.run_conformance.enforced
+    ):
+        raise RuntimeError(
+            "local evidence manifest does not bind the passed Harbor receipt"
+        )
+
+    manifest_file_sha256 = hashlib.sha256(store.manifest_path.read_bytes()).hexdigest()
+    run_receipt_file_sha256 = hashlib.sha256(
+        store.run_conformance_path.read_bytes()
+    ).hexdigest()
+    records = {item.attempt_id: item for item in manifest.attempt_records}
+
+    _apply_harbor_conformance(rows, repo_root=repo_root, run_id=run_id)
+    for row in rows:
+        attempt_id_value = str(row.get("attempt_id") or "")
+        record = records[attempt_id_value]
+        if row.get("local_evidence_record_digest") != record.record_digest:
+            raise RuntimeError(
+                "local comparison row record digest disagrees with its manifest"
+            )
+        if not hosted_evidence_expected and str(row.get("trace_project") or ""):
+            raise RuntimeError(
+                "local comparison row unexpectedly names a hosted evidence project"
+            )
+        if not row.get("local_evidence_links"):
+            raise RuntimeError(
+                "local comparison row is missing its canonical evidence chain"
+            )
+        if row.get("harbor_conformance_status") != "passed":
+            raise RuntimeError(
+                "local comparison row did not reconcile its Harbor receipt"
+            )
+        local_binding = {
+            "local_evidence_manifest_digest": manifest.manifest_digest,
+            "local_evidence_manifest_file_sha256": manifest_file_sha256,
+            "local_evidence_plan_digest": manifest.plan_digest,
+            "local_evidence_attempt_record_set_digest": (
+                manifest.attempt_record_set_digest
+            ),
+            "local_evidence_prediction_row_set_digest": (
+                manifest.prediction_row_set_digest
+            ),
+            "local_evidence_prediction_row_sha256": record.prediction_row_sha256,
+            "local_evidence_run_receipt_digest": receipt_digest,
+            "local_evidence_run_receipt_file_sha256": run_receipt_file_sha256,
+        }
+        if not hosted_evidence_expected:
+            local_binding["hosted_evidence_privacy_scan_status"] = "not_applicable"
+        row.update(local_binding)
 
 
 def _require_checkpoint_judges(
@@ -11364,6 +12257,7 @@ def _execution(
             "reserve_per_attempt_usd",
             "approval_required",
             "trace_content",
+            "evidence_mode",
             "source_evidence_project",
             "source_evidence_destination",
             "evidence_project",
@@ -11401,6 +12295,15 @@ def _execution(
         raise ValueError(
             "evidence checkpoint cells require comparison concurrency 1"
         )
+    raw_mode = str(value.get("evidence_mode") or "").strip()
+    if not raw_mode:
+        # Missing modes are historical and retain their hosted semantics.
+        # New scaffolds write ``local`` explicitly.
+        evidence_mode: EvidenceMode = "weave_required"
+    elif raw_mode in {"local", "weave_required"}:
+        evidence_mode = raw_mode  # type: ignore[assignment]
+    else:
+        raise ValueError("execution evidence_mode must be local or weave_required")
     evidence_project = _evidence_project(value.get("evidence_project"))
     evidence_destination = _declared_evidence_destination(
         value.get("evidence_destination"),
@@ -11415,12 +12318,27 @@ def _execution(
         evidence_project=source_evidence_project,
         label="source_evidence_destination",
     )
-    if (source_evidence_project is None) != (
-        source_evidence_destination is None
-    ):
-        raise ValueError(
-            "source evidence project and destination must be declared together"
+    if evidence_mode == "local":
+        if evidence_project or isinstance(
+            evidence_destination,
+            EvidenceDestinationV1,
+        ):
+            raise ValueError(
+                "local evidence mode does not accept W&B result destinations"
+            )
+        source_evidence_destination = (
+            source_evidence_destination or LocalEvidenceDestinationV1()
         )
+        evidence_destination = LocalEvidenceDestinationV1()
+    else:
+        if isinstance(evidence_destination, LocalEvidenceDestinationV1):
+            raise ValueError(
+                "weave_required evidence mode requires a W&B result destination"
+            )
+    _validate_comparison_source_destination(
+        source_evidence_project,
+        source_evidence_destination,
+    )
     prerequisite_values = (
         value.get("prerequisite_result"),
         value.get("prerequisite_attestation"),
@@ -11446,6 +12364,7 @@ def _execution(
         ),
         approval_required=bool(value.get("approval_required", True)),
         trace_content=trace_content,  # type: ignore[arg-type]
+        evidence_mode=evidence_mode,
         source_evidence_project=source_evidence_project,
         source_evidence_destination=source_evidence_destination,
         evidence_project=evidence_project,
@@ -12457,6 +13376,7 @@ def _preview_dict(value: PreviewSummary) -> dict[str, Any]:
         "source_evidence_destination": value.source_evidence_destination,
         "evidence_project": value.evidence_project,
         "evidence_destination": value.evidence_destination,
+        "candidate_definitions": dict(value.candidate_definitions),
         "matrix_cells": [asdict(item) for item in value.matrix_cells],
     }
 
@@ -12947,16 +13867,47 @@ def _declared_evidence_destination(
     *,
     evidence_project: str | None,
     label: str = "evidence_destination",
-) -> EvidenceDestinationV1 | None:
+) -> EvidenceDestination | None:
     if value in (None, {}):
         return None
     raw = _mapping(value, f"execution {label}")
-    destination = evidence_destination_from_dict(raw)
-    if evidence_project is not None and destination.project_slug != evidence_project:
+    destination: EvidenceDestination = (
+        local_evidence_destination_from_dict(raw)
+        if raw.get("kind") == "local"
+        else evidence_destination_from_dict(raw)
+    )
+    if isinstance(destination, LocalEvidenceDestinationV1):
+        if evidence_project is not None:
+            raise ValueError(
+                f"execution {label} local destination cannot name a W&B project"
+            )
+    elif evidence_project is not None and destination.project_slug != evidence_project:
         raise ValueError(
             f"execution {label} must match its project"
         )
     return destination
+
+
+def _validate_comparison_source_destination(
+    project: str | None,
+    destination: EvidenceDestination | None,
+) -> None:
+    if destination is None:
+        if project is not None:
+            raise ValueError(
+                "source evidence project and destination must be declared together"
+            )
+        return
+    if isinstance(destination, LocalEvidenceDestinationV1):
+        if project is not None:
+            raise ValueError(
+                "local source evidence destination cannot name a W&B project"
+            )
+        return
+    if project != destination.project_slug:
+        raise ValueError(
+            "source evidence project and destination must be declared together"
+        )
 
 
 def _comparison_evidence_environment(
@@ -12964,13 +13915,29 @@ def _comparison_evidence_environment(
     env: Mapping[str, str],
 ) -> dict[str, str]:
     destination = spec.execution.evidence_destination
-    if destination is not None:
+    if isinstance(destination, LocalEvidenceDestinationV1):
+        result = dict(env)
+        result["FUGUE_EVIDENCE_MODE"] = "local"
+        return result
+    if isinstance(destination, EvidenceDestinationV1):
         return evidence_destination_environment(destination, env)
     return trace_project_environment(spec.execution.evidence_project, env)
 
 
 def _evidence_destination(value: Any, label: str) -> dict[str, Any]:
     raw = _mapping(value, label)
+    return _evidence_destination_contract(raw, label).to_dict()
+
+
+def _evidence_destination_contract(
+    raw: Mapping[str, Any],
+    label: str,
+) -> EvidenceDestination:
+    if raw.get("kind") == "local":
+        destination = local_evidence_destination_from_dict(raw)
+        if dict(raw) != destination.to_dict():
+            raise ValueError(f"{label} does not match its canonical identity")
+        return destination
     _reject_unknown(
         raw,
         {
@@ -12996,7 +13963,23 @@ def _evidence_destination(value: Any, label: str) -> dict[str, Any]:
     canonical = destination.to_dict()
     if raw != canonical:
         raise ValueError(f"{label} does not match its canonical identity")
-    return canonical
+    return destination
+
+
+def _destination_project_slug(destination: EvidenceDestination) -> str | None:
+    return (
+        destination.project_slug
+        if isinstance(destination, EvidenceDestinationV1)
+        else None
+    )
+
+
+def _destination_app_base_url(destination: EvidenceDestination) -> str | None:
+    return (
+        destination.app_base_url
+        if isinstance(destination, EvidenceDestinationV1)
+        else None
+    )
 
 
 def _positive_int(value: Any, label: str) -> int:

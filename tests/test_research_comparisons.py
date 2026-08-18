@@ -644,6 +644,14 @@ def test_execute_comparison_surfaces_result_projection_failure_separately(
         "fugue.bench.execution.new_run_id",
         lambda: "projection-failure-run",
     )
+    # This test replaces the Operator and exercises only presentation-sink
+    # failure handling. Local-ledger-first behavior is covered by the real
+    # Operator/comparison contract tests, so do not fabricate that ledger here.
+    monkeypatch.setattr(
+        comparison_module,
+        "_bind_local_execution_evidence",
+        lambda *_args, **_kwargs: None,
+    )
     projection_calls: list[str] = []
 
     def pass_start(*_args: Any, **_kwargs: Any) -> dict[str, Any]:

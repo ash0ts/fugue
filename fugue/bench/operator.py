@@ -86,6 +86,7 @@ from fugue.bench.library import (
     scorer_reference,
     validate_id,
 )
+from fugue.bench.local_evidence import LocalEvidenceDestinationV1
 from fugue.bench.manifest import (
     BenchmarkManifest,
     FixtureRepositorySpec,
@@ -232,6 +233,46 @@ class PreviewSummary:
     source_evidence_destination: dict[str, Any] = field(default_factory=dict)
     evidence_project: str = ""
     evidence_destination: dict[str, Any] = field(default_factory=dict)
+    candidate_definitions: dict[str, dict[str, Any]] = field(default_factory=dict)
+
+
+@dataclass(frozen=True)
+class _EvidenceCoordinators:
+    local: GeneratedEvaluationCoordinator
+    hosted: LiveEvaluationCoordinator | None = None
+
+    def begin_cell(self, cell: PlannedCell) -> Mapping[str, str] | None:
+        overlay = dict(self.local.begin_cell(cell) or {})
+        hosted = self.hosted.begin_cell(cell) if self.hosted is not None else None
+        if hosted:
+            overlap = {
+                key
+                for key in overlay
+                if key in hosted and overlay[key] != hosted[key]
+            }
+            if overlap:
+                raise RuntimeError(
+                    "local and hosted evidence overlays disagree: "
+                    + ", ".join(sorted(overlap))
+                )
+            overlay.update(hosted)
+        return overlay
+
+    def finish_cell(self, cell: PlannedCell, outcome: Any) -> None:
+        # Canonical local evidence closes before any hosted network work.
+        # A Weave failure may block a weave_required run, but it cannot erase
+        # or precede the provider-neutral local terminal record.
+        canonical_row = self.local.finish_cell(cell, outcome)
+        if self.hosted is not None:
+            if hasattr(self.hosted, "terminal_row"):
+                self.hosted.finish_cell(
+                    cell,
+                    outcome,
+                    canonical_row=canonical_row,
+                )
+            else:
+                # Backward-compatible injected coordinator seam.
+                self.hosted.finish_cell(cell, outcome)
 
 
 @dataclass(frozen=True)
@@ -1470,6 +1511,14 @@ class OperatorService:
             plan.experiment,
             self.env,
         )
+        candidate_definitions: dict[str, dict[str, Any]] = {}
+        for job in jobs:
+            definition = job.resolved_candidate.definition
+            existing = candidate_definitions.setdefault(job.candidate_id, definition)
+            if existing != definition:
+                raise RuntimeError(
+                    f"candidate {job.candidate_id} resolved inconsistently"
+                )
         return PreviewSummary(
             cells=len(jobs),
             applicable_cells=sum(job.applicable for job in jobs),
@@ -1527,8 +1576,14 @@ class OperatorService:
                 if plan.experiment.source_evidence_destination is not None
                 else {}
             ),
-            evidence_project=trace_project_slug(evidence_env),
-            evidence_destination=trace_destination_identity(evidence_env),
+            evidence_project=(
+                _evidence_project_for_mode(plan.experiment, evidence_env) or ""
+            ),
+            evidence_destination=_evidence_destination_for_mode(
+                plan.experiment,
+                evidence_env,
+            ),
+            candidate_definitions=dict(sorted(candidate_definitions.items())),
         )
 
     def rendered_jobs(
@@ -1688,11 +1743,14 @@ class OperatorService:
             jobs=rendered,
             repo_root=self.repo_root,
         )
-        _validate_evidence_project_jobs(
-            rendered,
-            expected_project=trace_project_slug(env),
-            expected_destination=trace_destination_identity(env),
-        )
+        if selected.evidence_mode == "local":
+            _validate_local_evidence_jobs(rendered)
+        else:
+            _validate_evidence_project_jobs(
+                rendered,
+                expected_project=trace_project_slug(env),
+                expected_destination=trace_destination_identity(env),
+            )
         return rendered
 
     def _direct_workload_jobs(
@@ -1889,7 +1947,16 @@ class OperatorService:
                     "runner": workload.runner,
                     "n_attempts": attempts,
                     "trace_content": experiment.trace_content,
-                    "evidence_destination": trace_destination_identity(direct_env),
+                    "instrumentation": (
+                        "local_evidence"
+                        if experiment.evidence_mode == "local"
+                        else "weave"
+                    ),
+                    "evidence_destination": (
+                        LocalEvidenceDestinationV1().to_dict()
+                        if experiment.evidence_mode == "local"
+                        else trace_destination_identity(direct_env)
+                    ),
                     **(
                         {
                             "source_evidence_destination": (
@@ -2043,6 +2110,7 @@ class OperatorService:
         )
         running = False
         live: LiveEvaluationCoordinator | None = None
+        local: GeneratedEvaluationCoordinator | None = None
         try:
             if cancel_event.is_set():
                 raise _RunCancellation
@@ -2157,11 +2225,13 @@ class OperatorService:
                     "started_at": _now(),
                     "run_name": run_name,
                     "experiment_id": resolved.id,
-                    "trace_project": trace_project_slug(
-                        rendered[0].env if rendered else execution_env
+                    "trace_project": _evidence_project_for_mode(
+                        resolved,
+                        rendered[0].env if rendered else execution_env,
                     ),
-                    "evidence_destination": trace_destination_identity(
-                        rendered[0].env if rendered else execution_env
+                    "evidence_destination": _evidence_destination_for_mode(
+                        resolved,
+                        rendered[0].env if rendered else execution_env,
                     ),
                     "cell_count": len(cells),
                     "jobs_dirs": job_dirs,
@@ -2182,7 +2252,7 @@ class OperatorService:
             if approved_destination is not None and (
                 not isinstance(approved_destination, Mapping)
                 or dict(approved_destination)
-                != trace_destination_identity(run_env)
+                != _evidence_destination_for_mode(resolved, run_env)
             ):
                 raise RuntimeError(
                     "approved comparison evidence destination changed before "
@@ -2229,7 +2299,8 @@ class OperatorService:
                 )
 
             observability_error = None
-            live_required = bool(
+            evidence_mode = getattr(resolved, "evidence_mode", "weave_required")
+            live_required = evidence_mode == "weave_required" and bool(
                 request.approved_comparison or resolved.require_live_evidence
             ) and any(
                 cell.applicable and cell.execution_kind == "agent"
@@ -2249,6 +2320,8 @@ class OperatorService:
                     "this experiment cannot disable required live Weave evidence"
                 )
             if (
+                evidence_mode == "weave_required"
+                and
                 cells
                 and trace_api_key(run_env)
                 and not live_disabled
@@ -2269,6 +2342,10 @@ class OperatorService:
                             and conformance_enforced
                             else None
                         ),
+                        # The provider-neutral local row is canonical. Hosted
+                        # rows are retained separately as publication evidence
+                        # and never become duplicate Fugue predictions.
+                        results_filename="hosted-evaluation-results.jsonl",
                     )
                 except Exception as exc:
                     observability_error = f"{type(exc).__name__}: {exc}"
@@ -2280,34 +2357,30 @@ class OperatorService:
                 raise RuntimeError(
                     "required live-evidence coordinator is unavailable"
                 )
-            local = (
-                GeneratedEvaluationCoordinator(
-                    cells,
-                    repo_root=self.repo_root,
-                    env=run_env,
-                    host_evaluator=host_evaluator,
-                )
-                if live is None
-                and (
-                    host_evaluator is not None
-                    or any(cell.evaluation_case is not None for cell in cells)
-                )
-                else None
+            local = GeneratedEvaluationCoordinator(
+                cells,
+                repo_root=self.repo_root,
+                env=run_env,
+                host_evaluator=host_evaluator,
+                cell_conformance=(
+                    checkpoint_conformance if conformance_enforced else None
+                ),
+                # Injected runners are unit-test/embedding seams and do not
+                # necessarily emit a native Agent transcript. Real Harbor
+                # execution must always close the canonical local chain.
+                require_complete_evidence=conformance_enforced,
+                evidence_mode=evidence_mode,
             )
+            evidence = _EvidenceCoordinators(local=local, hosted=live)
+
             outcomes = execute_cells(
                 cells,
                 repo_root=self.repo_root,
                 max_workers=max_workers,
                 runner=cell_runner,
-                cell_started=live.begin_cell if live is not None else None,
-                require_cell_started_success=live is not None,
-                cell_finished=(
-                    live.finish_cell
-                    if live is not None
-                    else local.finish_cell
-                    if local is not None
-                    else None
-                ),
+                cell_started=evidence.begin_cell,
+                require_cell_started_success=True,
+                cell_finished=evidence.finish_cell,
                 cancellation_event=cancel_event,
             )
             cancelled = cancel_event.is_set() or any(
@@ -2341,6 +2414,11 @@ class OperatorService:
                 pre_execution_inventory=pre_execution_inventory,
                 enforce=conformance_enforced,
             )
+            # The canonical manifest is closed only after the final run-scoped
+            # privacy, execution-policy, and Harbor cleanup receipt exists.
+            # This prevents a complete evidence chain from outliving a leaked
+            # secret or orphaned run resource discovered in the final wave.
+            local_manifest = local.finalize() if local is not None else None
             conformance_blocked = (
                 harbor_conformance.enforced
                 and harbor_conformance.status != "passed"
@@ -2397,6 +2475,16 @@ class OperatorService:
                     if publication
                     else [],
                     "evaluation_failures": failures,
+                    "local_evidence": (
+                        {
+                            "status": local_manifest.status,
+                            "manifest_digest": local_manifest.manifest_digest,
+                            "plan_digest": local_manifest.plan_digest,
+                            "attempts": len(local_manifest.attempt_records),
+                        }
+                        if local_manifest is not None
+                        else None
+                    ),
                     "harbor_conformance": harbor_conformance.manifest_reference(
                         self.repo_root
                     ),
@@ -3218,6 +3306,27 @@ def _experiment_evidence_environment(
     experiment: ExperimentSpec,
     env: Mapping[str, str],
 ) -> dict[str, str]:
+    if getattr(experiment, "evidence_mode", "weave_required") == "local":
+        result = dict(env)
+        for key in tuple(result):
+            if key.startswith("FUGUE_WEAVE_") or key.startswith(
+                "OTEL_EXPORTER_OTLP_"
+            ) or key in {
+                "OTEL_RESOURCE_ATTRIBUTES",
+                "WEAVE_PROJECT",
+                "WEAVE_TRACE_SERVER_URL",
+                "WANDB_ENTITY",
+                "WANDB_PROJECT",
+                "FUGUE_RESULT_EVIDENCE_PROJECT",
+                "FUGUE_WANDB_RESEARCH_ID",
+                "FUGUE_WANDB_STUDY_ID",
+                "FUGUE_RESEARCH_EXPERIMENT_ID",
+                "FUGUE_STUDY_CONSOLE_BACKLINK",
+            }:
+                result.pop(key, None)
+        result["FUGUE_EVIDENCE_MODE"] = "local"
+        result["FUGUE_LOCAL_EVIDENCE_FORMAT"] = "fugue-evidence"
+        return result
     destination = experiment.evidence_destination
     if destination is not None:
         if (
@@ -3229,6 +3338,24 @@ def _experiment_evidence_environment(
             )
         return evidence_destination_environment(destination, env)
     return trace_project_environment(experiment.evidence_project, env)
+
+
+def _evidence_destination_for_mode(
+    experiment: ExperimentSpec,
+    env: Mapping[str, str],
+) -> dict[str, Any]:
+    if getattr(experiment, "evidence_mode", "weave_required") == "local":
+        return LocalEvidenceDestinationV1().to_dict()
+    return trace_destination_identity(env)
+
+
+def _evidence_project_for_mode(
+    experiment: ExperimentSpec,
+    env: Mapping[str, str],
+) -> str | None:
+    if getattr(experiment, "evidence_mode", "weave_required") == "local":
+        return None
+    return trace_project_slug(env)
 
 
 def _validate_evidence_project_jobs(
@@ -3262,6 +3389,26 @@ def _validate_evidence_project_jobs(
         raise RuntimeError(
             "rendered jobs disagree with the locked evidence destination: "
             + ", ".join(destination_mismatches)
+        )
+
+
+def _validate_local_evidence_jobs(jobs: list[RenderedJob]) -> None:
+    expected = LocalEvidenceDestinationV1().to_dict()
+    mismatched = sorted(
+        job.job_name
+        for job in jobs
+        if job.resolved_candidate.execution_definition.get("instrumentation")
+        != "local_evidence"
+        or job.resolved_candidate.execution_definition.get(
+            "evidence_destination"
+        )
+        != expected
+        or job.env.get("FUGUE_EVIDENCE_MODE") != "local"
+    )
+    if mismatched:
+        raise RuntimeError(
+            "rendered jobs disagree with canonical local evidence: "
+            + ", ".join(mismatched)
         )
 
 

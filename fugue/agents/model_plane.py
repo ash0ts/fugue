@@ -1,9 +1,10 @@
-"""Harbor agent subclasses: provider-neutral model plane + Weave tracing.
+"""Harbor agent subclasses: provider-neutral model plane + optional tracing.
 
-Fugue always traces to W&B Weave, while model calls can bill through W&B
-Inference, OpenAI, or Anthropic. The shared ``ModelRoute`` determines whether
-each harness can talk to the provider natively or should use the local LiteLLM
-bridge.
+Fugue always captures provider-neutral local Agent evidence. W&B Weave tracing
+is enabled only for studies that explicitly require it, while model calls can
+bill through W&B Inference, OpenAI, or Anthropic. The shared ``ModelRoute``
+determines whether each harness can talk to the provider natively or should use
+the local LiteLLM bridge.
 
 Setup builds each harness and tracing integration into a locked runtime image.
 Trials mount that image read-only and only write cell-specific configuration.
@@ -104,6 +105,16 @@ def _require_trace_key() -> str:
             "for Weave tracing."
         )
     return key
+
+
+def _evidence_mode() -> str:
+    mode = os.environ.get("FUGUE_EVIDENCE_MODE", "weave_required").strip()
+    mode = mode or "weave_required"
+    if mode not in {"local", "weave_required"}:
+        raise ValueError(
+            "FUGUE_EVIDENCE_MODE must be either 'local' or 'weave_required'"
+        )
+    return mode
 
 
 def _require_model_key(route: ModelRoute) -> str:
@@ -509,17 +520,18 @@ class _TrialMetaMixin:
     async def _begin_trial(
         self, harness: str, route: ModelRoute, environment: BaseEnvironment
     ) -> None:
-        os.environ["FUGUE_WEAVE_CONVERSATION_ID"] = self.trace_conversation_id
-        os.environ["OTEL_RESOURCE_ATTRIBUTES"] = self._otel_resource_attributes(
-            harness, route
-        )
-        os.environ["FUGUE_TRACE_ATTRIBUTES_JSON"] = json.dumps(
-            {
-                key: str(value)
-                for key, value in self._trace_attributes(harness, route).items()
-            },
-            sort_keys=True,
-        )
+        if _evidence_mode() == "weave_required":
+            os.environ["FUGUE_WEAVE_CONVERSATION_ID"] = self.trace_conversation_id
+            os.environ["OTEL_RESOURCE_ATTRIBUTES"] = self._otel_resource_attributes(
+                harness, route
+            )
+            os.environ["FUGUE_TRACE_ATTRIBUTES_JSON"] = json.dumps(
+                {
+                    key: str(value)
+                    for key, value in self._trace_attributes(harness, route).items()
+                },
+                sort_keys=True,
+            )
         await self._capture_runtime_fingerprint(environment, "pre_execution")
         registration_error: Exception | None = None
         try:
@@ -703,7 +715,18 @@ done
         }
 
     def _meta_begin(self, harness: str, route: ModelRoute) -> None:
-        entity, project = _weave_entity_project()
+        evidence_mode = _evidence_mode()
+        if evidence_mode == "weave_required":
+            entity, project = _weave_entity_project()
+            trace_project: str | None = f"{entity}/{project}"
+            trace_receipt: dict[str, Any] | None = trace_destination_identity(
+                os.environ
+            )
+        else:
+            entity = None
+            project = None
+            trace_project = None
+            trace_receipt = None
         tags = _experiment_tags(harness, route, self.context_system_id)
         model_transport = resolve_harness_model_route(route, harness)
         prompt_id = os.environ.get("FUGUE_PROMPT_ID")
@@ -799,8 +822,8 @@ done
             "manifest_path": os.environ.get("FUGUE_MANIFEST_PATH"),
             "weave_entity": entity,
             "weave_project": project,
-            "trace_project": f"{entity}/{project}",
-            "trace_receipt": trace_destination_identity(os.environ),
+            "trace_project": trace_project,
+            "trace_receipt": trace_receipt,
             "wandb_research_id": os.environ.get("FUGUE_WANDB_RESEARCH_ID"),
             "wandb_study_id": os.environ.get("FUGUE_WANDB_STUDY_ID"),
             "research_experiment_id": os.environ.get(
@@ -815,13 +838,25 @@ done
             "study_console_backlink": os.environ.get(
                 "FUGUE_STUDY_CONSOLE_BACKLINK"
             ),
-            "weave_agent_name": stable_agent_name(harness),
-            "weave_conversation_key": self.conversation_key,
-            "weave_conversation_id": self.trace_conversation_id,
+            "weave_agent_name": (
+                stable_agent_name(harness)
+                if evidence_mode == "weave_required"
+                else None
+            ),
+            "weave_conversation_key": (
+                self.conversation_key if evidence_mode == "weave_required" else None
+            ),
+            "weave_conversation_id": (
+                self.trace_conversation_id
+                if evidence_mode == "weave_required"
+                else None
+            ),
             "planned_conversation_id": self.trace_conversation_id,
             "eval_predict_and_score_call_id": os.environ.get(
                 "FUGUE_WEAVE_EVAL_PREDICT_AND_SCORE_CALL_ID"
-            ),
+            )
+            if evidence_mode == "weave_required"
+            else None,
             "evaluation_scope_id": os.environ.get("FUGUE_EVALUATION_SCOPE_ID"),
             "trace_content": self.trace_content,
             "runtime_fingerprints": getattr(self, "_runtime_fingerprints", {}),
@@ -832,6 +867,10 @@ done
         }
         if getattr(self, "_context_artifact_meta", None):
             meta["context_artifact"] = self._context_artifact_meta
+        if evidence_mode == "local":
+            meta["evidence_mode"] = "local"
+            meta["agent_name"] = stable_agent_name(harness)
+            meta["conversation_key"] = self.conversation_key
         self.logs_dir.mkdir(parents=True, exist_ok=True)
         self._meta_path().write_text(json.dumps(meta, indent=2) + "\n")
 
@@ -943,12 +982,20 @@ done
         try:
             native_ids = self._extract_session_ids()
             meta["native_session_ids"] = native_ids
-            meta["weave_conversation_ids"] = list(dict.fromkeys(native_ids))
+            meta["weave_conversation_ids"] = (
+                list(dict.fromkeys(native_ids))
+                if _evidence_mode() == "weave_required"
+                else []
+            )
         except (OSError, json.JSONDecodeError):
             meta["native_session_ids"] = []
             meta["weave_conversation_ids"] = []
         meta["conversation_correlation"] = {
-            "status": "pending_live_verification",
+            "status": (
+                "pending_live_verification"
+                if _evidence_mode() == "weave_required"
+                else "isolated_trial_directory"
+            ),
             "planned_conversation_id": self.trace_conversation_id,
             "native_session_ids": meta["native_session_ids"],
         }
@@ -967,12 +1014,13 @@ done
     def _set_context_registration(self, value: dict[str, Any]) -> None:
         value = self._context_registration(value)
         self._context_registration_meta = value
-        trace_environment = self._trace_environment(
-            self.TRACE_HARNESS, self.model_route
-        )
-        os.environ.update(trace_environment)
-        if hasattr(self, "_resolved_env_vars"):
-            self._resolved_env_vars.update(trace_environment)
+        if _evidence_mode() == "weave_required":
+            trace_environment = self._trace_environment(
+                self.TRACE_HARNESS, self.model_route
+            )
+            os.environ.update(trace_environment)
+            if hasattr(self, "_resolved_env_vars"):
+                self._resolved_env_vars.update(trace_environment)
         try:
             meta = json.loads(self._meta_path().read_text())
         except (OSError, json.JSONDecodeError):
@@ -1397,8 +1445,9 @@ class FugueHermes(_TrialMetaMixin, Hermes):
     def __init__(self, *args, model_name: str | None = None, **kwargs):
         self.model_route = resolve_model_route(model_name)
         _require_model_key(self.model_route)
-        _require_trace_key()
-        _weave_entity_project()  # fail fast before containers spin up
+        if _evidence_mode() == "weave_required":
+            _require_trace_key()
+            _weave_entity_project()  # fail fast before containers spin up
         kwargs.setdefault("version", self._HERMES_VERSION)
         super().__init__(*args, model_name=self.model_route.model_id, **kwargs)
 
@@ -1416,14 +1465,19 @@ class FugueHermes(_TrialMetaMixin, Hermes):
             ),
             timeout_sec=30,
         )
+        trace_check = (
+            f" && test -s {runtime}/hermes-otel/fugue-patch-lock.json"
+            if _evidence_mode() == "weave_required"
+            else ""
+        )
+        verification_command = (
+            f"PATH={runtime}/bin:$PATH node --version | grep -F v22.23.0 && "
+            f"PATH={runtime}/bin:$PATH npm --version | grep -F 10.9.8 && "
+            f"PATH={runtime}/bin:$PATH hermes version{trace_check}"
+        )
         result = await self.exec_as_agent(
             environment,
-            command=(
-                f"PATH={runtime}/bin:$PATH node --version | grep -F v22.23.0 && "
-                f"PATH={runtime}/bin:$PATH npm --version | grep -F 10.9.8 && "
-                f"PATH={runtime}/bin:$PATH hermes version && "
-                f"test -s {runtime}/hermes-otel/fugue-patch-lock.json"
-            ),
+            command=verification_command,
             timeout_sec=30,
         )
         if result.return_code != 0:
@@ -1492,16 +1546,17 @@ class FugueHermes(_TrialMetaMixin, Hermes):
                     "models": [self.model_route.model_id],
                 },
             },
+        }
+        if _evidence_mode() == "weave_required":
             # Plugin enablement lives in this same file (`hermes plugins
             # enable` rewrites config.yaml in place — verified by diffing
             # before/after). Declare it here so the config overwrite can't
             # wipe it; mirrors the exact block the CLI writes.
-            "plugins": {
+            config["plugins"] = {
                 "enabled": ["hermes_otel"],
                 "disabled": [],
                 "entries": {"hermes_otel": {"allow_tool_override": False}},
-            },
-        }
+            }
         return yaml.dump(config, default_flow_style=False)
 
     def _build_otel_plugin_config_yaml(self) -> str:
@@ -1558,28 +1613,40 @@ class FugueHermes(_TrialMetaMixin, Hermes):
         interaction = self._task_interaction(instruction)
         await self._begin_trial("hermes", self.model_route, environment)
 
-        entity, project = _weave_entity_project()
-        trace_key = _require_trace_key()
+        trace_environment: dict[str, str] = {}
+        weave_environment: dict[str, str] = {}
+        debug_environment: dict[str, str] = {}
+        if _evidence_mode() == "weave_required":
+            entity, project = _weave_entity_project()
+            trace_key = _require_trace_key()
+            trace_environment = self._trace_environment("hermes", self.model_route)
+            weave_environment = {
+                "WANDB_API_KEY": trace_key,
+                "WANDB_ENTITY": entity,
+                "WANDB_PROJECT": project,
+                "OTEL_EXPORTER_OTLP_TRACES_HEADERS": weave_agents_otel_headers(
+                    f"{entity}/{project}", trace_key
+                ),
+                "FUGUE_WEAVE_SINGLE_TURN_KEY": self.trace_conversation_id,
+            }
+            debug_environment = {
+                # Per-span detail lands in the plugin dir's debug.log — the
+                # fastest signal when validating trace delivery.
+                "HERMES_OTEL_DEBUG": "true",
+            }
         env: dict[str, str] = {
             **provider_client_env(self.model_route, os.environ),
-            **self._trace_environment("hermes", self.model_route),
+            **trace_environment,
             "TERMINAL_ENV": "local",
-            "WANDB_API_KEY": trace_key,
-            "WANDB_ENTITY": entity,
-            "WANDB_PROJECT": project,
-            "OTEL_EXPORTER_OTLP_TRACES_HEADERS": weave_agents_otel_headers(
-                f"{entity}/{project}", trace_key
-            ),
-            "FUGUE_WEAVE_SINGLE_TURN_KEY": self.trace_conversation_id,
+            **weave_environment,
             "HARBOR_INSTRUCTION": instruction,
-            # Per-span detail lands in the plugin dir's debug.log — the
-            # fastest signal when validating trace delivery.
-            "HERMES_OTEL_DEBUG": "true",
+            **debug_environment,
             _chat_key_env(self.model_route): _chat_key(self.model_route),
         }
 
         home = await self._detect_home(environment)
-        await self._configure_hermes_otel(environment, home)
+        if _evidence_mode() == "weave_required":
+            await self._configure_hermes_otel(environment, home)
 
         config_yaml = self._build_model_config_yaml()
         await self.exec_as_agent(
@@ -1609,7 +1676,8 @@ class FugueHermes(_TrialMetaMixin, Hermes):
                     "probe": "$HOME/.hermes/config.yaml",
                 }
             )
-            env.update(self._trace_environment("hermes", self.model_route))
+            if _evidence_mode() == "weave_required":
+                env.update(self._trace_environment("hermes", self.model_route))
         skills_command = self._build_register_skills_command()
         if skills_command:
             result = await self.exec_as_agent(
@@ -1658,16 +1726,25 @@ class FugueHermes(_TrialMetaMixin, Hermes):
                 )
         finally:
             try:
-                await self.exec_as_agent(
-                    environment,
-                    command=(
+                if _evidence_mode() == "weave_required":
+                    export_command = (
                         'export PATH="/opt/fugue-agent-runtime/bin:'
                         '$HOME/.local/bin:$PATH" && '
                         "hermes sessions export /logs/agent/hermes-session.jsonl "
                         "--source cli 2>/dev/null; "
                         'cp "$HOME/.hermes/plugins/hermes_otel/debug.log" '
                         "/logs/agent/hermes-otel-debug.log 2>/dev/null; true"
-                    ),
+                    )
+                else:
+                    export_command = (
+                        'export PATH="/opt/fugue-agent-runtime/bin:'
+                        '$HOME/.local/bin:$PATH" && '
+                        "hermes sessions export /logs/agent/hermes-session.jsonl "
+                        "--source cli 2>/dev/null"
+                    )
+                await self.exec_as_agent(
+                    environment,
+                    command=export_command,
                     timeout_sec=30,
                 )
             except Exception:
@@ -1741,10 +1818,11 @@ class FugueOpenClaw(_TrialMetaMixin, OpenClaw):
     def __init__(self, *args, model_name: str | None = None, **kwargs):
         self.model_route = resolve_model_route(model_name)
         _require_model_key(self.model_route)
-        _require_trace_key()
         os.environ["OPENAI_API_KEY"] = _chat_key(self.model_route)
         os.environ["OPENAI_BASE_URL"] = _chat_base_url(self.model_route)
-        _weave_entity_project()
+        if _evidence_mode() == "weave_required":
+            _require_trace_key()
+            _weave_entity_project()
         kwargs.setdefault("version", self._OPENCLAW_VERSION)
         super().__init__(
             *args, model_name=f"openai/{self.model_route.model_id}", **kwargs
@@ -1793,6 +1871,8 @@ class FugueOpenClaw(_TrialMetaMixin, OpenClaw):
     @override
     def _build_full_openclaw_config(self) -> dict[str, Any]:
         cfg = super()._build_full_openclaw_config()
+        if _evidence_mode() == "local":
+            return cfg
         entity, project = _weave_entity_project()
         plugins = cfg.setdefault("plugins", {})
         load = plugins.setdefault("load", {})
@@ -1937,16 +2017,29 @@ class FugueOpenClaw(_TrialMetaMixin, OpenClaw):
         provider, _ = self.model_name.split("/", 1)
         self._validate_provider(provider)
 
+        trace_environment: dict[str, str] = {}
+        weave_environment: dict[str, str] = {}
+        correlation_environment: dict[str, str] = {}
+        if _evidence_mode() == "weave_required":
+            trace_environment = self._trace_environment(
+                "openclaw", self.model_route
+            )
+            weave_environment = {
+                "WANDB_API_KEY": _require_trace_key(),
+                "OPENCLAW_GATEWAY_TOKEN": self._GATEWAY_TOKEN,
+                "OPENCLAW_GATEWAY_PORT": str(self._GATEWAY_PORT),
+            }
+            correlation_environment = {
+                "FUGUE_WEAVE_CONVERSATION_ID": self.trace_conversation_id,
+                "FUGUE_WEAVE_SINGLE_TURN_KEY": self.trace_conversation_id,
+            }
         env: dict[str, str] = {
             **provider_client_env(self.model_route, os.environ),
-            **self._trace_environment("openclaw", self.model_route),
-            "WANDB_API_KEY": _require_trace_key(),
-            "OPENCLAW_GATEWAY_TOKEN": self._GATEWAY_TOKEN,
-            "OPENCLAW_GATEWAY_PORT": str(self._GATEWAY_PORT),
+            **trace_environment,
+            **weave_environment,
             "OPENAI_API_KEY": _chat_key(self.model_route),
             "OPENAI_BASE_URL": _chat_base_url(self.model_route),
-            "FUGUE_WEAVE_CONVERSATION_ID": self.trace_conversation_id,
-            "FUGUE_WEAVE_SINGLE_TURN_KEY": self.trace_conversation_id,
+            **correlation_environment,
         }
         for key in self._provider_env_keys(provider):
             val = self._get_env(key)
@@ -1984,12 +2077,13 @@ class FugueOpenClaw(_TrialMetaMixin, OpenClaw):
             )
             await self.exec_as_agent(environment, command=copy_upload, env=env)
 
-            await self.exec_as_agent(
-                environment,
-                command=self._verify_plugin_command(),
-                env=env,
-                timeout_sec=60,
-            )
+            if _evidence_mode() == "weave_required":
+                await self.exec_as_agent(
+                    environment,
+                    command=self._verify_plugin_command(),
+                    env=env,
+                    timeout_sec=60,
+                )
 
             if self.mcp_servers:
                 registration = await self.exec_as_agent(
@@ -2015,7 +2109,8 @@ class FugueOpenClaw(_TrialMetaMixin, OpenClaw):
                         "probe": "openclaw config validate + mcp.servers",
                     }
                 )
-                env.update(self._trace_environment("openclaw", self.model_route))
+                if _evidence_mode() == "weave_required":
+                    env.update(self._trace_environment("openclaw", self.model_route))
 
             await self.exec_as_agent(
                 environment,
@@ -2043,13 +2138,14 @@ class FugueOpenClaw(_TrialMetaMixin, OpenClaw):
             )
             await self._lock_trial_mutators(environment)
 
-            await self.exec_as_agent(
-                environment,
-                command=self._start_gateway_command(),
-                env=env,
-                timeout_sec=180,
-            )
-            gateway_started = True
+            if _evidence_mode() == "weave_required":
+                await self.exec_as_agent(
+                    environment,
+                    command=self._start_gateway_command(),
+                    env=env,
+                    timeout_sec=180,
+                )
+                gateway_started = True
 
             self._resolved_flags["openclaw_agent_id"] = openclaw_agent_id(
                 self.conversation_id
@@ -2060,8 +2156,13 @@ class FugueOpenClaw(_TrialMetaMixin, OpenClaw):
             )
             cli_flags = self.build_cli_flags()
             cli_flags_arg = (cli_flags + " ") if cli_flags else ""
+            agent_command = (
+                "openclaw agent --local --json "
+                if _evidence_mode() == "local"
+                else "openclaw agent --json "
+            )
             command = (
-                f"openclaw agent --json {cli_flags_arg}"
+                f"{agent_command}{cli_flags_arg}"
                 f"--model {shlex.quote(self.model_name)} "
                 f"--session-key {shlex.quote(session_key)} "
                 f"--message {escaped_instruction} "
@@ -2074,7 +2175,7 @@ class FugueOpenClaw(_TrialMetaMixin, OpenClaw):
             for index in range(interaction.plan.follow_up_count):
                 follow_up = await self._interaction_follow_up(interaction, index)
                 command = (
-                    f"openclaw agent --json {cli_flags_arg}"
+                    f"{agent_command}{cli_flags_arg}"
                     f"--model {shlex.quote(self.model_name)} "
                     f"--session-key {shlex.quote(session_key)} "
                     f"--message {shlex.quote(follow_up)} "
@@ -2087,11 +2188,12 @@ class FugueOpenClaw(_TrialMetaMixin, OpenClaw):
                 )
             await self._copy_openclaw_session_file_to_agent_logs(environment, env)
 
-            # The plugin flushes on a 1s cadence; give the last batch a beat
-            # before the gateway teardown force-flushes the rest.
-            await self.exec_as_agent(
-                environment, command="sleep 5", env=env, timeout_sec=30
-            )
+            if _evidence_mode() == "weave_required":
+                # The plugin flushes on a 1s cadence; give the last batch a beat
+                # before the gateway teardown force-flushes the rest.
+                await self.exec_as_agent(
+                    environment, command="sleep 5", env=env, timeout_sec=30
+                )
         finally:
             if gateway_started:
                 try:
@@ -2111,6 +2213,8 @@ class FugueOpenClaw(_TrialMetaMixin, OpenClaw):
         native_ids = self._regex_ids(
             self.logs_dir / "openclaw.txt", r'"sessionId"\s*:\s*"([^"]+)"'
         )
+        if _evidence_mode() == "local":
+            return native_ids
         return list(dict.fromkeys([self.trace_conversation_id, *native_ids]))
 
 
@@ -2147,8 +2251,9 @@ class FugueClaudeCode(_TrialMetaMixin, ClaudeCode):
         self.action_gate_profile = normalize_action_gate_profile(action_gate_profile)
         self.model_route = resolve_model_route(model_name)
         _require_model_key(self.model_route)
-        _require_trace_key()
-        _weave_entity_project()
+        if _evidence_mode() == "weave_required":
+            _require_trace_key()
+            _weave_entity_project()
         os.environ["ANTHROPIC_BASE_URL"] = _messages_base_url(self.model_route)
         os.environ["ANTHROPIC_API_KEY"] = _messages_key(self.model_route)
         os.environ.pop("CLAUDE_CODE_OAUTH_TOKEN", None)
@@ -2161,29 +2266,46 @@ class FugueClaudeCode(_TrialMetaMixin, ClaudeCode):
     @override
     async def install(self, environment: BaseEnvironment) -> None:
         runtime = "/opt/fugue-agent-runtime"
+        trace_binary_check = (
+            f"test -x {runtime}/bin/weave-claude-code && "
+            if _evidence_mode() == "weave_required"
+            else ""
+        )
+        trace_binary_link = (
+            f" && ln -sf {runtime}/bin/weave-claude-code "
+            "/usr/local/bin/weave-claude-code"
+            if _evidence_mode() == "weave_required"
+            else ""
+        )
+        trace_runtime_check = (
+            f" && PATH={runtime}/bin:$PATH weave-claude-code --version && "
+            f"test -s {runtime}/claude-code-patch-lock.json && "
+            f"test -s {runtime}/lib/node_modules/weave-claude-code/"
+            ".claude-plugin/marketplace.json"
+            if _evidence_mode() == "weave_required"
+            else ""
+        )
+        install_command = (
+            f"test -x {runtime}/bin/node && test -x {runtime}/bin/claude && "
+            f"{trace_binary_check}"
+            f"test -x {runtime}/bin/npm && "
+            f"ln -sf {runtime}/bin/node /usr/local/bin/node && "
+            f"ln -sf {runtime}/bin/claude /usr/local/bin/claude"
+            f"{trace_binary_link}"
+        )
+        verification_command = (
+            f"PATH={runtime}/bin:$PATH claude --version | "
+            f"grep -F {shlex.quote(self._CLAUDE_CODE_VERSION)}"
+            f"{trace_runtime_check}"
+        )
         await self.exec_as_root(
             environment,
-            command=(
-                f"test -x {runtime}/bin/node && test -x {runtime}/bin/claude && "
-                f"test -x {runtime}/bin/weave-claude-code && "
-                f"test -x {runtime}/bin/npm && "
-                f"ln -sf {runtime}/bin/node /usr/local/bin/node && "
-                f"ln -sf {runtime}/bin/claude /usr/local/bin/claude && "
-                f"ln -sf {runtime}/bin/weave-claude-code "
-                "/usr/local/bin/weave-claude-code"
-            ),
+            command=install_command,
             timeout_sec=30,
         )
         result = await self.exec_as_agent(
             environment,
-            command=(
-                f"PATH={runtime}/bin:$PATH claude --version | "
-                f"grep -F {shlex.quote(self._CLAUDE_CODE_VERSION)} && "
-                f"PATH={runtime}/bin:$PATH weave-claude-code --version && "
-                f"test -s {runtime}/claude-code-patch-lock.json && "
-                f"test -s {runtime}/lib/node_modules/weave-claude-code/"
-                ".claude-plugin/marketplace.json"
-            ),
+            command=verification_command,
             timeout_sec=30,
         )
         if result.return_code != 0:
@@ -2295,14 +2417,16 @@ class FugueClaudeCode(_TrialMetaMixin, ClaudeCode):
     ) -> None:
         interaction = self._task_interaction(instruction)
         await self._begin_trial("claude-code", self.model_route, environment)
-        self._resolved_env_vars.update(
-            {
-                **self._trace_environment("claude-code", self.model_route),
-                "FUGUE_WEAVE_CONVERSATION_ID": self.trace_conversation_id,
-            }
-        )
+        if _evidence_mode() == "weave_required":
+            self._resolved_env_vars.update(
+                {
+                    **self._trace_environment("claude-code", self.model_route),
+                    "FUGUE_WEAVE_CONVERSATION_ID": self.trace_conversation_id,
+                }
+            )
         try:
-            await self._install_weave_plugin(environment)
+            if _evidence_mode() == "weave_required":
+                await self._install_weave_plugin(environment)
             await self._install_tool_result_guard(
                 environment,
                 "claude-code",
@@ -2357,24 +2481,40 @@ class FugueClaudeCode(_TrialMetaMixin, ClaudeCode):
             interaction.observe_agent(
                 captured.stdout or captured.stderr or "No response text captured."
             )
-            follow_env = {
-                **provider_client_env(self.model_route, os.environ),
-                **self._trace_environment("claude-code", self.model_route),
-                "ANTHROPIC_BASE_URL": _messages_base_url(self.model_route),
-                "ANTHROPIC_API_KEY": _messages_key(self.model_route),
-                "ANTHROPIC_MODEL": self.model_route.model_id,
-                "ANTHROPIC_DEFAULT_SONNET_MODEL": self.model_route.model_id,
-                "ANTHROPIC_DEFAULT_OPUS_MODEL": self.model_route.model_id,
-                "ANTHROPIC_DEFAULT_HAIKU_MODEL": self.model_route.model_id,
-                "CLAUDE_CODE_SUBAGENT_MODEL": self.model_route.model_id,
-                "CLAUDE_CODE_DISABLE_ADAPTIVE_THINKING": "1",
-                "CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC": "1",
-                "CLAUDE_CONFIG_DIR": self._CLAUDE_CONFIG_DIR,
-                "IS_SANDBOX": "1",
-                "WANDB_API_KEY": _require_trace_key(),
-                "WEAVE_PROJECT": _weave_project_slug(),
-                "FUGUE_WEAVE_CONVERSATION_ID": self.trace_conversation_id,
-            }
+            if _evidence_mode() == "weave_required":
+                follow_env = {
+                    **provider_client_env(self.model_route, os.environ),
+                    **self._trace_environment("claude-code", self.model_route),
+                    "ANTHROPIC_BASE_URL": _messages_base_url(self.model_route),
+                    "ANTHROPIC_API_KEY": _messages_key(self.model_route),
+                    "ANTHROPIC_MODEL": self.model_route.model_id,
+                    "ANTHROPIC_DEFAULT_SONNET_MODEL": self.model_route.model_id,
+                    "ANTHROPIC_DEFAULT_OPUS_MODEL": self.model_route.model_id,
+                    "ANTHROPIC_DEFAULT_HAIKU_MODEL": self.model_route.model_id,
+                    "CLAUDE_CODE_SUBAGENT_MODEL": self.model_route.model_id,
+                    "CLAUDE_CODE_DISABLE_ADAPTIVE_THINKING": "1",
+                    "CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC": "1",
+                    "CLAUDE_CONFIG_DIR": self._CLAUDE_CONFIG_DIR,
+                    "IS_SANDBOX": "1",
+                    "WANDB_API_KEY": _require_trace_key(),
+                    "WEAVE_PROJECT": _weave_project_slug(),
+                    "FUGUE_WEAVE_CONVERSATION_ID": self.trace_conversation_id,
+                }
+            else:
+                follow_env = {
+                    **provider_client_env(self.model_route, os.environ),
+                    "ANTHROPIC_BASE_URL": _messages_base_url(self.model_route),
+                    "ANTHROPIC_API_KEY": _messages_key(self.model_route),
+                    "ANTHROPIC_MODEL": self.model_route.model_id,
+                    "ANTHROPIC_DEFAULT_SONNET_MODEL": self.model_route.model_id,
+                    "ANTHROPIC_DEFAULT_OPUS_MODEL": self.model_route.model_id,
+                    "ANTHROPIC_DEFAULT_HAIKU_MODEL": self.model_route.model_id,
+                    "CLAUDE_CODE_SUBAGENT_MODEL": self.model_route.model_id,
+                    "CLAUDE_CODE_DISABLE_ADAPTIVE_THINKING": "1",
+                    "CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC": "1",
+                    "CLAUDE_CONFIG_DIR": self._CLAUDE_CONFIG_DIR,
+                    "IS_SANDBOX": "1",
+                }
             cli_flags = self.build_cli_flags()
             extra_flags = (cli_flags + " ") if cli_flags else ""
             for index in range(interaction.plan.follow_up_count):
@@ -2397,10 +2537,11 @@ class FugueClaudeCode(_TrialMetaMixin, ClaudeCode):
             # Harbor may terminate Claude before its native SessionEnd hook.
             # Forward that lifecycle event for the real transcript so the
             # plugin closes the existing turn instead of leaking a root span.
-            try:
-                await self._finalize_weave_session(environment)
-            except Exception:
-                pass
+            if _evidence_mode() == "weave_required":
+                try:
+                    await self._finalize_weave_session(environment)
+                except Exception:
+                    pass
             self._set_task_interaction_summary(interaction)
             await self._finish_trial(environment)
 
@@ -2472,33 +2613,48 @@ class FugueCodex(_TrialMetaMixin, Codex):
         self.action_gate_profile = normalize_action_gate_profile(action_gate_profile)
         self.model_route = resolve_model_route(model_name)
         _require_model_key(self.model_route)
-        _require_trace_key()
-        _weave_entity_project()
+        if _evidence_mode() == "weave_required":
+            _require_trace_key()
+            _weave_entity_project()
         kwargs.setdefault("version", self._CODEX_VERSION)
         super().__init__(*args, model_name=self.model_route.model_id, **kwargs)
 
     @override
     async def install(self, environment: BaseEnvironment) -> None:
         runtime = "/opt/fugue-agent-runtime"
-        await self.exec_as_root(
-            environment,
-            command=(
+        if _evidence_mode() == "weave_required":
+            install_command = (
                 f"test -x {runtime}/bin/node && "
                 f"ln -sf {runtime}/bin/node /usr/local/bin/node && "
                 f"ln -sf {runtime}/bin/codex /usr/local/bin/codex && "
                 f"ln -sf {runtime}/bin/weave-codex /usr/local/bin/weave-codex"
-            ),
-            timeout_sec=30,
-        )
-        result = await self.exec_as_agent(
-            environment,
-            command=(
+            )
+            verification_command = (
                 f"test -x {runtime}/bin/codex && "
                 f"test -x {runtime}/bin/weave-codex && "
                 f"PATH={runtime}/bin:$PATH codex --version | "
                 f"grep -F {shlex.quote(self._CODEX_VERSION)} && "
                 f"PATH={runtime}/bin:$PATH weave-codex --help >/dev/null"
-            ),
+            )
+        else:
+            install_command = (
+                f"test -x {runtime}/bin/node && "
+                f"ln -sf {runtime}/bin/node /usr/local/bin/node && "
+                f"ln -sf {runtime}/bin/codex /usr/local/bin/codex"
+            )
+            verification_command = (
+                f"test -x {runtime}/bin/codex && "
+                f"PATH={runtime}/bin:$PATH codex --version | "
+                f"grep -F {shlex.quote(self._CODEX_VERSION)}"
+            )
+        await self.exec_as_root(
+            environment,
+            command=install_command,
+            timeout_sec=30,
+        )
+        result = await self.exec_as_agent(
+            environment,
+            command=verification_command,
             timeout_sec=30,
         )
         if result.return_code != 0:
@@ -2571,43 +2727,64 @@ class FugueCodex(_TrialMetaMixin, Codex):
             directory=f"{remote_codex_home}/home/.agents/skills",
         )
         escaped_instruction = shlex.quote(instruction)
-        weave_project = _weave_project_slug()
-        env: dict[str, str] = {
-            **provider_client_env(self.model_route, os.environ),
-            **self._trace_environment("codex", self.model_route),
-            "CODEX_HOME": remote_codex_home,
-            "HOME": f"{remote_codex_home}/home",
-            # Codex reads the configured provider's key from OPENAI_API_KEY
-            # regardless of whether it is native OpenAI or the local bridge.
-            "OPENAI_API_KEY": _responses_key(self.model_route),
-            # The wrapper inherits these values; the key never enters a command.
-            "WANDB_API_KEY": _require_trace_key(),
-            "WEAVE_PROJECT": weave_project,
-            # Consumed by the emit.js patch from install(); keeps all trials
-            # grouped under the stable Codex agent.
-            "WEAVE_CODEX_AGENT_NAME": stable_agent_name("codex"),
-            "FUGUE_WEAVE_CONVERSATION_ID": self.trace_conversation_id,
-            "PATH": (
-                "/opt/fugue-agent-runtime/bin:/usr/local/sbin:/usr/local/bin:"
-                "/usr/sbin:/usr/bin:/sbin:/bin"
-            ),
-        }
+        if _evidence_mode() == "weave_required":
+            weave_project = _weave_project_slug()
+            env: dict[str, str] = {
+                **provider_client_env(self.model_route, os.environ),
+                **self._trace_environment("codex", self.model_route),
+                "CODEX_HOME": remote_codex_home,
+                "HOME": f"{remote_codex_home}/home",
+                # Codex reads the configured provider's key from OPENAI_API_KEY
+                # regardless of whether it is native OpenAI or the local bridge.
+                "OPENAI_API_KEY": _responses_key(self.model_route),
+                # The wrapper inherits these values; the key never enters a command.
+                "WANDB_API_KEY": _require_trace_key(),
+                "WEAVE_PROJECT": weave_project,
+                # Consumed by the emit.js patch from install(); keeps all trials
+                # grouped under the stable Codex agent.
+                "WEAVE_CODEX_AGENT_NAME": stable_agent_name("codex"),
+                "FUGUE_WEAVE_CONVERSATION_ID": self.trace_conversation_id,
+                "PATH": (
+                    "/opt/fugue-agent-runtime/bin:/usr/local/sbin:/usr/local/bin:"
+                    "/usr/sbin:/usr/bin:/sbin:/bin"
+                ),
+            }
+        else:
+            weave_project = None
+            env = {
+                **provider_client_env(self.model_route, os.environ),
+                "CODEX_HOME": remote_codex_home,
+                "HOME": f"{remote_codex_home}/home",
+                # Codex reads the configured provider's key from OPENAI_API_KEY
+                # regardless of whether it is native OpenAI or the local bridge.
+                "OPENAI_API_KEY": _responses_key(self.model_route),
+                "PATH": (
+                    "/opt/fugue-agent-runtime/bin:/usr/local/sbin:/usr/local/bin:"
+                    "/usr/sbin:/usr/bin:/sbin:/bin"
+                ),
+            }
 
         config_toml = self._build_model_config_toml()
-        settings_json = json.dumps(
-            {
-                "weave_project": weave_project,
-                "capture_content": self.capture_content,
-            }
-        )
-        setup_command = (
-            f'mkdir -p "$CODEX_HOME" "$HOME" {shlex.quote(EnvironmentPaths.agent_dir.as_posix())}\n'
-            f"cat >>\"$CODEX_HOME/config.toml\" <<'TOML'\n{config_toml}TOML\n"
-            "mkdir -p ~/.weave-codex\n"
-            f"cat > ~/.weave-codex/settings.json <<'JSON'\n{settings_json}\nJSON\n"
-            "weave-codex status --json "
-            "2>&1 | tee /logs/agent/weave-codex-status.json\n"
-        )
+        if _evidence_mode() == "weave_required":
+            settings_json = json.dumps(
+                {
+                    "weave_project": weave_project,
+                    "capture_content": self.capture_content,
+                }
+            )
+            setup_command = (
+                f'mkdir -p "$CODEX_HOME" "$HOME" {shlex.quote(EnvironmentPaths.agent_dir.as_posix())}\n'
+                f"cat >>\"$CODEX_HOME/config.toml\" <<'TOML'\n{config_toml}TOML\n"
+                "mkdir -p ~/.weave-codex\n"
+                f"cat > ~/.weave-codex/settings.json <<'JSON'\n{settings_json}\nJSON\n"
+                "weave-codex status --json "
+                "2>&1 | tee /logs/agent/weave-codex-status.json\n"
+            )
+        else:
+            setup_command = (
+                f'mkdir -p "$CODEX_HOME" "$HOME" {shlex.quote(EnvironmentPaths.agent_dir.as_posix())}\n'
+                f"cat >>\"$CODEX_HOME/config.toml\" <<'TOML'\n{config_toml}TOML\n"
+            )
 
         skills_command = self._build_register_skills_command()
         if skills_command:
@@ -2678,7 +2855,8 @@ class FugueCodex(_TrialMetaMixin, Codex):
                     "probe": "codex mcp list --json",
                 }
             )
-            env.update(self._trace_environment("codex", self.model_route))
+            if _evidence_mode() == "weave_required":
+                env.update(self._trace_environment("codex", self.model_route))
         await self._lock_trial_mutators(environment)
 
         codex_output = (EnvironmentPaths.agent_dir / self._OUTPUT_FILENAME).as_posix()
@@ -2693,8 +2871,12 @@ class FugueCodex(_TrialMetaMixin, Codex):
                         # The wrapper has already sourced the keys into Codex's
                         # process. Remove the file before Codex can open a shell.
                         f"rm -rf {_CONTAINER_SECRET_ROOT.as_posix()}; "
-                        "weave-codex run -- codex exec "
-                        "--dangerously-bypass-approvals-and-sandbox "
+                        + (
+                            "weave-codex run -- codex exec "
+                            if _evidence_mode() == "weave_required"
+                            else "codex exec "
+                        )
+                        + "--dangerously-bypass-approvals-and-sandbox "
                         "--skip-git-repo-check "
                         "--json "
                         f"{feature_flags}"
@@ -2721,8 +2903,12 @@ class FugueCodex(_TrialMetaMixin, Codex):
                         command=(
                             "set -o pipefail; "
                             f"rm -rf {_CONTAINER_SECRET_ROOT.as_posix()}; "
-                            "weave-codex run -- codex exec resume --last "
-                            "--dangerously-bypass-approvals-and-sandbox "
+                            + (
+                                "weave-codex run -- codex exec resume --last "
+                                if _evidence_mode() == "weave_required"
+                                else "codex exec resume --last "
+                            )
+                            + "--dangerously-bypass-approvals-and-sandbox "
                             "--skip-git-repo-check "
                             "--json "
                             f"{feature_flags}"

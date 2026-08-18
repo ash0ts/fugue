@@ -19,10 +19,18 @@ from fugue.bench.context_contracts import (
 from fugue.bench.files import as_list as _list
 from fugue.bench.files import as_mapping as _dict
 from fugue.bench.files import require_unique
+from fugue.bench.local_evidence import (
+    LocalEvidenceDestinationV1,
+    local_evidence_destination_from_dict,
+)
 from fugue.model_plane import (
     EvidenceDestinationV1,
+    EvidenceMode,
+    default_evidence_destination,
     evidence_destination_from_dict,
 )
+
+EvidenceDestination = EvidenceDestinationV1 | LocalEvidenceDestinationV1
 
 CONFIG_ROOT = Path("configs") / "fugue"
 PROMPTS_DIR = "prompts"
@@ -383,9 +391,10 @@ class ExperimentSpec:
     judge_model: str | None = None
     run_name: str | None = None
     source_evidence_project: str | None = None
-    source_evidence_destination: EvidenceDestinationV1 | None = None
+    source_evidence_destination: EvidenceDestination | None = None
     evidence_project: str | None = None
-    evidence_destination: EvidenceDestinationV1 | None = None
+    evidence_destination: EvidenceDestination | None = None
+    evidence_mode: EvidenceMode | None = None
     require_live_evidence: bool = False
     evidence_checkpoint_cells: int = 0
     tags: list[str] = field(default_factory=list)
@@ -412,6 +421,65 @@ class ExperimentSpec:
     debug: bool = False
     quiet: bool = False
 
+    def __post_init__(self) -> None:
+        mode = self.evidence_mode
+        hosted_result_declared = bool(
+            self.evidence_project
+            or isinstance(self.evidence_destination, EvidenceDestinationV1)
+            or self.require_live_evidence
+        )
+        if mode is None:
+            # Direct constructors predate evidence modes and historically
+            # represented live Weave runs. Config parsing always supplies an
+            # explicit inferred mode, so newly authored specs still default
+            # to local without silently changing programmatic legacy callers.
+            mode = "weave_required"
+            object.__setattr__(self, "evidence_mode", mode)
+        if mode not in {"local", "weave_required"}:
+            raise ValueError("evidence_mode must be local or weave_required")
+        if mode == "local" and hosted_result_declared:
+            # ``dataclasses.replace`` is used by older operator callers to
+            # bind a declared W&B destination to a previously local spec.
+            # External parsing still rejects an explicit local+W&B config.
+            mode = "weave_required"
+            object.__setattr__(self, "evidence_mode", mode)
+            if isinstance(
+                self.source_evidence_destination,
+                LocalEvidenceDestinationV1,
+            ):
+                object.__setattr__(self, "source_evidence_destination", None)
+            if isinstance(self.evidence_destination, LocalEvidenceDestinationV1):
+                object.__setattr__(self, "evidence_destination", None)
+        if mode == "weave_required":
+            if (
+                self.source_evidence_project is not None
+                and self.source_evidence_destination is None
+            ):
+                object.__setattr__(
+                    self,
+                    "source_evidence_destination",
+                    default_evidence_destination(self.source_evidence_project),
+                )
+            if self.evidence_project is not None and self.evidence_destination is None:
+                object.__setattr__(
+                    self,
+                    "evidence_destination",
+                    default_evidence_destination(self.evidence_project),
+                )
+        if mode == "local" and self.require_live_evidence:
+            raise ValueError("local evidence mode rejects require_live_evidence")
+        if mode == "weave_required" and isinstance(
+            self.evidence_destination,
+            LocalEvidenceDestinationV1,
+        ):
+            raise ValueError(
+                "weave_required evidence mode requires a W&B result destination"
+            )
+        _validate_source_destination_pair(
+            self.source_evidence_project,
+            self.source_evidence_destination,
+        )
+
     def to_dict(self) -> dict[str, Any]:
         value = _paths_to_strings(asdict(self))
         if self.source_evidence_project is None:
@@ -422,6 +490,7 @@ class ExperimentSpec:
             value.pop("evidence_project", None)
         if self.evidence_destination is None:
             value.pop("evidence_destination", None)
+        value["evidence_mode"] = str(self.evidence_mode)
         if not self.require_live_evidence:
             value.pop("require_live_evidence", None)
         if not self.evidence_checkpoint_cells:
@@ -686,13 +755,39 @@ def experiment_from_data(
         raw.get("evidence_destination"),
         evidence_project=evidence_project,
     )
-    if (source_evidence_project is None) != (
-        source_evidence_destination is None
-    ):
-        raise ValueError(
-            "source evidence project and destination must be declared together"
-        )
     require_live_evidence = bool(raw.get("require_live_evidence", False))
+    declared_evidence_mode = _optional_str(raw.get("evidence_mode"))
+    if declared_evidence_mode is None:
+        # Documents created before this field existed were live Weave runs.
+        # New templates write ``local`` explicitly.
+        evidence_mode: EvidenceMode = "weave_required"
+    elif declared_evidence_mode in {"local", "weave_required"}:
+        evidence_mode = declared_evidence_mode  # type: ignore[assignment]
+    else:
+        raise ValueError("evidence_mode must be local or weave_required")
+    if evidence_mode == "local":
+        if require_live_evidence:
+            raise ValueError("local evidence mode rejects require_live_evidence")
+        if any(
+            (
+                evidence_project,
+                isinstance(evidence_destination, EvidenceDestinationV1),
+            )
+        ):
+            raise ValueError(
+                "local evidence mode does not accept W&B result destinations"
+            )
+        source_evidence_destination = source_evidence_destination or LocalEvidenceDestinationV1()
+        evidence_destination = evidence_destination or LocalEvidenceDestinationV1()
+    else:
+        if isinstance(evidence_destination, LocalEvidenceDestinationV1):
+            raise ValueError(
+                "weave_required evidence mode requires a W&B result destination"
+            )
+    _validate_source_destination_pair(
+        source_evidence_project,
+        source_evidence_destination,
+    )
     evidence_checkpoint_cells = (
         _non_negative_int(
             raw.get("evidence_checkpoint_cells"),
@@ -717,6 +812,7 @@ def experiment_from_data(
         source_evidence_destination=source_evidence_destination,
         evidence_project=evidence_project,
         evidence_destination=evidence_destination,
+        evidence_mode=evidence_mode,
         require_live_evidence=require_live_evidence,
         evidence_checkpoint_cells=evidence_checkpoint_cells,
         tags=_string_list(raw.get("tags")),
@@ -1313,18 +1409,47 @@ def _optional_evidence_destination(
     *,
     evidence_project: Any,
     label: str = "evidence_destination",
-) -> EvidenceDestinationV1 | None:
+) -> EvidenceDestination | None:
     if value in (None, {}):
         return None
     if not isinstance(value, dict):
         raise ValueError(f"{label} must be a mapping")
-    destination = evidence_destination_from_dict(value)
+    destination: EvidenceDestination = (
+        local_evidence_destination_from_dict(value)
+        if value.get("kind") == "local"
+        else evidence_destination_from_dict(value)
+    )
     project = _optional_evidence_project(evidence_project)
-    if project is not None and destination.project_slug != project:
+    if isinstance(destination, LocalEvidenceDestinationV1):
+        if project is not None:
+            raise ValueError(f"{label} local destination cannot name a W&B project")
+    elif project is not None and destination.project_slug != project:
         raise ValueError(
             f"{label} must match the declared project"
         )
     return destination
+
+
+def _validate_source_destination_pair(
+    project: str | None,
+    destination: EvidenceDestination | None,
+) -> None:
+    if destination is None:
+        if project is not None:
+            raise ValueError(
+                "source evidence project and destination must be declared together"
+            )
+        return
+    if isinstance(destination, LocalEvidenceDestinationV1):
+        if project is not None:
+            raise ValueError(
+                "local source evidence destination cannot name a W&B project"
+            )
+        return
+    if project != destination.project_slug:
+        raise ValueError(
+            "source evidence project and destination must be declared together"
+        )
 
 
 def _trace_content(value: Any) -> str:
