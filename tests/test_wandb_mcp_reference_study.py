@@ -244,6 +244,11 @@ def test_default_materializer_builds_a_complete_check_ready_bundle(
     assert "source_evidence_project: wandb/fugue-mcp-release-source-v2" in comparison
     assert "research_id: fugue-mcp-release-qualification-v1" in comparison
     assert "study_console_base_url: http://127.0.0.1:18080" in comparison
+    scorer_profiles = (
+        destination / "configs/fugue/task-authoring/profiles.yaml"
+    ).read_text(encoding="utf-8")
+    assert 'platform: "linux/amd64"' in scorer_profiles
+    assert "{{" not in scorer_profiles
     assert json.loads((destination / ".fugue-study.json").read_text()) == {
         "kind": "fugue_standalone_study",
         "schema_version": 1,

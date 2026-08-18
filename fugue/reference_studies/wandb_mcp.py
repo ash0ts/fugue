@@ -885,6 +885,7 @@ def _materialize_packaged_reference_study(
         "{{CANDIDATE_SHA}}": candidate_sha,
         "{{CANDIDATE_SHORT}}": candidate_sha[:7],
         "{{CANDIDATE_TREE}}": request.source_lock.source_tree,
+        "{{FUGUE_SCORER_PLATFORM}}": request.target_platform,
         "{{TARGET_PLATFORM}}": request.target_platform,
         "{{MCP_BASELINE_LOCK_ID}}": baseline_id,
         "{{MCP_CANDIDATE_LOCK_ID}}": candidate_id,
@@ -893,12 +894,17 @@ def _materialize_packaged_reference_study(
         resources["mcp.json.template"], replacements, name="mcp.json.template"
     )
     _write_prepared_file(request.staging_root / "mcp.json", mcp_config)
+    scorer_profiles = _render_resource(
+        resources["configs/fugue/task-authoring/profiles.yaml"],
+        replacements,
+        name="configs/fugue/task-authoring/profiles.yaml",
+    )
+    _write_prepared_file(
+        request.staging_root / "configs/fugue/task-authoring/profiles.yaml",
+        scorer_profiles,
+    )
     for resource_name, destination_name in (
         ("README.md", "README.md"),
-        (
-            "configs/fugue/task-authoring/profiles.yaml",
-            "configs/fugue/task-authoring/profiles.yaml",
-        ),
         ("tasks.jsonl", "tasks.jsonl"),
         ("private-labels.jsonl", "private-labels.jsonl"),
         ("release-contract-v1.json", "release-contract-v1.json"),
