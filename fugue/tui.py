@@ -65,6 +65,16 @@ TERMINAL_RUN_STATES = {"passed", "failed", "cancelled", "interrupted"}
 ACTIVE_RUN_STATES = {"starting", "running"}
 
 
+def _evidence_destination_summary(
+    experiment: ExperimentSpec,
+    *,
+    weave_link: str,
+) -> str:
+    if experiment.evidence_mode == "local":
+        return "Local ledger (.fugue/runtime); W&B/Weave publication optional"
+    return f"W&B/Weave ({weave_link})"
+
+
 @dataclass(frozen=True)
 class PlanState:
     base_experiment_id: str
@@ -160,8 +170,9 @@ class HelpScreen(ModalScreen[None]):
                 "n Next        p Previous   r Review / run\n"
                 "/ Commands    c Cancel     e Export\n"
                 "a Agents      w Trace      ? Help\n\n"
-                "Plan defines the comparison. Runs operates it. Weave Agents "
-                "explains the conversations, model calls, and tool use."
+                "Plan defines the comparison. Runs operates it. Every run writes "
+                "a canonical local evidence ledger. Agents and Trace open hosted "
+                "evidence only when Weave is required or the result was published."
             )
             yield Button("Close", id="close-help", variant="primary")
 
@@ -374,14 +385,28 @@ class ConfirmRunScreen(ModalScreen[bool]):
     }
     """
 
+    def __init__(self, *, evidence_mode: str = "weave_required") -> None:
+        super().__init__()
+        self.evidence_mode = evidence_mode
+
     def compose(self) -> ComposeResult:
-        with Vertical(id="confirm-run-panel"):
-            yield Label("FULL TRACE CONTENT", classes="warning")
-            yield Static(
+        if self.evidence_mode == "local":
+            confirmation = (
+                "Prompts, responses, reasoning, tool arguments, and tool results "
+                "will be retained in the canonical local evidence ledger on this "
+                "machine. This run will not publish them to W&B/Weave; publication "
+                "is a separate explicit action. Local transcripts can still contain "
+                "sensitive data."
+            )
+        else:
+            confirmation = (
                 "Prompts, responses, reasoning, tool arguments, and tool results "
                 "will be sent to the configured Weave project. Harness plugins do "
                 "not provide automatic PII scrubbing."
             )
+        with Vertical(id="confirm-run-panel"):
+            yield Label("FULL TRACE CONTENT", classes="warning")
+            yield Static(confirmation, id="trace-confirmation-copy")
             with Horizontal(classes="button-row"):
                 yield Button("Run experiment", id="confirm-run", variant="primary")
                 yield Button("Cancel", id="cancel-run-confirm")
@@ -749,8 +774,15 @@ class FugueApp(App[None]):
             )
             with Collapsible(title="Analysis settings", collapsed=True):
                 yield Select(
-                    [("Hybrid local + Weave", "hybrid"), ("Local only", "local")],
-                    value="hybrid",
+                    [
+                        ("Local + published Weave", "hybrid"),
+                        ("Local only", "local"),
+                    ],
+                    value=(
+                        "local"
+                        if self.plan.experiment.evidence_mode == "local"
+                        else "hybrid"
+                    ),
                     allow_blank=False,
                     id="analysis-source",
                 )
@@ -1113,11 +1145,14 @@ class FugueApp(App[None]):
             else experiment.manifest.as_posix()
         )
         model = request.model or experiment.model or "FUGUE_MODEL"
-        project = self.service.deep_links().weave
+        evidence = _evidence_destination_summary(
+            experiment,
+            weave_link=self.service.deep_links().weave,
+        )
         description = experiment.description or "Saved Fugue experiment"
         self.query_one("#define-summary", Static).update(
             f"{experiment.title}\n{description}\n\n"
-            f"Benchmark: {coverage}\nModel: {model}\nWeave: {project}"
+            f"Benchmark: {coverage}\nModel: {model}\nEvidence: {evidence}"
         )
 
     def _render_proposal(self) -> None:
@@ -1562,7 +1597,8 @@ class FugueApp(App[None]):
         self.query_one("#review-summary", Static).update(
             f"{experiment.title}\n{experiment.description}\n\n"
             f"Benchmark: {', '.join(_workload_label(item, item) for item in preview.workloads)}\n"
-            f"Model: {model}\nWeave: {self.service.deep_links().weave}\n"
+            f"Model: {model}\n"
+            f"Evidence: {_evidence_destination_summary(experiment, weave_link=self.service.deep_links().weave)}\n"
             f"Context treatments: {contexts}\n"
             f"{_count(preview.cells, 'cell')} / {_count(len(tasks), 'task')} / "
             f"{_count(preview.estimated_trials, 'trial')}"
@@ -1627,7 +1663,10 @@ class FugueApp(App[None]):
         blockers = []
         if not status.model_key_present:
             blockers.append(f"Model credentials are missing: {status.model_key_env}")
-        if not status.trace_key_present:
+        if (
+            self.plan.experiment.evidence_mode == "weave_required"
+            and not status.trace_key_present
+        ):
             blockers.append("Weave tracing requires FUGUE_WEAVE_API_KEY")
         generated_scoring = any(
             any(
@@ -1721,7 +1760,12 @@ class FugueApp(App[None]):
             self.plan.request.trace_content or self.plan.experiment.trace_content
         )
         if trace_content == "full":
-            self.push_screen(ConfirmRunScreen(), self._launch_if_confirmed)
+            self.push_screen(
+                ConfirmRunScreen(
+                    evidence_mode=str(self.plan.experiment.evidence_mode)
+                ),
+                self._launch_if_confirmed,
+            )
         else:
             self._launch_if_confirmed(True)
 
@@ -2239,6 +2283,7 @@ class FugueApp(App[None]):
         selected_context = [
             item for item in status.selected_context_systems if item != "none"
         ]
+        local_evidence = self.plan.experiment.evidence_mode == "local"
         rows = (
             (
                 "Model provider",
@@ -2246,9 +2291,13 @@ class FugueApp(App[None]):
                 f"{status.model_provider} / {status.model}",
             ),
             (
-                "W&B / Weave",
-                status.trace_key_present,
-                status.trace_project,
+                "Evidence",
+                True if local_evidence else status.trace_key_present,
+                (
+                    "Canonical local ledger; W&B/Weave publication is optional"
+                    if local_evidence
+                    else status.trace_project
+                ),
             ),
             (
                 "Local runtime",
@@ -2278,12 +2327,17 @@ class FugueApp(App[None]):
             f"({'present' if route.key_present else 'missing'})"
             for route in status.routes
         )
+        evidence_detail = (
+            "Evidence: canonical local ledger; hosted publication is optional"
+            if local_evidence
+            else f"W&B/Weave: {status.links.weave}"
+        )
         self.query_one("#setup-details", Static).update(
             f"{route_details}\n"
             f"Bridge: {'ready' if status.bridge_ready else 'offline'} at 127.0.0.1:4000\n"
             f"Trace content: {status.trace_content}\n"
             f"Context cache entries: {status.context_cache_entries}\n"
-            f"Weave: {status.links.weave}"
+            f"{evidence_detail}"
         )
 
     def _run_preflight(self) -> None:

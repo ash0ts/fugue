@@ -17,6 +17,9 @@ from fugue.agents.model_plane import (
     FugueHermes,
     FugueOpenClaw,
 )
+from fugue.bench.candidates import stable_digest
+from fugue.bench.execution import CellOutcome, PlannedCell
+from fugue.bench.export import GeneratedEvaluationCoordinator
 
 _HARNESS_TYPES = (FugueHermes, FugueOpenClaw, FugueClaudeCode, FugueCodex)
 _TRACE_ENV_NAMES = {
@@ -266,3 +269,317 @@ def test_local_meta_is_provider_neutral_and_retains_native_session_identity(
     assert meta["weave_project"] is None
     assert meta["weave_conversation_ids"] == []
     assert meta["conversation_correlation"]["status"] == ("isolated_trial_directory")
+
+
+def _materialize_native_local_transcript(
+    logs_dir: Path,
+    *,
+    harness: str,
+    session_id: str,
+) -> None:
+    if harness == "hermes":
+        (logs_dir / "hermes-session.jsonl").write_text(
+            json.dumps(
+                {
+                    "session_id": session_id,
+                    "role": "assistant",
+                    "content": "completed",
+                    "tool_calls": [{"name": "read_file", "arguments": {}}],
+                }
+            )
+            + "\n",
+            encoding="utf-8",
+        )
+        return
+    if harness == "openclaw":
+        (logs_dir / "openclaw.txt").write_text(
+            json.dumps(
+                {
+                    "sessionId": session_id,
+                    "meta": {
+                        "agentMeta": {
+                            "sessionFile": "/home/agent/.openclaw/session.jsonl"
+                        }
+                    },
+                }
+            )
+            + "\n",
+            encoding="utf-8",
+        )
+        (logs_dir / "openclaw.session.jsonl").write_text(
+            json.dumps(
+                {
+                    "type": "message",
+                    "message": {"role": "assistant", "content": "completed"},
+                }
+            )
+            + "\n"
+            + json.dumps(
+                {"type": "tool_call", "name": "read_file", "arguments": {}}
+            )
+            + "\n",
+            encoding="utf-8",
+        )
+        return
+    if harness == "claude-code":
+        (logs_dir / "claude-code.txt").write_text(
+            json.dumps(
+                {"type": "system", "subtype": "init", "session_id": session_id}
+            )
+            + "\n"
+            + json.dumps(
+                {
+                    "type": "assistant",
+                    "session_id": session_id,
+                    "message": {
+                        "content": [{"type": "text", "text": "completed"}]
+                    },
+                }
+            )
+            + "\n",
+            encoding="utf-8",
+        )
+        transcript = (
+            logs_dir / "sessions" / "projects" / "-app" / f"{session_id}.jsonl"
+        )
+        transcript.parent.mkdir(parents=True)
+        transcript.write_text(
+            json.dumps(
+                {
+                    "type": "assistant",
+                    "sessionId": session_id,
+                    "message": {
+                        "content": [{"type": "tool_use", "name": "Read", "input": {}}]
+                    },
+                }
+            )
+            + "\n",
+            encoding="utf-8",
+        )
+        return
+    if harness == "codex":
+        (logs_dir / "codex.txt").write_text(
+            json.dumps({"type": "thread.started", "thread_id": session_id}) + "\n",
+            encoding="utf-8",
+        )
+        transcript = (
+            logs_dir
+            / "sessions"
+            / "2026"
+            / "08"
+            / "18"
+            / f"rollout-2026-08-18T12-00-00-{session_id}.jsonl"
+        )
+        transcript.parent.mkdir(parents=True)
+        transcript.write_text(
+            json.dumps({"type": "session_meta", "payload": {"id": session_id}})
+            + "\n"
+            + json.dumps(
+                {"type": "function_call", "name": "read_file", "arguments": {}}
+            )
+            + "\n",
+            encoding="utf-8",
+        )
+        return
+    raise AssertionError(f"unsupported harness: {harness}")
+
+
+@pytest.mark.parametrize(
+    ("harness", "harness_type"),
+    [
+        ("hermes", FugueHermes),
+        ("openclaw", FugueOpenClaw),
+        ("claude-code", FugueClaudeCode),
+        ("codex", FugueCodex),
+    ],
+)
+def test_local_harness_run_closes_provider_neutral_evidence_manifest(
+    harness: str,
+    harness_type: type,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    root = tmp_path / harness
+    trial_dir = root / "jobs" / "cell-a"
+    logs_dir = trial_dir / "agent"
+    run_id = f"run-{harness}"
+    session_id = "11111111-2222-4333-8444-555555555555"
+    cell = PlannedCell(
+        id="cell-a",
+        run_id=run_id,
+        run_name=run_id,
+        workload_id="suite",
+        task_id="task-a",
+        harness=harness,
+        context_system_id="none",
+        variant_id="baseline",
+        model_provider="anthropic",
+        model="anthropic/claude-test",
+        trial_index=1,
+        comparison_example_id="example-a",
+        candidate_id="candidate-a",
+        execution_fingerprint="execution-a",
+        config_path=root / "config.json",
+        result_path=trial_dir / "result.json",
+        command=("harbor", "run"),
+        env={"FUGUE_EVIDENCE_MODE": "local", "FUGUE_DATASET": "suite@v1"},
+        n_attempts=1,
+        evaluation_asset_lock_sha256="e" * 64,
+        run_snapshot_sha256="a" * 64,
+    )
+    conformance = {
+        "status": "passed",
+        "execution_identity": {"status": "passed", "digest": "x" * 64},
+        "local_artifact_privacy_scan": {"status": "passed", "matches": 0},
+        "private_label_boundary": {"status": "passed"},
+        "docker_cleanup": {"status": "passed", "matched_containers": []},
+    }
+    coordinator = GeneratedEvaluationCoordinator(
+        [cell],
+        repo_root=root,
+        env={"ANTHROPIC_API_KEY": "not-a-real-secret-value"},
+        cell_conformance=lambda _cell: conformance,
+        require_complete_evidence=True,
+        evidence_mode="local",
+    )
+    overlay = coordinator.begin_cell(cell)
+    assert overlay is not None
+
+    environment = {
+        "FUGUE_RUN_ID": run_id,
+        "FUGUE_WORKLOAD_ID": "suite",
+        "FUGUE_TASK_NAME": "task-a",
+        "FUGUE_HARNESS": harness,
+        "FUGUE_CONTEXT_SYSTEM_ID": "none",
+        "FUGUE_VARIANT_ID": "baseline",
+        "FUGUE_TRIAL_INDEX": "1",
+        "FUGUE_COMPARISON_EXAMPLE_ID": "example-a",
+        "FUGUE_CANDIDATE_ID": "candidate-a",
+        "FUGUE_EXECUTION_FINGERPRINT": "execution-a",
+        "FUGUE_DATASET": "suite@v1",
+        "ANTHROPIC_API_KEY": "model-key",
+        **overlay,
+    }
+    for name, value in environment.items():
+        monkeypatch.setenv(name, value)
+    for name in _TRACE_ENV_NAMES:
+        monkeypatch.delenv(name, raising=False)
+
+    agent = _local_agent(harness_type, logs_dir, monkeypatch)
+    agent._context_registration_meta = {"status": "not_assigned"}
+    calls: list[dict[str, Any]] = []
+
+    async def exec_as_agent(
+        _environment: object,
+        command: str,
+        env: dict[str, str] | None = None,
+        **kwargs: Any,
+    ) -> SimpleNamespace:
+        calls.append({"command": command, "env": dict(env or {}), **kwargs})
+        if any(
+            marker in command
+            for marker in (
+                "hermes --yolo chat",
+                "openclaw agent --local --json",
+                "claude --verbose --output-format=stream-json",
+                "codex exec --dangerously-bypass-approvals-and-sandbox",
+                "_openclaw_container_copy_session_transcript",
+            )
+        ):
+            _materialize_native_local_transcript(
+                logs_dir,
+                harness=harness,
+                session_id=session_id,
+            )
+        stdout = ""
+        if "tail -c" in command:
+            stdout = (logs_dir / "claude-code.txt").read_text(encoding="utf-8")
+        elif "openclaw agent --local --json" in command:
+            stdout = json.dumps({"sessionId": session_id}) + "\n"
+        else:
+            stdout = "native agent output"
+        return SimpleNamespace(return_code=0, stdout=stdout, stderr="")
+
+    async def begin_trial(
+        observed_harness: str,
+        route: object,
+        _environment: object,
+    ) -> None:
+        agent._meta_begin(observed_harness, route)
+
+    async def finish_trial(_environment: object) -> None:
+        agent._meta_end()
+
+    agent.exec_as_agent = exec_as_agent
+    agent._begin_trial = begin_trial
+    agent._finish_trial = finish_trial
+    agent._verify_skill_registration = AsyncMock()
+    agent._lock_trial_mutators = AsyncMock()
+    agent._install_tool_result_guard = AsyncMock()
+    agent._install_action_gate = AsyncMock()
+    agent._detect_home = AsyncMock(return_value="/home/agent")
+    agent._task_interaction = lambda _instruction: _Interaction()
+    agent._set_task_interaction_summary = lambda _interaction: None
+
+    asyncio.run(agent.run("perform the task", object(), SimpleNamespace()))
+
+    (trial_dir / "result.json").write_text(
+        json.dumps(
+            {
+                "task_name": "suite/task-a",
+                "trial_name": "cell-a",
+                "agent_result": {
+                    "n_input_tokens": 12,
+                    "n_output_tokens": 3,
+                    "cost_usd": 0.02,
+                },
+                "verifier_result": {"rewards": {"reward": 1.0}},
+                "started_at": "2026-08-18T12:00:00Z",
+                "finished_at": "2026-08-18T12:00:02Z",
+            }
+        ),
+        encoding="utf-8",
+    )
+    row = coordinator.finish_cell(
+        cell,
+        CellOutcome(cell.id, "passed", returncode=0),
+    )
+    conformance_receipt = {
+        "schema_version": 2,
+        "run_id": run_id,
+        "backend": "local_harbor_docker",
+        "status": "passed",
+        "enforced": True,
+        "receipt_sha256": "",
+    }
+    conformance_receipt["receipt_sha256"] = stable_digest(conformance_receipt)
+    (root / f".fugue/runtime/{run_id}/harbor-conformance.json").write_text(
+        json.dumps(conformance_receipt, sort_keys=True) + "\n",
+        encoding="utf-8",
+    )
+    manifest = coordinator.finalize()
+
+    assert row is not None
+    assert manifest is not None and manifest.status == "complete"
+    assert len(manifest.attempt_records) == 1
+    assert {link["system"] for link in row["local_evidence_links"]} == {
+        "local_artifact"
+    }
+    assert {link["kind"] for link in row["local_evidence_links"]} == {
+        "evaluation_root",
+        "prediction_and_score",
+        "prediction",
+        "agent_root",
+        "dataset",
+    }
+    agent_receipt_path = next(
+        (root / f".fugue/runtime/{run_id}/evidence/agents").glob("*.json")
+    )
+    receipt = json.loads(agent_receipt_path.read_text(encoding="utf-8"))
+    assert receipt["status"] == "resolved"
+    assert receipt["native_weave_call"] is False
+    assert receipt["correlation_method"] == "isolated_trial_directory_v1"
+    assert receipt["primary_session_id"] == session_id
+    assert receipt["tool_event_count"] == 1
+    assert len(receipt["tool_events_sha256"]) == 64
+    assert all(_TRACE_ENV_NAMES.isdisjoint(call["env"]) for call in calls)

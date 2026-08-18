@@ -7,7 +7,7 @@ from types import SimpleNamespace
 
 import pytest
 from test_operator import make_operator_repo
-from textual.widgets import Button, Collapsible, ContentSwitcher
+from textual.widgets import Button, Collapsible, ContentSwitcher, Static
 
 from fugue.bench.ai import AssetDraft, ExperimentDraft
 from fugue.bench.evaluations import build_evaluation_draft, source_catalog
@@ -57,6 +57,41 @@ def test_tui_uses_three_step_plan_and_automatic_preview(
             assert app.query_one("#workspace").active == "setup"
 
     asyncio.run(exercise())
+
+
+def test_tui_requires_weave_key_only_for_weave_required_experiments(
+    tmp_path: Path,
+) -> None:
+    service = make_operator_repo(tmp_path)
+    app = FugueApp(service=service, experiment_id="demo")
+    preview = service.preview_experiment(app.plan.experiment)
+
+    status = SimpleNamespace(
+        model_key_present=True,
+        model_key_env="OPENAI_API_KEY",
+        trace_key_present=False,
+        routes=(),
+        docker_present=True,
+        harbor_present=True,
+        model_provider="openai",
+        bridge_ready=True,
+    )
+
+    hosted_blockers = app._blockers(preview, status)
+    assert "Weave tracing requires FUGUE_WEAVE_API_KEY" in hosted_blockers
+
+    local_experiment = replace(
+        app.plan.experiment,
+        schema_version=2,
+        evidence_mode="local",
+        evidence_project=None,
+        evidence_destination=None,
+        require_live_evidence=False,
+    )
+    app.plan = replace(app.plan, experiment=local_experiment)
+
+    local_blockers = app._blockers(preview, status)
+    assert "Weave tracing requires FUGUE_WEAVE_API_KEY" not in local_blockers
 
 
 def test_tui_variants_stay_in_memory_until_explicit_save(
@@ -461,6 +496,49 @@ def test_full_trace_launch_requires_confirmation(
             app._request_launch()
             await pilot.pause()
             assert isinstance(app.screen, ConfirmRunScreen)
+            copy = str(
+                app.screen.query_one("#trace-confirmation-copy", Static).render()
+            )
+            assert "configured Weave project" in copy
+
+    asyncio.run(exercise())
+
+
+def test_local_full_trace_confirmation_and_summaries_do_not_claim_publication(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv("FUGUE_NO_ANIMATION", "1")
+    app = FugueApp(service=make_operator_repo(tmp_path), experiment_id="demo")
+    local_experiment = replace(
+        app.plan.experiment,
+        schema_version=2,
+        evidence_mode="local",
+        evidence_project=None,
+        evidence_destination=None,
+        require_live_evidence=False,
+    )
+    app.plan = replace(app.plan, experiment=local_experiment)
+
+    async def exercise() -> None:
+        async with app.run_test(size=(100, 32)) as pilot:
+            await pilot.pause(1)
+            assert "Local ledger" in str(app.query_one("#define-summary").render())
+            assert "canonical local ledger" in str(
+                app.query_one("#setup-details").render()
+            )
+
+            app._show_plan_step("review-step")
+            app._review_blockers = ()
+            app._request_launch()
+            await pilot.pause()
+
+            assert isinstance(app.screen, ConfirmRunScreen)
+            copy = str(
+                app.screen.query_one("#trace-confirmation-copy", Static).render()
+            )
+            assert "canonical local evidence ledger" in copy
+            assert "will not publish" in copy
+            assert "configured Weave project" not in copy
 
     asyncio.run(exercise())
 
