@@ -84,6 +84,9 @@ _EVENT_TYPES = frozenset(
 )
 _HEX_SHA256 = re.compile(r"^[0-9a-f]{64}$")
 _SAFE_RUN_ID = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,199}$")
+_SAFE_PROJECT_SLUG = re.compile(
+    r"^[A-Za-z0-9][A-Za-z0-9_.-]*/[A-Za-z0-9][A-Za-z0-9_.-]*$"
+)
 _PRIVATE_FIELDS = frozenset(
     {
         "answer_key",
@@ -398,13 +401,21 @@ def _projection_answer_excerpt(row: Mapping[str, Any]) -> str | None:
 
 
 def _projection_reported_project(row: Mapping[str, Any]) -> str | None:
+    normalized = _projection_project_slug(row.get("reported_project_identity"))
+    if normalized is not None:
+        return normalized
     raw = _projection_structured_result(_projection_answer(row))
     if not isinstance(raw, Mapping):
         return None
     value = raw.get("source_project")
     if value is None:
         value = raw.get("project")
-    return str(value).strip() or None if value is not None else None
+    return _projection_project_slug(value)
+
+
+def _projection_project_slug(value: Any) -> str | None:
+    text = str(value or "").strip()
+    return text if _SAFE_PROJECT_SLUG.fullmatch(text) else None
 
 
 def _projection_score_explanation(

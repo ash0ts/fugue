@@ -32,6 +32,7 @@ from fugue.bench.comparison import (
     _evaluate_decision,
     _evaluator_digest,
     _mechanism_summary,
+    _normalized_reported_project_identity,
     _paired_attempt_v3,
     _paired_attempt_view_v3,
     _prepare_comparison_scorer_runtimes,
@@ -61,9 +62,12 @@ from fugue.bench.comparison import (
 from fugue.bench.comparison import _decision_policy as parse_decision_policy
 from fugue.bench.evaluations import JudgeResponseError
 from fugue.bench.execution_recovery import ExecutionFinalizationPending
-from fugue.bench.local_evidence import local_result_row_projection_digest
+from fugue.bench.local_evidence import (
+    local_result_row_projection_digest,
+    local_result_row_projection_v1,
+)
 from fugue.bench.operator import OperatorService
-from fugue.model_plane import trace_destination_identity
+from fugue.model_plane import EvidenceMode, trace_destination_identity
 from fugue.research.approvals import ApprovalLedger
 from fugue.research.contracts import ResearchError
 from fugue.research.database import connect_database
@@ -997,6 +1001,90 @@ def _release_note_gate_decision(
             },
         ),
     )
+
+
+def _local_harbor_decision_rows() -> list[dict[str, object]]:
+    rows = [
+        _decision_row(variant="baseline", passed=True),
+        _decision_row(variant="candidate", passed=True),
+    ]
+    for row in rows:
+        row.pop("infrastructure_conformance_complete")
+        row["trace_project"] = None
+        row["local_evidence_links"] = [{"system": "local_artifact"}]
+        row["hosted_evidence_privacy_scan_status"] = "not_applicable"
+    return rows
+
+
+def _evaluate_local_harbor_decision(
+    rows: list[dict[str, object]],
+    *,
+    evidence_mode: EvidenceMode,
+):
+    return _evaluate_decision(
+        policy=parse_decision_policy(_decision_policy()),
+        rows=rows,
+        deterministic={"candidate": {"passed": 1, "evaluated": 1}},
+        operational={"infrastructure_failures": 0},
+        improved=0,
+        regressed=0,
+        incomplete=0,
+        required_incomplete=0,
+        integrity={
+            "status": "reconciled",
+            "duplicate_attempt_ids": [],
+            "unresolved_evidence_attempts": 0,
+            "cross_project_attempts": 0,
+        },
+        attestation=None,
+        evidence_mode=evidence_mode,
+    )
+
+
+def test_local_decision_uses_one_shared_harbor_receipt_without_hosted_gate() -> None:
+    rows = _local_harbor_decision_rows()
+
+    decision = _evaluate_local_harbor_decision(rows, evidence_mode="local")
+
+    gates = {gate.id: gate for gate in decision.gates}
+    assert decision.status == "ready_for_signoff"
+    assert "hosted-evidence-privacy" not in gates
+    assert gates["infrastructure"].status == "passed"
+    assert gates["sandbox-cleanup"].status == "passed"
+
+    hosted = _evaluate_local_harbor_decision(rows, evidence_mode="weave_required")
+    hosted_gates = {gate.id: gate for gate in hosted.gates}
+    assert hosted.status == "blocked"
+    assert hosted_gates["hosted-evidence-privacy"].status == "unavailable"
+
+
+def test_local_harbor_conformance_rejects_mixed_or_empty_run_receipts() -> None:
+    mismatched = _local_harbor_decision_rows()
+    mismatched[1]["harbor_conformance_receipt_digest"] = "e" * 64
+    for row in mismatched:
+        # A generic receipt flag cannot bypass the stricter run-wide Harbor
+        # receipt contract.
+        row["infrastructure_conformance_complete"] = True
+
+    mismatch_decision = _evaluate_local_harbor_decision(
+        mismatched,
+        evidence_mode="local",
+    )
+    mismatch_gates = {gate.id: gate for gate in mismatch_decision.gates}
+    assert mismatch_decision.status == "blocked"
+    assert mismatch_gates["infrastructure"].status == "unavailable"
+    assert mismatch_gates["sandbox-cleanup"].status == "unavailable"
+
+    missing = _local_harbor_decision_rows()
+    for row in missing:
+        row["harbor_conformance_receipt_digest"] = ""
+    missing_decision = _evaluate_local_harbor_decision(
+        missing,
+        evidence_mode="local",
+    )
+    missing_gates = {gate.id: gate for gate in missing_decision.gates}
+    assert missing_gates["infrastructure"].status == "unavailable"
+    assert missing_gates["sandbox-cleanup"].status == "unavailable"
 
 
 def test_release_note_infrastructure_gate_is_implicit_and_fail_closed() -> None:
@@ -2795,6 +2883,40 @@ def test_comparison_scoring_prefers_locked_answer_artifact(
     )
 
 
+def test_exact_answer_artifact_populates_safe_reported_project_projection() -> None:
+    exact_output = (
+        "```json\n"
+        '{"source_project":"wandb/fugue-mcp-release-source-v2"}'
+        "\n```"
+    )
+    reported = _normalized_reported_project_identity(exact_output)
+    assert reported == "wandb/fugue-mcp-release-source-v2"
+
+    scored_row = {
+        "attempt_id": "a" * 64,
+        "reported_project_identity": reported,
+        # The normalized artifact value must win after final_output is removed.
+        "agent_response": "I wrote the structured answer to fugue-answer.md.",
+    }
+    projection = local_result_row_projection_v1(scored_row)
+    assert projection["reported_project_identity"] == reported
+
+    assert _normalized_reported_project_identity(
+        '{"source_project":"wandb/other-project"}'
+    ) == ("wandb/other-project")
+    assert _normalized_reported_project_identity(
+        '{"source_project":"https://wandb.ai/wandb/project?token=secret"}'
+    ) is None
+    malformed_projection = local_result_row_projection_v1(
+        {
+            "attempt_id": "b" * 64,
+            "reported_project_identity": "not a project slug",
+            "agent_response": "The answer artifact contained an invalid project.",
+        }
+    )
+    assert malformed_projection["reported_project_identity"] is None
+
+
 def test_source_use_demo_uses_packaged_assets_outside_checkout(
     tmp_path: Path,
     capsys: pytest.CaptureFixture[str],
@@ -2985,8 +3107,17 @@ def test_eight_row_report_uses_real_pair_counts_and_neutral_study_language() -> 
     )
 
     assert "- Rows: 8" in markdown
-    assert "Baseline aligned attempts passed: 4/4" in markdown
-    assert "Candidate aligned attempts passed: 4/4" in markdown
+    assert (
+        "Baseline tasks that passed all required gates: 4/4 aligned task attempts"
+        in markdown
+    )
+    assert (
+        "Candidate tasks that passed all required gates: 4/4 aligned task attempts"
+        in markdown
+    )
+    assert "Baseline full result" in markdown
+    assert "Candidate full result" in markdown
+    assert "Paired outcome change" in markdown
     assert "0/0" not in markdown
     assert "Task Passed" not in markdown
     assert (
@@ -4511,6 +4642,10 @@ def test_execute_local_comparison_never_requires_or_fetches_weave(
     assert "Package release: **NOT EVALUATED**" in markdown
     assert "Release-policy note: Package release was not evaluated" in markdown
     assert "behavioral study is not release-complete" not in markdown
+    assert "Baseline tasks that passed all required gates:" in markdown
+    assert "Candidate tasks that passed all required gates:" in markdown
+    assert "| Baseline full result | Candidate full result |" in markdown
+    assert "Paired outcome change |" in markdown
     assert (
         "Evidence integrity grade: **A** (evidence-link reconciliation and privacy "
         "integrity; not a behavioral-quality score)" in markdown
@@ -4523,6 +4658,28 @@ def test_execute_local_comparison_never_requires_or_fetches_weave(
     assert "Portable evidence destination: `fugue-evidence` layout v1" in markdown
     assert "`fugue://local-evidence/" in markdown
     assert "No safe evidence links were available." not in markdown
+
+    governed = replace(
+        result,
+        decision_policy=parse_decision_policy(_decision_policy()),
+        decision=replace(
+            result.decision,
+            status="blocked",
+            recommendation="Complete the missing package gates.",
+        ),
+    )
+    governed_markdown = _result_markdown(governed)
+    assert "Package release: **HOLD**" in governed_markdown
+    assert (
+        "This local Study does not evaluate every package-release gate."
+        in governed_markdown
+    )
+    assert "Governed gate status: **BLOCKED**" in governed_markdown
+    assert (
+        "Governed gate recommendation: Complete the missing package gates."
+        in governed_markdown
+    )
+    assert "Package release decision: **BLOCKED**" not in governed_markdown
     approved = dict(captured["approved"])  # type: ignore[arg-type]
     assert approved["approval_required"] is False
     assert approved["approval_digest"] == ""

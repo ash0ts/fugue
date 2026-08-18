@@ -10,7 +10,13 @@ from types import SimpleNamespace
 
 import pytest
 
+from fugue.bench.candidates import stable_digest
+from fugue.bench.comparison import load_comparison
 from fugue.bench.component_imports import MCPImportLockV1
+from fugue.reference_studies import (
+    wandb_mcp_qualification,
+    wandb_mcp_qualification_core,
+)
 from fugue.reference_studies.wandb_mcp import (
     PREPARATION_RECEIPT_NAME,
     SOURCE_LOCK_NAME,
@@ -27,9 +33,15 @@ from fugue.reference_studies.wandb_mcp import (
     WandbMCPReferenceSourceLockV1,
     _freeze_hosted_reference_source,
     _materialization_inventory,
+    _stable_digest,
     prepare_wandb_mcp_reference_study,
     read_wandb_mcp_reference_lock,
     read_wandb_mcp_reference_receipt,
+)
+from fugue.reference_studies.wandb_mcp_qualification import (
+    _load_packaged_release_inputs,
+    bound_release_note_coverage,
+    qualification_input_readiness,
 )
 
 COMMIT = "b" * 40
@@ -204,7 +216,8 @@ def test_default_materializer_builds_a_complete_check_ready_bundle(
     def fake_freeze(*, staging_root, credential):
         assert credential == "unit-test-wandb-key"
         evidence = {"evidence_lock_digest": "7" * 64}
-        conformance = {"receipt_digest": "8" * 64}
+        conformance = {"receipt_digest": ""}
+        conformance["receipt_digest"] = stable_digest(conformance)
         (staging_root / "source-evidence.lock.json").write_text(
             json.dumps(evidence), encoding="utf-8"
         )
@@ -268,6 +281,79 @@ def test_default_materializer_builds_a_complete_check_ready_bundle(
     assert receipt.materialization is not None
     assert receipt.materialization.total_files > 10
     assert "unit-test-wandb-key" not in json.dumps(receipt.to_dict())
+
+    monkeypatch.setattr(
+        wandb_mcp_qualification_core,
+        "validate_evidence_lock",
+        lambda raw, **_kwargs: raw,
+    )
+    monkeypatch.setattr(
+        wandb_mcp_qualification,
+        "_validate_source_conformance_binding",
+        lambda **_kwargs: None,
+    )
+
+    spec = load_comparison(destination / "comparison.yaml", repo_root=destination)
+    source_lock = read_wandb_mcp_reference_lock(destination)
+    digests, coverage = _load_packaged_release_inputs(
+        spec,
+        root=destination,
+        source_lock=source_lock,
+    )
+    assert digests["release_notes_lock"] == json.loads(
+        (destination / "release-notes.lock.json").read_text(encoding="utf-8")
+    )["lock_digest"]
+    assert digests["mechanism_receipt"] == json.loads(
+        (destination / "mechanism-receipt.json").read_text(encoding="utf-8")
+    )["receipt_digest"]
+    assert len(coverage) == 4
+    assert {item["status"] for item in coverage} == {"unqualified"}
+    readiness_digests, readiness_blockers = qualification_input_readiness(
+        spec,
+        repo_root=destination,
+    )
+    assert readiness_blockers == []
+    assert readiness_digests["release_notes_lock"] == digests[
+        "release_notes_lock"
+    ]
+    assert readiness_digests["mechanism_receipt"] == digests[
+        "mechanism_receipt"
+    ]
+    assert readiness_digests["release_note_coverage"] == digests[
+        "release_note_coverage"
+    ]
+    assert bound_release_note_coverage(
+        spec,
+        readiness={"qualification_input_digests": digests},
+        repo_root=destination,
+    ) == coverage
+
+    mechanism_path = destination / "mechanism-receipt.json"
+    mechanism_path.chmod(0o644)
+    mechanism = json.loads(mechanism_path.read_text(encoding="utf-8"))
+    original_digest = mechanism.pop("receipt_digest")
+    mechanism["release_note_coverage"][0]["task_ids"] = ["not-a-task"]
+    mechanism["receipt_digest"] = _stable_digest(mechanism)
+    assert mechanism["receipt_digest"] != original_digest
+    mechanism_path.write_text(json.dumps(mechanism), encoding="utf-8")
+    with pytest.raises(
+        ValueError,
+        match="release-note coverage does not match",
+    ):
+        _load_packaged_release_inputs(
+            spec,
+            root=destination,
+            source_lock=source_lock,
+        )
+    invalid_digests, invalid_blockers = qualification_input_readiness(
+        spec,
+        repo_root=destination,
+    )
+    assert invalid_digests == {}
+    assert any(
+        "prepared reference artifact changed: mechanism-receipt.json" in blocker
+        for blocker in invalid_blockers
+    )
 
 
 def test_hosted_source_freeze_reads_and_rechecks_exact_inventory(

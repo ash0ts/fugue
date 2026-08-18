@@ -50,6 +50,8 @@ execution:
     app_base_url: https://wandb.ai
   evidence_lock: source-evidence.lock.json
   source_conformance_receipt: source-conformance-receipt.json
+  release_notes_lock: release-notes.lock.json
+  mechanism_receipt: mechanism-receipt.json
   research_id: fugue-mcp-release-qualification-v1
   study_console_base_url: http://127.0.0.1:18080
   model: anthropic/claude-sonnet-5
@@ -101,7 +103,7 @@ decision_policy:
     - id: no-harbor-orphans
       label: No run-scoped Harbor resources remain
       category: infrastructure
-      source: infrastructure.gate.no-harbor-orphans
+      source: cleanup.orphans
       operator: eq
-      target: true
+      target: 0
       critical: true

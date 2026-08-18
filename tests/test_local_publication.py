@@ -1120,6 +1120,58 @@ class _FakeWeaveClient:
         return SimpleNamespace(uri=uri)
 
 
+class _ObjectifiedWeaveRef:
+    def __init__(self, uri: str, payload: dict[str, Any]) -> None:
+        self.uri = uri
+        self.payload = payload
+
+    def model_dump(self) -> dict[str, Any]:
+        return dict(self.payload)
+
+
+class _ObjectifyingWeaveDict(dict[str, Any]):
+    """Model Weave readback without losing the stored reference identity."""
+
+    def items(self):
+        for key, value in dict.items(self):
+            if isinstance(value, _ObjectifiedWeaveRef):
+                yield key, value.payload
+            else:
+                yield key, value
+
+
+def test_weave_call_input_comparison_uses_raw_immutable_ref_identity(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    original_import = publication.importlib.import_module
+
+    def import_module(name: str):
+        if name == "weave.trace.refs":
+            return SimpleNamespace(Ref=_ObjectifiedWeaveRef)
+        if name == "weave.trace.vals":
+            return SimpleNamespace(WeaveDict=_ObjectifyingWeaveDict)
+        return original_import(name)
+
+    monkeypatch.setattr(publication.importlib, "import_module", import_module)
+    uri = "weave:///wandb/local-result/object/frozen-dataset:sha256"
+    observed = _ObjectifyingWeaveDict(
+        {"dataset_ref": _ObjectifiedWeaveRef(uri, {"attempt_id": "a" * 64})}
+    )
+
+    assert publication._canonical_values_equal(
+        observed,
+        {"dataset_ref": uri},
+    )
+    assert not publication._canonical_values_equal(
+        observed,
+        {
+            "dataset_ref": (
+                "weave:///wandb/local-result/object/other-dataset:sha256"
+            )
+        },
+    )
+
+
 def _install_fake_weave(
     monkeypatch: pytest.MonkeyPatch,
     target: WeavePublicationTargetV1,

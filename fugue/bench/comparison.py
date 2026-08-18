@@ -3923,6 +3923,7 @@ def analyze_comparison_rows(
         integrity=integrity,
         attestation=signed,
         release_note_coverage=resolved_release_note_coverage,
+        evidence_mode="local" if local_result else "weave_required",
     )
     if result_schema_version == 3 and topology is not None:
         decision = _apply_v3_decision_validity(
@@ -4417,7 +4418,7 @@ def _task_validity_v3(
                 ),
             )
             blockers = tuple(
-                f"{task_id}: {dimension} failed in both arms"
+                f"{task_id}: both arms failed {dimension}"
                 for dimension in shared_failures
             )
         else:
@@ -4460,12 +4461,16 @@ def _behavioral_summary_v3(
                     for blocker in validity.blockers
                 ),
                 *(
-                    f"{pair.task_id}: {change.id} failed for the candidate"
+                    f"{pair.task_id}: candidate failed {change.id}"
                     for pair in paired_cases
                     for change in pair.dimension_changes
                     if change.role in {"outcome", "safety_gate"}
                     and change.critical
                     and change.candidate is False
+                    # Task validity already names failures shared by both arms.
+                    # Do not repeat the same task and dimension as a second,
+                    # candidate-only blocker.
+                    and change.baseline is not False
                 ),
             ]
         )
@@ -6192,9 +6197,16 @@ def _safe_score_explanation(
 
 
 def _reported_project_identity(row: Mapping[str, Any]) -> str | None:
+    normalized = _safe_reported_project_slug(row.get("reported_project_identity"))
+    if normalized is not None:
+        return normalized
     raw = row.get("agent_response")
     if raw is None:
         raw = row.get("final_output")
+    return _normalized_reported_project_identity(raw)
+
+
+def _normalized_reported_project_identity(raw: Any) -> str | None:
     if isinstance(raw, str):
         raw = _extract_structured_result(raw)
     if not isinstance(raw, Mapping):
@@ -6202,7 +6214,18 @@ def _reported_project_identity(row: Mapping[str, Any]) -> str | None:
     value = raw.get("source_project")
     if value is None:
         value = raw.get("project")
-    return str(value).strip() or None if value is not None else None
+    if value is None:
+        return None
+    return _safe_reported_project_slug(value)
+
+
+def _safe_reported_project_slug(value: Any) -> str | None:
+    try:
+        return _evidence_project(value, label="reported project identity")
+    except ValueError:
+        # The pinned scorer remains authoritative for a malformed serialized
+        # answer. Do not persist an unsafe or ambiguous project identifier.
+        return None
 
 
 def _attempt_evidence_links(
@@ -6441,6 +6464,33 @@ def _is_local_harbor_row(row: Mapping[str, Any]) -> bool:
     return bool(
         row.get("harbor_config")
         or str(row.get("harbor_environment") or "").startswith("local_harbor")
+    )
+
+
+def _local_harbor_run_conformance_complete(
+    rows: Sequence[Mapping[str, Any]],
+) -> bool:
+    """Return true only for one complete run-wide Harbor receipt.
+
+    A per-row cleanup flag is not sufficient. Every canonical row must bind
+    the same nonempty run receipt, and that receipt must report successful
+    conformance and cleanup with no orphaned container.
+    """
+
+    if not rows or not all(_is_local_harbor_row(row) for row in rows):
+        return False
+    receipt_digests = {
+        str(row.get("harbor_conformance_receipt_digest") or "") for row in rows
+    }
+    return bool(
+        len(receipt_digests) == 1
+        and next(iter(receipt_digests))
+        and all(
+            row.get("harbor_conformance_status") == "passed"
+            and row.get("sandbox_cleanup_verified") is True
+            and row.get("orphaned_sandbox") is False
+            for row in rows
+        )
     )
 
 
@@ -7419,6 +7469,8 @@ def _evaluate_decision(
     integrity: Mapping[str, Any],
     attestation: DecisionAttestationV1 | None,
     release_note_coverage: Sequence[Mapping[str, Any]] = (),
+    evidence_mode: EvidenceMode = "weave_required",
+    allow_local_harbor_conformance: bool = True,
 ) -> DecisionSummaryV1:
     evidence_grade = _evidence_grade(integrity, rows)
     if integrity.get("status") == "invalid":
@@ -7466,9 +7518,10 @@ def _evaluate_decision(
         required_incomplete=required_incomplete,
         integrity=integrity,
         evidence_grade=evidence_grade,
+        allow_local_harbor_conformance=allow_local_harbor_conformance,
     )
     policies = list(policy.gates)
-    implicit = _implicit_decision_gate_policies()
+    implicit = _implicit_decision_gate_policies(evidence_mode=evidence_mode)
     policies = _canonical_decision_gate_policies(
         policies,
         implicit=implicit,
@@ -7543,8 +7596,10 @@ def _evaluate_decision(
     )
 
 
-def _implicit_decision_gate_policies() -> tuple[DecisionGatePolicyV1, ...]:
-    return (
+def _implicit_decision_gate_policies(
+    *, evidence_mode: EvidenceMode = "weave_required"
+) -> tuple[DecisionGatePolicyV1, ...]:
+    policies = (
         DecisionGatePolicyV1(
             id="result-integrity",
             label="Result rows and summary reconcile",
@@ -7625,6 +7680,11 @@ def _implicit_decision_gate_policies() -> tuple[DecisionGatePolicyV1, ...]:
             operator="eq",
             target=0,
         ),
+    )
+    if evidence_mode == "weave_required":
+        return policies
+    return tuple(
+        gate for gate in policies if gate.source != "privacy.hosted_evidence_passed"
     )
 
 
@@ -7722,6 +7782,7 @@ def _decision_facts(
     required_incomplete: int,
     integrity: Mapping[str, Any],
     evidence_grade: str,
+    allow_local_harbor_conformance: bool = True,
 ) -> dict[str, str | float | int | bool | None]:
     candidate = _mapping_or_empty(deterministic.get("candidate"))
     critical_failures = _critical_dimension_failures(rows, "candidate")
@@ -7745,14 +7806,27 @@ def _decision_facts(
         int(row.get("sandbox_deleted") is False or row.get("orphaned_sandbox") is True)
         for row in rows
     )
-    infrastructure_complete = bool(rows) and all(
+    declared_infrastructure_complete = bool(rows) and all(
         row.get("infrastructure_conformance_complete") is True for row in rows
+    )
+    local_harbor_rows = bool(rows) and all(_is_local_harbor_row(row) for row in rows)
+    local_harbor_complete = bool(
+        allow_local_harbor_conformance
+        and _local_harbor_run_conformance_complete(rows)
+    )
+    infrastructure_complete = (
+        local_harbor_complete
+        if local_harbor_rows
+        else declared_infrastructure_complete
     )
     privacy_evidence_available = bool(rows) and all(
         _privacy_scan_evidence_available(row) for row in rows
     )
-    cleanup_complete = bool(rows) and all(
-        row.get("sandbox_cleanup_verified") is True for row in rows
+    cleanup_complete = (
+        local_harbor_complete
+        if local_harbor_rows and allow_local_harbor_conformance
+        else bool(rows)
+        and all(row.get("sandbox_cleanup_verified") is True for row in rows)
     )
     facts: dict[str, str | float | int | bool | None] = {
         "integrity.valid": integrity.get("status") == "reconciled",
@@ -8756,6 +8830,9 @@ def _v3_canonical_attempt_rows(  # noqa: C901 - one bounded audit checks every V
                     else None
                 ),
                 "harbor_conformance_status": infrastructure.get("conformance_status"),
+                "harbor_conformance_receipt_digest": infrastructure.get(
+                    "conformance_receipt_digest"
+                ),
                 "harbor_policy_attestation_verified": infrastructure.get(
                     "policy_attestation_verified"
                 ),
@@ -8893,6 +8970,7 @@ def _v3_decision_facts(
     rows: Sequence[Mapping[str, Any]],
     *,
     integrity: Mapping[str, Any],
+    allow_local_harbor_conformance: bool = True,
 ) -> dict[str, str | float | int | bool | None]:
     grade = _evidence_grade(integrity, rows)
     facts = _decision_facts(
@@ -8910,6 +8988,7 @@ def _v3_decision_facts(
         required_incomplete=result.required_evaluations_incomplete,
         integrity=integrity,
         evidence_grade=grade,
+        allow_local_harbor_conformance=allow_local_harbor_conformance,
     )
     source_statuses = {
         result.evidence_topology.pre_run_drift.status,
@@ -9223,9 +9302,20 @@ def _verify_v3_derived_analysis(
         result.paired_cases,
         topology=result.evidence_topology,
     )
-    if tuple(item.to_dict() for item in result.task_validity) != tuple(
-        item.to_dict() for item in recomputed_validity
-    ):
+    stored_validity = tuple(item.to_dict() for item in result.task_validity)
+    current_validity = tuple(item.to_dict() for item in recomputed_validity)
+    legacy_validity_values = _legacy_v3_task_validity(recomputed_validity)
+    legacy_validity = tuple(item.to_dict() for item in legacy_validity_values)
+    if stored_validity == current_validity:
+        verified_validity = recomputed_validity
+        legacy_blocker_wording = False
+    elif stored_validity == legacy_validity:
+        # V3 results written before the concise blocker wording remain
+        # readable. The legacy form is derived from the same paired evidence;
+        # this branch does not accept arbitrary stored prose.
+        verified_validity = legacy_validity_values
+        legacy_blocker_wording = True
+    else:
         raise ValueError(
             "ComparisonResultV3 task validity disagrees with paired evidence"
         )
@@ -9242,7 +9332,7 @@ def _verify_v3_derived_analysis(
             ),
             blockers=validity.blockers,
         ).to_dict()
-        for validity in recomputed_validity
+        for validity in verified_validity
     )
     if (
         tuple(item.to_dict() for item in result.aligned_analysis.task_summaries)
@@ -9255,7 +9345,8 @@ def _verify_v3_derived_analysis(
         result,
         pair_counts=pair_counts,
         candidate_critical_failures=candidate_critical_failures,
-        task_validity=recomputed_validity,
+        task_validity=verified_validity,
+        legacy_blocker_wording=legacy_blocker_wording,
     )
     reconstructed_rows = [
         {
@@ -9285,6 +9376,25 @@ def _verify_v3_derived_analysis(
         canonical_rows=canonical_rows,
         semantic_integrity=semantic_integrity,
     )
+
+
+def _legacy_v3_task_validity(
+    values: Sequence[TaskValidityV1],
+) -> tuple[TaskValidityV1, ...]:
+    legacy: list[TaskValidityV1] = []
+    for value in values:
+        prefix = f"{value.task_id}: both arms failed "
+        blockers = tuple(
+            (
+                f"{value.task_id}: {blocker.removeprefix(prefix)} "
+                "failed in both arms"
+                if blocker.startswith(prefix)
+                else blocker
+            )
+            for blocker in value.blockers
+        )
+        legacy.append(replace(value, blockers=blockers))
+    return tuple(legacy)
 
 
 def _verify_v3_pairs(
@@ -9354,6 +9464,7 @@ def _verify_v3_behavioral_summary(
     pair_counts: Counter[str],
     candidate_critical_failures: int,
     task_validity: Sequence[TaskValidityV1],
+    legacy_blocker_wording: bool,
 ) -> None:
     behavioral = result.behavioral_summary
     if (
@@ -9374,12 +9485,17 @@ def _verify_v3_behavioral_summary(
     )
     paired_blockers = tuple(
         dict.fromkeys(
-            f"{pair.task_id}: {change.id} failed for the candidate"
+            (
+                f"{pair.task_id}: {change.id} failed for the candidate"
+                if legacy_blocker_wording
+                else f"{pair.task_id}: candidate failed {change.id}"
+            )
             for pair in result.paired_cases
             for change in pair.dimension_changes
             if change.role in {"outcome", "safety_gate"}
             and change.critical
             and change.candidate is False
+            and (legacy_blocker_wording or change.baseline is not False)
         )
     )
     expected_blockers = tuple(dict.fromkeys((*validity_blockers, *paired_blockers)))
@@ -9465,14 +9581,33 @@ def _verify_v3_decision_gates(
                 "ComparisonResultV3 without a policy cannot claim a release decision"
             )
         return
+    explicit_sources = {gate.source for gate in policy.gates}
+    legacy_local_decision_contract = bool(
+        result.evidence_backend == "local"
+        and "privacy.hosted_evidence_passed" not in explicit_sources
+        and any(gate.id == "hosted-evidence-privacy" for gate in decision.gates)
+    )
     facts = _v3_decision_facts(
         result,
         canonical_rows,
         integrity=semantic_integrity,
+        # Local V3 artifacts written before local publication became optional
+        # carried the hosted-privacy gate and did not treat the shared Harbor
+        # receipt as general infrastructure evidence. Preserve verification of
+        # those immutable artifacts without writing that legacy contract again.
+        allow_local_harbor_conformance=not legacy_local_decision_contract,
     )
     policies = _canonical_decision_gate_policies(
         list(policy.gates),
-        implicit=_implicit_decision_gate_policies(),
+        implicit=_implicit_decision_gate_policies(
+            evidence_mode=(
+                "weave_required"
+                if legacy_local_decision_contract
+                else "local"
+                if result.evidence_backend == "local"
+                else "weave_required"
+            )
+        ),
         release_note_coverage=result.release_note_coverage,
     )
     by_id = {item.id: item for item in decision.gates}
@@ -10855,6 +10990,45 @@ def _study_console_backlink(
     )
 
 
+def _mcp_tool_usage_counts(row: Mapping[str, Any]) -> dict[str, int]:
+    normalized_counts: dict[str, int] = {}
+    normalized_calls = row.get("mcp_tool_calls")
+    if isinstance(normalized_calls, Sequence) and not isinstance(
+        normalized_calls, (str, bytes, bytearray)
+    ):
+        for item in normalized_calls:
+            if not isinstance(item, Mapping):
+                continue
+            name = str(
+                item.get("tool")
+                or item.get("name")
+                or item.get("tool_name")
+                or ""
+            )
+            if name:
+                normalized_counts[name] = normalized_counts.get(name, 0) + 1
+    if normalized_counts:
+        return normalized_counts
+
+    traced_counts: dict[str, int] = {}
+    tool_counts = row.get("weave_tool_names") or {}
+    if not isinstance(tool_counts, Mapping):
+        return traced_counts
+    for raw_name, raw_count in tool_counts.items():
+        name = str(raw_name)
+        if not name.startswith("mcp__"):
+            continue
+        public_name = name.split("__", 2)[-1]
+        count = (
+            int(raw_count)
+            if isinstance(raw_count, int) and not isinstance(raw_count, bool)
+            else 0
+        )
+        if count:
+            traced_counts[public_name] = traced_counts.get(public_name, 0) + count
+    return traced_counts
+
+
 def _operational_summary(
     rows: Sequence[Mapping[str, Any]],
 ) -> dict[str, Any]:
@@ -10898,31 +11072,34 @@ def _operational_summary(
             wandb_rows += 1
             wandb_eligible += row.get("wandb_serverless_eligible") is True
         variant = str(row.get("variant_id") or "unknown")
-        tool_counts = row.get("weave_tool_names") or {}
-        if isinstance(tool_counts, Mapping):
-            for raw_name, raw_count in tool_counts.items():
-                name = str(raw_name)
-                if not name.startswith("mcp__"):
-                    continue
-                public_name = name.split("__", 2)[-1]
-                count = (
-                    int(raw_count)
-                    if isinstance(raw_count, int) and not isinstance(raw_count, bool)
-                    else 0
-                )
-                usage = mcp_tool_usage.setdefault(variant, {})
-                usage[public_name] = usage.get(public_name, 0) + count
+        observed_tool_counts = _mcp_tool_usage_counts(row)
+        if observed_tool_counts:
+            usage = mcp_tool_usage.setdefault(variant, {})
+            for name, count in observed_tool_counts.items():
+                usage[name] = usage.get(name, 0) + count
         cost = row.get("accounted_cost_usd", row.get("cost_usd"))
         if isinstance(cost, int | float) and not isinstance(cost, bool):
             observed_cost += float(cost)
             cost_rows += 1
-        latency = row.get("latency_ms")
-        if isinstance(latency, int | float) and not isinstance(latency, bool):
-            latency_ms += float(latency)
+        row_latency_ms = _row_number(row, "latency_ms")
+        if row_latency_ms is None:
+            latency_sec = _row_number(row, "latency_sec", "wall_time_sec")
+            row_latency_ms = latency_sec * 1000 if latency_sec is not None else None
+        if row_latency_ms is not None:
+            latency_ms += row_latency_ms
             latency_rows += 1
         row_input = row.get("input_tokens")
         row_output = row.get("output_tokens")
-        if isinstance(row_input, int) and isinstance(row_output, int):
+        if not isinstance(row_input, int) or isinstance(row_input, bool):
+            row_input = row.get("n_input_tokens")
+        if not isinstance(row_output, int) or isinstance(row_output, bool):
+            row_output = row.get("n_output_tokens")
+        if (
+            isinstance(row_input, int)
+            and not isinstance(row_input, bool)
+            and isinstance(row_output, int)
+            and not isinstance(row_output, bool)
+        ):
             input_tokens += row_input
             output_tokens += row_output
             usage_rows += 1
@@ -11352,6 +11529,11 @@ def execute_comparison(  # noqa: C901 - one governed execution transaction
         nonlocal source_checkpoint_drift
         evaluation_row = dict(row)
         evaluation_row["final_output"] = _comparison_trial_output(row)
+        reported_project = _normalized_reported_project_identity(
+            evaluation_row["final_output"]
+        )
+        if reported_project is not None:
+            evaluation_row["reported_project_identity"] = reported_project
         judge_env = {
             **service.env,
             "FUGUE_HOST_REPO_ROOT": repo_root.resolve().as_posix(),
@@ -13726,7 +13908,8 @@ def _result_markdown(result: ComparisonResult) -> str:
         "Aligned outcome claims are suppressed because behavioral evidence is invalid.\n"
         if invalid_behavior
         else (
-            "| Task | Harness | Attempt | Baseline | Candidate | Change |\n"
+            "| Task | Harness | Attempt | Baseline full result | "
+            "Candidate full result | Paired outcome change |\n"
             "| --- | --- | ---: | --- | --- | --- |\n"
             + "".join(
                 f"| {task} | {harness} | {attempt} | {_pass_label(baseline)} | "
@@ -13770,26 +13953,40 @@ def _result_markdown(result: ComparisonResult) -> str:
         and result.decision.candidate_sha
         else "not applicable (no package release policy)"
     )
-    release_summary = (
-        "- Package release: **NOT EVALUATED**\n"
-        if isinstance(result, ComparisonResultV2 | ComparisonResultV3)
-        and result.decision_policy is None
-        else (
+    local_governed_study = bool(
+        isinstance(result, ComparisonResultV3)
+        and result.decision_policy is not None
+        and isinstance(
+            result.evidence_topology.result_destination,
+            LocalEvidenceDestinationV1,
+        )
+    )
+    if not isinstance(result, ComparisonResultV2 | ComparisonResultV3):
+        release_summary = ""
+        release_note = ""
+    elif result.decision_policy is None:
+        release_summary = "- Package release: **NOT EVALUATED**\n"
+        release_note = (
+            "- Release-policy note: Package release was not evaluated by this "
+            "Study.\n"
+        )
+    elif local_governed_study:
+        release_summary = (
+            "- Package release: **HOLD**\n"
+            "- Release scope: This local Study does not evaluate every "
+            "package-release gate.\n"
+            f"- Governed gate status: **{result.decision.status.upper()}**\n"
+        )
+        release_note = (
+            f"- Governed gate recommendation: {result.decision.recommendation}\n"
+        )
+    else:
+        release_summary = (
             f"- Package release decision: **{result.decision.status.upper()}**\n"
-            if isinstance(result, ComparisonResultV2 | ComparisonResultV3)
-            else ""
         )
-    )
-    release_note = (
-        "- Release-policy note: Package release was not evaluated by this Study.\n"
-        if isinstance(result, ComparisonResultV2 | ComparisonResultV3)
-        and result.decision_policy is None
-        else (
+        release_note = (
             f"- Release-policy recommendation: {result.decision.recommendation}\n"
-            if isinstance(result, ComparisonResultV2 | ComparisonResultV3)
-            else ""
         )
-    )
     behavioral_recommendation = (
         result.behavioral_summary.recommendation
         if isinstance(result, ComparisonResultV2 | ComparisonResultV3)
@@ -13825,10 +14022,10 @@ def _result_markdown(result: ComparisonResult) -> str:
     return (
         f"# {result.comparison_id}\n\n"
         "## Decision summary\n\n" + decision + f"- Rows: {result.rows}\n"
-        f"- Baseline aligned attempts passed: {result.baseline_passed}/"
-        f"{baseline_attempts}\n"
-        f"- Candidate aligned attempts passed: {result.candidate_passed}/"
-        f"{candidate_attempts}\n"
+        "- Baseline tasks that passed all required gates: "
+        f"{result.baseline_passed}/{baseline_attempts} aligned task attempts\n"
+        "- Candidate tasks that passed all required gates: "
+        f"{result.candidate_passed}/{candidate_attempts} aligned task attempts\n"
         f"- Improved pairs: {result.improved}\n"
         f"- Regressed pairs: {result.regressed}\n"
         f"- Mixed pairs: "

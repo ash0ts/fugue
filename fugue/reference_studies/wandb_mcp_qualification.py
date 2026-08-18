@@ -252,6 +252,49 @@ def bound_release_note_coverage(
 
     if spec.schema_version < 3 or not spec.execution.mechanism_receipt:
         return ()
+    if _is_packaged_reference_study(spec):
+        policy = spec.decision_policy
+        if policy is None:
+            raise ValueError(
+                "W&B MCP reference study has no governed candidate SHA"
+            )
+        root = (
+            repo_root
+            if repo_root.name == policy.candidate_sha
+            and (repo_root / "source.lock.json").is_file()
+            else repo_root
+            / ".fugue/reference-studies/wandb-mcp"
+            / policy.candidate_sha
+        )
+        from fugue.reference_studies.wandb_mcp import (
+            read_wandb_mcp_reference_lock,
+        )
+
+        lock = read_wandb_mcp_reference_lock(root / "source.lock.json")
+        current_inputs, coverage = _load_packaged_release_inputs(
+            spec,
+            root=root,
+            source_lock=lock,
+        )
+        expected_inputs = c._mapping_or_empty(
+            readiness.get("qualification_input_digests")
+        )
+        expected_coverage = expected_inputs.get("release_note_coverage")
+        for name, label in (
+            ("release_notes_lock", "release-notes lock"),
+            ("mechanism_receipt", "mechanism receipt"),
+        ):
+            if current_inputs.get(name) != expected_inputs.get(name):
+                raise ValueError(
+                    f"{label} changed after preview; prepare and approve a "
+                    "new exact preview"
+                )
+        if stable_digest([dict(item) for item in coverage]) != expected_coverage:
+            raise ValueError(
+                "release-note coverage changed after preview; prepare and "
+                "approve a new exact preview"
+            )
+        return coverage
     receipt_path = c._safe_input_path(
         Path(spec.execution.mechanism_receipt),
         repo_root,
@@ -443,6 +486,11 @@ def _prepared_reference_source_readiness(
             result_project=_SOURCE_PROJECT,
             private_labels_path=repo_root / spec.taskset.private_labels,
         )
+        release_input_digests, _ = _load_packaged_release_inputs(
+            spec,
+            root=root,
+            source_lock=lock,
+        )
         return {
             "reference_study_source_lock": lock.lock_digest,
             "reference_study_source_lock_file": c._sha256_path(
@@ -470,6 +518,7 @@ def _prepared_reference_source_readiness(
             "source_conformance_receipt_file": c._sha256_path(
                 conformance_path
             ),
+            **release_input_digests,
         }, []
     except (
         FileNotFoundError,
@@ -479,6 +528,234 @@ def _prepared_reference_source_readiness(
         json.JSONDecodeError,
     ) as exc:
         return {}, [f"W&B MCP reference study is not prepared: {exc}"]
+
+
+def _load_packaged_release_inputs(
+    spec: Any,
+    *,
+    root: Path,
+    source_lock: Any,
+) -> tuple[dict[str, str], tuple[dict[str, Any], ...]]:
+    """Validate and bind the packaged release-note and mechanism inputs."""
+
+    from fugue.bench import comparison as c
+    from fugue.reference_studies.wandb_mcp import (
+        _PACKAGED_RELEASE_NOTE_COVERAGE,
+        _stable_digest,
+    )
+
+    if not spec.execution.release_notes_lock:
+        raise ValueError("prepared reference spec has no release-notes lock")
+    if not spec.execution.mechanism_receipt:
+        raise ValueError("prepared reference spec has no mechanism receipt")
+    release_path = c._safe_input_path(
+        Path(spec.execution.release_notes_lock),
+        root,
+        "prepared reference release-notes lock",
+    )
+    receipt_path = c._safe_input_path(
+        Path(spec.execution.mechanism_receipt),
+        root,
+        "prepared reference mechanism receipt",
+    )
+    if release_path != (root / "release-notes.lock.json").resolve():
+        raise ValueError("prepared release-notes lock path is not canonical")
+    if receipt_path != (root / "mechanism-receipt.json").resolve():
+        raise ValueError("prepared mechanism receipt path is not canonical")
+
+    release = c._load_json_object(
+        release_path,
+        "prepared reference release-notes lock",
+    )
+    _verify_packaged_digest(
+        release,
+        field="lock_digest",
+        label="prepared reference release-notes lock",
+        digest=_stable_digest,
+    )
+    expected_release_fields = {
+        "schema_version",
+        "kind",
+        "repository_url",
+        "requested_ref",
+        "commit",
+        "tree",
+        "release_notes",
+        "lock_digest",
+    }
+    if set(release) != expected_release_fields:
+        raise ValueError("prepared release-notes lock fields do not match V1")
+    source_value = source_lock.to_dict()
+    if (
+        release.get("schema_version") != 1
+        or release.get("kind") != "wandb-mcp-release-notes-lock"
+        or release.get("repository_url") != source_value.get("repository_url")
+        or release.get("requested_ref") != source_value.get("requested_ref")
+        or release.get("commit") != source_value.get("source_commit")
+        or release.get("tree") != source_value.get("source_tree")
+        or release.get("release_notes") != source_value.get("release_notes")
+    ):
+        raise ValueError(
+            "prepared release-notes lock does not match the exact source lock"
+        )
+    policy = spec.decision_policy
+    if policy is None or release.get("commit") != policy.candidate_sha:
+        raise ValueError(
+            "prepared release-notes lock does not match the governed candidate"
+        )
+
+    receipt = c._load_json_object(
+        receipt_path,
+        "prepared reference mechanism receipt",
+    )
+    _verify_packaged_digest(
+        receipt,
+        field="receipt_digest",
+        label="prepared reference mechanism receipt",
+        digest=_stable_digest,
+    )
+    expected_receipt_fields = {
+        "schema_version",
+        "kind",
+        "target_platform",
+        "source_lock_digest",
+        "release_notes_lock_digest",
+        "profiles",
+        "release_note_coverage",
+        "runtime_dependency",
+        "receipt_digest",
+    }
+    if set(receipt) != expected_receipt_fields:
+        raise ValueError("prepared mechanism receipt fields do not match V1")
+    if (
+        receipt.get("schema_version") != 1
+        or receipt.get("kind")
+        != "wandb-mcp-reference-mechanism-preparation"
+        or receipt.get("source_lock_digest") != source_lock.lock_digest
+        or receipt.get("release_notes_lock_digest")
+        != release.get("lock_digest")
+        or receipt.get("runtime_dependency") is not False
+    ):
+        raise ValueError(
+            "prepared mechanism receipt does not match its source inputs"
+        )
+    _validate_packaged_mechanism_profiles(
+        spec,
+        repo_root=root,
+        target_platform=str(receipt.get("target_platform") or ""),
+        profiles=receipt.get("profiles"),
+    )
+    coverage = c._release_note_coverage_v3(
+        [
+            c._mapping(item, "prepared release-note coverage")
+            for item in c._sequence(
+                receipt.get("release_note_coverage"),
+                "prepared release-note coverage",
+            )
+        ]
+    )
+    expected_coverage = c._release_note_coverage_v3(
+        [dict(item) for item in _PACKAGED_RELEASE_NOTE_COVERAGE]
+    )
+    if not coverage or coverage != expected_coverage:
+        raise ValueError(
+            "prepared mechanism receipt release-note coverage does not match "
+            "the packaged canary contract"
+        )
+    task_ids = {
+        str(item["id"])
+        for item in c._load_public_tasks(root / spec.taskset.tasks)
+    }
+    dimension_ids = {
+        f"{evaluator.id}.{dimension}"
+        for evaluator in spec.evaluators
+        for dimension in evaluator.dimensions
+    }
+    if any(
+        set(item["task_ids"]) - task_ids
+        or set(item["dimensions"]) - dimension_ids
+        for item in coverage
+    ):
+        raise ValueError(
+            "prepared release-note coverage references an unavailable task "
+            "or scorer dimension"
+        )
+    return {
+        "release_notes_lock": str(release["lock_digest"]),
+        "release_notes_lock_file": c._sha256_path(release_path),
+        "mechanism_receipt": str(receipt["receipt_digest"]),
+        "mechanism_receipt_file": c._sha256_path(receipt_path),
+        "release_note_coverage": stable_digest(
+            [dict(item) for item in coverage]
+        ),
+    }, coverage
+
+
+def _validate_packaged_mechanism_profiles(
+    spec: Any,
+    *,
+    repo_root: Path,
+    target_platform: str,
+    profiles: Any,
+) -> None:
+    from fugue.bench import comparison as c
+    from fugue.reference_studies.wandb_mcp import (
+        _BASELINE_COMMIT,
+        _mechanism_profile,
+    )
+
+    policy = spec.decision_policy
+    if policy is None:
+        raise ValueError("packaged MCP reference study has no decision policy")
+    expected_profiles: list[dict[str, Any]] = []
+    for role, candidate, commit in (
+        ("baseline", spec.baseline, _BASELINE_COMMIT),
+        ("candidate", spec.candidate, policy.candidate_sha),
+    ):
+        integration_ids = tuple(
+            str(selection["id"]) for selection in candidate.integrations
+        )
+        if len(integration_ids) != 1:
+            raise ValueError(
+                "packaged MCP reference arms require one integration each"
+            )
+        integration_id = integration_ids[0]
+        lock_path = (
+            repo_root
+            / ".fugue/imports/mcp/locks"
+            / f"{integration_id}.json"
+        )
+        lock = c._load_json_object(
+            c._safe_input_path(
+                lock_path,
+                repo_root,
+                f"prepared MCP lock {integration_id}",
+            ),
+            f"prepared MCP lock {integration_id}",
+        )
+        if lock.get("runtime_platform") != target_platform:
+            raise ValueError(
+                f"prepared mechanism profile {role!r} platform does not match"
+            )
+        expected_profiles.append(_mechanism_profile(role, commit, lock))
+    if profiles != expected_profiles:
+        raise ValueError(
+            "prepared mechanism receipt profiles do not match the exact MCP locks"
+        )
+
+
+def _verify_packaged_digest(
+    value: Mapping[str, Any],
+    *,
+    field: str,
+    label: str,
+    digest: Any,
+) -> None:
+    supplied = str(value.get(field) or "")
+    unsigned = dict(value)
+    unsigned.pop(field, None)
+    if not re.fullmatch(r"[0-9a-f]{64}", supplied) or digest(unsigned) != supplied:
+        raise ValueError(f"{label} digest does not match")
 
 
 def _is_packaged_reference_study(spec: Any) -> bool:

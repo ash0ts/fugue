@@ -48,6 +48,66 @@ _REFERENCE_RESOURCE_NAMES = (
 )
 _BASELINE_COMMIT = "53b199a5f4af29aa82077e2c7f1e2c5e5e0c2ca0"
 _SOURCE_PROJECT = "wandb/fugue-mcp-release-source-v2"
+_PACKAGED_RELEASE_NOTE_COVERAGE = (
+    {
+        "release_note": "selective-server-side-fields",
+        "status": "unqualified",
+        "task_ids": ["run-inventory-projection"],
+        "dimensions": [
+            "tool-surface.answer_correct",
+            "tool-surface.bounded_evidence",
+        ],
+        "infrastructure_gates": [],
+        "rationale": (
+            "The locked Run-inventory task assesses selective fields. "
+            "The canary does not qualify this release-note behavior by itself."
+        ),
+    },
+    {
+        "release_note": "cursor-continuation-pagination",
+        "status": "unqualified",
+        "task_ids": ["filtered-failure-triage"],
+        "dimensions": [
+            "tool-surface.answer_correct",
+            "tool-surface.bounded_evidence",
+        ],
+        "infrastructure_gates": [],
+        "rationale": (
+            "The locked failure-triage task assesses bounded continuation. "
+            "The canary does not qualify this release-note behavior by itself."
+        ),
+    },
+    {
+        "release_note": "bounded-history",
+        "status": "unqualified",
+        "task_ids": ["exact-history-target"],
+        "dimensions": [
+            "tool-surface.answer_correct",
+            "tool-surface.bounded_evidence",
+            "tool-surface.evidence_honesty",
+        ],
+        "infrastructure_gates": [],
+        "rationale": (
+            "The locked history task assesses exact-axis targeting and bounds. "
+            "The canary does not qualify this release-note behavior by itself."
+        ),
+    },
+    {
+        "release_note": "evaluation-prediction-reconciliation",
+        "status": "unqualified",
+        "task_ids": ["evaluation-summary-accuracy"],
+        "dimensions": [
+            "tool-surface.answer_correct",
+            "tool-surface.target_behavior_satisfied",
+        ],
+        "infrastructure_gates": [],
+        "rationale": (
+            "The locked Evaluation task assesses direct prediction-child "
+            "reconciliation. The canary does not qualify this release-note "
+            "behavior by itself."
+        ),
+    },
+)
 
 
 def _stable_digest(value: Mapping[str, Any]) -> str:
@@ -1005,9 +1065,13 @@ def _materialize_packaged_reference_study(
             "kind": "wandb-mcp-reference-mechanism-preparation",
             "target_platform": request.target_platform,
             "source_lock_digest": request.source_lock.lock_digest,
+            "release_notes_lock_digest": release_notes["lock_digest"],
             "profiles": [
                 _mechanism_profile("baseline", _BASELINE_COMMIT, baseline_lock_value),
                 _mechanism_profile("candidate", candidate_sha, candidate_lock_value),
+            ],
+            "release_note_coverage": [
+                dict(item) for item in _PACKAGED_RELEASE_NOTE_COVERAGE
             ],
             "runtime_dependency": False,
         },
@@ -1046,6 +1110,7 @@ def _materialize_packaged_reference_study(
         {
             "schema_version": 1,
             "source_lock_digest": request.source_lock.lock_digest,
+            "release_notes_lock_digest": release_notes["lock_digest"],
             "baseline": {
                 "commit": _BASELINE_COMMIT,
                 "source_digest": baseline_lock_value["source_digest"],
@@ -1069,6 +1134,7 @@ def _materialize_packaged_reference_study(
         {
             "schema_version": 1,
             "target_platform": request.target_platform,
+            "mechanism_receipt_digest": mechanism["receipt_digest"],
             "profiles": [
                 {
                     "id": value["id"],

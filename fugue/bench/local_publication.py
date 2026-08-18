@@ -1093,10 +1093,18 @@ def _mapping_value(value: Any) -> dict[str, Any]:
 
 def _canonical_values_equal(left: Any, right: Any) -> bool:
     def normalize(value: Any) -> Any:
+        # Weave's public Call readback wraps inputs in a WeaveDict whose
+        # ``items()`` method objectifies stored refs. Compare the persisted
+        # wire identity instead: read raw WeaveDict entries and normalize
+        # immutable Weave Ref objects to their URI before model serialization.
+        weave_uri = _immutable_weave_ref_uri(value)
+        if weave_uri is not None:
+            return weave_uri
         if isinstance(value, Mapping):
+            items = _wire_mapping_items(value)
             return {
                 str(key): normalize(item)
-                for key, item in sorted(value.items(), key=lambda item: str(item[0]))
+                for key, item in sorted(items, key=lambda item: str(item[0]))
             }
         if isinstance(value, Sequence) and not isinstance(
             value, (str, bytes, bytearray)
@@ -1108,6 +1116,32 @@ def _canonical_values_equal(left: Any, right: Any) -> bool:
         return value
 
     return normalize(left) == normalize(right)
+
+
+def _immutable_weave_ref_uri(value: Any) -> str | None:
+    ref_type = _optional_weave_type("weave.trace.refs", "Ref")
+    if ref_type is None or not isinstance(value, ref_type):
+        return None
+    direct = getattr(value, "uri", None)
+    selected = direct() if callable(direct) else direct
+    uri = str(selected or "")
+    return uri if uri.startswith("weave:///") else None
+
+
+def _wire_mapping_items(value: Mapping[Any, Any]) -> Any:
+    weave_dict_type = _optional_weave_type("weave.trace.vals", "WeaveDict")
+    if weave_dict_type is not None and isinstance(value, weave_dict_type):
+        return dict.items(value)
+    return value.items()
+
+
+def _optional_weave_type(module_name: str, name: str) -> type[Any] | None:
+    try:
+        module = importlib.import_module(module_name)
+    except ModuleNotFoundError:
+        return None
+    selected = getattr(module, name, None)
+    return selected if isinstance(selected, type) else None
 
 
 def _weave_ref_uri(value: Any) -> str:

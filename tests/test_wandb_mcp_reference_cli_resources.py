@@ -218,6 +218,14 @@ def test_packaged_comparison_is_local_and_reference_bound() -> None:
         "version": 1,
         "intent": "python-package-release-qualification",
     }
+    cleanup_gate = next(
+        gate
+        for gate in template["decision_policy"]["gates"]
+        if gate["id"] == "no-harbor-orphans"
+    )
+    assert cleanup_gate["source"] == "cleanup.orphans"
+    assert cleanup_gate["operator"] == "eq"
+    assert cleanup_gate["target"] == 0
     assert "evidence_project" not in template["execution"]
     assert "evidence_destination" not in template["execution"]
     assert template["execution"]["source_evidence_project"] == (
