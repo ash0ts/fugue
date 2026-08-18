@@ -62,6 +62,10 @@ def test_public_command_surface_is_intentionally_small() -> None:
     }
     assert "--env-file" in subparsers.choices["run"].format_help()
     assert "--env-file" in subparsers.choices["setup"].format_help()
+    compare_help = " ".join(subparsers.choices["compare"].format_help().split())
+    assert "local mode this flag does not trigger hosted evidence hydration" in (
+        compare_help
+    )
     result_help = subparsers.choices["result"].format_help()
     assert "--authorize-followup" in result_help
     assert "--signoff-by" in result_help
@@ -71,7 +75,13 @@ def test_public_command_surface_is_intentionally_small() -> None:
         if isinstance(action, cli.argparse._SubParsersAction)
     )
     assert "weave" in publish_actions.choices
-    assert "--project" in publish_actions.choices["weave"].format_help()
+    publish_weave_help = " ".join(
+        publish_actions.choices["weave"].format_help().split()
+    )
+    assert "--project" in publish_weave_help
+    assert "Raw local transcript and tool-event artifact files remain local" in (
+        publish_weave_help
+    )
     research_actions = next(
         action
         for action in subparsers.choices["research"]._actions
@@ -79,6 +89,79 @@ def test_public_command_surface_is_intentionally_small() -> None:
     )
     assert "publications" in research_actions.choices
     assert "replay" in research_actions.choices["publications"].format_help()
+    root_help = " ".join(cli._parser().format_help().split())
+    assert "not a native W&B Study" in root_help
+    assert "results or Research indexes" in root_help
+    study_help = " ".join(subparsers.choices["study"].format_help().split())
+    assert "scoped Weave publication receipts" in study_help
+
+
+def test_comparison_readiness_names_the_canonical_local_destination(capsys) -> None:
+    from fugue.bench.cli import _print_comparison_readiness_dict
+
+    _print_comparison_readiness_dict(
+        {
+            "status": "ready",
+            "question": "Does the candidate improve the locked tasks?",
+            "evidence_project": None,
+            "task_count": 2,
+            "actual_changes": ["prompt"],
+            "base_failures": 2,
+            "gold_passes": 2,
+            "judge_evaluators": [],
+            "estimated_cells": 4,
+            "estimated_cost_usd": 1.25,
+            "blockers": [],
+            "warnings": [],
+        },
+        evidence_mode="local",
+    )
+
+    output = " ".join(capsys.readouterr().out.split())
+    assert "Evidence destination canonical local artifact ledger" in output
+
+
+@pytest.mark.parametrize(
+    ("evidence_project", "expected"),
+    (
+        (
+            "wandb/locked-study",
+            "canonical local artifact ledger + required W&B/Weave: wandb/locked-study",
+        ),
+        (
+            None,
+            "canonical local artifact ledger + required hosted destination "
+            "resolved by the operator",
+        ),
+    ),
+)
+def test_comparison_readiness_names_required_hosted_destination(
+    evidence_project: str | None,
+    expected: str,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    from fugue.bench.cli import _print_comparison_readiness_dict
+
+    _print_comparison_readiness_dict(
+        {
+            "status": "ready",
+            "question": "Does the candidate improve the locked tasks?",
+            "evidence_project": evidence_project,
+            "task_count": 2,
+            "actual_changes": ["prompt"],
+            "base_failures": 2,
+            "gold_passes": 2,
+            "judge_evaluators": [],
+            "estimated_cells": 4,
+            "estimated_cost_usd": 1.25,
+            "blockers": [],
+            "warnings": [],
+        },
+        evidence_mode="weave_required",
+    )
+
+    output = " ".join(capsys.readouterr().out.split())
+    assert expected in output
 
 
 def test_local_preview_without_required_credentials_is_not_approvable(

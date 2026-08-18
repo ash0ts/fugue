@@ -311,7 +311,7 @@ def test_human_comparison_preview_maps_labels_to_full_candidate_ids(
     comparison = study / "comparison.yaml"
     comparison.write_text("schema_version: 1\n", encoding="utf-8")
     _write_study_marker(study)
-    spec = object()
+    spec = SimpleNamespace(execution=SimpleNamespace(evidence_mode="local"))
     baseline_id = "a" * 64
     candidate_id = "b" * 64
     readiness = {

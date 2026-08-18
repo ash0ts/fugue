@@ -38,6 +38,7 @@ from fugue.bench.library import (
     ContextSelection,
     ExperimentSpec,
     FeatureVariant,
+    experiment_from_yaml,
     experiment_to_yaml,
     list_prompts,
     list_skills,
@@ -52,6 +53,7 @@ from fugue.bench.operator import (
     RunSummary,
 )
 from fugue.bench.sources import list_skill_source_ids
+from fugue.model_plane import EvidenceDestinationV1
 
 HARNESS_LABELS = (
     ("Hermes", "hermes"),
@@ -67,12 +69,26 @@ ACTIVE_RUN_STATES = {"starting", "running"}
 
 def _evidence_destination_summary(
     experiment: ExperimentSpec,
-    *,
-    weave_link: str,
 ) -> str:
     if experiment.evidence_mode == "local":
-        return "Local ledger (.fugue/runtime); W&B/Weave publication optional"
-    return f"W&B/Weave ({weave_link})"
+        return (
+            "Canonical local artifact ledger (.fugue/runtime); "
+            "W&B/Weave publication optional"
+        )
+    destination = experiment.evidence_destination
+    if isinstance(destination, EvidenceDestinationV1):
+        project_url = (
+            f"{destination.app_base_url.rstrip('/')}"
+            f"/{destination.entity}/{destination.project}"
+        )
+        return (
+            "Canonical local artifact ledger + required W&B/Weave: "
+            f"{destination.project_slug} ({project_url})"
+        )
+    return (
+        "Canonical local artifact ledger + required W&B/Weave destination "
+        "resolved by the operator"
+    )
 
 
 @dataclass(frozen=True)
@@ -171,8 +187,9 @@ class HelpScreen(ModalScreen[None]):
                 "/ Commands    c Cancel     e Export\n"
                 "a Agents      w Trace      ? Help\n\n"
                 "Plan defines the comparison. Runs operates it. Every run writes "
-                "a canonical local evidence ledger. Agents and Trace open hosted "
-                "evidence only when Weave is required or the result was published."
+                "a canonical local evidence ledger. Hosted actions are available "
+                "when Weave is required. For a published local result, use the URL "
+                "returned by the publish command."
             )
             yield Button("Close", id="close-help", variant="primary")
 
@@ -293,9 +310,7 @@ class VariantEditorScreen(ModalScreen[FeatureVariant | None]):
             if not label:
                 raise ValueError("variant label is required")
             prompt_value = self.query_one("#edit-prompt-select", Select).value
-            context_value = str(
-                self.query_one("#edit-context-select", Select).value
-            )
+            context_value = str(self.query_one("#edit-context-select", Select).value)
             context = self.variant.context
             if context.system_id != context_value:
                 context = ContextSelection(system_id=context_value)
@@ -304,9 +319,7 @@ class VariantEditorScreen(ModalScreen[FeatureVariant | None]):
                 id=variant_id,
                 label=label,
                 prompt_id=str(prompt_value) or None,
-                skills=list(
-                    self.query_one("#variant-skills", SelectionList).selected
-                ),
+                skills=list(self.query_one("#variant-skills", SelectionList).selected),
                 context=context,
                 enabled=True,
             )
@@ -393,10 +406,10 @@ class ConfirmRunScreen(ModalScreen[bool]):
         if self.evidence_mode == "local":
             confirmation = (
                 "Prompts, responses, reasoning, tool arguments, and tool results "
-                "will be retained in the canonical local evidence ledger on this "
-                "machine. This run will not publish them to W&B/Weave; publication "
-                "is a separate explicit action. Local transcripts can still contain "
-                "sensitive data."
+                "will remain in this run's local artifacts and be digest-bound by "
+                "the canonical local evidence ledger. This run will not publish "
+                "them to W&B/Weave; publication is a separate explicit action. "
+                "Local transcripts can still contain sensitive data."
             )
         else:
             confirmation = (
@@ -644,7 +657,9 @@ class FugueApp(App[None]):
                 with Vertical(id="proposal-panel", classes="hidden"):
                     yield Static(id="proposal-summary")
                     with Horizontal(classes="button-row"):
-                        yield Button("Use proposal", id="use-proposal", variant="primary")
+                        yield Button(
+                            "Use proposal", id="use-proposal", variant="primary"
+                        )
                         yield Button("Refine", id="refine-proposal")
                         yield Button("Discard", id="discard-proposal")
                 yield Label("Variants", classes="muted")
@@ -751,12 +766,18 @@ class FugueApp(App[None]):
             with Horizontal(classes="button-row"):
                 yield Button("Combined log", id="all-run-logs")
                 yield Button("Cancel", id="cancel-run", variant="warning")
-                yield Button("Export", id="export-run")
-                yield Button("Open Eval / Trace", id="open-trace")
-                yield Button("Open Agents", id="open-agents", variant="primary")
+                yield Button("Export run evidence", id="export-run")
+                yield Button("Open hosted eval / trace", id="open-trace")
+                yield Button(
+                    "Open hosted Agents",
+                    id="open-agents",
+                    variant="primary",
+                )
             yield DataTable(id="runs-table", cursor_type="row", zebra_stripes=True)
             yield Label("CANDIDATES", classes="section-title")
-            yield DataTable(id="candidates-table", cursor_type="row", zebra_stripes=True)
+            yield DataTable(
+                id="candidates-table", cursor_type="row", zebra_stripes=True
+            )
             yield Label("CELLS", classes="section-title")
             yield DataTable(id="cells-table", cursor_type="row", zebra_stripes=True)
             yield Label("LOG", classes="section-title")
@@ -765,17 +786,24 @@ class FugueApp(App[None]):
     def _compose_results(self) -> ComposeResult:
         with Vertical(classes="pane"):
             with Horizontal(classes="button-row"):
-                yield Button("Open Agents", id="results-agents", variant="primary")
+                yield Button(
+                    "Open hosted Agents",
+                    id="results-agents",
+                    variant="primary",
+                )
             yield Static("No results loaded.", id="result-summary")
             yield Label("ASK FUGUE ABOUT THESE RESULTS", classes="section-title")
             yield Input(
-                placeholder="Which variant worked best, and why?",
+                placeholder=(
+                    "What outcome differences are supported, what remains "
+                    "inconclusive, and which evidence should I inspect?"
+                ),
                 id="analysis-question",
             )
             with Collapsible(title="Analysis settings", collapsed=True):
                 yield Select(
                     [
-                        ("Local + published Weave", "hybrid"),
+                        ("Local ledger + bound Weave publication", "hybrid"),
                         ("Local only", "local"),
                     ],
                     value=(
@@ -845,8 +873,7 @@ class FugueApp(App[None]):
                 self._set_run_size(str(event.value))
         elif event.select.id == "trace-content-select":
             current = (
-                self.plan.request.trace_content
-                or self.plan.experiment.trace_content
+                self.plan.request.trace_content or self.plan.experiment.trace_content
             )
             if str(event.value) != current:
                 self._update_request(trace_content=str(event.value))
@@ -945,9 +972,7 @@ class FugueApp(App[None]):
             except ValueError as exc:
                 self.notify(str(exc), severity="error")
 
-    def on_data_table_row_highlighted(
-        self, event: DataTable.RowHighlighted
-    ) -> None:
+    def on_data_table_row_highlighted(self, event: DataTable.RowHighlighted) -> None:
         if event.data_table.id == "variant-table":
             self.selected_variant_id = str(event.row_key.value)
 
@@ -1003,15 +1028,11 @@ class FugueApp(App[None]):
             return
         self._apply_agent_preset_confirmed(preset_id, True)
 
-    def _apply_agent_preset_confirmed(
-        self, preset_id: str, confirmed: bool
-    ) -> None:
+    def _apply_agent_preset_confirmed(self, preset_id: str, confirmed: bool) -> None:
         if not confirmed:
             self._render_plan()
             return
-        experiment = self.service.apply_agent_preset(
-            self.plan.experiment, preset_id
-        )
+        experiment = self.service.apply_agent_preset(self.plan.experiment, preset_id)
         request = replace(
             self.service.request_for_experiment(experiment),
             agent_preset_id=preset_id,
@@ -1145,10 +1166,7 @@ class FugueApp(App[None]):
             else experiment.manifest.as_posix()
         )
         model = request.model or experiment.model or "FUGUE_MODEL"
-        evidence = _evidence_destination_summary(
-            experiment,
-            weave_link=self.service.deep_links().weave,
-        )
+        evidence = _evidence_destination_summary(experiment)
         description = experiment.description or "Saved Fugue experiment"
         self.query_one("#define-summary", Static).update(
             f"{experiment.title}\n{description}\n\n"
@@ -1168,7 +1186,7 @@ class FugueApp(App[None]):
             f"Comparison: {len(draft.preview.variants)} variants across "
             f"{len(draft.preview.harnesses)} harnesses\n"
             f"Scale: {draft.preview.cells} cells / "
-            f"{draft.preview.estimated_trials} trials\n"
+            f"{draft.preview.estimated_trials} runnable attempts\n"
             f"Assumptions: {assumptions}\nWarnings: {warnings}"
             + _evaluation_proposal_summary(draft)
             + f"\n\nProposed changes:\n{draft.diff or 'No file changes'}"
@@ -1192,7 +1210,11 @@ class FugueApp(App[None]):
 
     def _render_compare_sentence(self) -> None:
         request = self.plan.request
-        size = _preset_label(request.preset) if self._run_size() != CUSTOM_SIZE else "Custom"
+        size = (
+            _preset_label(request.preset)
+            if self._run_size() != CUSTOM_SIZE
+            else "Custom"
+        )
         self.query_one("#compare-sentence", Static).update(
             f"Run {_count(len(request.variants), 'variant')} across "
             f"{_count(len(request.harnesses), 'harness')} on "
@@ -1236,7 +1258,10 @@ class FugueApp(App[None]):
         self._queue_preview()
 
     def _run_size(self) -> str:
-        if self.plan.request.n_tasks is not None or self.plan.request.n_attempts is not None:
+        if (
+            self.plan.request.n_tasks is not None
+            or self.plan.request.n_attempts is not None
+        ):
             return CUSTOM_SIZE
         preset_ids = {item.id for item in self.plan.experiment.presets}
         return (
@@ -1401,7 +1426,9 @@ class FugueApp(App[None]):
         source = self._selected_variant()
         existing = {item.id for item in self.plan.experiment.variants}
         item_id = _unique_id(f"{source.id}-copy", existing)
-        duplicate = replace(source, id=item_id, label=f"{source.label} copy", enabled=True)
+        duplicate = replace(
+            source, id=item_id, label=f"{source.label} copy", enabled=True
+        )
         self._variant_added(duplicate)
 
     def _edit_variant(self) -> None:
@@ -1519,9 +1546,7 @@ class FugueApp(App[None]):
             return
         request = self.plan.request
         if not request.harnesses or not request.variants:
-            preview_status.update(
-                "Select at least one harness and one variant."
-            )
+            preview_status.update("Select at least one harness and one variant.")
             return
         self._preview_generation += 1
         generation = self._preview_generation
@@ -1574,9 +1599,10 @@ class FugueApp(App[None]):
     def _render_preview(self, preview: PreviewSummary) -> None:
         unavailable = preview.cells - preview.applicable_cells
         self.query_one("#preview-status", Static).update(
-            f"{preview.cells} cells / {preview.estimated_trials} trials / "
-            f"{preview.applicable_cells} ready"
-            + (f" / {unavailable} unavailable" if unavailable else "")
+            f"{_count(preview.cells, 'logical cell')} / "
+            f"{_count(preview.estimated_trials, 'runnable attempt')} / "
+            f"{_count(preview.applicable_cells, 'runnable cell')} now"
+            + (f" / {_count(unavailable, 'unavailable cell')}" if unavailable else "")
         )
         tasks = {
             (item.workload_id, item.task_id)
@@ -1585,23 +1611,26 @@ class FugueApp(App[None]):
         }
         experiment = self.plan.experiment
         model = self.plan.request.model or experiment.model or "FUGUE_MODEL"
-        contexts = ", ".join(
-            sorted(
-                {
-                    f"{item.context_system_id} ({item.context_delivery})"
-                    for item in preview.matrix_cells
-                    if item.context_system_id != "none"
-                }
+        contexts = (
+            ", ".join(
+                sorted(
+                    {
+                        f"{item.context_system_id} ({item.context_delivery})"
+                        for item in preview.matrix_cells
+                        if item.context_system_id != "none"
+                    }
+                )
             )
-        ) or "none"
+            or "none"
+        )
         self.query_one("#review-summary", Static).update(
             f"{experiment.title}\n{experiment.description}\n\n"
             f"Benchmark: {', '.join(_workload_label(item, item) for item in preview.workloads)}\n"
             f"Model: {model}\n"
-            f"Evidence: {_evidence_destination_summary(experiment, weave_link=self.service.deep_links().weave)}\n"
+            f"Evidence: {_evidence_destination_summary(experiment)}\n"
             f"Context treatments: {contexts}\n"
             f"{_count(preview.cells, 'cell')} / {_count(len(tasks), 'task')} / "
-            f"{_count(preview.estimated_trials, 'trial')}"
+            f"{_count(preview.estimated_trials, 'runnable attempt')}"
         )
         self._render_review_matrix(preview)
         warnings = list(self._review_blockers)
@@ -1646,11 +1675,16 @@ class FugueApp(App[None]):
                     if item.harness == harness and item.variant_id == variant
                 ]
                 ready = sum(item.trial_count for item in selected if item.applicable)
-                unavailable = sum(not item.applicable for item in selected)
+                unavailable = sum(
+                    item.trial_count for item in selected if not item.applicable
+                )
                 if ready and unavailable:
-                    values.append(f"{ready} ready / {unavailable} N/A")
+                    values.append(
+                        f"{_count(ready, 'runnable attempt')} / "
+                        f"{_count(unavailable, 'unavailable attempt')}"
+                    )
                 elif ready:
-                    values.append(f"{ready} trials")
+                    values.append(_count(ready, "runnable attempt"))
                 elif unavailable:
                     values.append("N/A")
                 else:
@@ -1679,15 +1713,19 @@ class FugueApp(App[None]):
             self.plan.request.judge_model or self.plan.experiment.judge_model
         )
         if generated_scoring and not explicit_judge:
-            blockers.append("Generated evaluation rubrics require an explicit judge model")
+            blockers.append(
+                "Generated evaluation rubrics require an explicit judge model"
+            )
         judge_route = next(
             (route for route in status.routes if route.role == "judge"),
             None,
         )
-        if generated_scoring and judge_route is not None and not judge_route.key_present:
-            blockers.append(
-                f"Judge credentials are missing: {judge_route.key_env}"
-            )
+        if (
+            generated_scoring
+            and judge_route is not None
+            and not judge_route.key_present
+        ):
+            blockers.append(f"Judge credentials are missing: {judge_route.key_env}")
         harnesses = tuple(
             dict.fromkeys(
                 item.harness
@@ -1703,7 +1741,9 @@ class FugueApp(App[None]):
             _bridge_required(status.model_provider, harnesses)
             and not status.bridge_ready
         ):
-            blockers.append("The selected harness/model combination requires the local bridge")
+            blockers.append(
+                "The selected harness/model combination requires the local bridge"
+            )
         missing_context = sorted(
             {
                 item.context_system_id
@@ -1715,9 +1755,7 @@ class FugueApp(App[None]):
             }
         )
         if missing_context:
-            blockers.append(
-                "Prepare context for: " + ", ".join(missing_context)
-            )
+            blockers.append("Prepare context for: " + ", ".join(missing_context))
         if preview.applicable_cells == 0:
             blockers.append("No matrix cells are applicable")
         if self.plan.assets:
@@ -1731,7 +1769,9 @@ class FugueApp(App[None]):
                 continue
             cells = [item for item in preview.matrix_cells if item.harness == harness]
             statuses[harness] = (
-                "pending" if any(item.applicable for item in cells) else "not_applicable"
+                "pending"
+                if any(item.applicable for item in cells)
+                else "not_applicable"
             )
         sequencer = self.query_one(PixelSequencer)
         sequencer.set_compact(False)
@@ -1761,9 +1801,7 @@ class FugueApp(App[None]):
         )
         if trace_content == "full":
             self.push_screen(
-                ConfirmRunScreen(
-                    evidence_mode=str(self.plan.experiment.evidence_mode)
-                ),
+                ConfirmRunScreen(evidence_mode=str(self.plan.experiment.evidence_mode)),
                 self._launch_if_confirmed,
             )
         else:
@@ -1844,12 +1882,16 @@ class FugueApp(App[None]):
         if not self.selected_run_id:
             self.notify("Select a run to export", severity="warning")
             return
-        self._export_worker(self.selected_run_id)
+        evidence_mode = self._selected_run_evidence_mode()
+        self._export_worker(
+            self.selected_run_id,
+            fetch_weave=evidence_mode == "weave_required",
+        )
 
     @work(thread=True, exclusive=True, group="export")
-    def _export_worker(self, run_id: str) -> None:
+    def _export_worker(self, run_id: str, *, fetch_weave: bool) -> None:
         try:
-            summary = self.service.export_run(run_id, fetch_weave=True)
+            summary = self.service.export_run(run_id, fetch_weave=fetch_weave)
         except Exception as exc:
             self.call_from_thread(self.notify, str(exc), severity="error")
             return
@@ -1859,6 +1901,19 @@ class FugueApp(App[None]):
         )
 
     def action_open_agents(self) -> None:
+        evidence_mode = self._selected_run_evidence_mode()
+        if evidence_mode != "weave_required":
+            reason = (
+                "Hosted Agents were not requested for this local study."
+                if evidence_mode == "local"
+                else "Fugue cannot verify a hosted evidence mode for this run."
+            )
+            self.notify(
+                f"{reason} Export the run evidence or use the URL returned by an "
+                "explicit publish command.",
+                severity="warning",
+            )
+            return
         links = (
             self.service.run_links(self.selected_run_id)
             if self.selected_run_id
@@ -1868,6 +1923,19 @@ class FugueApp(App[None]):
         self.notify("Opened Weave Agents")
 
     def action_open_trace(self) -> None:
+        evidence_mode = self._selected_run_evidence_mode()
+        if evidence_mode != "weave_required":
+            reason = (
+                "Hosted evaluations and traces were not requested for this local study."
+                if evidence_mode == "local"
+                else "Fugue cannot verify a hosted evidence mode for this run."
+            )
+            self.notify(
+                f"{reason} Export the run evidence or use the URL returned by an "
+                "explicit publish command.",
+                severity="warning",
+            )
+            return
         if self.selected_run_id:
             evaluation = self.service.run_evaluation(
                 self.selected_run_id,
@@ -1893,6 +1961,26 @@ class FugueApp(App[None]):
                 self.copy_to_clipboard(conversation_id)
                 self.notify(f"Copied conversation {conversation_id}")
         self.action_open_agents()
+
+    def _selected_run_evidence_mode(self) -> str | None:
+        if not self.selected_run_id:
+            return str(self.plan.experiment.evidence_mode)
+        snapshot = (
+            self.service.repo_root
+            / ".fugue"
+            / "runtime"
+            / self.selected_run_id
+            / "experiment.yaml"
+        )
+        if not snapshot.is_file() or snapshot.is_symlink():
+            return None
+        try:
+            experiment = experiment_from_yaml(
+                snapshot.read_text(encoding="utf-8"),
+            )
+        except (OSError, TypeError, ValueError):
+            return None
+        return str(experiment.evidence_mode)
 
     def _refresh_runs(self) -> bool:
         table = next(iter(self.query("#runs-table")), None)
@@ -2026,7 +2114,9 @@ class FugueApp(App[None]):
     def _update_run_actions(self, run: RunSummary) -> None:
         active = run.status in ACTIVE_RUN_STATES
         self.query_one("#cancel-run", Button).display = active
-        self.query_one("#export-run", Button).display = run.status in TERMINAL_RUN_STATES
+        self.query_one("#export-run", Button).display = (
+            run.status in TERMINAL_RUN_STATES
+        )
 
     def _show_all_logs(self) -> None:
         self.selected_cell_id = None
@@ -2059,6 +2149,44 @@ class FugueApp(App[None]):
             if result.average_wall_time_sec is not None
             else "N/A latency"
         )
+        local_integrity = tuple(
+            str(row["local_evidence_integrity"])
+            for row in result.rows
+            if row.get("local_evidence_integrity") is not None
+        )
+        hosted_attempts = sum(
+            row.get("evidence_backend") == "weave" for row in result.rows
+        )
+        hosted_linked = sum(
+            row.get("evidence_backend") == "weave"
+            and row.get("trace_link_status") == "linked"
+            for row in result.rows
+        )
+        local_only_attempts = sum(
+            row.get("evidence_backend") == "local" for row in result.rows
+        )
+        evidence_parts: list[str] = []
+        if result.total == 0:
+            evidence_parts.append("no attempts loaded")
+        elif len(local_integrity) == result.total:
+            resolved = sum(value == "resolved" for value in local_integrity)
+            evidence_parts.append(
+                f"{resolved}/{result.total} local evidence chains resolved"
+            )
+        else:
+            evidence_parts.append(
+                "local evidence-chain status is not loaded for every attempt"
+            )
+        if hosted_attempts:
+            evidence_parts.append(
+                f"{hosted_linked}/{hosted_attempts} hosted trace links"
+            )
+        if local_only_attempts:
+            evidence_parts.append(
+                "hosted evidence not requested for "
+                f"{_count(local_only_attempts, 'local-only attempt')}"
+            )
+        linked_evidence = "; ".join(evidence_parts)
         self.query_one("#result-summary", Static).update(
             f"{result.total} trials   {rate} pass rate   {reward}   {latency}\n"
             f"${result.cost_usd:.4f}   "
@@ -2068,7 +2196,7 @@ class FugueApp(App[None]):
             f"{result.context_invoked}/{result.context_assigned} context used   "
             f"{result.runtime_mismatched} runtime mismatches   "
             f"{result.attributed_errors} attributed errors   "
-            f"{result.linked_traces} linked traces   "
+            f"{linked_evidence}   "
             f"{result.usage_unavailable} usage N/A"
         )
         table = self.query_one("#results-table", DataTable)
@@ -2080,6 +2208,7 @@ class FugueApp(App[None]):
             "Context",
             "Transport",
             "Model",
+            "Evidence backend",
             "Trials",
             "Pass rate",
             "Reward",
@@ -2088,9 +2217,9 @@ class FugueApp(App[None]):
             "Tokens",
             "Tools",
             "Failures",
-            "Conversations",
+            "Hosted evidence",
         )
-        groups: dict[tuple[str, str, str, str, str, str], list[dict[str, Any]]] = (
+        groups: dict[tuple[str, str, str, str, str, str, str], list[dict[str, Any]]] = (
             defaultdict(list)
         )
         for row in result.rows:
@@ -2101,11 +2230,18 @@ class FugueApp(App[None]):
                 str(row.get("context_system_id") or "none"),
                 str(row.get("context_delivery") or "portable"),
                 str(row.get("model") or "unknown"),
+                str(row.get("evidence_backend") or "unknown"),
             )
             groups[key].append(row)
-        for (harness, experiment, variant, context, transport, model), rows in sorted(
-            groups.items()
-        ):
+        for (
+            harness,
+            experiment,
+            variant,
+            context,
+            transport,
+            model,
+            evidence_backend,
+        ), rows in sorted(groups.items()):
             scored = [row for row in rows if row.get("pass") is not None]
             passed = sum(row.get("pass") is True for row in rows)
             pass_rate = f"{passed / len(scored):.1%}" if scored else "N/A"
@@ -2143,6 +2279,7 @@ class FugueApp(App[None]):
                 f"{context} ({invoked}/{assigned} used)" if assigned else context,
                 transport,
                 model,
+                evidence_backend,
                 str(len(rows)),
                 pass_rate,
                 f"{sum(rewards) / len(rewards):.3f}" if rewards else "N/A",
@@ -2152,12 +2289,15 @@ class FugueApp(App[None]):
                 str(sum(int(row.get("weave_tool_call_count") or 0) for row in rows)),
                 str(
                     sum(
-                        bool(row.get("exception_class"))
-                        or row.get("pass") is False
+                        bool(row.get("exception_class")) or row.get("pass") is False
                         for row in rows
                     )
                 ),
-                f"{len(conversations)} / {linked} linked",
+                (
+                    "not requested"
+                    if evidence_backend == "local"
+                    else f"{len(conversations)} conversations / {linked} linked"
+                ),
             )
 
     def _analyze_with_ai(self) -> None:
@@ -2219,9 +2359,7 @@ class FugueApp(App[None]):
         )
         report = self.query_one("#analysis-report", RichLog)
         report.clear()
-        report.write(
-            "Scope resolved locally. Review it before generating the report."
-        )
+        report.write("Scope resolved locally. Review it before generating the report.")
         self.query_one("#generate-analysis", Button).disabled = False
         self.notify("Scope ready; no Weave query or report call has run yet")
 
@@ -2287,27 +2425,38 @@ class FugueApp(App[None]):
         rows = (
             (
                 "Model provider",
-                model_ready,
+                "ready" if model_ready else "needs attention",
                 f"{status.model_provider} / {status.model}",
             ),
             (
-                "Evidence",
-                True if local_evidence else status.trace_key_present,
+                "Evidence backend",
                 (
-                    "Canonical local ledger; W&B/Weave publication is optional"
+                    "selected"
+                    if local_evidence
+                    else "ready"
+                    if status.trace_key_present
+                    else "needs attention"
+                ),
+                (
+                    "Local backend selected; the ledger is created during the run "
+                    "and hosted publication is optional"
                     if local_evidence
                     else status.trace_project
                 ),
             ),
             (
                 "Local runtime",
-                runtime_ready,
+                "ready" if runtime_ready else "needs attention",
                 f"Docker {'ready' if status.docker_present else 'missing'}, "
                 f"Harbor {'ready' if status.harbor_present else 'missing'}",
             ),
             (
                 "Required context",
-                not selected_context or status.context_cache_entries > 0,
+                (
+                    "ready"
+                    if not selected_context or status.context_cache_entries > 0
+                    else "needs attention"
+                ),
                 (
                     ", ".join(selected_context)
                     if selected_context
@@ -2315,8 +2464,8 @@ class FugueApp(App[None]):
                 ),
             ),
         )
-        for name, ready, detail in rows:
-            table.add_row(name, "ready" if ready else "needs attention", detail)
+        for name, state, detail in rows:
+            table.add_row(name, state, detail)
         self.query_one("#start-bridge", Button).display = (
             _bridge_required(status.model_provider, self.plan.request.harnesses)
             and not status.bridge_ready
@@ -2330,7 +2479,10 @@ class FugueApp(App[None]):
         evidence_detail = (
             "Evidence: canonical local ledger; hosted publication is optional"
             if local_evidence
-            else f"W&B/Weave: {status.links.weave}"
+            else (
+                "Evidence: canonical local ledger + required W&B/Weave: "
+                f"{status.links.weave}"
+            )
         )
         self.query_one("#setup-details", Static).update(
             f"{route_details}\n"
@@ -2368,8 +2520,7 @@ class FugueApp(App[None]):
         log.clear()
         for check in checks:
             log.write(
-                f"{'ready' if check.ok else 'missing':<8} "
-                f"{check.name}: {check.detail}"
+                f"{'ready' if check.ok else 'missing':<8} {check.name}: {check.detail}"
             )
         ready = all(check.ok for check in checks)
         self.notify(
@@ -2470,9 +2621,7 @@ def _evaluation_proposal_summary(draft: Any) -> str:
     dimensions = [
         str(item.get("id")) for item in evaluation.rubric.get("dimensions") or []
     ]
-    source_hashes = (
-        evaluation.rubric.get("generation", {}).get("source_hashes", {})
-    )
+    source_hashes = evaluation.rubric.get("generation", {}).get("source_hashes", {})
     coverage = ", ".join(
         f"{key}={value}" for key, value in sorted(evaluation.coverage.items())
     )

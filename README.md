@@ -111,9 +111,11 @@ flowchart TB
   committed before the first cell runs.
 - **Exact approval.** Paid Agent, judge, or interactor calls require approval
   bound to one preview digest, cell limit, and spend ceiling.
-- **Isolated execution.** Each cell runs through Harbor without access to the
-  Docker socket, host paths, dependency installation, downloads, builds, or
-  service startup.
+- **Isolated execution.** Each cell runs through Harbor without the Docker
+  socket or unapproved host paths. It receives only declared read-only
+  task/runtime mounts, scoped writable outputs, and allowlisted model or
+  integration network access. Trials cannot install, download, build, start
+  undeclared services, or access host services.
 - **Durable recovery.** Operation IDs, leases, and immutable run identities
   make control-plane retries safe. An already-launched trial is reconciled,
   never silently launched again.
@@ -274,10 +276,11 @@ Skill, MCP, memory, and harness templates all use the same lifecycle and result
 schema. Planning and replay support Python 3.12 and 3.13; Harbor execution
 requires Python 3.13 and Docker.
 
-`check` reproduces intended failures, verifies known-good outputs, resolves the
-actual baseline/candidate diff, checks required components and judge
-calibration, and computes the exact attempt and cost bounds. It can answer
-`ready`, `needs_review`, `blocked`, or `no_comparison_justified`. A blocked or
+`check` validates the declared comparison without model spend. When the study
+declares base/gold fixtures or judge calibration, it verifies those gates. It
+also resolves treatment identities, required components, and exact attempt and
+cost bounds. It can answer `ready`,
+`needs_review`, `blocked`, or `no_comparison_justified`. A blocked or
 unnecessary comparison does not run.
 
 Simple tasksets can be written as strict JSONL, built through
@@ -313,16 +316,22 @@ mechanism evidence, infrastructure health, and evidence completeness. Local
 mode writes one canonical dataset manifest, evaluation record,
 prediction-and-score record, prediction record, and provider-neutral Agent
 receipt per attempt. `weave_required` mode additionally binds native hosted
-Calls. `fugue publish weave RESULT --project ENTITY/PROJECT` can publish a
-completed local result later without changing its digest.
+Calls. `fugue publish weave RESULT --project ENTITY/PROJECT` publishes a
+digest-bound sanitized projection and writes a separate publication receipt.
+It does not change or re-score the local result, and it does not relabel a
+provider-neutral Agent receipt as a native Weave Agent Call. The projection
+contains study identities, scores, safe excerpts, and evidence-chain metadata.
+Raw local transcript and tool-event artifact files remain local. Review the
+destination project's access policy before publishing.
 CI uses distinct exit codes for a passed gate (`0`), a completed regression
 (`1`), an invalid comparison (`2`), and incomplete required evidence (`3`).
 
-To share several results with colleagues, publish each unchanged evidence
-chain with an explicit Research and Study identity. Then build one immutable
-local index and publish that index to a W&B project:
+To share several results with colleagues, publish a digest-bound projection of
+each evidence chain with an explicit Research and Study identity. Then build
+one immutable local index and publish that index to a W&B project:
 
 ```bash
+python -m pip install "fugue[weave]"
 fugue publish weave RESULT.json \
   --project ENTITY/EVIDENCE_PROJECT \
   --research-id agent-change-research-v1 \
@@ -341,13 +350,16 @@ fugue publish wandb-index research-index.json \
 ```
 
 The last command creates a deterministic W&B index Run and an immutable
-Artifact. The Run contains a derivative table for browsing the studies. The
-Artifact preserves the exact Research index and its bound result and
-publication-receipt sources. The installed W&B SDK does not expose a native
-`wandb.study` service API. Fugue therefore does not claim that the index is a
-native Study or provide a fabricated Study Console link. A future native
-publisher can implement the same optional publication protocol without
-changing the local index or any result.
+Artifact. Share the returned Run URL with colleagues who can access the target
+project. Its digest-bound table shows each Study's behavioral status,
+recommendation, evidence integrity, exact result and qualification digests,
+candidate assignments, and primary evidence link. The Artifact preserves the
+exact Research index and its bound result and publication-receipt sources. The
+installed W&B SDK does not expose a native `wandb.study` service API. Fugue
+therefore describes this object as a Research index, not a native Study, and
+does not fabricate a Study Console link. A future native publisher can
+implement the same optional publication protocol without changing the local
+index or any result.
 
 Normal MCP configurations and standard Agent Skills are candidate inputs, not
 special experiment types:
@@ -561,6 +573,10 @@ candidate and workload, keeps the returned URLs in the run manifest, and
 attaches each verified Agent root to its prediction with Weave's GenAI span
 reference. A completed local result can instead be published afterward through
 the explicit `fugue publish weave` command.
+
+`--fetch-weave` only asks Fugue to hydrate hosted evidence for an explicitly
+`weave_required` run. It does not publish, upload, or otherwise change a local
+evidence run.
 
 ```mermaid
 flowchart LR

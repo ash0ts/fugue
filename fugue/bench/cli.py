@@ -149,7 +149,7 @@ def _parser() -> FugueArgumentParser:
     init.set_defaults(handler=_comparison_init)
 
     check = subparsers.add_parser(
-        "check", help="Validate comparison readiness without spending or writing"
+        "check", help="Validate authored comparison readiness without model spend"
     )
     check.add_argument("comparison", type=Path)
     _add_common_args(check, json_output=True, infer_comparison_root=True)
@@ -177,7 +177,15 @@ def _parser() -> FugueArgumentParser:
         ),
     )
     compare.add_argument("--approval")
-    compare.add_argument("--fetch-weave", action="store_true")
+    compare.add_argument(
+        "--fetch-weave",
+        action="store_true",
+        help=(
+            "For weave_required studies, fetch hosted Weave evidence during "
+            "finalization. In local mode this flag does not trigger hosted "
+            "evidence hydration."
+        ),
+    )
     _add_common_args(compare, json_output=True, infer_comparison_root=True)
     compare.set_defaults(handler=_comparison_compare)
 
@@ -193,9 +201,7 @@ def _parser() -> FugueArgumentParser:
     approve.add_argument("--repo-root", type=Path, default=Path.cwd())
     approve.set_defaults(handler=_comparison_approve)
 
-    result = subparsers.add_parser(
-        "result", help="Read an exported comparison result"
-    )
+    result = subparsers.add_parser("result", help="Read an exported comparison result")
     result.add_argument("comparison", nargs="?", default="latest")
     result.add_argument("--json", action="store_true")
     result.add_argument("--open", action="store_true", dest="open_result")
@@ -224,14 +230,15 @@ def _parser() -> FugueArgumentParser:
     result.set_defaults(handler=_comparison_result)
 
     study = subparsers.add_parser(
-        "study", help="Build a local index of immutable comparison results"
+        "study",
+        help="Build a digest-bound local Research index (not a native W&B Study)",
     )
     study_actions = study.add_subparsers(
         dest="study_action", metavar="ACTION", required=True
     )
     study_index = study_actions.add_parser(
         "index",
-        help="Build one digest-bound Research index from published local results",
+        help=("Index exact local results and their scoped Weave publication receipts"),
     )
     study_index.add_argument("--research-id", required=True)
     study_index.add_argument("--title", required=True)
@@ -252,13 +259,27 @@ def _parser() -> FugueArgumentParser:
     study_index.set_defaults(handler=_study_index)
 
     publish_command = subparsers.add_parser(
-        "publish", help="Publish an unchanged canonical local result"
+        "publish",
+        help=(
+            "Publish digest-bound projections of local results or Research "
+            "indexes to an optional W&B backend"
+        ),
     )
     publish_actions = publish_command.add_subparsers(
         dest="publish_action", metavar="BACKEND", required=True
     )
     publish_weave = publish_actions.add_parser(
-        "weave", help="Publish a local result's evidence chain to W&B Weave"
+        "weave",
+        help=(
+            "Publish a sanitized, digest-bound projection of a verified local "
+            "result to W&B Weave"
+        ),
+        description=(
+            "Publish sanitized result and evidence-chain projections to W&B Weave. "
+            "Raw local transcript and tool-event artifact files remain local, and "
+            "the canonical local result digest does not change. Review publishable "
+            "excerpts and evidence metadata for sensitive data first."
+        ),
     )
     publish_weave.add_argument("result", type=Path)
     publish_weave.add_argument("--project", required=True, metavar="ENTITY/PROJECT")
@@ -279,9 +300,7 @@ def _parser() -> FugueArgumentParser:
     publish_weave.set_defaults(handler=_publish_local_result)
     publish_index = publish_actions.add_parser(
         "wandb-index",
-        help=(
-            "Publish an unchanged Research index as a W&B index Run and Artifact"
-        ),
+        help=("Publish an unchanged Research index as a W&B index Run and Artifact"),
     )
     publish_index.add_argument("index", type=Path)
     publish_index.add_argument("--project", required=True, metavar="ENTITY/PROJECT")
@@ -958,7 +977,9 @@ def _doctor(args: argparse.Namespace) -> int:
         for name, item in report["optional_features"].items():
             ready = item.get("ready", item["installed"])
             detail = item.get("version") or "install the matching Fugue extra"
-            table.add_row(name.replace("_", " "), "ready" if ready else "optional", detail)
+            table.add_row(
+                name.replace("_", " "), "ready" if ready else "optional", detail
+            )
         CONSOLE.print(table)
     return 0 if report["ok"] else 2
 
@@ -972,7 +993,10 @@ def _comparison_check(args: argparse.Namespace) -> int:
     if args.json:
         print(json.dumps(readiness.to_dict(), indent=2, sort_keys=True))
     else:
-        _print_comparison_readiness(readiness)
+        _print_comparison_readiness(
+            readiness,
+            evidence_mode=spec.execution.evidence_mode,
+        )
     return 0 if readiness.status in {"ready", "needs_review"} else 2
 
 
@@ -1004,10 +1028,11 @@ def _comparison_prepare(
         }
         print(json.dumps(payload, indent=2, sort_keys=True))
     else:
-        _print_comparison_readiness_dict(preview.readiness)
-        treatment_identities = _comparison_preview_treatment_identities(
-            preview.matrix
+        _print_comparison_readiness_dict(
+            preview.readiness,
+            evidence_mode=spec.execution.evidence_mode,
         )
+        treatment_identities = _comparison_preview_treatment_identities(preview.matrix)
         prepared_summary = Text()
         prepared_summary.append(receipt["receipt_digest"], style="bold")
         prepared_summary.append(
@@ -1068,7 +1093,10 @@ def _comparison_compare(args: argparse.Namespace) -> int:
                 )
             )
         else:
-            _print_comparison_readiness(readiness)
+            _print_comparison_readiness(
+                readiness,
+                evidence_mode=spec.execution.evidence_mode,
+            )
             CONSOLE.print(
                 "\n[fugue.warning]Exact preview not generated while the "
                 "comparison is blocked.[/]"
@@ -1090,7 +1118,10 @@ def _comparison_compare(args: argparse.Namespace) -> int:
             payload["approval_eligible"] = preview_usable
             print(json.dumps(payload, indent=2, sort_keys=True))
         else:
-            _print_comparison_readiness_dict(preview.readiness)
+            _print_comparison_readiness_dict(
+                preview.readiness,
+                evidence_mode=spec.execution.evidence_mode,
+            )
             if preview_usable:
                 treatment_identities = _comparison_preview_treatment_identities(
                     preview.matrix
@@ -1098,7 +1129,7 @@ def _comparison_compare(args: argparse.Namespace) -> int:
                 preview_summary = Text()
                 preview_summary.append(preview.preview_digest, style="bold")
                 preview_summary.append(
-                    f"\n{preview.matrix['estimated_trials']} aligned attempts\n"
+                    f"\n{preview.matrix['estimated_trials']} runnable aligned attempts\n"
                     "This exact digest is eligible for human approval."
                 )
                 _append_comparison_preview_treatment_identities(
@@ -1115,7 +1146,7 @@ def _comparison_compare(args: argparse.Namespace) -> int:
             else:
                 CONSOLE.print(
                     "\n[fugue.warning]No usable preview: one or more planned "
-                    "attempts are unavailable in this environment.[/]"
+                    "attempts are not runnable in this environment.[/]"
                 )
         return 0 if preview_usable else 2
     if not preview_usable:
@@ -1136,7 +1167,7 @@ def _comparison_compare(args: argparse.Namespace) -> int:
         else:
             CONSOLE.print(
                 "[fugue.warning]Comparison cannot run because one or more "
-                "planned attempts are unavailable in this environment.[/]"
+                "planned attempts are not runnable in this environment.[/]"
             )
         return 2
     if not args.approval:
@@ -1188,9 +1219,7 @@ def _comparison_compare(args: argparse.Namespace) -> int:
                 "stage": publication_error.stage,
                 "research_id": publication_error.research_id,
                 "error_type": publication_error.error_type,
-                "receipt": publication_error.receipt_path.relative_to(
-                    root
-                ).as_posix(),
+                "receipt": publication_error.receipt_path.relative_to(root).as_posix(),
                 "behavioral_result": payload,
             }
         print(json.dumps(payload, indent=2, sort_keys=True))
@@ -1202,9 +1231,7 @@ def _comparison_compare(args: argparse.Namespace) -> int:
                 "\n[fugue.warning]The immutable behavioral result was saved, "
                 "but its declared Research publication is incomplete.[/]"
             )
-            CONSOLE.print(
-                f"Publication receipt: {publication_error.receipt_path}"
-            )
+            CONSOLE.print(f"Publication receipt: {publication_error.receipt_path}")
     if publication_error is not None:
         return 3
     behavioral = getattr(result, "behavioral_summary", None)
@@ -1255,9 +1282,7 @@ def _append_comparison_preview_treatment_identities(
         return
     target.append("\n\nTreatment identities", style="bold")
     for variant_label, variant_id, harness, candidate_id in identities:
-        target.append(
-            f"\n- {variant_label} ({variant_id}; {harness}): {candidate_id}"
-        )
+        target.append(f"\n- {variant_label} ({variant_id}; {harness}): {candidate_id}")
 
 
 def _comparison_approve(args: argparse.Namespace) -> int:
@@ -1378,8 +1403,7 @@ def _comparison_result(args: argparse.Namespace) -> int:
         return 0
     if args.reviewed_by or args.reviewed_at:
         raise ValueError(
-            "--reviewed-by/--reviewed-at require --authorize-followup or "
-            "--signoff-by"
+            "--reviewed-by/--reviewed-at require --authorize-followup or --signoff-by"
         )
     if args.open_result:
         with tempfile.NamedTemporaryFile(
@@ -1546,6 +1570,20 @@ def _publish_local_result(args: argparse.Namespace) -> int:
         if args.receipt is not None
         else None
     )
+    privacy_notice = (
+        "Privacy boundary: publishing sends sanitized result and evidence-chain "
+        "projections to the selected W&B project. Raw local transcript and "
+        "tool-event artifact files remain local. Review the destination project's "
+        "access policy before continuing."
+    )
+    if args.json:
+        print(privacy_notice, file=sys.stderr)
+    else:
+        CONSOLE.print(
+            privacy_notice.replace(
+                "Privacy boundary:", "[fugue.gold]Privacy boundary:[/]"
+            )
+        )
     env = load_env(args.env_file)
     try:
         publisher = weave_publisher_from_environment(env)
@@ -1592,12 +1630,12 @@ def _publish_local_result(args: argparse.Namespace) -> int:
                         f"Target: {receipt.target.project_slug}",
                         *scope_lines,
                         f"Result: {receipt.result_digest}",
-                        f"Local evidence: {receipt.local_manifest_digest}",
+                        f"Canonical local manifest: {receipt.local_manifest_digest}",
                         f"Hosted objects: {len(receipt.hosted_objects)}",
                         f"Receipt: {receipt.receipt_digest}",
                     )
                 ),
-                title="Published unchanged local result",
+                title="Published local result projection",
                 border_style="fugue.success",
             )
         )
@@ -1778,14 +1816,10 @@ def _comparison_demo(args: argparse.Namespace) -> int:
         source="bundled-replay",
     )
     destination = (
-        args.out.resolve()
-        if args.out
-        else root / "artifacts" / "source-use-replay"
+        args.out.resolve() if args.out else root / "artifacts" / "source-use-replay"
     )
     write_jsonl(rows, destination / "attempts.jsonl")
-    json_path, markdown_path = write_comparison_result(
-        result, destination=destination
-    )
+    json_path, markdown_path = write_comparison_result(result, destination=destination)
     if args.json:
         print(json.dumps(result.to_dict(), indent=2, sort_keys=True))
     else:
@@ -1833,11 +1867,22 @@ def _wandb_sandbox(args: argparse.Namespace) -> int:
     return 0 if result["deleted"] and result["orphans"] == 0 else 3
 
 
-def _print_comparison_readiness(readiness: Any) -> None:
-    _print_comparison_readiness_dict(readiness.to_dict())
+def _print_comparison_readiness(
+    readiness: Any,
+    *,
+    evidence_mode: str | None = None,
+) -> None:
+    _print_comparison_readiness_dict(
+        readiness.to_dict(),
+        evidence_mode=evidence_mode,
+    )
 
 
-def _print_comparison_readiness_dict(value: Mapping[str, Any]) -> None:
+def _print_comparison_readiness_dict(
+    value: Mapping[str, Any],
+    *,
+    evidence_mode: str | None = None,
+) -> None:
     status = str(value["status"])
     color = {
         "ready": "fugue.success",
@@ -1849,9 +1894,23 @@ def _print_comparison_readiness_dict(value: Mapping[str, Any]) -> None:
     table.add_column(style="bold")
     table.add_column()
     table.add_row("Question", str(value["question"]))
+    evidence_project = value.get("evidence_project")
+    if evidence_mode == "local":
+        evidence_destination = "canonical local artifact ledger"
+    elif evidence_mode == "weave_required" and evidence_project:
+        evidence_destination = (
+            f"canonical local artifact ledger + required W&B/Weave: {evidence_project}"
+        )
+    elif evidence_mode == "weave_required":
+        evidence_destination = (
+            "canonical local artifact ledger + required hosted destination "
+            "resolved by the operator"
+        )
+    else:
+        evidence_destination = "inspect the exact preview evidence mode"
     table.add_row(
-        "Evidence project",
-        str(value.get("evidence_project") or "operator environment"),
+        "Evidence destination",
+        evidence_destination,
     )
     table.add_row("Tasks", str(value["task_count"]))
     table.add_row("Changed", ", ".join(value["actual_changes"]) or "none")
@@ -2132,7 +2191,7 @@ def _print_preview(preview: Any) -> None:
     summary = Table.grid(padding=(0, 2))
     summary.add_row("Cells", str(preview.cells))
     summary.add_row("Applicable", str(preview.applicable_cells))
-    summary.add_row("Estimated trials", str(preview.estimated_trials))
+    summary.add_row("Runnable attempts", str(preview.estimated_trials))
     summary.add_row("Harnesses", ", ".join(preview.harnesses) or "none")
     summary.add_row("Variants", ", ".join(preview.variants) or "none")
     summary.add_row("Workloads", ", ".join(preview.workloads) or "none")
@@ -2140,7 +2199,20 @@ def _print_preview(preview: Any) -> None:
         "Environment",
         str((preview.environment or {}).get("type") or "docker"),
     )
-    summary.add_row("Evidence project", preview.evidence_project or "not configured")
+    evidence_destination = dict(preview.evidence_destination or {})
+    if preview.evidence_project:
+        evidence_summary = (
+            "canonical local artifact ledger + required W&B/Weave: "
+            f"{preview.evidence_project}"
+        )
+    elif evidence_destination.get("kind") == "local":
+        evidence_summary = "canonical local artifact ledger"
+    else:
+        evidence_summary = (
+            "canonical local artifact ledger + required hosted destination "
+            "resolved by the operator"
+        )
+    summary.add_row("Evidence destination", evidence_summary)
     commands = "\n".join(preview.commands) or "No applicable commands."
     CONSOLE.print(
         Group(
@@ -2342,7 +2414,9 @@ def _report_missing_run_asset(
     raw_path = Path(exc.filename) if exc.filename else None
     if raw_path is not None:
         try:
-            display_path = raw_path.resolve().relative_to(repo_root.resolve()).as_posix()
+            display_path = (
+                raw_path.resolve().relative_to(repo_root.resolve()).as_posix()
+            )
         except ValueError:
             display_path = raw_path.name
     else:
@@ -2479,9 +2553,7 @@ def _component_mcp(args: argparse.Namespace) -> int:
                 "W&B MCP preparation did not materialize a runnable comparison"
             )
         comparison_path = (
-            args.repo_root.resolve()
-            / str(payload["destination"])
-            / "comparison.yaml"
+            args.repo_root.resolve() / str(payload["destination"]) / "comparison.yaml"
         )
         payload.update(
             candidate_sha=str(payload["source_commit"]),
