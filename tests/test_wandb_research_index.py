@@ -859,6 +859,33 @@ def test_run_preflight_filters_by_documented_unique_name() -> None:
     ]
 
 
+def test_table_summary_accepts_wandb_summary_subdict_shape() -> None:
+    class _SummarySubDict:
+        def __init__(self, values: dict[str, object]) -> None:
+            self._values = values
+
+        def keys(self) -> object:
+            return self._values.keys()
+
+        def __getitem__(self, key: str) -> object:
+            return self._values[key]
+
+    expected = {
+        "_type": "table-file",
+        "ncols": len(adapter._TABLE_COLUMNS),
+        "nrows": 1,
+        "log_mode": "IMMUTABLE",
+        "path": f"media/table/studies_0_{'a' * 20}.table.json",
+        "sha256": "a" * 64,
+        "size": 123,
+    }
+
+    assert adapter._verify_table_summary(
+        {adapter._TABLE_KEY: _SummarySubDict(expected)},
+        rows=1,
+    ) == (expected["path"], expected["sha256"], expected["size"])
+
+
 @pytest.mark.parametrize("exists", [False, True])
 def test_artifact_preflight_uses_supported_single_artifact_api(
     exists: bool,

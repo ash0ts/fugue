@@ -724,11 +724,16 @@ def _verify_table_summary(
             "authoritative W&B Run has no readable summary"
         ) from exc
     raw_table = summary.get(_TABLE_KEY)
-    if not isinstance(raw_table, Mapping):
+    if raw_table is None:
         raise WandbResearchIndexPublicationError(
             "authoritative W&B Run is missing the Research-index Table summary"
         )
-    table = dict(raw_table)
+    try:
+        table = dict(raw_table)
+    except (TypeError, ValueError) as exc:
+        raise WandbResearchIndexPublicationError(
+            "authoritative W&B Run has an unreadable Research-index Table summary"
+        ) from exc
     if (
         table.get("_type") != "table-file"
         or table.get("ncols") != len(_TABLE_COLUMNS)
