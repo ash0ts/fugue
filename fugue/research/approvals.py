@@ -35,8 +35,11 @@ class ApprovalLedger:
                     consumed_by TEXT,
                     created_at TEXT NOT NULL
                 );
-                CREATE UNIQUE INDEX IF NOT EXISTS approval_subject
-                    ON execution_approvals(subject_kind, preview_digest);
+                DROP INDEX IF EXISTS approval_subject;
+                CREATE INDEX IF NOT EXISTS approval_subject_lookup
+                    ON execution_approvals(
+                        subject_kind, preview_digest, created_at
+                    );
                 CREATE TABLE IF NOT EXISTS approval_operations (
                     operation_id TEXT PRIMARY KEY,
                     input_digest TEXT NOT NULL,
@@ -61,7 +64,10 @@ class ApprovalLedger:
         if expires_in_seconds < 60 or expires_in_seconds > 86_400:
             raise ValueError("approval expiry must be between 60 and 86400 seconds")
         created = datetime.now(UTC)
-        approval_id = f"approval-{preview_digest[:20]}"
+        approval_id = (
+            f"approval-{preview_digest[:12]}-"
+            f"{stable_digest(operation_id)[:12]}"
+        )
         unsigned = ExecutionApprovalV1(
             schema_version=RESEARCH_SCHEMA_VERSION,
             approval_id=approval_id,
@@ -106,20 +112,6 @@ class ApprovalLedger:
                     )
                 conn.commit()
                 return self.get(str(prior[1]))
-            existing = conn.execute(
-                "SELECT receipt_json FROM execution_approvals "
-                "WHERE subject_kind=? AND preview_digest=?",
-                (subject_kind, preview_digest),
-            ).fetchone()
-            if existing:
-                prior_approval = execution_approval_from_dict(json.loads(existing[0]))
-                if prior_approval.to_dict() != approval.to_dict():
-                    raise ResearchError(
-                        "approval_conflict",
-                        "the preview already has a different approval",
-                        category="conflict",
-                    )
-                return prior_approval
             conn.execute(
                 "INSERT INTO execution_approvals VALUES (?, ?, ?, ?, NULL, ?)",
                 (
@@ -161,18 +153,33 @@ class ApprovalLedger:
     ) -> ExecutionApprovalV1:
         """Resolve operator approval without exposing its receipt to the Agent."""
         with connect_database(self.path) as conn:
-            row = conn.execute(
-                "SELECT receipt_json FROM execution_approvals "
-                "WHERE subject_kind=? AND preview_digest=?",
+            rows = conn.execute(
+                "SELECT receipt_json, consumed_by FROM execution_approvals "
+                "WHERE subject_kind=? AND preview_digest=? "
+                "ORDER BY created_at DESC, approval_digest DESC",
                 (subject_kind, preview_digest),
-            ).fetchone()
-        if row is None:
+            ).fetchall()
+        if not rows:
             raise ResearchError(
                 "approval_not_found",
                 "operator approval for the exact preview was not found",
                 category="policy",
             )
-        return execution_approval_from_dict(json.loads(row[0]))
+        values = [
+            (execution_approval_from_dict(json.loads(row[0])), row[1])
+            for row in rows
+        ]
+        current = datetime.now(UTC)
+        for approval, consumed_by in values:
+            if not consumed_by and _parse_time(approval.expires_at) > current:
+                return approval
+        for approval, _consumed_by in values:
+            if _parse_time(approval.expires_at) > current:
+                return approval
+        # Returning the newest expired receipt preserves a precise
+        # approval_expired error at claim time instead of disguising it as a
+        # missing approval.
+        return values[0][0]
 
     def claim(
         self,

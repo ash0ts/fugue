@@ -21,6 +21,8 @@ from fugue.bench.execution import (
     execute_cells,
     record_recovered_cell_outcome,
 )
+from fugue.bench.files import atomic_write_json
+from fugue.bench.harbor_outcome import HARBOR_TERMINAL_CLASSIFIER_DIGEST
 from fugue.redaction import redact_text, redact_value, secrets_from_env
 
 _DIGEST = re.compile(r"^[0-9a-f]{64}$")
@@ -109,19 +111,38 @@ _EVENT_PAYLOAD_FIELDS: dict[str, set[str]] = {
     "fatal_integrity_halt": {"reason"},
 }
 
-_LOCAL_ADAPTER_CONTRACT = stable_digest(
+LOCAL_HARBOR_RECOVERY_ADAPTER_CONTRACT = stable_digest(
     {
         "contract": "fugue.execution-recovery-adapters",
-        "version": 1,
+        "version": 3,
+        "harbor_terminal_classifier": HARBOR_TERMINAL_CLASSIFIER_DIGEST,
         "cost": "authoritative-receipt",
         "cleanup": "exact-scope-post-run-inventory",
-        "interrupted": "authoritative-terminal-and-result-reconciliation",
+        "interrupted": (
+            "parent-process-or-harbor-terminal-hook-and-result-reconciliation"
+        ),
+        "physical_namespace": (
+            "unique-harbor-config-job-result-and-agent-state-per-execution"
+        ),
     }
 )
 
 
 class ExecutionRecoveryError(RuntimeError):
     """A durable controller cannot safely admit or reconcile execution."""
+
+
+class ExecutionRecoveryPaused(ExecutionRecoveryError):
+    """Admission paused without invalidating or rerunning completed work."""
+
+
+class ExecutionFinalizationPending(ExecutionRecoveryPaused):
+    """Host-only finalization may be retried without rerunning the Agent.
+
+    Finalizers must raise this type only when already-written Agent work is
+    intact and the remaining operation is safe and idempotent. Integrity or
+    identity disagreements must use another exception and remain fatal.
+    """
 
 
 class ExecutionJournalCorrupt(ExecutionRecoveryError):
@@ -395,7 +416,7 @@ class ExecutionScheduleV1:
         maximum_infrastructure_replacements: int,
         maximum_total_micro_usd: int,
         maximum_in_flight_micro_usd: int,
-        adapter_contract_digest: str = _LOCAL_ADAPTER_CONTRACT,
+        adapter_contract_digest: str = LOCAL_HARBOR_RECOVERY_ADAPTER_CONTRACT,
         retryable_terminal_kinds: Sequence[str] = tuple(
             sorted(_RETRYABLE_INFRASTRUCTURE)
         ),
@@ -2333,6 +2354,41 @@ CanonicalizationVerifier = Callable[
     [PlannedCell, PhysicalExecutionIdentityV1, CellOutcome],
     CanonicalizationObservationV1,
 ]
+WaveBeginCell = Callable[[PlannedCell], Mapping[str, str] | None]
+WaveFinishCell = Callable[[PlannedCell, CellOutcome], None]
+WaveInvalidateCell = Callable[[PlannedCell, CellOutcome], None]
+WaveFinalize = Callable[[tuple[CellOutcome, ...]], None]
+
+
+@dataclass(frozen=True)
+class AdmittedWaveLifecycle:
+    """Host lifecycle attached only after physical work is durably admitted.
+
+    A lifecycle may finalize local evidence after Agent work is terminal. Its
+    callbacks must be idempotent because controller recovery can replay them.
+    Canonical result selection remains in :class:`ExecutionRecoveryController`
+    and happens only after ``finalize`` succeeds.
+    """
+
+    begin_cell: WaveBeginCell | None = None
+    finish_cell: WaveFinishCell | None = None
+    invalidate_cell: WaveInvalidateCell | None = None
+    finalize: WaveFinalize | None = None
+
+    def __post_init__(self) -> None:
+        for value, label in (
+            (self.begin_cell, "wave begin callback"),
+            (self.finish_cell, "wave finish callback"),
+            (self.invalidate_cell, "wave invalidation callback"),
+            (self.finalize, "wave finalize callback"),
+        ):
+            if value is not None and not callable(value):
+                raise TypeError(f"{label} must be callable")
+
+
+AdmittedWaveLifecycleFactory = Callable[
+    [tuple[PlannedCell, ...]], AdmittedWaveLifecycle
+]
 
 
 @dataclass(frozen=True)
@@ -2365,6 +2421,7 @@ def execute_recoverable_cells(  # noqa: C901 - bridges durable and cell lifecycl
     repo_root: Path,
     runner: Callable[..., Any] | None = None,
     cell_finished: CellFinished | None = None,
+    wave_lifecycle_factory: AdmittedWaveLifecycleFactory | None = None,
     cancellation_event: threading.Event | None = None,
 ) -> list[CellOutcome]:
     """Execute admitted waves through the canonical ``execute_cells`` path.
@@ -2398,6 +2455,29 @@ def execute_recoverable_cells(  # noqa: C901 - bridges durable and cell lifecycl
     if len(stage_plans) != stage_authorization.maximum_logical_attempts:
         raise ValueError("authorized stage does not exactly match the frozen cells")
     stage_attempt_ids = {item.logical_attempt_id for item in stage_plans}
+    cells_by_block: dict[str, list[PlannedCell]] = {}
+    for plan in stage_plans:
+        cells_by_block.setdefault(plan.admission_block_id, []).append(
+            by_attempt[plan.logical_attempt_id]
+        )
+    for block_id, block_cells in cells_by_block.items():
+        if len({cell.run_id for cell in block_cells}) != 1:
+            raise ValueError(
+                f"admission block {block_id} crosses canonical run boundaries"
+            )
+        destinations = {
+            (
+                cell.env.get("FUGUE_RESULT_EVIDENCE_PROJECT")
+                or cell.env.get("FUGUE_WEAVE_PROJECT")
+                or cell.env.get("WANDB_PROJECT")
+                or ""
+            )
+            for cell in block_cells
+        }
+        if len(destinations) != 1:
+            raise ValueError(
+                f"admission block {block_id} crosses evidence destinations"
+            )
     settled_physical_ids: set[str] = set()
     settlement_lock = threading.Lock()
     secrets = tuple(
@@ -2442,7 +2522,7 @@ def execute_recoverable_cells(  # noqa: C901 - bridges durable and cell lifecycl
         )
         return observation
 
-    def physical_cell(
+    def identified_cell(
         physical: PhysicalExecutionIdentityV1,
     ) -> PlannedCell:
         cell = by_attempt[physical.logical_attempt_id]
@@ -2452,12 +2532,22 @@ def execute_recoverable_cells(  # noqa: C901 - bridges durable and cell lifecycl
             retry_ordinal=physical.retry_ordinal,
             env={
                 **cell.env,
+                "FUGUE_LOGICAL_ATTEMPT_ID": physical.logical_attempt_id,
                 "FUGUE_PHYSICAL_EXECUTION_ID": physical.physical_execution_id,
                 "FUGUE_RETRY_ORDINAL": str(physical.retry_ordinal),
             },
         )
 
-    def repair_partial_settlements() -> None:
+    def physical_cell(
+        physical: PhysicalExecutionIdentityV1,
+    ) -> PlannedCell:
+        return _rehydrate_physical_harbor_cell(
+            identified_cell(physical),
+            physical=physical,
+            repo_root=repo_root,
+        )
+
+    def repair_partial_settlements(*, canonicalize: bool) -> None:
         snapshot = controller.snapshot()
         for state in snapshot.physical_executions.values():
             if state.terminal_kind is None or state.canonical:
@@ -2528,7 +2618,8 @@ def execute_recoverable_cells(  # noqa: C901 - bridges durable and cell lifecycl
                     )
                 continue
             if (
-                state.terminal_kind in _BEHAVIORAL_TERMINAL
+                canonicalize
+                and state.terminal_kind in _BEHAVIORAL_TERMINAL
                 and state.fully_reconciled
                 and physical.logical_attempt_id
                 not in controller.snapshot().canonical_results
@@ -2538,6 +2629,8 @@ def execute_recoverable_cells(  # noqa: C901 - bridges durable and cell lifecycl
                         adapters.canonicalization_verifier(cell, physical, outcome)
                     )
                     controller.select_canonical(physical, reconciliation)
+                except ExecutionFinalizationPending:
+                    raise
                 except Exception as exc:
                     controller.halt(
                         _safe_failure(
@@ -2546,6 +2639,63 @@ def execute_recoverable_cells(  # noqa: C901 - bridges durable and cell lifecycl
                         logical_attempt_id=physical.logical_attempt_id,
                         physical_execution_id=physical.physical_execution_id,
                     )
+
+    def finalize_recovered_waves() -> None:
+        """Retry host-only evidence finalization without Agent execution."""
+
+        if wave_lifecycle_factory is None:
+            return
+        snapshot = controller.snapshot()
+        pending_by_block: dict[str, list[PhysicalExecutionStateV1]] = {}
+        for plan in stage_plans:
+            if plan.logical_attempt_id in snapshot.canonical_results:
+                continue
+            states = [
+                state
+                for state in snapshot.physical_executions.values()
+                if state.identity.logical_attempt_id == plan.logical_attempt_id
+                and state.terminal_kind in _BEHAVIORAL_TERMINAL
+                and state.fully_reconciled
+            ]
+            if not states:
+                continue
+            selected = max(states, key=lambda state: state.identity.retry_ordinal)
+            pending_by_block.setdefault(plan.admission_block_id, []).append(selected)
+        ordered_blocks = dict.fromkeys(
+            plan.admission_block_id for plan in stage_plans
+        )
+        for block_id in ordered_blocks:
+            states = pending_by_block.get(block_id)
+            if not states:
+                continue
+            wave_cells = tuple(physical_cell(state.identity) for state in states)
+            outcomes = tuple(
+                _cell_outcome_from_record(state.cell_outcome) for state in states
+            )
+            lifecycle = wave_lifecycle_factory(wave_cells)
+            if not isinstance(lifecycle, AdmittedWaveLifecycle):
+                raise TypeError(
+                    "wave lifecycle factory must return AdmittedWaveLifecycle"
+                )
+            try:
+                if lifecycle.finish_cell is not None:
+                    for cell, outcome in zip(wave_cells, outcomes, strict=True):
+                        lifecycle.finish_cell(cell, outcome)
+                if lifecycle.finalize is not None:
+                    lifecycle.finalize(outcomes)
+            except ExecutionFinalizationPending:
+                raise
+            except Exception as exc:
+                first = states[0].identity
+                controller.halt(
+                    _safe_failure(
+                        "recovered wave evidence finalization failed", exc, secrets
+                    ),
+                    logical_attempt_id=first.logical_attempt_id,
+                    physical_execution_id=first.physical_execution_id,
+                )
+                return
+            repair_partial_settlements(canonicalize=True)
 
     def reconcile_active_executions() -> None:
         snapshot = controller.snapshot()
@@ -2629,9 +2779,16 @@ def execute_recoverable_cells(  # noqa: C901 - bridges durable and cell lifecycl
             record_recovered_cell_outcome(repo_root, cell, outcome)
 
     while True:
-        repair_partial_settlements()
+        repair_partial_settlements(
+            canonicalize=wave_lifecycle_factory is None,
+        )
         reconcile_active_executions()
-        repair_partial_settlements()
+        repair_partial_settlements(
+            canonicalize=wave_lifecycle_factory is None,
+        )
+        finalize_recovered_waves()
+        if controller.snapshot().fatal_reasons:
+            break
         admission = controller.admit(stage_id=stage_authorization.stage_id)
         if admission.status == "complete":
             break
@@ -2639,6 +2796,11 @@ def execute_recoverable_cells(  # noqa: C901 - bridges durable and cell lifecycl
             snapshot = controller.snapshot()
             if snapshot.fatal_reasons:
                 break
+            if admission.reason in {
+                "authoritative cost is missing",
+                "physical executions are still active",
+            }:
+                raise ExecutionRecoveryPaused(admission.reason)
             raise ExecutionRecoveryError(admission.reason)
         physical_by_cell: dict[str, PhysicalExecutionIdentityV1] = {}
         wave_cells: list[PlannedCell] = []
@@ -2663,9 +2825,23 @@ def execute_recoverable_cells(  # noqa: C901 - bridges durable and cell lifecycl
                 )
                 continue
             physical_by_cell[cell.id] = physical
-            wave_cells.append(physical_cell(physical))
+            wave_cells.append(
+                _materialize_physical_harbor_cell(
+                    identified_cell(physical),
+                    physical=physical,
+                    repo_root=repo_root,
+                )
+            )
         if not wave_cells:
             break
+        wave_lifecycle = (
+            wave_lifecycle_factory(tuple(wave_cells))
+            if wave_lifecycle_factory is not None
+            else AdmittedWaveLifecycle()
+        )
+        if not isinstance(wave_lifecycle, AdmittedWaveLifecycle):
+            raise TypeError("wave lifecycle factory must return AdmittedWaveLifecycle")
+        pending_finalizations: list[str] = []
 
         def begin_cell(
             cell: PlannedCell,
@@ -2673,6 +2849,7 @@ def execute_recoverable_cells(  # noqa: C901 - bridges durable and cell lifecycl
             _physical_by_cell: Mapping[str, PhysicalExecutionIdentityV1] = (
                 physical_by_cell
             ),
+            _wave_lifecycle: AdmittedWaveLifecycle = wave_lifecycle,
         ) -> Mapping[str, str] | None:
             physical = _physical_by_cell[cell.id]
             observed = tuple(
@@ -2688,7 +2865,11 @@ def execute_recoverable_cells(  # noqa: C901 - bridges durable and cell lifecycl
                 "observed Harbor resources",
             )
             controller.started(physical, observed_harbor_resources=observed)
-            return None
+            return (
+                _wave_lifecycle.begin_cell(cell)
+                if _wave_lifecycle.begin_cell is not None
+                else None
+            )
 
         def settle_cell(
             cell: PlannedCell,
@@ -2697,6 +2878,8 @@ def execute_recoverable_cells(  # noqa: C901 - bridges durable and cell lifecycl
             _physical_by_cell: Mapping[str, PhysicalExecutionIdentityV1] = (
                 physical_by_cell
             ),
+            _wave_lifecycle: AdmittedWaveLifecycle = wave_lifecycle,
+            _pending_finalizations: list[str] = pending_finalizations,
         ) -> None:
             physical = _physical_by_cell[cell.id]
             with settlement_lock:
@@ -2704,9 +2887,29 @@ def execute_recoverable_cells(  # noqa: C901 - bridges durable and cell lifecycl
                     return
                 settled_physical_ids.add(physical.physical_execution_id)
             callback_failure = None
+            finalization_pending = False
+            lifecycle_callback = (
+                _wave_lifecycle.invalidate_cell
+                if outcome.terminal_kind in _RETRYABLE_INFRASTRUCTURE
+                else _wave_lifecycle.finish_cell
+            )
+            if lifecycle_callback is not None:
+                try:
+                    lifecycle_callback(cell, outcome)
+                except ExecutionFinalizationPending as exc:
+                    finalization_pending = True
+                    _pending_finalizations.append(
+                        _safe_failure("host finalization is pending", exc, secrets)
+                    )
+                except Exception as exc:
+                    callback_failure = _safe_failure(
+                        "required wave evidence completion failed", exc, secrets
+                    )
             if (
                 cell_finished is not None
                 and outcome.terminal_kind not in _RETRYABLE_INFRASTRUCTURE
+                and callback_failure is None
+                and not finalization_pending
             ):
                 try:
                     cell_finished(cell, outcome)
@@ -2791,7 +2994,12 @@ def execute_recoverable_cells(  # noqa: C901 - bridges durable and cell lifecycl
             state = controller.snapshot().physical_executions[
                 physical.physical_execution_id
             ]
-            if state.terminal_kind in _BEHAVIORAL_TERMINAL and state.fully_reconciled:
+            if (
+                wave_lifecycle_factory is None
+                and not finalization_pending
+                and state.terminal_kind in _BEHAVIORAL_TERMINAL
+                and state.fully_reconciled
+            ):
                 try:
                     reconciliation = checked_canonicalization(
                         adapters.canonicalization_verifier(
@@ -2799,6 +3007,10 @@ def execute_recoverable_cells(  # noqa: C901 - bridges durable and cell lifecycl
                         )
                     )
                     controller.select_canonical(physical, reconciliation)
+                except ExecutionFinalizationPending as exc:
+                    _pending_finalizations.append(
+                        _safe_failure("host finalization is pending", exc, secrets)
+                    )
                 except Exception as exc:
                     controller.halt(
                         _safe_failure(
@@ -2851,6 +3063,31 @@ def execute_recoverable_cells(  # noqa: C901 - bridges durable and cell lifecycl
             ]
             if state.terminal_kind is None:
                 settle_cell(cell, outcomes_by_cell[cell.id])
+        if pending_finalizations:
+            raise ExecutionFinalizationPending(pending_finalizations[-1])
+        behavioral_wave_outcomes = tuple(
+            outcome
+            for outcome in wave_outcomes
+            if outcome.terminal_kind in _BEHAVIORAL_TERMINAL
+        )
+        if (
+            wave_lifecycle_factory is not None
+            and not controller.snapshot().fatal_reasons
+        ):
+            try:
+                if wave_lifecycle.finalize is not None and behavioral_wave_outcomes:
+                    wave_lifecycle.finalize(behavioral_wave_outcomes)
+            except ExecutionFinalizationPending:
+                raise
+            except Exception as exc:
+                first = admission.physical_executions[0]
+                controller.halt(
+                    _safe_failure("wave evidence finalization failed", exc, secrets),
+                    logical_attempt_id=first.logical_attempt_id,
+                    physical_execution_id=first.physical_execution_id,
+                )
+            else:
+                repair_partial_settlements(canonicalize=True)
         if controller.snapshot().fatal_reasons:
             break
     snapshot = controller.snapshot()
@@ -3132,6 +3369,210 @@ def _absolute_path(path: Path, repo_root: Path) -> Path:
     return path if path.is_absolute() else repo_root / path
 
 
+def _materialize_physical_harbor_cell(  # noqa: C901 - strict projection audit
+    cell: PlannedCell,
+    *,
+    physical: PhysicalExecutionIdentityV1,
+    repo_root: Path,
+    _write_once: bool = True,
+) -> PlannedCell:
+    """Give one physical Harbor execution a fresh immutable state namespace."""
+
+    if not cell.command or Path(str(cell.command[0])).name != "harbor":
+        return cell
+    command = list(cell.command)
+    config_positions = [
+        index for index, value in enumerate(command) if value == "--config"
+    ]
+    if len(config_positions) != 1 or config_positions[0] + 1 >= len(command):
+        raise ExecutionRecoveryError(
+            "recoverable Harbor command must contain exactly one --config path"
+        )
+    logical_input = _absolute_path(cell.config_path, repo_root)
+    if logical_input.is_symlink():
+        raise ExecutionRecoveryError("approved logical Harbor config is a symlink")
+    logical_config = logical_input.resolve()
+    try:
+        logical_reference = logical_config.relative_to(repo_root.resolve()).as_posix()
+        logical_bytes = logical_config.read_bytes()
+        raw = json.loads(logical_bytes)
+    except (ValueError, OSError, json.JSONDecodeError) as exc:
+        raise ExecutionRecoveryError(
+            "approved logical Harbor config is unavailable or invalid"
+        ) from exc
+    if not isinstance(raw, Mapping):
+        raise ExecutionRecoveryError("approved logical Harbor config is not an object")
+    logical_digest = hashlib.sha256(logical_bytes).hexdigest()
+    if cell.config_sha256 and cell.config_sha256 != logical_digest:
+        raise ExecutionRecoveryError("approved logical Harbor config changed")
+    original_job_name = raw.get("job_name")
+    if not isinstance(original_job_name, str) or not original_job_name.strip():
+        raise ExecutionRecoveryError("approved Harbor config has no job name")
+    fugue_config = raw.get("fugue")
+    if not isinstance(fugue_config, Mapping):
+        raise ExecutionRecoveryError("approved Harbor config has no Fugue identity")
+    agents = raw.get("agents")
+    if not isinstance(agents, list) or not agents:
+        raise ExecutionRecoveryError("approved Harbor config has no Agent")
+
+    suffix = f"-p{physical.physical_execution_id[:12]}"
+    maximum_base = 120 - len(suffix)
+    physical_job_name = f"{original_job_name[:maximum_base].rstrip('-')}{suffix}"
+    physical_root = (
+        repo_root.resolve()
+        / ".fugue"
+        / "runtime"
+        / cell.run_id
+        / "physical-executions"
+        / physical.physical_execution_id
+        / "harbor"
+    )
+    physical_jobs_dir = physical_root / "jobs"
+    physical_config_path = physical_root / "config.json"
+    physical_result_path = physical_jobs_dir / physical_job_name / "result.json"
+    physical_parent = physical_root.parent
+    if _write_once:
+        physical_parent.mkdir(parents=True, exist_ok=True, mode=0o700)
+        if physical_parent.is_symlink() or physical_root.exists():
+            raise ExecutionRecoveryError(
+                "physical Harbor namespace is not a fresh write-once directory"
+            )
+        physical_root.mkdir(mode=0o700)
+        os.chmod(physical_root, 0o700)
+    elif (
+        not physical_root.is_dir()
+        or physical_root.is_symlink()
+        or physical_parent.is_symlink()
+    ):
+        raise ExecutionRecoveryError(
+            "journaled physical Harbor namespace is unavailable"
+        )
+
+    namespace = {
+        "schema_version": 1,
+        "logical_attempt_id": physical.logical_attempt_id,
+        "physical_execution_id": physical.physical_execution_id,
+        "retry_ordinal": physical.retry_ordinal,
+        "logical_config_path": logical_reference,
+        "logical_config_sha256": logical_digest,
+        "harbor_job_name": physical_job_name,
+        "harbor_jobs_dir": physical_jobs_dir.as_posix(),
+        "harbor_result_path": physical_result_path.as_posix(),
+        # These are container-local paths. Their host backing directory is
+        # unique because the Harbor job/output namespace above is unique.
+        "claude_config_dir": "/logs/agent/sessions",
+        "claude_plugin_cache_dir": "/logs/agent/sessions/plugin-cache",
+    }
+    namespace = {**namespace, "namespace_digest": stable_digest(namespace)}
+    agent_environment = {
+        "FUGUE_LOGICAL_ATTEMPT_ID": physical.logical_attempt_id,
+        "FUGUE_PHYSICAL_EXECUTION_ID": physical.physical_execution_id,
+        "FUGUE_RETRY_ORDINAL": str(physical.retry_ordinal),
+        "FUGUE_PHYSICAL_AGENT_STATE_NAMESPACE": namespace["namespace_digest"],
+    }
+    physical_agents: list[dict[str, Any]] = []
+    for raw_agent in agents:
+        if not isinstance(raw_agent, Mapping):
+            raise ExecutionRecoveryError("approved Harbor Agent config is invalid")
+        raw_env = raw_agent.get("env") or {}
+        if not isinstance(raw_env, Mapping):
+            raise ExecutionRecoveryError("approved Harbor Agent environment is invalid")
+        physical_agents.append(
+            {
+                **dict(raw_agent),
+                "env": {**dict(raw_env), **agent_environment},
+            }
+        )
+    physical_config = {
+        **dict(raw),
+        "job_name": physical_job_name,
+        "jobs_dir": physical_jobs_dir.as_posix(),
+        "agents": physical_agents,
+        "fugue": {
+            **dict(fugue_config),
+            "physical_execution": namespace,
+        },
+    }
+    if physical_config_path.is_symlink():
+        raise ExecutionRecoveryError("physical Harbor config cannot be a symlink")
+    if physical_jobs_dir.exists() and physical_jobs_dir.is_symlink():
+        raise ExecutionRecoveryError("physical Harbor jobs directory is a symlink")
+    if physical_config_path.is_file():
+        try:
+            existing = json.loads(physical_config_path.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError) as exc:
+            raise ExecutionRecoveryError(
+                "physical Harbor config is unreadable"
+            ) from exc
+        if existing != physical_config:
+            raise ExecutionRecoveryError("physical Harbor config changed")
+    elif _write_once:
+        atomic_write_json(physical_config_path, physical_config)
+    else:
+        raise ExecutionRecoveryError(
+            "journaled physical Harbor config is unavailable"
+        )
+    physical_digest = hashlib.sha256(physical_config_path.read_bytes()).hexdigest()
+    command[config_positions[0] + 1] = physical_config_path.as_posix()
+    forbidden = {
+        "--plugin",
+        "--pk",
+        "--plugin-kwarg",
+        "--upload",
+    }
+    if any(value in forbidden for value in command):
+        raise ExecutionRecoveryError(
+            "recoverable Harbor commands cannot supply plugins or uploads"
+        )
+    terminal_receipt = physical_parent / "harbor-terminal.json"
+    plugin_kwargs = {
+        "logical_attempt_id": physical.logical_attempt_id,
+        "physical_execution_id": physical.physical_execution_id,
+        "retry_ordinal": str(physical.retry_ordinal),
+        "cell_id": cell.id,
+        "config_path": physical_config_path.as_posix(),
+        "config_sha256": physical_digest,
+        "result_path": physical_result_path.as_posix(),
+        "receipt_path": terminal_receipt.as_posix(),
+    }
+    command.extend(
+        ["--plugin", "fugue.bench.harbor_terminal:DurableHarborTerminalPlugin"]
+    )
+    for key, value in plugin_kwargs.items():
+        command.extend(["--pk", f"{key}={value}"])
+    return replace(
+        cell,
+        config_path=physical_config_path,
+        result_path=physical_result_path,
+        command=tuple(command),
+        config_sha256=physical_digest,
+        env={
+            **cell.env,
+            **agent_environment,
+            "FUGUE_HARBOR_CONFIG": physical_config_path.as_posix(),
+            "FUGUE_JOB_NAME": physical_job_name,
+            "FUGUE_PHYSICAL_HARBOR_JOBS_DIR": physical_jobs_dir.as_posix(),
+            "FUGUE_PHYSICAL_RESULT_PATH": physical_result_path.as_posix(),
+        },
+    )
+
+
+def _rehydrate_physical_harbor_cell(
+    cell: PlannedCell,
+    *,
+    physical: PhysicalExecutionIdentityV1,
+    repo_root: Path,
+) -> PlannedCell:
+    """Read and recompute an existing physical namespace without writing."""
+
+    return _materialize_physical_harbor_cell(
+        cell,
+        physical=physical,
+        repo_root=repo_root,
+        _write_once=False,
+    )
+
+
 def _archive_noncanonical_result(
     *,
     repo_root: Path,
@@ -3139,8 +3580,6 @@ def _archive_noncanonical_result(
     physical: PhysicalExecutionIdentityV1,
 ) -> str | None:
     source = _absolute_path(cell.result_path, repo_root)
-    if not source.is_file():
-        return None
     destination = (
         repo_root
         / ".fugue"
@@ -3150,6 +3589,20 @@ def _archive_noncanonical_result(
         / physical.physical_execution_id
         / source.name
     )
+    if not source.is_file():
+        if not destination.is_file() or destination.is_symlink():
+            return None
+        if not _runner_receipt_binds_archived_result(
+            repo_root=repo_root,
+            cell=cell,
+            physical=physical,
+            source=source,
+            destination=destination,
+        ):
+            raise ExecutionRecoveryError(
+                "existing physical result archive lacks its runner binding"
+            )
+        return _relative_reference(destination, repo_root)
     destination.parent.mkdir(parents=True, exist_ok=True)
     if destination.exists():
         if source.exists():
@@ -3159,6 +3612,43 @@ def _archive_noncanonical_result(
         return _relative_reference(destination, repo_root)
     os.replace(source, destination)
     return _relative_reference(destination, repo_root)
+
+
+def _runner_receipt_binds_archived_result(
+    *,
+    repo_root: Path,
+    cell: PlannedCell,
+    physical: PhysicalExecutionIdentityV1,
+    source: Path,
+    destination: Path,
+) -> bool:
+    receipt_path = destination.parent / "runner-terminal.json"
+    if not receipt_path.is_file() or receipt_path.is_symlink():
+        return False
+    try:
+        receipt = json.loads(receipt_path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return False
+    if not isinstance(receipt, Mapping):
+        return False
+    unsigned = {
+        key: value for key, value in receipt.items() if key != "receipt_digest"
+    }
+    try:
+        source_reference = source.resolve().relative_to(repo_root.resolve()).as_posix()
+    except ValueError:
+        return False
+    return bool(
+        receipt.get("receipt_digest") == stable_digest(unsigned)
+        and receipt.get("logical_attempt_id") == physical.logical_attempt_id
+        and receipt.get("physical_execution_id")
+        == physical.physical_execution_id
+        and receipt.get("retry_ordinal") == physical.retry_ordinal
+        and receipt.get("config_sha256") == cell.config_sha256
+        and receipt.get("result_reference") == source_reference
+        and receipt.get("result_sha256")
+        == hashlib.sha256(destination.read_bytes()).hexdigest()
+    )
 
 
 def _require_fields(raw: Mapping[str, Any], expected: set[str], label: str) -> None:

@@ -16,9 +16,13 @@ from typing import TYPE_CHECKING, Any, Literal
 
 from filelock import FileLock
 
-from fugue.bench.candidates import attempt_id, attempt_identity
+from fugue.bench.candidates import attempt_id, attempt_identity, stable_digest
 from fugue.bench.files import atomic_write_json, latest_jsonl_records
 from fugue.bench.files import terminate_process_group as _terminate_process_group
+from fugue.bench.harbor_outcome import (
+    HARBOR_TERMINAL_CLASSIFIER_DIGEST,
+    classify_harbor_terminal,
+)
 from fugue.bench.sandbox_policy import verify_harbor_job_attestation
 from fugue.redaction import redact_text, secrets_from_env
 
@@ -41,6 +45,7 @@ RuntimeOutcome = Literal[
     "completed",
     "timed_out",
     "cancelled",
+    "interrupted",
     "not_started",
     "not_applicable",
 ]
@@ -216,6 +221,8 @@ class _HarborJobResult:
     error: str | None
     benchmark_outcome: BenchmarkOutcome
     reward: float | None = None
+    terminal_kind: CellTerminalKind | None = None
+    runtime_outcome: RuntimeOutcome | None = None
 
 
 class _CellWallTimeExceeded(RuntimeError):
@@ -554,13 +561,31 @@ def execute_cells(  # noqa: C901 - owns the complete cell lifecycle
             cancellation_requested = bool(
                 cancellation_event is not None and cancellation_event.is_set()
             )
-            if cancellation_requested and (returncode != 0 or trial_error is not None):
-                status: CellStatus = "cancelled"
+            if harbor_result.terminal_kind is not None:
+                terminal_kind = harbor_result.terminal_kind
+                status = (
+                    "passed"
+                    if terminal_kind == "success"
+                    else "cancelled"
+                    if terminal_kind == "cancelled"
+                    else "failed"
+                )
+                runtime_outcome = harbor_result.runtime_outcome or (
+                    "completed" if status != "cancelled" else "cancelled"
+                )
+            elif cancellation_requested and (
+                returncode != 0 or trial_error is not None
+            ):
+                status = "cancelled"
                 trial_error = cancellation_message
+                terminal_kind = "cancelled"
+                runtime_outcome = "cancelled"
             else:
                 status = (
                     "passed" if returncode == 0 and trial_error is None else "failed"
                 )
+                terminal_kind = "success" if status == "passed" else "task_failure"
+                runtime_outcome = "completed"
             outcome = CellOutcome(
                 cell.id,
                 status,
@@ -568,14 +593,8 @@ def execute_cells(  # noqa: C901 - owns the complete cell lifecycle
                 error=trial_error,
                 benchmark_outcome=harbor_result.benchmark_outcome,
                 reward=harbor_result.reward,
-                runtime_outcome=("cancelled" if status == "cancelled" else "completed"),
-                terminal_kind=(
-                    "cancelled"
-                    if status == "cancelled"
-                    else "success"
-                    if status == "passed"
-                    else "task_failure"
-                ),
+                runtime_outcome=runtime_outcome,
+                terminal_kind=terminal_kind,
             )
         except TypedInfrastructureFailure as exc:
             outcome = CellOutcome(
@@ -603,6 +622,25 @@ def execute_cells(  # noqa: C901 - owns the complete cell lifecycle
                 terminal_kind="execution_failure",
             )
         outcome = safe_outcome(outcome)
+        if cell.physical_execution_id:
+            try:
+                _write_physical_runner_terminal_observation(
+                    repo_root=repo_root,
+                    cell=cell,
+                    outcome=outcome,
+                )
+            except Exception as exc:
+                outcome = CellOutcome(
+                    cell.id,
+                    "failed",
+                    error=(
+                        "required physical runner terminal receipt failed: "
+                        f"{type(exc).__name__}: {exc}"
+                    ),
+                    benchmark_outcome="unscored",
+                    runtime_outcome="not_started",
+                    terminal_kind="evidence_failure",
+                )
         ended = datetime.now(UTC)
         if cell_finished is not None:
             try:
@@ -826,9 +864,23 @@ def _harbor_job_result(cell: PlannedCell, repo_root: Path) -> _HarborJobResult:
         return _HarborJobResult(
             f"Harbor did not produce a readable job result: {exc}", "unscored"
         )
+    bound_terminal = _bound_harbor_terminal_result(
+        cell=cell,
+        repo_root=repo_root,
+        raw_job=result,
+    )
+    if bound_terminal is not None:
+        return bound_terminal
     stats = result.get("stats") or {}
     errored = int(stats.get("n_errored_trials") or 0)
     cancelled = int(stats.get("n_cancelled_trials") or 0)
+    if cell.physical_execution_id and errored:
+        return _HarborJobResult(
+            "durable Harbor trial error lacks structured terminal evidence",
+            "unscored",
+            terminal_kind="evidence_failure",
+            runtime_outcome="not_started",
+        )
     if errored:
         return _HarborJobResult(f"{errored} Harbor trial(s) errored", "unscored")
     if cancelled:
@@ -868,6 +920,163 @@ def _harbor_job_result(cell: PlannedCell, repo_root: Path) -> _HarborJobResult:
         "passed" if reward == 1.0 else "failed",
         reward,
     )
+
+
+def _bound_harbor_terminal_result(
+    *,
+    cell: PlannedCell,
+    repo_root: Path,
+    raw_job: Mapping[str, Any],
+) -> _HarborJobResult | None:
+    if not cell.physical_execution_id:
+        return None
+    physical_root = (
+        repo_root
+        / ".fugue"
+        / "runtime"
+        / cell.run_id
+        / "physical-executions"
+        / cell.physical_execution_id
+    ).resolve()
+    receipt_path = physical_root / "harbor-terminal.json"
+    if not receipt_path.is_file() or receipt_path.is_symlink():
+        return None
+    try:
+        receipt = json.loads(receipt_path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return None
+    if not isinstance(receipt, Mapping):
+        return None
+    unsigned = {key: value for key, value in receipt.items() if key != "receipt_digest"}
+    if (
+        receipt.get("receipt_digest") != stable_digest(unsigned)
+        or receipt.get("classifier_digest")
+        != HARBOR_TERMINAL_CLASSIFIER_DIGEST
+        or receipt.get("logical_attempt_id") != cell.attempt_id
+        or receipt.get("physical_execution_id") != cell.physical_execution_id
+        or receipt.get("retry_ordinal") != cell.retry_ordinal
+        or receipt.get("config_sha256") != cell.config_sha256
+        or receipt.get("source_result_path")
+        != _absolute_cell_path(cell.result_path, repo_root).resolve().as_posix()
+    ):
+        return None
+    raw_trial_path = receipt.get("terminal_trial_path")
+    raw_snapshot_path = receipt.get("terminal_result_path")
+    if not isinstance(raw_trial_path, str) or not isinstance(
+        raw_snapshot_path, str
+    ):
+        return None
+    trial_path = Path(raw_trial_path).resolve()
+    snapshot_path = Path(raw_snapshot_path).resolve()
+    try:
+        trial_path.relative_to(physical_root)
+        snapshot_path.relative_to(physical_root)
+    except ValueError:
+        return None
+    result_path = _absolute_cell_path(cell.result_path, repo_root)
+    if any(
+        not candidate.is_file() or candidate.is_symlink()
+        for candidate in (trial_path, snapshot_path, result_path)
+    ):
+        return None
+    if (
+        hashlib.sha256(trial_path.read_bytes()).hexdigest()
+        != receipt.get("terminal_trial_sha256")
+        or hashlib.sha256(snapshot_path.read_bytes()).hexdigest()
+        != receipt.get("terminal_result_sha256")
+    ):
+        return None
+    try:
+        trial = json.loads(trial_path.read_text(encoding="utf-8"))
+        snapshot_job = json.loads(snapshot_path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return None
+    if not isinstance(trial, Mapping) or not isinstance(snapshot_job, Mapping):
+        return None
+    try:
+        snapshot_outcome = classify_harbor_terminal(
+            snapshot_job,
+            cell_id=cell.id,
+            trial=trial,
+        )
+        outcome = classify_harbor_terminal(
+            raw_job,
+            cell_id=cell.id,
+            trial=trial,
+        )
+    except (TypeError, ValueError):
+        return None
+    if receipt.get("cell_outcome") != snapshot_outcome or outcome != snapshot_outcome:
+        return None
+    return _HarborJobResult(
+        error=str(outcome["error"]) if outcome.get("error") is not None else None,
+        benchmark_outcome=str(outcome["benchmark_outcome"]),  # type: ignore[arg-type]
+        reward=(
+            float(outcome["reward"]) if outcome.get("reward") is not None else None
+        ),
+        terminal_kind=str(outcome["terminal_kind"]),  # type: ignore[arg-type]
+        runtime_outcome=str(outcome["runtime_outcome"]),  # type: ignore[arg-type]
+    )
+
+
+def _absolute_cell_path(path: Path, repo_root: Path) -> Path:
+    return path if path.is_absolute() else repo_root / path
+
+
+def _write_physical_runner_terminal_observation(
+    *,
+    repo_root: Path,
+    cell: PlannedCell,
+    outcome: CellOutcome,
+) -> Path:
+    """Persist the runner exit observation before host-only finalization."""
+
+    result_path = cell.result_path
+    if not result_path.is_absolute():
+        result_path = repo_root / result_path
+    result_reference = None
+    result_sha256 = None
+    if result_path.is_file() and not result_path.is_symlink():
+        result_reference = result_path.resolve().relative_to(
+            repo_root.resolve()
+        ).as_posix()
+        result_sha256 = hashlib.sha256(result_path.read_bytes()).hexdigest()
+    unsigned = {
+        "schema_version": 1,
+        "logical_attempt_id": cell.attempt_id,
+        "physical_execution_id": cell.physical_execution_id,
+        "retry_ordinal": cell.retry_ordinal,
+        "config_sha256": cell.config_sha256,
+        "result_reference": result_reference,
+        "result_sha256": result_sha256,
+        "cell_outcome": {
+            "cell_id": outcome.cell_id,
+            "status": outcome.status,
+            "returncode": outcome.returncode,
+            "error": outcome.error,
+            "benchmark_outcome": outcome.benchmark_outcome,
+            "reward": outcome.reward,
+            "runtime_outcome": outcome.runtime_outcome,
+            "terminal_kind": outcome.terminal_kind,
+        },
+    }
+    payload = {**unsigned, "receipt_digest": stable_digest(unsigned)}
+    path = (
+        repo_root
+        / ".fugue"
+        / "runtime"
+        / cell.run_id
+        / "physical-executions"
+        / cell.physical_execution_id
+        / "runner-terminal.json"
+    )
+    if path.is_file():
+        existing = json.loads(path.read_text(encoding="utf-8"))
+        if existing != payload:
+            raise RuntimeError("physical runner terminal receipt changed")
+    else:
+        atomic_write_json(path, payload)
+    return path
 
 
 def update_run_manifest(

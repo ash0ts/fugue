@@ -5,6 +5,7 @@ import json
 import threading
 import time
 from concurrent.futures import ThreadPoolExecutor
+from dataclasses import replace
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -17,9 +18,11 @@ from fugue.bench.execution import (
     TypedInfrastructureFailure,
 )
 from fugue.bench.execution_recovery import (
+    AdmittedWaveLifecycle,
     CanonicalizationObservationV1,
     CleanupObservationV1,
     CostObservationV1,
+    ExecutionFinalizationPending,
     ExecutionJournalCorrupt,
     ExecutionRecoveryAdapters,
     ExecutionRecoveryController,
@@ -707,6 +710,347 @@ def test_recovery_wrapper_uses_canonical_cell_executor_and_resumes_retry(
     assert set(seen).issubset(
         {str(record.get("physical_execution_id")) for record in run_records}
     )
+
+
+def test_harbor_replacement_uses_a_fresh_physical_agent_namespace(
+    tmp_path: Path,
+) -> None:
+    logical = _cell(tmp_path, 0, run_id="harbor-physical-namespace")
+    logical_config = tmp_path / "logical-harbor-config.json"
+    logical_payload = {
+        "job_name": "logical-security-job",
+        "jobs_dir": (tmp_path / "logical-jobs").as_posix(),
+        "agents": [{"name": "claude-code", "env": {"LOCKED": "yes"}}],
+        "fugue": {
+            "run_id": logical.run_id,
+            "candidate_id": logical.candidate_id,
+            "execution_fingerprint": logical.execution_fingerprint,
+        },
+    }
+    logical_config.write_text(
+        json.dumps(logical_payload, sort_keys=True) + "\n",
+        encoding="utf-8",
+    )
+    logical = replace(
+        logical,
+        config_path=logical_config,
+        config_sha256=hashlib.sha256(logical_config.read_bytes()).hexdigest(),
+        command=("harbor", "run", "--config", logical_config.as_posix()),
+        env={"FUGUE_ATTEMPT_ID": logical.attempt_id},
+    )
+    plan = LogicalExecutionPlanV1.create(
+        logical_attempt_id=logical.attempt_id,
+        stage_id="checkpoint",
+        stage_ordinal=0,
+        admission_block_id="checkpoint",
+        block_ordinal=0,
+        attempt_ordinal=0,
+        admission_weight=1,
+        maximum_cost_micro_usd=500_000,
+    )
+    schedule = _schedule(
+        [plan], replacements=1, total=1_000_000, in_flight=500_000
+    )
+    controller = ExecutionRecoveryController(
+        tmp_path / "events.jsonl",
+        controller_id="harbor-physical-namespace",
+        schedule=schedule,
+    )
+    executions: list[dict[str, object]] = []
+
+    def runner(
+        command: list[str], *, env: dict[str, str], **_kwargs: object
+    ) -> object:
+        config_path = Path(command[command.index("--config") + 1])
+        config = json.loads(config_path.read_text(encoding="utf-8"))
+        namespace = config["fugue"]["physical_execution"]
+        state_root = Path(config["jobs_dir"]) / config["job_name"] / "agent-state"
+        stale_marker = state_root / "sessions/plugin-cache/prior-physical-session"
+        executions.append(
+            {
+                "config_path": config_path,
+                "job_name": config["job_name"],
+                "jobs_dir": Path(config["jobs_dir"]),
+                "physical_id": env["FUGUE_PHYSICAL_EXECUTION_ID"],
+                "logical_id": env["FUGUE_LOGICAL_ATTEMPT_ID"],
+                "attempt_id": env["FUGUE_ATTEMPT_ID"],
+                "namespace": namespace["namespace_digest"],
+                "agent_namespace": config["agents"][0]["env"][
+                    "FUGUE_PHYSICAL_AGENT_STATE_NAMESPACE"
+                ],
+                "saw_stale_state": stale_marker.exists(),
+            }
+        )
+        if len(executions) == 1:
+            stale_marker.parent.mkdir(parents=True)
+            stale_marker.write_text("must not be reused", encoding="utf-8")
+            raise TypedInfrastructureFailure("sandbox_lost", "simulated crash")
+        return SimpleNamespace(returncode=0)
+
+    outcomes = execute_recoverable_cells(
+        controller,
+        [logical],
+        stage_authorization=_authorization(schedule),
+        adapters=_adapters(),
+        repo_root=tmp_path,
+        runner=runner,
+    )
+
+    assert [item.status for item in outcomes] == ["passed"]
+    assert len(executions) == 2
+    first, replacement_execution = executions
+    assert first["config_path"] != replacement_execution["config_path"]
+    assert first["job_name"] != replacement_execution["job_name"]
+    assert first["jobs_dir"] != replacement_execution["jobs_dir"]
+    assert first["physical_id"] != replacement_execution["physical_id"]
+    assert first["namespace"] != replacement_execution["namespace"]
+    assert first["agent_namespace"] == first["namespace"]
+    assert replacement_execution["agent_namespace"] == replacement_execution[
+        "namespace"
+    ]
+    assert first["logical_id"] == replacement_execution["logical_id"]
+    assert first["attempt_id"] == replacement_execution["attempt_id"]
+    assert replacement_execution["saw_stale_state"] is False
+    assert controller.snapshot().canonical_results == {
+        logical.attempt_id: replacement_execution["physical_id"]
+    }
+
+
+def test_wave_finalization_precedes_canonical_selection(tmp_path: Path) -> None:
+    cell = _cell(tmp_path, 0, run_id="wave-lifecycle")
+    plan = LogicalExecutionPlanV1.create(
+        logical_attempt_id=cell.attempt_id,
+        stage_id="checkpoint",
+        stage_ordinal=0,
+        admission_block_id="checkpoint",
+        block_ordinal=0,
+        attempt_ordinal=0,
+        admission_weight=1,
+        maximum_cost_micro_usd=500_000,
+    )
+    schedule = _schedule([plan], replacements=0, total=500_000, in_flight=500_000)
+    controller = ExecutionRecoveryController(
+        tmp_path / "events.jsonl", controller_id="wave-lifecycle", schedule=schedule
+    )
+    order: list[str] = []
+    finalized = tmp_path / "local-evidence-finalized"
+
+    def factory(admitted: tuple[PlannedCell, ...]) -> AdmittedWaveLifecycle:
+        physical_id = admitted[0].physical_execution_id
+        assert physical_id in controller.snapshot().physical_executions
+
+        def begin(_cell: PlannedCell) -> dict[str, str]:
+            order.append("begin")
+            return {"LOCAL_EVIDENCE_OPEN": physical_id}
+
+        def finish(_cell: PlannedCell, _outcome: CellOutcome) -> None:
+            order.append("finish")
+
+        def finalize(_outcomes: tuple[CellOutcome, ...]) -> None:
+            order.append("finalize")
+            finalized.write_text(physical_id, encoding="utf-8")
+
+        return AdmittedWaveLifecycle(
+            begin_cell=begin, finish_cell=finish, finalize=finalize
+        )
+
+    def canonical(
+        _cell: PlannedCell, physical: object, _outcome: CellOutcome
+    ) -> CanonicalizationObservationV1:
+        assert finalized.read_text(encoding="utf-8") == physical.physical_execution_id
+        assert controller.snapshot().canonical_results == {}
+        order.append("canonical")
+        return _canonical(physical)
+
+    def runner(*_args: object, env: dict[str, str], **_kwargs: object) -> object:
+        assert env["LOCAL_EVIDENCE_OPEN"] == env["FUGUE_PHYSICAL_EXECUTION_ID"]
+        order.append("agent")
+        return SimpleNamespace(returncode=0)
+
+    outcomes = execute_recoverable_cells(
+        controller,
+        [cell],
+        stage_authorization=_authorization(schedule),
+        adapters=_adapters(canonicalization_verifier=canonical),
+        repo_root=tmp_path,
+        runner=runner,
+        wave_lifecycle_factory=factory,
+    )
+
+    assert [item.status for item in outcomes] == ["passed"]
+    assert order == ["begin", "agent", "finish", "finalize", "canonical"]
+
+
+def test_pending_host_finalization_resumes_without_agent_spend(tmp_path: Path) -> None:
+    cell = _cell(tmp_path, 0, run_id="pending-finalization")
+    plan = LogicalExecutionPlanV1.create(
+        logical_attempt_id=cell.attempt_id,
+        stage_id="checkpoint",
+        stage_ordinal=0,
+        admission_block_id="checkpoint",
+        block_ordinal=0,
+        attempt_ordinal=0,
+        admission_weight=1,
+        maximum_cost_micro_usd=500_000,
+    )
+    schedule = _schedule([plan], replacements=0, total=500_000, in_flight=500_000)
+    journal = tmp_path / "events.jsonl"
+    controller = ExecutionRecoveryController(
+        journal, controller_id="pending-finalization", schedule=schedule
+    )
+    runner_calls = 0
+
+    def runner(*_args: object, **_kwargs: object) -> object:
+        nonlocal runner_calls
+        runner_calls += 1
+        return SimpleNamespace(returncode=0)
+
+    def pending_factory(_cells: tuple[PlannedCell, ...]) -> AdmittedWaveLifecycle:
+        def finalize(_outcomes: tuple[CellOutcome, ...]) -> None:
+            raise ExecutionFinalizationPending("publication API is temporarily down")
+
+        return AdmittedWaveLifecycle(finalize=finalize)
+
+    with pytest.raises(ExecutionFinalizationPending, match="temporarily down"):
+        execute_recoverable_cells(
+            controller,
+            [cell],
+            stage_authorization=_authorization(schedule),
+            adapters=_adapters(),
+            repo_root=tmp_path,
+            runner=runner,
+            wave_lifecycle_factory=pending_factory,
+        )
+
+    interrupted = controller.snapshot()
+    assert runner_calls == 1
+    assert interrupted.canonical_results == {}
+    assert not interrupted.active_physical_execution_ids
+    assert not interrupted.fatal_reasons
+
+    finalization_calls = 0
+
+    def recovery_factory(_cells: tuple[PlannedCell, ...]) -> AdmittedWaveLifecycle:
+        def finalize(_outcomes: tuple[CellOutcome, ...]) -> None:
+            nonlocal finalization_calls
+            finalization_calls += 1
+
+        return AdmittedWaveLifecycle(finalize=finalize)
+
+    outcomes = execute_recoverable_cells(
+        ExecutionRecoveryController(
+            journal, controller_id="pending-finalization", schedule=schedule
+        ),
+        [cell],
+        stage_authorization=_authorization(schedule),
+        adapters=_adapters(),
+        repo_root=tmp_path,
+        runner=runner,
+        wave_lifecycle_factory=recovery_factory,
+    )
+
+    assert runner_calls == 1
+    assert finalization_calls == 1
+    assert [item.status for item in outcomes] == ["passed"]
+
+
+def test_generic_finalization_error_is_fatal_integrity_failure(
+    tmp_path: Path,
+) -> None:
+    cell = _cell(tmp_path, 0, run_id="fatal-finalization")
+    plan = LogicalExecutionPlanV1.create(
+        logical_attempt_id=cell.attempt_id,
+        stage_id="checkpoint",
+        stage_ordinal=0,
+        admission_block_id="checkpoint",
+        block_ordinal=0,
+        attempt_ordinal=0,
+        admission_weight=1,
+        maximum_cost_micro_usd=500_000,
+    )
+    schedule = _schedule([plan], replacements=0, total=500_000, in_flight=500_000)
+    controller = ExecutionRecoveryController(
+        tmp_path / "events.jsonl",
+        controller_id="fatal-finalization",
+        schedule=schedule,
+    )
+
+    def factory(_cells: tuple[PlannedCell, ...]) -> AdmittedWaveLifecycle:
+        def finalize(_outcomes: tuple[CellOutcome, ...]) -> None:
+            raise RuntimeError("result identity mismatch")
+
+        return AdmittedWaveLifecycle(finalize=finalize)
+
+    with pytest.raises(ExecutionRecoveryError, match="fatal integrity gate"):
+        execute_recoverable_cells(
+            controller,
+            [cell],
+            stage_authorization=_authorization(schedule),
+            adapters=_adapters(),
+            repo_root=tmp_path,
+            runner=lambda *_args, **_kwargs: SimpleNamespace(returncode=0),
+            wave_lifecycle_factory=factory,
+        )
+
+    snapshot = controller.snapshot()
+    assert snapshot.canonical_results == {}
+    assert "result identity mismatch" in snapshot.fatal_reasons[-1]
+
+
+def test_recoverable_execution_cannot_cross_run_or_destination_boundaries(
+    tmp_path: Path,
+) -> None:
+    first = _cell(tmp_path, 0, run_id="run-a")
+    second = _cell(tmp_path, 1, run_id="run-b")
+    plans = [
+        LogicalExecutionPlanV1.create(
+            logical_attempt_id=cell.attempt_id,
+            stage_id="checkpoint",
+            stage_ordinal=0,
+            admission_block_id="same-block",
+            block_ordinal=0,
+            attempt_ordinal=index,
+            admission_weight=1,
+            maximum_cost_micro_usd=500_000,
+        )
+        for index, cell in enumerate((first, second))
+    ]
+    schedule = _schedule(
+        plans, capacity=2, replacements=0, total=1_000_000, in_flight=1_000_000
+    )
+
+    with pytest.raises(ValueError, match="share one canonical run id"):
+        execute_recoverable_cells(
+            ExecutionRecoveryController(
+                tmp_path / "run-boundary.jsonl",
+                controller_id="run-boundary",
+                schedule=schedule,
+            ),
+            [first, second],
+            stage_authorization=_authorization(schedule),
+            adapters=_adapters(),
+            repo_root=tmp_path,
+            runner=lambda *_args, **_kwargs: SimpleNamespace(returncode=0),
+        )
+
+    same_run = replace(second, run_id=first.run_id)
+    routed = [
+        replace(first, env={"FUGUE_RESULT_EVIDENCE_PROJECT": "entity/project-a"}),
+        replace(same_run, env={"FUGUE_RESULT_EVIDENCE_PROJECT": "entity/project-b"}),
+    ]
+    with pytest.raises(ValueError, match="crosses evidence destinations"):
+        execute_recoverable_cells(
+            ExecutionRecoveryController(
+                tmp_path / "destination-boundary.jsonl",
+                controller_id="destination-boundary",
+                schedule=schedule,
+            ),
+            routed,
+            stage_authorization=_authorization(schedule),
+            adapters=_adapters(),
+            repo_root=tmp_path,
+            runner=lambda *_args, **_kwargs: SimpleNamespace(returncode=0),
+        )
 
 
 def test_recovery_wrapper_runs_required_local_evaluator_once(tmp_path: Path) -> None:

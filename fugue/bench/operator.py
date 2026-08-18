@@ -27,6 +27,11 @@ from fugue.bench.candidates import (
     resolve_candidate,
     stable_digest,
 )
+from fugue.bench.comparison_execution import (
+    execute_durable_comparison_cells,
+    execution_binding_from_approved,
+    recovery_journal_path,
+)
 from fugue.bench.context import (
     CONTEXT_MANIFEST,
     DEFAULT_CACHE_ROOT,
@@ -50,6 +55,7 @@ from fugue.bench.evaluation_assets import (
 )
 from fugue.bench.evaluations import evaluation_asset_path, load_cases, load_rubric
 from fugue.bench.execution import (
+    CellOutcome,
     PlannedCell,
     execute_cells,
     latest_cell_records,
@@ -59,6 +65,13 @@ from fugue.bench.execution import (
     read_run_manifest,
     update_run_manifest,
     write_run_manifest,
+)
+from fugue.bench.execution_recovery import (
+    ExecutionFinalizationPending,
+    ExecutionRecoveryController,
+    ExecutionRecoveryPaused,
+    PhysicalExecutionIdentityV1,
+    _rehydrate_physical_harbor_cell,
 )
 from fugue.bench.export import (
     GeneratedEvaluationCoordinator,
@@ -86,7 +99,10 @@ from fugue.bench.library import (
     scorer_reference,
     validate_id,
 )
-from fugue.bench.local_evidence import LocalEvidenceDestinationV1
+from fugue.bench.local_evidence import (
+    LocalEvidenceDestinationV1,
+    LocalEvidenceStore,
+)
 from fugue.bench.manifest import (
     BenchmarkManifest,
     FixtureRepositorySpec,
@@ -96,8 +112,14 @@ from fugue.bench.manifest import (
 from fugue.bench.portable_runtime import prepare_runtime as prepare_portable_runtime
 from fugue.bench.portable_runtime import runtime_ready as portable_runtime_ready
 from fugue.bench.reproducibility import (
+    EVALUATION_ASSET_LOCK_NAME,
+    INPUT_LOCK_NAME,
+    EvaluationAssetLockV1,
+    RunSnapshotV1,
     build_evaluation_asset_lock,
     build_run_snapshot,
+    read_evaluation_asset_lock,
+    verify_snapshot,
     write_evaluation_asset_lock,
     write_run_input_lock,
 )
@@ -163,6 +185,7 @@ from fugue.model_plane import (
     trace_project_environment,
     trace_project_slug,
 )
+from fugue.redaction import secrets_from_env
 from fugue.weave_support import trace_async_operation
 
 if TYPE_CHECKING:
@@ -273,6 +296,55 @@ class _EvidenceCoordinators:
             else:
                 # Backward-compatible injected coordinator seam.
                 self.hosted.finish_cell(cell, outcome)
+
+    def restore_finished_cell(self, cell: PlannedCell, outcome: Any) -> None:
+        """Repair host-only finalization without re-running Agent or judge."""
+
+        canonical_row = self.local.restore_finished_cell(cell)
+        if self.hosted is None:
+            return
+        self.hosted.finish_cell(cell, outcome, canonical_row=canonical_row)
+        matches: list[dict[str, Any]] = []
+        if self.hosted.results_path.is_file():
+            for line in self.hosted.results_path.read_text(
+                encoding="utf-8"
+            ).splitlines():
+                if not line.strip():
+                    continue
+                value = json.loads(line)
+                if (
+                    isinstance(value, dict)
+                    and value.get("attempt_id") == cell.attempt_id
+                ):
+                    matches.append(value)
+        if not matches:
+            raise ExecutionFinalizationPending(
+                "hosted evidence finalization is incomplete; Agent work was "
+                "preserved and will not be rerun"
+            )
+        for row in matches:
+            for key, expected in (
+                ("attempt_id", cell.attempt_id),
+                ("candidate_id", cell.candidate_id),
+                ("execution_fingerprint", cell.execution_fingerprint),
+            ):
+                if row.get(key) != expected:
+                    raise RuntimeError(
+                        f"restored hosted evidence disagrees on {key}"
+                    )
+
+    def invalidate_cell(self, cell: PlannedCell, outcome: Any) -> None:
+        """Retain one logical hosted prediction across physical retries."""
+
+        if self.hosted is not None:
+            self.hosted.invalidate_physical_execution(
+                cell,
+                reason=str(
+                    getattr(outcome, "error", None)
+                    or getattr(outcome, "terminal_kind", None)
+                    or "infrastructure retry"
+                ),
+            )
 
 
 @dataclass(frozen=True)
@@ -953,6 +1025,163 @@ class OperatorService:
                 "materialized run coordinates differ from the resolved plan"
             )
         return replace(plan, jobs=jobs, cells=cells)
+
+    def _restore_run_plan_for_resume(  # noqa: C901 - fail-closed lock audit
+        self,
+        plan: ResolvedRunPlan,
+        *,
+        run_id: str,
+        execution_env: Mapping[str, str],
+    ) -> tuple[ResolvedRunPlan, RunSnapshotV1, EvaluationAssetLockV1]:
+        """Rehydrate an immutable run without rewriting any accepted input."""
+
+        run_dir = self.repo_root / ".fugue" / "runtime" / run_id
+        experiment_path = run_dir / "experiment.yaml"
+        input_lock_path = run_dir / INPUT_LOCK_NAME
+        evaluation_lock_path = run_dir / EVALUATION_ASSET_LOCK_NAME
+        for path, label in (
+            (experiment_path, "experiment snapshot"),
+            (input_lock_path, "run input lock"),
+            (evaluation_lock_path, "evaluation asset lock"),
+        ):
+            if not path.is_file() or path.is_symlink():
+                raise ValueError(f"resume requires an immutable {label}: {path}")
+        if experiment_path.read_text(encoding="utf-8") != experiment_to_yaml(
+            plan.experiment
+        ):
+            raise ValueError("resume experiment snapshot changed")
+        try:
+            stored_snapshot = json.loads(
+                input_lock_path.read_text(encoding="utf-8")
+            )
+        except json.JSONDecodeError as exc:
+            raise ValueError("resume run input lock is invalid JSON") from exc
+        if not isinstance(stored_snapshot, dict) or not verify_snapshot(
+            stored_snapshot
+        ):
+            raise ValueError("resume run input lock digest does not match")
+        if str(stored_snapshot.get("run_id") or "") != run_id:
+            raise ValueError("resume run input lock belongs to another run")
+        planned_rows = stored_snapshot.get("planned_matrix")
+        if not isinstance(planned_rows, list) or any(
+            not isinstance(item, Mapping) for item in planned_rows
+        ):
+            raise ValueError("resume run input lock has no planned matrix")
+        stored_by_attempt = {
+            str(item.get("attempt_id") or ""): dict(item)
+            for item in planned_rows
+        }
+        if (
+            len(stored_by_attempt) != len(planned_rows)
+            or "" in stored_by_attempt
+        ):
+            raise ValueError("resume planned matrix has duplicate attempts")
+        preview_cells = {cell.attempt_id: cell for cell in plan.cells}
+        if set(preview_cells) != set(stored_by_attempt):
+            raise ValueError("resume plan does not match the immutable attempt set")
+        jobs_by_config = {
+            job.config_path.resolve(): job for job in plan.jobs
+        }
+        hydrated_jobs: list[RenderedJob] = []
+        for attempt, preview_cell in preview_cells.items():
+            stored = stored_by_attempt[attempt]
+            stored_config = Path(str(stored.get("config_path") or ""))
+            if not stored_config.is_absolute():
+                stored_config = self.repo_root / stored_config
+            expected_config = preview_cell.config_path.resolve()
+            if stored_config.resolve() != expected_config:
+                raise ValueError("resume Harbor config path changed")
+            base_job = jobs_by_config.get(expected_config)
+            if base_job is None:
+                raise ValueError("resume attempt has no resolved Harbor job")
+            if not expected_config.is_file() or expected_config.is_symlink():
+                raise ValueError("resume Harbor config is unavailable")
+            raw_bytes = expected_config.read_bytes()
+            if hashlib.sha256(raw_bytes).hexdigest() != str(
+                stored.get("config_sha256") or ""
+            ):
+                raise ValueError("resume Harbor config digest changed")
+            try:
+                config = json.loads(raw_bytes)
+            except json.JSONDecodeError as exc:
+                raise ValueError("resume Harbor config is invalid JSON") from exc
+            if not isinstance(config, dict):
+                raise ValueError("resume Harbor config must be an object")
+            hydrated_jobs.append(replace(base_job, config=config))
+        cells = tuple(
+            plan_cells(
+                hydrated_jobs,
+                run_id=run_id,
+                run_name=plan.run_name,
+                scheduling_seed=plan.preset.scheduling_seed,
+                verify_inputs=True,
+                approved_comparison=plan.request.approved_comparison,
+            )
+        )
+        _validate_approved_comparison_plan(
+            plan.request.approved_comparison, cells
+        )
+        evaluation_assets = read_evaluation_asset_lock(evaluation_lock_path)
+        if evaluation_assets.run_id != run_id:
+            raise ValueError("resume evaluation asset lock belongs to another run")
+        if evaluation_assets.lock_sha256 != str(
+            stored_snapshot.get("evaluation_asset_lock_sha256") or ""
+        ):
+            raise ValueError("resume evaluation asset lock changed")
+        cells = tuple(
+            replace(
+                cell,
+                evaluation_asset_lock_sha256=evaluation_assets.lock_sha256,
+            )
+            for cell in cells
+        )
+        hydrated = replace(
+            plan,
+            jobs=tuple(hydrated_jobs),
+            cells=cells,
+        )
+        bridge_runtime = _resolved_bridge_runtime(
+            list(hydrated.jobs),
+            request=hydrated.request,
+            experiment=hydrated.experiment,
+            repo_root=self.repo_root,
+            env=execution_env,
+        )
+        selection_kind, selection_sha = _selection_lock_identity(
+            hydrated.request.selection_lock, self.repo_root
+        )
+        recomputed = build_run_snapshot(
+            repo_root=self.repo_root,
+            run_id=run_id,
+            experiment=hydrated.experiment,
+            request=asdict(hydrated.request),
+            jobs=list(hydrated.jobs),
+            cells=list(cells),
+            env=execution_env,
+            bridge_runtime=bridge_runtime,
+            evaluation_asset_lock_sha256=evaluation_assets.lock_sha256,
+            selection_lock_sha256=selection_sha,
+            treatment_selection_sha256=(
+                selection_sha if selection_kind == "treatment" else ""
+            ),
+            intervention_selection_sha256=(
+                selection_sha if selection_kind == "intervention" else ""
+            ),
+        )
+        if recomputed.to_dict() != stored_snapshot:
+            raise ValueError("resume run snapshot no longer matches exact inputs")
+        source = recomputed.runtime.get("fugue_source") or {}
+        cells = tuple(
+            replace(
+                cell,
+                run_snapshot_sha256=recomputed.snapshot_sha256,
+                source_commit=str(source.get("commit") or ""),
+                source_tree=str(source.get("tree") or ""),
+                source_dirty_digest=str(source.get("dirty_digest") or ""),
+            )
+            for cell in cells
+        )
+        return replace(hydrated, cells=cells), recomputed, evaluation_assets
 
     def prepare_context(
         self,
@@ -2075,7 +2304,7 @@ class OperatorService:
 
         return await ExperimentAnalyst(self).execute(preview, model=model)
 
-    def execute_run(
+    def execute_run(  # noqa: C901 - owns the full run transaction
         self,
         request: ExperimentRequest,
         *,
@@ -2084,11 +2313,26 @@ class OperatorService:
         cell_runner: Any = None,
         cancellation_event: threading.Event | None = None,
         host_evaluator: Callable[[dict[str, Any]], None] | None = None,
+        comparison_wave_finalizer: (
+            Callable[[tuple[CellOutcome, ...]], None] | None
+        ) = None,
         host_scorer_names: tuple[str, ...] = (),
+        resume: bool = False,
     ) -> RunSummary:
         """Own the complete snapshot-before-execution run transaction."""
+        run_id = validate_id(run_id, kind="run id")
         run_dir = self.repo_root / ".fugue" / "runtime" / run_id
-        run_dir.mkdir(parents=True, exist_ok=True)
+        if resume:
+            if not run_dir.is_dir():
+                raise ValueError(f"resume run does not exist: {run_id}")
+            if read_run_manifest(run_dir) is None:
+                raise ValueError(f"resume run has no durable manifest: {run_id}")
+        else:
+            if run_dir.exists() and any(run_dir.iterdir()):
+                raise ValueError(
+                    f"run id already has durable state; use --resume {run_id}"
+                )
+            run_dir.mkdir(parents=True, exist_ok=True)
         cancel_event = cancellation_event or threading.Event()
         restore_sigterm = _install_worker_sigterm_handler(cancel_event)
         existing_manifest = read_run_manifest(run_dir) or {}
@@ -2097,17 +2341,18 @@ class OperatorService:
             if isinstance(existing_manifest.get("pid"), int)
             else {"pid": os.getpid(), "detached": False}
         )
-        write_run_manifest(
-            self.repo_root,
-            run_id,
-            {
-                "status": "starting",
-                "run_name": request.run_name or request.experiment_id,
-                "experiment_id": request.experiment_id,
-                "trace_content": request.trace_content,
-                **foreground_identity,
-            },
-        )
+        if not resume:
+            write_run_manifest(
+                self.repo_root,
+                run_id,
+                {
+                    "status": "starting",
+                    "run_name": request.run_name or request.experiment_id,
+                    "experiment_id": request.experiment_id,
+                    "trace_content": request.trace_content,
+                    **foreground_identity,
+                },
+            )
         running = False
         live: LiveEvaluationCoordinator | None = None
         local: GeneratedEvaluationCoordinator | None = None
@@ -2121,18 +2366,111 @@ class OperatorService:
             )
             request = plan.request
             resolved = plan.experiment
-            snapshot_path = run_dir / "experiment.yaml"
-            temporary = snapshot_path.with_name(
-                f".{snapshot_path.name}.{os.getpid()}.tmp"
-            )
-            temporary.write_text(experiment_to_yaml(resolved), encoding="utf-8")
-            os.replace(temporary, snapshot_path)
-            plan = self._materialize_run_plan(plan, run_id=run_id)
-            rendered = list(plan.jobs)
+            if resume and not (
+                request.approved_comparison
+                and request.approved_comparison.get("execution_schedule")
+            ):
+                raise ValueError(
+                    "resume requires an approved comparison with a bound "
+                    "execution schedule"
+                )
             execution_env = _experiment_evidence_environment(
                 resolved,
                 self.env,
             )
+            if resume:
+                plan, run_snapshot, evaluation_assets = (
+                    self._restore_run_plan_for_resume(
+                        plan,
+                        run_id=run_id,
+                        execution_env=execution_env,
+                    )
+                )
+                write_run_manifest(
+                    self.repo_root,
+                    run_id,
+                    {
+                        "status": "resuming",
+                        "resumed_at": _now(),
+                        **foreground_identity,
+                    },
+                )
+            else:
+                snapshot_path = run_dir / "experiment.yaml"
+                temporary = snapshot_path.with_name(
+                    f".{snapshot_path.name}.{os.getpid()}.tmp"
+                )
+                temporary.write_text(
+                    experiment_to_yaml(resolved), encoding="utf-8"
+                )
+                os.replace(temporary, snapshot_path)
+                plan = self._materialize_run_plan(plan, run_id=run_id)
+                initial_cells = list(plan.cells)
+                bridge_runtime = _resolved_bridge_runtime(
+                    list(plan.jobs),
+                    request=request,
+                    experiment=resolved,
+                    repo_root=self.repo_root,
+                    env=execution_env,
+                )
+                evaluation_assets = build_evaluation_asset_lock(
+                    run_id, initial_cells
+                )
+                write_evaluation_asset_lock(self.repo_root, evaluation_assets)
+                initial_cells = [
+                    replace(
+                        cell,
+                        evaluation_asset_lock_sha256=(
+                            evaluation_assets.lock_sha256
+                        ),
+                    )
+                    for cell in initial_cells
+                ]
+                selection_lock_kind, selection_lock_sha256 = (
+                    _selection_lock_identity(
+                        request.selection_lock, self.repo_root
+                    )
+                )
+                run_snapshot = build_run_snapshot(
+                    repo_root=self.repo_root,
+                    run_id=run_id,
+                    experiment=resolved,
+                    request=asdict(request),
+                    jobs=list(plan.jobs),
+                    cells=initial_cells,
+                    env=execution_env,
+                    bridge_runtime=bridge_runtime,
+                    evaluation_asset_lock_sha256=(
+                        evaluation_assets.lock_sha256
+                    ),
+                    selection_lock_sha256=selection_lock_sha256,
+                    treatment_selection_sha256=(
+                        selection_lock_sha256
+                        if selection_lock_kind == "treatment"
+                        else ""
+                    ),
+                    intervention_selection_sha256=(
+                        selection_lock_sha256
+                        if selection_lock_kind == "intervention"
+                        else ""
+                    ),
+                )
+                source_state = run_snapshot.runtime.get("fugue_source") or {}
+                initial_cells = [
+                    replace(
+                        cell,
+                        run_snapshot_sha256=run_snapshot.snapshot_sha256,
+                        source_commit=str(source_state.get("commit") or ""),
+                        source_tree=str(source_state.get("tree") or ""),
+                        source_dirty_digest=str(
+                            source_state.get("dirty_digest") or ""
+                        ),
+                    )
+                    for cell in initial_cells
+                ]
+                plan = replace(plan, cells=tuple(initial_cells))
+                write_run_input_lock(self.repo_root, run_snapshot)
+            rendered = list(plan.jobs)
             _verify_rendered_setup(rendered)
             validate_harbor_job_configs(
                 [
@@ -2145,62 +2483,6 @@ class OperatorService:
             selected_preset = plan.preset
             max_workers = plan.max_workers
             cells = list(plan.cells)
-            bridge_runtime = _resolved_bridge_runtime(
-                rendered,
-                request=request,
-                experiment=resolved,
-                repo_root=self.repo_root,
-                env=execution_env,
-            )
-            evaluation_assets = build_evaluation_asset_lock(run_id, cells)
-            write_evaluation_asset_lock(self.repo_root, evaluation_assets)
-            cells = [
-                replace(
-                    cell,
-                    evaluation_asset_lock_sha256=evaluation_assets.lock_sha256,
-                )
-                for cell in cells
-            ]
-            selection_lock_kind, selection_lock_sha256 = _selection_lock_identity(
-                request.selection_lock, self.repo_root
-            )
-            run_snapshot = build_run_snapshot(
-                repo_root=self.repo_root,
-                run_id=run_id,
-                experiment=resolved,
-                request=asdict(request),
-                jobs=rendered,
-                cells=cells,
-                env=execution_env,
-                bridge_runtime=bridge_runtime,
-                evaluation_asset_lock_sha256=evaluation_assets.lock_sha256,
-                selection_lock_sha256=selection_lock_sha256,
-                treatment_selection_sha256=(
-                    selection_lock_sha256
-                    if selection_lock_kind == "treatment"
-                    else ""
-                ),
-                intervention_selection_sha256=(
-                    selection_lock_sha256
-                    if selection_lock_kind == "intervention"
-                    else ""
-                ),
-            )
-            source_state = run_snapshot.runtime.get("fugue_source") or {}
-            source_commit = str(source_state.get("commit") or "")
-            source_tree = str(source_state.get("tree") or "")
-            source_dirty_digest = str(source_state.get("dirty_digest") or "")
-            cells = [
-                replace(
-                    cell,
-                    run_snapshot_sha256=run_snapshot.snapshot_sha256,
-                    source_commit=source_commit,
-                    source_tree=source_tree,
-                    source_dirty_digest=source_dirty_digest,
-                )
-                for cell in cells
-            ]
-            write_run_input_lock(self.repo_root, run_snapshot)
             if cancel_event.is_set():
                 raise _RunCancellation
             job_dirs = sorted(
@@ -2222,7 +2504,8 @@ class OperatorService:
                 run_id,
                 {
                     "status": "running",
-                    "started_at": _now(),
+                    "started_at": existing_manifest.get("started_at") or _now(),
+                    **({"resumed_at": _now()} if resume else {}),
                     "run_name": run_name,
                     "experiment_id": resolved.id,
                     "trace_project": _evidence_project_for_mode(
@@ -2266,7 +2549,15 @@ class OperatorService:
                 if request.approved_comparison
                 else resolved.evidence_checkpoint_cells
             )
-            if evidence_checkpoint_cells and max_workers != 1:
+            durable_comparison = bool(
+                request.approved_comparison
+                and request.approved_comparison.get("execution_schedule")
+            )
+            if (
+                evidence_checkpoint_cells
+                and max_workers != 1
+                and not durable_comparison
+            ):
                 raise RuntimeError(
                     "evidence-checkpoint comparisons require cell concurrency 1"
                 )
@@ -2282,9 +2573,24 @@ class OperatorService:
             rendered_by_config = {
                 Path(job.config_path).resolve(): job for job in rendered
             }
+            rendered_by_attempt = {
+                cell.attempt_id: rendered_by_config[
+                    Path(cell.config_path).resolve()
+                ]
+                for cell in cells
+                if Path(cell.config_path).resolve() in rendered_by_config
+            }
 
             def checkpoint_conformance(cell: PlannedCell) -> Mapping[str, Any]:
                 job = rendered_by_config.get(Path(cell.config_path).resolve())
+                if job is None and cell.physical_execution_id:
+                    logical = rendered_by_attempt.get(cell.attempt_id)
+                    if logical is not None:
+                        job = _physical_rendered_job(
+                            repo_root=self.repo_root,
+                            cell=cell,
+                            logical_job=logical,
+                        )
                 if job is None:
                     raise RuntimeError(
                         "checkpoint cell has no exact rendered Harbor job"
@@ -2296,6 +2602,7 @@ class OperatorService:
                     env=run_env,
                     host_scorer_names=host_scorer_names,
                     pre_execution_inventory=pre_execution_inventory,
+                    exact_physical_scope=bool(cell.physical_execution_id),
                 )
 
             observability_error = None
@@ -2373,16 +2680,91 @@ class OperatorService:
             )
             evidence = _EvidenceCoordinators(local=local, hosted=live)
 
-            outcomes = execute_cells(
-                cells,
-                repo_root=self.repo_root,
-                max_workers=max_workers,
-                runner=cell_runner,
-                cell_started=evidence.begin_cell,
-                require_cell_started_success=True,
-                cell_finished=evidence.finish_cell,
-                cancellation_event=cancel_event,
-            )
+            def durable_finish_cell(
+                cell: PlannedCell, outcome: CellOutcome
+            ) -> None:
+                try:
+                    LocalEvidenceStore(self.repo_root, run_id).read_attempt(
+                        cell.attempt_id
+                    )
+                except FileNotFoundError:
+                    evidence.finish_cell(cell, outcome)
+                else:
+                    # Recovery may replay host-only finalization after the
+                    # canonical local attempt was already written. Rehydrate
+                    # the exact stored row and complete any missing hosted
+                    # surface without rescoring (or repaying) an LLM judge.
+                    evidence.restore_finished_cell(cell, outcome)
+
+            recovery_summary: dict[str, Any] | None = None
+            if durable_comparison:
+                not_applicable = [cell for cell in cells if not cell.applicable]
+                latest_by_attempt = {
+                    str(item.get("attempt_id") or ""): item
+                    for item in latest_cell_records(run_dir / "cells.jsonl")
+                }
+                completed_not_applicable = [
+                    cell
+                    for cell in not_applicable
+                    if latest_by_attempt.get(cell.attempt_id, {}).get("status")
+                    == "not_applicable"
+                ]
+                pending_not_applicable = [
+                    cell
+                    for cell in not_applicable
+                    if cell not in completed_not_applicable
+                ]
+                outcomes = [
+                    CellOutcome(
+                        cell.id,
+                        "not_applicable",
+                        benchmark_outcome="not_applicable",
+                        runtime_outcome="not_applicable",
+                    )
+                    for cell in completed_not_applicable
+                ]
+                outcomes.extend(
+                    execute_cells(
+                        pending_not_applicable,
+                        repo_root=self.repo_root,
+                        max_workers=1,
+                        runner=cell_runner,
+                        cell_started=evidence.begin_cell,
+                        require_cell_started_success=True,
+                        cell_finished=evidence.finish_cell,
+                        cancellation_event=cancel_event,
+                    )
+                    if pending_not_applicable
+                    else []
+                )
+                durable_outcomes, recovery_summary = (
+                    execute_durable_comparison_cells(
+                        repo_root=self.repo_root,
+                        run_id=run_id,
+                        cells=cells,
+                        approved_comparison=request.approved_comparison,
+                        runner=cell_runner,
+                        begin_cell=evidence.begin_cell,
+                        finish_cell=durable_finish_cell,
+                        finalize_wave=comparison_wave_finalizer,
+                        invalidate_cell=evidence.invalidate_cell,
+                        cell_conformance=checkpoint_conformance,
+                        cancellation_event=cancel_event,
+                        secret_values=secrets_from_env(run_env),
+                    )
+                )
+                outcomes.extend(durable_outcomes)
+            else:
+                outcomes = execute_cells(
+                    cells,
+                    repo_root=self.repo_root,
+                    max_workers=max_workers,
+                    runner=cell_runner,
+                    cell_started=evidence.begin_cell,
+                    require_cell_started_success=True,
+                    cell_finished=evidence.finish_cell,
+                    cancellation_event=cancel_event,
+                )
             cancelled = cancel_event.is_set() or any(
                 item.status == "cancelled" for item in outcomes
             )
@@ -2405,14 +2787,27 @@ class OperatorService:
             skipped = sum(item.status == "not_applicable" for item in outcomes)
             cancelled_cells = sum(item.status == "cancelled" for item in outcomes)
             passed = sum(item.status == "passed" for item in outcomes)
+            conformance_jobs = rendered
+            conformance_scope: dict[str, Any] | None = None
+            if durable_comparison:
+                conformance_jobs, conformance_scope = (
+                    _durable_physical_conformance_jobs(
+                        repo_root=self.repo_root,
+                        run_id=run_id,
+                        logical_cells=cells,
+                        logical_jobs_by_attempt=rendered_by_attempt,
+                        approved_comparison=request.approved_comparison,
+                    )
+                )
             harbor_conformance = write_harbor_run_conformance_receipt(
                 repo_root=self.repo_root,
                 run_id=run_id,
-                jobs=rendered,
+                jobs=conformance_jobs,
                 env=run_env,
                 host_scorer_names=host_scorer_names,
                 pre_execution_inventory=pre_execution_inventory,
                 enforce=conformance_enforced,
+                execution_scope=conformance_scope,
             )
             # The canonical manifest is closed only after the final run-scoped
             # privacy, execution-policy, and Harbor cleanup receipt exists.
@@ -2488,6 +2883,7 @@ class OperatorService:
                     "harbor_conformance": harbor_conformance.manifest_reference(
                         self.repo_root
                     ),
+                    "comparison_execution": recovery_summary,
                 },
             )
         except _RunCancellation:
@@ -2503,6 +2899,34 @@ class OperatorService:
                     "observability_status": "cancelled",
                 },
             )
+        except ExecutionFinalizationPending as exc:
+            write_run_manifest(
+                self.repo_root,
+                run_id,
+                {
+                    "status": "finalizing",
+                    "paused_at": _now(),
+                    "error": f"{type(exc).__name__}: {exc}",
+                    "recovery_journal": recovery_journal_path(
+                        self.repo_root, run_id
+                    ).relative_to(self.repo_root).as_posix(),
+                },
+            )
+            raise
+        except ExecutionRecoveryPaused as exc:
+            write_run_manifest(
+                self.repo_root,
+                run_id,
+                {
+                    "status": "paused",
+                    "paused_at": _now(),
+                    "error": f"{type(exc).__name__}: {exc}",
+                    "recovery_journal": recovery_journal_path(
+                        self.repo_root, run_id
+                    ).relative_to(self.repo_root).as_posix(),
+                },
+            )
+            raise
         except KeyboardInterrupt:
             _finalize_run(
                 self.repo_root,
@@ -3737,6 +4161,174 @@ def _plan_coordinates(cells: tuple[PlannedCell, ...]) -> tuple[tuple[Any, ...], 
         )
         for cell in cells
     )
+
+
+def _physical_harbor_cell_from_journal(
+    *,
+    repo_root: Path,
+    logical_cell: PlannedCell,
+    physical: PhysicalExecutionIdentityV1,
+) -> PlannedCell:
+    """Recompute and verify one already-materialized physical namespace."""
+
+    identified = replace(
+        logical_cell,
+        physical_execution_id=physical.physical_execution_id,
+        retry_ordinal=physical.retry_ordinal,
+        env={
+            **logical_cell.env,
+            "FUGUE_LOGICAL_ATTEMPT_ID": physical.logical_attempt_id,
+            "FUGUE_PHYSICAL_EXECUTION_ID": physical.physical_execution_id,
+            "FUGUE_RETRY_ORDINAL": str(physical.retry_ordinal),
+        },
+    )
+    return _rehydrate_physical_harbor_cell(
+        identified,
+        physical=physical,
+        repo_root=repo_root,
+    )
+
+
+def _physical_rendered_job(
+    *,
+    repo_root: Path,
+    cell: PlannedCell,
+    logical_job: RenderedJob,
+) -> RenderedJob:
+    if not cell.physical_execution_id:
+        raise ValueError("physical conformance requires a physical execution id")
+    if cell.attempt_id != attempt_id(
+        task_id=logical_job.task_id,
+        arm=logical_job.variant_id,
+        harness=logical_job.harness,
+        attempt=logical_job.trial_index,
+        candidate=logical_job.candidate_id,
+        runtime=logical_job.resolved_candidate.execution_fingerprint,
+    ):
+        raise ValueError("physical Harbor cell belongs to another logical job")
+    config_path = cell.config_path.resolve()
+    physical_root = (
+        repo_root
+        / ".fugue"
+        / "runtime"
+        / cell.run_id
+        / "physical-executions"
+        / cell.physical_execution_id
+        / "harbor"
+    ).resolve()
+    if config_path != physical_root / "config.json":
+        raise ValueError("physical Harbor config path is outside its namespace")
+    config = json.loads(config_path.read_text(encoding="utf-8"))
+    if not isinstance(config, dict):
+        raise ValueError("physical Harbor config must be an object")
+    namespace = ((config.get("fugue") or {}).get("physical_execution") or {})
+    if (
+        not isinstance(namespace, Mapping)
+        or namespace.get("physical_execution_id") != cell.physical_execution_id
+        or namespace.get("logical_attempt_id") != cell.attempt_id
+        or namespace.get("retry_ordinal") != cell.retry_ordinal
+    ):
+        raise ValueError("physical Harbor job namespace disagrees with its cell")
+    if hashlib.sha256(config_path.read_bytes()).hexdigest() != cell.config_sha256:
+        raise ValueError("physical Harbor job config digest changed")
+    return replace(
+        logical_job,
+        command=list(cell.command),
+        config_path=cell.config_path,
+        result_path=cell.result_path,
+        config=config,
+        env=dict(cell.env),
+        job_name=str(config.get("job_name") or ""),
+    )
+
+
+def _durable_physical_conformance_jobs(
+    *,
+    repo_root: Path,
+    run_id: str,
+    logical_cells: list[PlannedCell],
+    logical_jobs_by_attempt: Mapping[str, RenderedJob],
+    approved_comparison: Mapping[str, Any],
+) -> tuple[list[RenderedJob], dict[str, Any]]:
+    binding = execution_binding_from_approved(approved_comparison)
+    controller = ExecutionRecoveryController(
+        recovery_journal_path(repo_root, run_id),
+        controller_id=f"comparison-{run_id}"[:200],
+        schedule=binding.schedule,
+    )
+    snapshot = controller.snapshot()
+    if not snapshot.complete or any(
+        state.active for state in snapshot.physical_executions.values()
+    ):
+        raise ValueError("durable Harbor conformance requires a complete journal")
+    by_attempt = {cell.attempt_id: cell for cell in logical_cells if cell.applicable}
+    jobs: list[RenderedJob] = []
+    physical_executions: list[dict[str, Any]] = []
+    ordered = sorted(
+        snapshot.physical_executions.values(),
+        key=lambda state: (
+            state.identity.logical_attempt_id,
+            state.identity.retry_ordinal,
+            state.identity.physical_execution_id,
+        ),
+    )
+    for state in ordered:
+        logical_cell = by_attempt.get(state.identity.logical_attempt_id)
+        logical_job = logical_jobs_by_attempt.get(
+            state.identity.logical_attempt_id
+        )
+        if logical_cell is None or logical_job is None:
+            raise ValueError("journaled physical execution has no logical input")
+        physical_cell = _physical_harbor_cell_from_journal(
+            repo_root=repo_root,
+            logical_cell=logical_cell,
+            physical=state.identity,
+        )
+        physical_executions.append(
+            {
+                **state.identity.to_dict(),
+                "terminal_kind": state.terminal_kind,
+                "cleanup_verified": state.cleanup_verified,
+                "cleanup_scope_verified": state.cleanup_scope_verified,
+                "cleanup_post_run_inventory": (
+                    state.cleanup_post_run_inventory
+                ),
+                "cleanup_receipt_reference": state.cleanup_receipt_reference,
+            }
+        )
+        # A typed runner-start failure is proven by a scoped no-start cleanup
+        # receipt. It has no Compose project or Harbor result directory for the
+        # final run-level scanner to inspect.
+        if state.terminal_kind == "runner_start_failure":
+            continue
+        jobs.append(
+            _physical_rendered_job(
+                repo_root=repo_root,
+                cell=physical_cell,
+                logical_job=logical_job,
+            )
+        )
+    expected_ids = {
+        state.identity.physical_execution_id for state in ordered
+    }
+    physical_root = repo_root / ".fugue" / "runtime" / run_id / "physical-executions"
+    observed_ids = (
+        {path.name for path in physical_root.iterdir() if path.is_dir()}
+        if physical_root.is_dir()
+        else set()
+    )
+    if observed_ids != expected_ids:
+        raise ValueError("physical Harbor namespaces disagree with the journal")
+    scope = {
+        "schema_version": 1,
+        "schedule_digest": binding.schedule.schedule_digest,
+        "event_chain_digest": snapshot.event_chain_digest,
+        "physical_execution_ids": sorted(expected_ids),
+        "physical_executions": physical_executions,
+        "physical_execution_set_digest": stable_digest(sorted(expected_ids)),
+        "journal_complete": snapshot.complete,
+    }
+    return jobs, {**scope, "scope_digest": stable_digest(scope)}
 
 
 def _validate_approved_comparison_plan(

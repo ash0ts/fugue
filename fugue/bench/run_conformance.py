@@ -133,6 +133,7 @@ def capture_local_cell_conformance(
     env: Mapping[str, str],
     host_scorer_names: Sequence[str] = (),
     pre_execution_inventory: Mapping[str, Any] | None,
+    exact_physical_scope: bool = False,
 ) -> dict[str, Any]:
     """Prove the first Harbor cell is clean before releasing a queued cell."""
 
@@ -160,6 +161,7 @@ def capture_local_cell_conformance(
         run_id=cell.run_id,
         jobs=[job],
         pre_execution_inventory=pre_execution_inventory,
+        exact_compose_scope=exact_physical_scope,
     )
     components = {
         "execution_identity": execution_identity,
@@ -185,6 +187,7 @@ def capture_local_cell_conformance(
         "backend": "local_harbor_docker",
         "status": status,
         "enforced": True,
+        "exact_physical_scope": exact_physical_scope,
         **components,
         "receipt_sha256": "",
     }
@@ -214,6 +217,7 @@ def write_harbor_run_conformance_receipt(
     host_scorer_names: Sequence[str] = (),
     pre_execution_inventory: Mapping[str, Any] | None = None,
     enforce: bool = True,
+    execution_scope: Mapping[str, Any] | None = None,
 ) -> HarborRunConformance:
     """Write one run-scoped, read-only audit for a local Harbor execution.
 
@@ -226,8 +230,25 @@ def write_harbor_run_conformance_receipt(
     root = repo_root.resolve()
     run_dir = root / ".fugue" / "runtime" / run_id
     receipt_path = run_dir / HARBOR_CONFORMANCE_RECEIPT
+    supersedes_receipt_sha256: str | None = None
     if receipt_path.is_file():
-        return _read_existing_receipt(receipt_path, run_id=run_id)
+        existing = json.loads(receipt_path.read_text(encoding="utf-8"))
+        if execution_scope is not None and existing.get("execution_scope") != dict(
+            execution_scope
+        ):
+            raise ValueError(
+                "Harbor conformance receipt belongs to an older execution set"
+            )
+        prior = _read_existing_receipt(receipt_path, run_id=run_id)
+        if prior.status == "passed":
+            return prior
+        supersedes_receipt_sha256 = prior.sha256
+        atomic_write_json(
+            run_dir
+            / "harbor-conformance-history"
+            / f"{prior.sha256}.json",
+            existing,
+        )
 
     configured_secrets = _configured_secrets(env, jobs)
     local_jobs, backend = _local_agent_jobs(jobs)
@@ -241,6 +262,7 @@ def write_harbor_run_conformance_receipt(
             "enforced": False,
             "generated_at": generated_at,
             "reason": "receipt applies only to local Docker/Harbor Agent runs",
+            "supersedes_receipt_sha256": supersedes_receipt_sha256,
             "receipt_sha256": "",
         }
         return _write_receipt(
@@ -260,6 +282,7 @@ def write_harbor_run_conformance_receipt(
             "reason": (
                 "an injected cell runner did not establish local Docker execution"
             ),
+            "supersedes_receipt_sha256": supersedes_receipt_sha256,
             "receipt_sha256": "",
         }
         return _write_receipt(
@@ -287,6 +310,7 @@ def write_harbor_run_conformance_receipt(
         run_id=run_id,
         jobs=local_jobs,
         pre_execution_inventory=pre_execution_inventory,
+        exact_compose_scope=False,
     )
     statuses = (
         str(identity["status"]),
@@ -308,6 +332,12 @@ def write_harbor_run_conformance_receipt(
         "status": status,
         "enforced": True,
         "generated_at": generated_at,
+        "supersedes_receipt_sha256": supersedes_receipt_sha256,
+        **(
+            {"execution_scope": dict(execution_scope)}
+            if execution_scope is not None
+            else {}
+        ),
         "execution_identity": identity,
         "local_artifact_privacy_scan": secret_scan,
         "private_label_boundary": private_boundary,
@@ -1559,6 +1589,7 @@ def _docker_cleanup_audit(
     run_id: str,
     jobs: Sequence[RenderedJob],
     pre_execution_inventory: Mapping[str, Any] | None,
+    exact_compose_scope: bool = False,
 ) -> dict[str, Any]:
     projects, derivation_errors = _compose_projects_for_jobs(
         repo_root=repo_root,
@@ -1570,7 +1601,11 @@ def _docker_cleanup_audit(
         "matched_networks": [],
         "mutations_performed": False,
         "scope": {
-            "kind": "exact_run_compose_projects",
+            "kind": (
+                "exact_physical_compose_projects"
+                if exact_compose_scope
+                else "exact_run_compose_projects"
+            ),
             "run_id": run_id,
             "run_directory": run_dir.resolve().as_posix(),
             "compose_projects": projects,
@@ -1582,6 +1617,12 @@ def _docker_cleanup_audit(
             ],
         },
     }
+    if exact_compose_scope:
+        return _exact_compose_cleanup_audit(
+            base=base,
+            projects=projects,
+            derivation_errors=derivation_errors,
+        )
     inventory = (
         dict(pre_execution_inventory)
         if isinstance(pre_execution_inventory, Mapping)
@@ -1752,6 +1793,91 @@ def _docker_cleanup_audit(
     }
 
 
+def _exact_compose_cleanup_audit(
+    *,
+    base: Mapping[str, Any],
+    projects: Sequence[str],
+    derivation_errors: Sequence[str],
+) -> dict[str, Any]:
+    """Audit only the immutable physical execution's Compose namespace."""
+
+    if derivation_errors or not projects:
+        return {
+            **base,
+            "status": "unavailable",
+            "reason": "exact physical Compose scope could not be established",
+            "errors": list(derivation_errors),
+            "pre_execution_inventory_status": "not_applicable",
+        }
+    matched_containers: list[dict[str, str]] = []
+    matched_networks: list[dict[str, str]] = []
+    for project in projects:
+        container_ids, container_error = _docker_ids(
+            [
+                "docker",
+                "container",
+                "ls",
+                "--all",
+                "--quiet",
+                "--filter",
+                f"label=com.docker.compose.project={project}",
+            ],
+            resource="container",
+        )
+        if container_error:
+            return {
+                **base,
+                "status": "unavailable",
+                "reason": container_error,
+                "errors": [],
+                "pre_execution_inventory_status": "not_applicable",
+            }
+        matched_containers.extend(
+            {
+                "container_id": value[:12],
+                "compose_project": project,
+                "attribution": "exact_compose_project_label",
+            }
+            for value in container_ids
+        )
+        network_ids, network_error = _docker_ids(
+            [
+                "docker",
+                "network",
+                "ls",
+                "--quiet",
+                "--filter",
+                f"label=com.docker.compose.project={project}",
+            ],
+            resource="network",
+        )
+        if network_error:
+            return {
+                **base,
+                "status": "unavailable",
+                "reason": network_error,
+                "matched_containers": matched_containers,
+                "errors": [],
+                "pre_execution_inventory_status": "not_applicable",
+            }
+        matched_networks.extend(
+            {"network_id": value[:12], "compose_project": project}
+            for value in network_ids
+        )
+    return {
+        **base,
+        "status": (
+            "failed" if matched_containers or matched_networks else "passed"
+        ),
+        "matched_containers": matched_containers,
+        "matched_networks": matched_networks,
+        "pre_execution_inventory_status": "not_applicable",
+        "new_remaining_container_count": len(matched_containers),
+        "unattributed_new_containers": [],
+        "errors": [],
+    }
+
+
 def _compose_projects_for_jobs(
     *,
     repo_root: Path,
@@ -1761,6 +1887,13 @@ def _compose_projects_for_jobs(
     allowed_roots = (
         (repo_root / "jobs").resolve(),
         (repo_root / ".fugue" / "runtime" / "jobs").resolve(),
+        (
+            repo_root
+            / ".fugue"
+            / "runtime"
+            / run_id
+            / "physical-executions"
+        ).resolve(),
     )
     projects: set[str] = set()
     errors: list[str] = []

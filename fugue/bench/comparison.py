@@ -15,6 +15,7 @@ from pathlib import Path, PurePosixPath
 from typing import Any, Literal
 
 import yaml
+from filelock import FileLock
 
 from fugue.bench.analysis_contracts import (
     AlignedAnalysisV1,
@@ -36,6 +37,14 @@ from fugue.bench.analysis_contracts import (
     task_validity_from_dict,
 )
 from fugue.bench.candidates import attempt_id, attempt_identity, stable_digest
+from fugue.bench.comparison_execution import (
+    ComparisonExecutionBindingV1,
+    compile_comparison_execution_binding,
+    execution_binding_from_approved,
+    verify_comparison_execution_binding,
+    verify_resume_stage_authorizations,
+)
+from fugue.bench.execution_recovery import ExecutionFinalizationPending
 from fugue.bench.files import atomic_write_json
 from fugue.bench.library import ExperimentSpec, experiment_from_data, validate_id
 from fugue.bench.local_evidence import (
@@ -48,6 +57,7 @@ from fugue.bench.operator import (
     OperatorService,
     PreviewSummary,
 )
+from fugue.bench.reproducibility import INPUT_LOCK_NAME, verify_snapshot
 from fugue.model_plane import (
     EvidenceDestinationV1,
     EvidenceMode,
@@ -70,6 +80,7 @@ COMPARISON_INPUT_ROOT = Path(".fugue/runtime/comparison-inputs")
 COMPARISON_PRIVATE_INPUT_ROOT = Path(".fugue/private/comparison-inputs")
 DEFAULT_COMPARISON_JUDGE_TIMEOUT_SEC = 120
 MAX_COMPARISON_JUDGE_TIMEOUT_SEC = 900
+MAX_COMPARISON_JUDGE_PROMPT_CHARACTERS = 48_000
 
 _HARNESS_AGENTS = {
     "hermes": "fugue.agents:FugueHermes",
@@ -180,6 +191,8 @@ class ComparisonEvaluatorV1:
     evidence: tuple[str, ...] = ()
     timeout_sec: int | None = None
     reserve_cost_usd: float = 0.0
+    input_cost_per_million: float | None = None
+    output_cost_per_million: float | None = None
 
     def to_dict(self) -> dict[str, Any]:
         return _drop_empty(asdict(self), preserve_false=True)
@@ -213,6 +226,7 @@ class ComparisonExecutionPolicyV1:
     prerequisite_spec: str | None = None
     preparation_required: bool = False
     evidence_checkpoint_cells: int = 0
+    maximum_infrastructure_replacements: int = 0
     environment: dict[str, Any] = field(default_factory=dict)
 
     def __post_init__(self) -> None:
@@ -616,6 +630,8 @@ class ComparisonSpecV1:
                 execution.pop("preparation_required", None)
             if execution.get("evidence_checkpoint_cells") == 0:
                 execution.pop("evidence_checkpoint_cells", None)
+            if execution.get("maximum_infrastructure_replacements") == 0:
+                execution.pop("maximum_infrastructure_replacements", None)
         for evaluator in value.get("evaluators") or ():
             if isinstance(evaluator, dict):
                 if not evaluator.get("dimension_roles"):
@@ -669,6 +685,7 @@ class ComparisonPreviewV1:
     matrix: dict[str, Any]
     experiment: dict[str, Any]
     manifest: dict[str, Any]
+    execution_schedule: dict[str, Any] = field(default_factory=dict)
     preview_digest: str = ""
 
     def to_dict(self) -> dict[str, Any]:
@@ -775,6 +792,7 @@ class ComparisonResultV3:
     cohort_lineage: dict[str, Any]
     candidate_definitions: dict[str, dict[str, Any]] = field(default_factory=dict)
     local_evidence: dict[str, Any] | None = None
+    execution_schedule: dict[str, Any] = field(default_factory=dict)
     evidence_backend: EvidenceBackend = "weave"
     publication_status: PublicationStatus = "published"
     local_chain_integrity: EvidenceChainIntegrity = "not_applicable"
@@ -804,6 +822,14 @@ class ComparisonResultV3:
                 )
         if self.local_evidence is not None:
             _verify_local_evidence_binding(self.local_evidence)
+        if self.execution_schedule:
+            binding = ComparisonExecutionBindingV1.from_dict(
+                self.execution_schedule
+            )
+            if binding.logical_cell_count != self.rows:
+                raise ValueError(
+                    "ComparisonResultV3 execution schedule row count disagrees"
+                )
         result_project = _destination_project_slug(
             self.evidence_topology.result_destination
         )
@@ -1158,6 +1184,19 @@ def check_comparison(
             "one attempt cannot estimate ordinary run-to-run variation"
         )
     for judge in (item for item in spec.evaluators if item.type == "llm_judge"):
+        if (
+            judge.input_cost_per_million is None
+            or judge.output_cost_per_million is None
+        ):
+            blockers.append(
+                f"judge {judge.id} requires locked input_cost_per_million and "
+                "output_cost_per_million rates for authoritative spend"
+            )
+        elif judge.reserve_cost_usd + 1e-12 < _maximum_judge_request_cost(judge):
+            blockers.append(
+                f"judge {judge.id} reserve_cost_usd must cover its locked "
+                "maximum request cost"
+            )
         issue = _judge_calibration_issue(judge, repo_root)
         if issue:
             (blockers if judge.required else warnings).append(issue)
@@ -2870,13 +2909,44 @@ def preview_comparison(
         raise RuntimeError(
             "comparison compiler and OperatorService resolved different planned cells"
         )
+    matrix_payload = _preview_dict(matrix)
+    expected_cells = tuple(
+        _mapping(item, "preview matrix cell")
+        for item in _sequence(
+            matrix_payload.get("matrix_cells"),
+            "preview matrix cells",
+        )
+    )
+    execution_schedule = (
+        compile_comparison_execution_binding(
+            comparison_id=spec.id,
+            expected_cells=expected_cells,
+            concurrency=spec.execution.concurrency,
+            checkpoint_cells=spec.execution.evidence_checkpoint_cells,
+            maximum_cost_usd=spec.execution.max_cost_usd,
+            reserve_per_attempt_usd=(
+                spec.execution.reserve_per_attempt_usd
+                + sum(
+                    evaluator.reserve_cost_usd
+                    for evaluator in spec.evaluators
+                    if evaluator.type == "llm_judge"
+                )
+            ),
+            maximum_infrastructure_replacements=(
+                spec.execution.maximum_infrastructure_replacements
+            ),
+        ).to_dict()
+        if any(bool(item.get("applicable")) for item in expected_cells)
+        else {}
+    )
     unsigned = ComparisonPreviewV1(
         schema_version=COMPARISON_SCHEMA_VERSION,
         comparison=spec.to_dict(),
         readiness=readiness.to_dict(),
-        matrix=_preview_dict(matrix),
+        matrix=matrix_payload,
         experiment=experiment.to_dict(),
         manifest=manifest,
+        execution_schedule=execution_schedule,
     )
     return replace(
         unsigned,
@@ -3195,6 +3265,7 @@ def materialize_comparison(
     repo_root: Path,
     operator: OperatorService | None = None,
     approval_digest: str = "",
+    write_inputs: bool = True,
 ) -> tuple[ExperimentSpec, ExperimentRequest]:
     _verify_artifact(preview.to_dict(), "preview_digest", "comparison preview")
     spec = comparison_from_dict(
@@ -3216,39 +3287,46 @@ def materialize_comparison(
             },
         )
     root = repo_root / Path(experiment.manifest).parent
-    root.mkdir(parents=True, exist_ok=True)
-    _materialize_approved_comparison_inputs(
-        spec,
-        preview=preview,
-        public_rows=public_rows,
-        repo_root=repo_root,
-    )
-    _write_immutable_text(
-        root / "public-cases.jsonl",
-        _jsonl(public_rows),
-        expected_sha256=str(
-            _mapping(preview.manifest["dataset"], "preview dataset")
-            .get("source", {})
-            .get("sha256")
-            or ""
-        ),
-        mode=0o444,
-        label="approved compiled public cases",
-    )
-    _write_immutable_text(
-        root / "manifest.yaml",
-        yaml.safe_dump(manifest, sort_keys=False),
-        expected_sha256=hashlib.sha256(
-            yaml.safe_dump(preview.manifest, sort_keys=False).encode()
-        ).hexdigest(),
-        mode=0o444,
-        label="approved comparison manifest",
-    )
-    _atomic_text(
-        root / "comparison.yaml",
-        yaml.safe_dump(spec.to_dict(), sort_keys=False),
-    )
-    atomic_write_json(root / "preview.json", preview.to_dict())
+    if write_inputs:
+        root.mkdir(parents=True, exist_ok=True)
+        _materialize_approved_comparison_inputs(
+            spec,
+            preview=preview,
+            public_rows=public_rows,
+            repo_root=repo_root,
+        )
+        _write_immutable_text(
+            root / "public-cases.jsonl",
+            _jsonl(public_rows),
+            expected_sha256=str(
+                _mapping(preview.manifest["dataset"], "preview dataset")
+                .get("source", {})
+                .get("sha256")
+                or ""
+            ),
+            mode=0o444,
+            label="approved compiled public cases",
+        )
+        _write_immutable_text(
+            root / "manifest.yaml",
+            yaml.safe_dump(manifest, sort_keys=False),
+            expected_sha256=hashlib.sha256(
+                yaml.safe_dump(preview.manifest, sort_keys=False).encode()
+            ).hexdigest(),
+            mode=0o444,
+            label="approved comparison manifest",
+        )
+        _atomic_text(
+            root / "comparison.yaml",
+            yaml.safe_dump(spec.to_dict(), sort_keys=False),
+        )
+        atomic_write_json(root / "preview.json", preview.to_dict())
+    else:
+        for path in (root / "public-cases.jsonl", root / "manifest.yaml"):
+            if not path.is_file() or path.is_symlink():
+                raise ValueError(
+                    f"resume comparison input is unavailable: {path}"
+                )
     approved_comparison = _approved_comparison_execution_lock(
         preview,
         approval_digest=approval_digest,
@@ -3688,6 +3766,25 @@ def _approved_comparison_execution_lock(
             raise ValueError(
                 f"preview candidate {candidate_id} definition digest does not match"
             )
+    execution_binding = verify_comparison_execution_binding(
+        _mapping(
+            preview.execution_schedule,
+            "preview comparison execution schedule",
+        ),
+        expected_cells=cells,
+    )
+    approval_required = comparison_execution.get("approval_required") is not False
+    if approval_required and not approval_digest:
+        raise ValueError("approved comparison requires an approval digest")
+    execution_authorization_digest = approval_digest or stable_digest(
+        {
+            "schema_version": 1,
+            "kind": "declared_no_approval_execution_authorization",
+            "preview_digest": preview.preview_digest,
+            "schedule_digest": execution_binding.schedule.schedule_digest,
+            "comparison_id": comparison.get("id"),
+        }
+    )
     unsigned = {
         "schema_version": 1,
         "kind": "approved_comparison_execution",
@@ -3696,6 +3793,8 @@ def _approved_comparison_execution_lock(
         ),
         "preview_digest": preview.preview_digest,
         "approval_digest": approval_digest,
+        "approval_required": approval_required,
+        "execution_authorization_digest": execution_authorization_digest,
         "spec_digest": str(comparison.get("spec_digest") or ""),
         "taskset_digest": str(readiness.get("taskset_digest") or ""),
         "private_labels_digest": str(
@@ -3740,6 +3839,8 @@ def _approved_comparison_execution_lock(
             candidate_id: dict(candidate_definitions[candidate_id])
             for candidate_id in all_candidate_ids
         },
+        "execution_schedule": execution_binding.to_dict(),
+        "execution_schedule_digest": execution_binding.binding_digest,
         "expected_cell_count": len(cells),
         "expected_cells_digest": stable_digest(cells),
         "expected_cells": cells,
@@ -3792,6 +3893,7 @@ def claim_comparison_approval(
     *,
     approval_digest: str,
     repo_root: Path,
+    subject_id: str | None = None,
 ) -> None:
     readiness = ComparisonReadinessV1(**preview.readiness)
     if readiness.status not in {"ready", "needs_review"}:
@@ -3800,13 +3902,21 @@ def claim_comparison_approval(
             "comparisons may not run"
         )
     store = StudyStore(repo_root)
+    execution = ComparisonExecutionBindingV1.from_dict(
+        _mapping(
+            preview.execution_schedule,
+            "preview comparison execution schedule",
+        )
+    )
     ApprovalLedger(store.path).claim(
         approval_digest=approval_digest,
         subject_kind="experiment",
         preview_digest=preview.preview_digest,
-        subject_id=f"comparison-{preview.preview_digest[:20]}",
-        estimated_cells=readiness.estimated_cells,
-        estimated_cost_usd=readiness.estimated_cost_usd,
+        subject_id=(subject_id or f"comparison-{preview.preview_digest[:20]}"),
+        estimated_cells=execution.schedule.maximum_physical_executions,
+        estimated_cost_usd=(
+            execution.schedule.maximum_total_micro_usd / 1_000_000
+        ),
     )
 
 
@@ -4213,7 +4323,12 @@ def analyze_comparison_rows(
                 )
             ),
             candidate_definitions=resolved_candidate_definitions,
-            local_evidence=local_evidence_binding,
+                local_evidence=local_evidence_binding,
+                execution_schedule=(
+                    dict(execution_lock.get("execution_schedule") or {})
+                    if execution_lock is not None
+                    else {}
+                ),
             supersedes=tuple(
                 item
                 if isinstance(item, SupersededResultV1)
@@ -5128,6 +5243,7 @@ def _verify_approved_comparison_execution_lock(  # noqa: C901
         expected_cells
     ):
         raise ValueError("approved comparison expected cell manifest digest does not match")
+    execution_binding_from_approved(approved)
     validate_id(
         str(approved.get("comparison_id") or ""),
         kind="approved comparison id",
@@ -5147,6 +5263,22 @@ def _verify_approved_comparison_execution_lock(  # noqa: C901
         or any(char not in "0123456789abcdef" for char in approval_digest)
     ):
         raise ValueError("approved comparison approval_digest must be an exact digest")
+    approval_required = approved.get("approval_required")
+    if not isinstance(approval_required, bool):
+        raise ValueError("approved comparison approval requirement must be boolean")
+    if approval_required and not approval_digest:
+        raise ValueError("approved comparison requires an approval digest")
+    execution_authorization_digest = str(
+        approved.get("execution_authorization_digest") or ""
+    )
+    if not re.fullmatch(r"[0-9a-f]{64}", execution_authorization_digest):
+        raise ValueError(
+            "approved comparison execution authorization must be an exact digest"
+        )
+    if approval_digest and execution_authorization_digest != approval_digest:
+        raise ValueError(
+            "approved comparison execution authorization disagrees with approval"
+        )
     evidence_mode = str(approved.get("evidence_mode") or "weave_required")
     if evidence_mode not in {"local", "weave_required"}:
         raise ValueError("approved comparison evidence mode is invalid")
@@ -5863,6 +5995,7 @@ def read_comparison_result(path: Path) -> ComparisonResult:
             if value.get("local_evidence") is not None
             else None
         )
+        value.setdefault("execution_schedule", {})
         local_destination = value["evidence_destination"].get("kind") == "local"
         value.setdefault(
             "evidence_backend", "local" if local_destination else "weave"
@@ -10252,6 +10385,7 @@ def score_comparison_rows(
                 continue
             failure_stage = "input_privacy"
             request_policy: dict[str, Any] | None = None
+            request_usage: Mapping[str, Any] = {}
             try:
                 judge_input_privacy = _comparison_judge_input_privacy_receipt(
                     evaluator=judge,
@@ -10268,10 +10402,12 @@ def score_comparison_rows(
                     row=row,
                     env=env,
                 )
+                request_usage = usage
                 failure_stage = "rubric_validation"
                 parsed = _validate_comparison_judge_payload(judge, payload)
                 for dimension, value in parsed["scores"].items():
                     judge_scores[f"{judge.id}.{dimension}"] = value
+                observed_cost = _comparison_judge_cost(judge, usage)
                 judge_results[judge.id] = {
                     "status": "scored",
                     **parsed,
@@ -10281,7 +10417,13 @@ def score_comparison_rows(
                         "judge_input_privacy": judge_input_privacy,
                     },
                     "qualification": qualification,
-                    "cost_usd": None,
+                    "cost_usd": observed_cost,
+                    "accounted_cost_usd": (
+                        observed_cost
+                        if observed_cost is not None
+                        else judge.reserve_cost_usd
+                    ),
+                    "cost_observation_complete": observed_cost is not None,
                 }
             except Exception as exc:
                 failure = _comparison_judge_failure_metadata(
@@ -10290,6 +10432,18 @@ def score_comparison_rows(
                 )
                 if request_policy is not None:
                     failure["request_policy"] = request_policy
+                failure_usage = failure.get("usage")
+                if not isinstance(failure_usage, Mapping) and request_usage:
+                    failure_usage = request_usage
+                    failure["usage"] = dict(request_usage)
+                failure_cost = (
+                    0.0
+                    if failure_stage == "input_privacy"
+                    else _comparison_judge_cost(
+                        judge,
+                        failure_usage if isinstance(failure_usage, Mapping) else {},
+                    )
+                )
                 judge_results[judge.id] = {
                     "status": "unavailable",
                     "reason": (
@@ -10298,6 +10452,13 @@ def score_comparison_rows(
                     ),
                     "failure": failure,
                     "qualification": qualification,
+                    "cost_usd": failure_cost,
+                    "accounted_cost_usd": (
+                        failure_cost
+                        if failure_cost is not None
+                        else judge.reserve_cost_usd
+                    ),
+                    "cost_observation_complete": failure_cost is not None,
                 }
                 if judge.required:
                     row["comparison_required_evaluation_complete"] = False
@@ -10322,6 +10483,7 @@ def _request_comparison_judge(
     env: Mapping[str, str],
 ) -> tuple[dict[str, Any], dict[str, Any], dict[str, Any]]:
     from fugue.bench.evaluations import (
+        JudgeResponseError,
         _post_judge,
     )
     from fugue.model_plane import (
@@ -10349,48 +10511,312 @@ def _request_comparison_judge(
         public_task=public_task,
         row=row,
     )
-    prompt = (
+    prompt_prefix = (
         "Blindly evaluate one Agent attempt. You do not know whether it came from "
         "the baseline or candidate. Use only the supplied public task, final "
         "response, permitted evidence, and rubric. Return one JSON object with: "
         "scores (one 0..1 number per dimension), overall_assessment (brief text), "
         "uncertainty (0..1), and rationale (at most 500 characters). Do not return "
         "hidden reasoning or a chain of thought.\n\n"
-        + json.dumps(payload, sort_keys=True, default=str)[:48_000]
     )
+    prompt = (
+        prompt_prefix + json.dumps(payload, sort_keys=True, default=str)
+    )[:MAX_COMPARISON_JUDGE_PROMPT_CHARACTERS]
+    timeout_sec = int(request_policy["timeout_sec"])
+    route_receipt = {
+        "schema_version": 1,
+        "role": "blind_comparison_judge",
+        "judge_id": evaluator.id,
+        "profile": evaluator.profile,
+        "route": model_route_identity(route, env),
+        "rubric_digest": _judge_contract_digest(evaluator),
+        "request_policy": request_policy,
+        "blind_fields": [
+            "baseline_or_candidate",
+            "candidate_revision",
+            "variant_id",
+            "treatment",
+            "harness",
+            "model",
+            "deterministic_scores",
+            "private_expected_values",
+            "receipts",
+            "internal_ids",
+        ],
+    }
+    durable_path, request_digest = _comparison_judge_request_state(
+        evaluator=evaluator,
+        row=row,
+        env=env,
+        prompt=prompt,
+        route_receipt=route_receipt,
+    )
+    request = {
+        "post_judge": _post_judge,
+        "judge_response_error": JudgeResponseError,
+        "evaluator": evaluator,
+        "route": route,
+        "api_key": api_key,
+        "env": env,
+        "prompt": prompt,
+        "route_receipt": route_receipt,
+        "durable_path": durable_path,
+        "request_digest": request_digest,
+        "timeout_sec": timeout_sec,
+    }
+    if durable_path is None:
+        return _perform_comparison_judge_request(**request)
+    # The lock spans pending creation, the provider request, and terminal
+    # receipt publication. A second recovery controller therefore reuses the
+    # completed response or observes the same ambiguous pending request; it can
+    # never issue duplicate host-side judge spend for one logical attempt.
+    lock = FileLock(f"{durable_path}.lock", timeout=timeout_sec + 60)
+    with lock:
+        return _perform_comparison_judge_request(**request)
+
+
+def _perform_comparison_judge_request(
+    *,
+    post_judge: Callable[..., tuple[dict[str, Any], dict[str, Any]]],
+    judge_response_error: Any,
+    evaluator: ComparisonEvaluatorV1,
+    route: Any,
+    api_key: str,
+    env: Mapping[str, str],
+    prompt: str,
+    route_receipt: Mapping[str, Any],
+    durable_path: Path | None,
+    request_digest: str,
+    timeout_sec: int,
+) -> tuple[dict[str, Any], dict[str, Any], dict[str, Any]]:
     import httpx
 
-    timeout_sec = int(request_policy["timeout_sec"])
+    if durable_path is not None and durable_path.is_file():
+        completed = _read_comparison_judge_request_state(
+            durable_path,
+            request_digest=request_digest,
+        )
+        status = str(completed.get("status") or "")
+        if status == "pending":
+            raise ExecutionFinalizationPending(
+                "judge request may have incurred spend before controller loss; "
+                "the Agent result is preserved and the request will not be resent"
+            )
+        usage = _mapping_or_empty(completed.get("usage"))
+        if completed.get("outcome") == "judge_response_error":
+            failure = _mapping_or_empty(completed.get("failure"))
+            raise judge_response_error(
+                stage=str(failure.get("stage") or "response_validation"),
+                code=str(failure.get("code") or "invalid_response"),
+                message=str(failure.get("message") or "judge response was invalid"),
+                response_sha256=str(failure.get("response_sha256") or ""),
+                response_characters=int(failure.get("response_characters") or 0),
+                usage=usage,
+            )
+        response = completed.get("response")
+        if completed.get("outcome") != "success" or not isinstance(
+            response, Mapping
+        ):
+            raise ValueError("completed judge request receipt is invalid")
+        return (
+            dict(response),
+            dict(usage),
+            {
+                **route_receipt,
+                "usage": dict(usage),
+                "durable_request_receipt": durable_path.as_posix(),
+                "durable_request_reused": True,
+            },
+        )
+    if durable_path is not None:
+        _write_comparison_judge_request_state(
+            durable_path,
+            {
+                "schema_version": 1,
+                "status": "pending",
+                "request_digest": request_digest,
+            },
+        )
     # HTTPX issues one request by default. Do not install a retrying transport:
     # a timed-out judge remains unavailable instead of creating duplicate spend.
-    with httpx.Client(timeout=timeout_sec) as client:
-        response, usage = _post_judge(client, route, api_key, env, prompt)
+    try:
+        with httpx.Client(timeout=timeout_sec) as client:
+            response, usage = post_judge(client, route, api_key, env, prompt)
+    except judge_response_error as exc:
+        if durable_path is not None:
+            _write_comparison_judge_request_state(
+                durable_path,
+                {
+                    "schema_version": 1,
+                    "status": "completed",
+                    "outcome": "judge_response_error",
+                    "request_digest": request_digest,
+                    "usage": dict(exc.usage),
+                    "failure": {
+                        "stage": exc.stage,
+                        "code": exc.code,
+                        "message": exc.safe_message,
+                        "response_sha256": exc.response_sha256,
+                        "response_characters": exc.response_characters,
+                    },
+                },
+            )
+        raise
+    safe_response = redact_value(response, secrets=secrets_from_env(env))
+    if not isinstance(safe_response, Mapping):
+        raise ValueError("judge response must remain an object after redaction")
+    if durable_path is not None:
+        _write_comparison_judge_request_state(
+            durable_path,
+            {
+                "schema_version": 1,
+                "status": "completed",
+                "outcome": "success",
+                "request_digest": request_digest,
+                "usage": dict(usage),
+                "response": dict(safe_response),
+            },
+        )
     return (
-        response,
+        dict(safe_response),
         usage,
         {
-            "schema_version": 1,
-            "role": "blind_comparison_judge",
-            "judge_id": evaluator.id,
-            "profile": evaluator.profile,
-            "route": model_route_identity(route, env),
-            "rubric_digest": _judge_contract_digest(evaluator),
-            "request_policy": request_policy,
-            "blind_fields": [
-                "baseline_or_candidate",
-                "candidate_revision",
-                "variant_id",
-                "treatment",
-                "harness",
-                "model",
-                "deterministic_scores",
-                "private_expected_values",
-                "receipts",
-                "internal_ids",
-            ],
+            **route_receipt,
             "usage": usage,
+            **(
+                {
+                    "durable_request_receipt": durable_path.as_posix(),
+                    "durable_request_reused": False,
+                }
+                if durable_path is not None
+                else {}
+            ),
         },
     )
+
+
+def _comparison_judge_request_state(
+    *,
+    evaluator: ComparisonEvaluatorV1,
+    row: Mapping[str, Any],
+    env: Mapping[str, str],
+    prompt: str,
+    route_receipt: Mapping[str, Any],
+) -> tuple[Path | None, str]:
+    request_digest = stable_digest(
+        {
+            "schema_version": 1,
+            "attempt_id": row.get("attempt_id"),
+            "judge_id": evaluator.id,
+            "route": route_receipt.get("route"),
+            "rubric_digest": route_receipt.get("rubric_digest"),
+            "request_policy": route_receipt.get("request_policy"),
+            "prompt_sha256": hashlib.sha256(prompt.encode()).hexdigest(),
+        }
+    )
+    if env.get("FUGUE_EVIDENCE_MODE") != "local":
+        return None, request_digest
+    root_value = str(env.get("FUGUE_HOST_REPO_ROOT") or "")
+    run_id = str(row.get("run_id") or env.get("FUGUE_RUN_ID") or "")
+    attempt = str(row.get("attempt_id") or "")
+    if not root_value or not re.fullmatch(r"[0-9a-f]{64}", attempt):
+        raise ValueError("durable judge request is missing its host attempt identity")
+    root = Path(root_value).resolve()
+    validate_id(run_id, kind="run id")
+    return (
+        root
+        / ".fugue"
+        / "runtime"
+        / run_id
+        / "judge-requests"
+        / f"{attempt}-{evaluator.id}.json",
+        request_digest,
+    )
+
+
+def _write_comparison_judge_request_state(
+    path: Path,
+    unsigned: Mapping[str, Any],
+) -> None:
+    payload = {**dict(unsigned), "receipt_digest": stable_digest(unsigned)}
+    atomic_write_json(path, payload, mode=0o600)
+
+
+def _read_comparison_judge_request_state(
+    path: Path,
+    *,
+    request_digest: str,
+) -> dict[str, Any]:
+    try:
+        payload = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError) as exc:
+        raise ValueError("durable judge request receipt is unreadable") from exc
+    if not isinstance(payload, dict):
+        raise ValueError("durable judge request receipt must be an object")
+    unsigned = {key: value for key, value in payload.items() if key != "receipt_digest"}
+    if (
+        payload.get("receipt_digest") != stable_digest(unsigned)
+        or payload.get("request_digest") != request_digest
+    ):
+        raise ValueError("durable judge request receipt identity changed")
+    return payload
+
+
+def _comparison_judge_cost(
+    evaluator: ComparisonEvaluatorV1,
+    usage: Mapping[str, Any],
+) -> float | None:
+    """Resolve actual judge spend only from locked rates and observed usage."""
+
+    supplied = usage.get("cost_usd")
+    if (
+        isinstance(supplied, int | float)
+        and not isinstance(supplied, bool)
+        and math.isfinite(float(supplied))
+        and float(supplied) >= 0
+    ):
+        return round(float(supplied), 12)
+    if (
+        evaluator.input_cost_per_million is None
+        or evaluator.output_cost_per_million is None
+    ):
+        return None
+    raw_input = usage.get("input_tokens")
+    raw_output = usage.get("output_tokens")
+    if any(
+        isinstance(value, bool)
+        or not isinstance(value, int | float)
+        or not math.isfinite(float(value))
+        or float(value) < 0
+        for value in (raw_input, raw_output)
+    ):
+        return None
+    return round(
+        (
+            float(raw_input) * evaluator.input_cost_per_million
+            + float(raw_output) * evaluator.output_cost_per_million
+        )
+        / 1_000_000,
+        12,
+    )
+
+
+def _maximum_judge_request_cost(evaluator: ComparisonEvaluatorV1) -> float:
+    """Conservatively price the preview-bound maximum judge request."""
+
+    if (
+        evaluator.input_cost_per_million is None
+        or evaluator.output_cost_per_million is None
+    ):
+        return math.inf
+    from fugue.bench.evaluations import JUDGE_JSON_MAX_OUTPUT_TOKENS
+
+    # The prompt is capped at 48k characters. One token per character is a
+    # deliberately conservative bound that cannot under-reserve ordinary text.
+    return (
+        MAX_COMPARISON_JUDGE_PROMPT_CHARACTERS * evaluator.input_cost_per_million
+        + JUDGE_JSON_MAX_OUTPUT_TOKENS * evaluator.output_cost_per_million
+    ) / 1_000_000
 
 
 def _comparison_judge_request_policy(
@@ -11421,7 +11847,7 @@ def _publish_comparison_result(
         raise publication_error
 
 
-def execute_comparison(
+def execute_comparison(  # noqa: C901 - one governed execution transaction
     preview: ComparisonPreviewV1,
     *,
     approval_digest: str,
@@ -11429,6 +11855,7 @@ def execute_comparison(
     env_file: Path | None = None,
     fetch_weave: bool = True,
     publish_research: bool = True,
+    resume_run_id: str | None = None,
 ) -> tuple[ComparisonResult, Path, Path]:
     """Execute one approved comparison.
 
@@ -11443,6 +11870,11 @@ def execute_comparison(
         source=repo_root,
     )
     local_mode = spec.execution.evidence_mode == "local"
+    if resume_run_id is not None and not local_mode:
+        raise ValueError(
+            "durable resume is currently supported only for local evidence; "
+            "start a fresh weave_required run with a current approval"
+        )
     result_schema_version = 3 if local_mode or spec.schema_version >= 3 else 2
     service = OperatorService(repo_root, env_file)
     current = preview_comparison(
@@ -11483,6 +11915,39 @@ def execute_comparison(
             "immutable source evidence did not match before execution; no "
             "comparison cells were launched"
         )
+    from fugue.bench.execution import new_run_id
+
+    run_id = (
+        validate_id(resume_run_id, kind="run id")
+        if resume_run_id is not None
+        else new_run_id()
+    )
+    locked_approval_digest = approval_digest
+    stored_approved_comparison: dict[str, Any] | None = None
+    resume_binding: ComparisonExecutionBindingV1 | None = None
+    if resume_run_id is not None:
+        stored_approved_comparison = _resume_approved_comparison_lock(
+            repo_root=repo_root,
+            run_id=run_id,
+            preview=preview,
+        )
+        locked_approval_digest = str(
+            stored_approved_comparison.get("approval_digest") or ""
+        )
+        resume_binding = execution_binding_from_approved(
+            stored_approved_comparison
+        )
+        stored_execution_authorization = str(
+            stored_approved_comparison.get("execution_authorization_digest")
+            or locked_approval_digest
+        )
+        verify_resume_stage_authorizations(
+            repo_root=repo_root,
+            run_id=run_id,
+            binding=resume_binding,
+            preview_digest=preview.preview_digest,
+            approval_digest=stored_execution_authorization,
+        )
     if spec.execution.approval_required:
         if not approval_digest:
             raise ValueError("comparison execution requires an approval digest")
@@ -11490,13 +11955,31 @@ def execute_comparison(
             preview,
             approval_digest=approval_digest,
             repo_root=repo_root,
+            subject_id=f"comparison-run-{run_id}",
         )
+        if resume_binding is not None:
+            _write_resume_approval_receipt(
+                repo_root=repo_root,
+                run_id=run_id,
+                preview_digest=preview.preview_digest,
+                schedule_digest=resume_binding.schedule.schedule_digest,
+                original_approval_digest=locked_approval_digest,
+                current_approval_digest=approval_digest,
+            )
     experiment, request = materialize_comparison(
         preview,
         repo_root=repo_root,
         operator=service,
-        approval_digest=approval_digest,
+        approval_digest=locked_approval_digest,
+        write_inputs=resume_run_id is None,
     )
+    if (
+        stored_approved_comparison is not None
+        and request.approved_comparison != stored_approved_comparison
+    ):
+        raise ValueError(
+            "resume approved comparison no longer matches the immutable run input"
+        )
     destination = repo_root / COMPARISON_RESULT_ROOT / preview.preview_digest
     research_publication_path, research_projection = (
         _project_comparison_start(
@@ -11523,66 +12006,109 @@ def execute_comparison(
         source_pre_run_drift = _matched_local_source_drift(
             request.approved_comparison
         )
-    from fugue.bench.execution import new_run_id
-
-    run_id = new_run_id()
-    evaluated_cells = 0
+    execution_binding = execution_binding_from_approved(
+        request.approved_comparison
+    )
+    checkpoint_attempts = tuple(
+        item.logical_attempt_id
+        for item in execution_binding.schedule.logical_attempts
+        if item.stage_id == "checkpoint"
+    )
     source_checkpoint_drift: EvidenceDriftCheckV1 | None = None
 
+    for checkpoint_attempt in checkpoint_attempts:
+        stored_row = _local_comparison_prediction_row(
+            repo_root=repo_root,
+            run_id=run_id,
+            attempt_id=checkpoint_attempt,
+        )
+        if stored_row is None:
+            continue
+        _require_checkpoint_evaluations(
+            spec, stored_row, checkpoint_index=0
+        )
+    if checkpoint_attempts and all(
+        _local_comparison_prediction_row(
+            repo_root=repo_root,
+            run_id=run_id,
+            attempt_id=attempt_id,
+        )
+        is not None
+        for attempt_id in checkpoint_attempts
+    ):
+        source_checkpoint_drift = _restore_or_verify_checkpoint_receipt(
+            spec=spec,
+            readiness=current.readiness,
+            repo_root=repo_root,
+            env=service.env,
+            run_id=run_id,
+            schedule_digest=execution_binding.schedule.schedule_digest,
+            checkpoint_attempt_ids=checkpoint_attempts,
+        )
+
     def evaluate_attempt(row: dict[str, Any]) -> None:
-        nonlocal evaluated_cells, source_checkpoint_drift
+        nonlocal source_checkpoint_drift
         evaluation_row = dict(row)
         evaluation_row["final_output"] = _comparison_trial_output(row)
+        judge_env = {
+            **service.env,
+            "FUGUE_HOST_REPO_ROOT": repo_root.resolve().as_posix(),
+            "FUGUE_RUN_ID": run_id,
+            "FUGUE_EVIDENCE_MODE": spec.execution.evidence_mode,
+        }
         scored = score_comparison_rows(
             spec,
             [evaluation_row],
             repo_root=repo_root,
-            env=service.env,
+            env=judge_env,
             approved_comparison=request.approved_comparison,
         )[0]
         scored.pop("final_output", None)
         row.update(scored)
-        _require_checkpoint_judges(
-            spec,
-            row,
-            checkpoint_index=evaluated_cells,
-        )
         if source_pre_run_drift is not None:
-            row["source_pre_run_drift"] = (
-                source_pre_run_drift.to_dict()
-            )
-        evaluated_cells += 1
-        if (
-            source_pre_run_drift is not None
-            and source_checkpoint_drift is None
-            and evaluated_cells
-            >= max(1, spec.execution.evidence_checkpoint_cells)
-        ):
-            source_checkpoint_drift = _verify_v3_source_drift(
-                spec,
-                readiness=current.readiness,
-                repo_root=repo_root,
-                env=service.env,
-            )
-            if (
-                source_checkpoint_drift is None
-                or source_checkpoint_drift.status != "matched"
-            ):
-                raise RuntimeError(
-                    "immutable source evidence changed at the first-cell "
-                    "checkpoint; remaining cells were cancelled"
-                )
+            row["source_pre_run_drift"] = source_pre_run_drift.to_dict()
         if source_checkpoint_drift is not None:
-            row["source_checkpoint_drift"] = (
-                source_checkpoint_drift.to_dict()
+            row["source_checkpoint_drift"] = source_checkpoint_drift.to_dict()
+
+    def finalize_checkpoint_wave(_outcomes: tuple[Any, ...]) -> None:
+        """Close the pair-complete gate after local evidence is immutable."""
+
+        nonlocal source_checkpoint_drift
+        if source_checkpoint_drift is not None or not checkpoint_attempts:
+            return
+        rows = [
+            _local_comparison_prediction_row(
+                repo_root=repo_root,
+                run_id=run_id,
+                attempt_id=attempt_id,
             )
+            for attempt_id in checkpoint_attempts
+        ]
+        if any(row is None for row in rows):
+            return
+        for row in rows:
+            assert row is not None
+            _require_checkpoint_evaluations(
+                spec, row, checkpoint_index=0
+            )
+        source_checkpoint_drift = _restore_or_verify_checkpoint_receipt(
+            spec=spec,
+            readiness=current.readiness,
+            repo_root=repo_root,
+            env=service.env,
+            run_id=run_id,
+            schedule_digest=execution_binding.schedule.schedule_digest,
+            checkpoint_attempt_ids=checkpoint_attempts,
+        )
 
     run_summary = service.execute_run(
         request,
         run_id=run_id,
         experiment=experiment,
         host_evaluator=evaluate_attempt,
+        comparison_wave_finalizer=finalize_checkpoint_wave,
         host_scorer_names=_comparison_scorer_names(spec),
+        resume=resume_run_id is not None,
     )
     if run_summary is not None and run_summary.status != "passed":
         raise RuntimeError(
@@ -11663,7 +12189,7 @@ def execute_comparison(
                 spec.execution.source_evidence_project
             ),
             result_schema_version=result_schema_version,
-            study_intent="mcp_release_qualification",
+            study_intent="candidate_comparison",
             release_note_coverage=release_note_coverage,
             supersedes=spec.supersedes,
         )
@@ -11717,7 +12243,7 @@ def execute_comparison(
             spec.execution.source_evidence_project
         ),
         result_schema_version=result_schema_version,
-        study_intent="mcp_release_qualification",
+        study_intent="candidate_comparison",
         release_note_coverage=release_note_coverage,
         supersedes=spec.supersedes,
     )
@@ -11736,6 +12262,191 @@ def execute_comparison(
         repo_root=repo_root,
     )
     return result, json_path, markdown_path
+
+
+def _resume_approved_comparison_lock(
+    *,
+    repo_root: Path,
+    run_id: str,
+    preview: ComparisonPreviewV1,
+) -> dict[str, Any]:
+    """Read the original exact comparison lock from a durable run snapshot."""
+
+    path = repo_root / ".fugue" / "runtime" / run_id / INPUT_LOCK_NAME
+    try:
+        snapshot = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError) as exc:
+        raise ValueError("resume run input lock is unavailable or invalid") from exc
+    if not isinstance(snapshot, dict) or not verify_snapshot(snapshot):
+        raise ValueError("resume run input lock digest does not match")
+    if snapshot.get("run_id") != run_id:
+        raise ValueError("resume run input lock belongs to another run")
+    request = snapshot.get("request")
+    if not isinstance(request, Mapping):
+        raise ValueError("resume run input lock has no exact request")
+    approved = request.get("approved_comparison")
+    if not isinstance(approved, Mapping):
+        raise ValueError("resume run has no approved comparison lock")
+    value = dict(approved)
+    _verify_approved_comparison_execution_lock(value)
+    if value.get("preview_digest") != preview.preview_digest:
+        raise ValueError("resume run targets a different comparison preview")
+    return value
+
+
+def _write_resume_approval_receipt(
+    *,
+    repo_root: Path,
+    run_id: str,
+    preview_digest: str,
+    schedule_digest: str,
+    original_approval_digest: str,
+    current_approval_digest: str,
+) -> Path:
+    """Bind renewed operator consent without mutating the accepted run lock."""
+
+    unsigned = {
+        "schema_version": 1,
+        "kind": "comparison_resume_authorization",
+        "run_id": run_id,
+        "preview_digest": preview_digest,
+        "schedule_digest": schedule_digest,
+        "original_approval_digest": original_approval_digest,
+        "current_approval_digest": current_approval_digest,
+    }
+    path = (
+        repo_root
+        / ".fugue"
+        / "runtime"
+        / run_id
+        / "resume-authorizations"
+        / f"{current_approval_digest}.json"
+    )
+    payload = {**unsigned, "receipt_digest": stable_digest(unsigned)}
+    if path.is_file():
+        try:
+            existing = json.loads(path.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError) as exc:
+            raise ValueError("resume authorization receipt is unreadable") from exc
+        if existing != payload:
+            raise ValueError("resume authorization receipt changed")
+        return path
+    atomic_write_json(path, payload, mode=0o600)
+    return path
+
+
+def _local_comparison_prediction_row(
+    *,
+    repo_root: Path,
+    run_id: str,
+    attempt_id: str,
+) -> dict[str, Any] | None:
+    store = LocalEvidenceStore(repo_root, run_id)
+    try:
+        record = store.read_attempt(attempt_id)
+    except FileNotFoundError:
+        return None
+    prediction = next(
+        (
+            node
+            for node in record.nodes
+            if node.kind == "prediction" and node.artifact is not None
+        ),
+        None,
+    )
+    if prediction is None or prediction.artifact is None:
+        raise RuntimeError("checkpoint prediction artifact is unavailable")
+    path = store.root / prediction.artifact.path
+    try:
+        value = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError) as exc:
+        raise RuntimeError("checkpoint prediction artifact is unreadable") from exc
+    if not isinstance(value, dict):
+        raise RuntimeError("checkpoint prediction artifact must be an object")
+    if (
+        value.get("attempt_id") != attempt_id
+        or stable_digest(value) != record.prediction_row_sha256
+    ):
+        raise RuntimeError("checkpoint prediction artifact identity changed")
+    return value
+
+
+def _restore_or_verify_checkpoint_receipt(
+    *,
+    spec: ComparisonSpecV1,
+    readiness: Mapping[str, Any],
+    repo_root: Path,
+    env: Mapping[str, str],
+    run_id: str,
+    schedule_digest: str,
+    checkpoint_attempt_ids: Sequence[str],
+) -> EvidenceDriftCheckV1 | None:
+    rows = [
+        _local_comparison_prediction_row(
+            repo_root=repo_root,
+            run_id=run_id,
+            attempt_id=attempt_id,
+        )
+        for attempt_id in checkpoint_attempt_ids
+    ]
+    if any(row is None for row in rows):
+        raise RuntimeError("checkpoint receipt requires every checkpoint result")
+    row_digests = {
+        attempt_id: stable_digest(row)
+        for attempt_id, row in zip(checkpoint_attempt_ids, rows, strict=True)
+        if row is not None
+    }
+    path = (
+        repo_root
+        / ".fugue"
+        / "runtime"
+        / run_id
+        / "comparison-checkpoint.json"
+    )
+    if path.is_file():
+        existing = json.loads(path.read_text(encoding="utf-8"))
+        if not isinstance(existing, dict):
+            raise RuntimeError("comparison checkpoint receipt is invalid")
+        digest = str(existing.get("receipt_digest") or "")
+        if digest != stable_digest(
+            {key: value for key, value in existing.items() if key != "receipt_digest"}
+        ):
+            raise RuntimeError("comparison checkpoint receipt digest changed")
+        if (
+            existing.get("run_id") != run_id
+            or existing.get("schedule_digest") != schedule_digest
+            or existing.get("checkpoint_attempt_ids")
+            != list(checkpoint_attempt_ids)
+            or existing.get("checkpoint_row_digests") != row_digests
+        ):
+            raise RuntimeError("comparison checkpoint receipt targets other inputs")
+        drift = existing.get("source_drift")
+        return (
+            EvidenceDriftCheckV1(**dict(drift))
+            if isinstance(drift, Mapping)
+            else None
+        )
+    source_drift = _verify_v3_source_drift(
+        spec,
+        readiness=readiness,
+        repo_root=repo_root,
+        env=env,
+    )
+    if source_drift is not None and source_drift.status != "matched":
+        raise RuntimeError(
+            "immutable source evidence changed at the pair-complete checkpoint; "
+            "remaining cells were not admitted"
+        )
+    unsigned = {
+        "schema_version": 1,
+        "run_id": run_id,
+        "schedule_digest": schedule_digest,
+        "checkpoint_attempt_ids": list(checkpoint_attempt_ids),
+        "checkpoint_row_digests": row_digests,
+        "source_drift": source_drift.to_dict() if source_drift else None,
+    }
+    atomic_write_json(path, {**unsigned, "receipt_digest": stable_digest(unsigned)})
+    return source_drift
 
 
 def _matched_local_source_drift(
@@ -11900,6 +12611,26 @@ def _require_checkpoint_judges(
         row["comparison_judge_checkpoint_status"] = "advisory_unavailable"
         return
     row["comparison_judge_checkpoint_status"] = "passed"
+
+
+def _require_checkpoint_evaluations(
+    spec: ComparisonSpecV1,
+    row: dict[str, Any],
+    *,
+    checkpoint_index: int,
+) -> None:
+    """Gate required scorer completion without conflating it with task pass."""
+
+    if row.get("comparison_required_evaluation_complete") is not True:
+        raise RuntimeError(
+            "checkpoint required evaluation did not complete; remaining cells "
+            "were not admitted"
+        )
+    _require_checkpoint_judges(
+        spec,
+        row,
+        checkpoint_index=checkpoint_index,
+    )
 
 
 def _apply_harbor_conformance(
@@ -12133,6 +12864,8 @@ def _evaluator(raw: Any) -> ComparisonEvaluatorV1:
             "evidence",
             "timeout_sec",
             "reserve_cost_usd",
+            "input_cost_per_million",
+            "output_cost_per_million",
         },
         "evaluator",
     )
@@ -12195,6 +12928,24 @@ def _evaluator(raw: Any) -> ComparisonEvaluatorV1:
         if "timeout_sec" in value:
             raise ValueError("timeout_sec is supported only for LLM judge evaluators")
         timeout_sec = None
+    input_cost_per_million = (
+        _non_negative_number(
+            value["input_cost_per_million"], "judge input cost"
+        )
+        if value.get("input_cost_per_million") is not None
+        else None
+    )
+    output_cost_per_million = (
+        _non_negative_number(
+            value["output_cost_per_million"], "judge output cost"
+        )
+        if value.get("output_cost_per_million") is not None
+        else None
+    )
+    if (input_cost_per_million is None) != (output_cost_per_million is None):
+        raise ValueError("judge input and output cost rates must be declared together")
+    if evaluator_type != "llm_judge" and input_cost_per_million is not None:
+        raise ValueError("judge cost rates are supported only for LLM judges")
     if evaluator_type == "deterministic" and bool(checks) == bool(scorer):
         raise ValueError(
             "deterministic evaluator requires exactly one of checks or scorer"
@@ -12245,6 +12996,8 @@ def _evaluator(raw: Any) -> ComparisonEvaluatorV1:
         reserve_cost_usd=_non_negative_number(
             value.get("reserve_cost_usd", 0), "judge reserve"
         ),
+        input_cost_per_million=input_cost_per_million,
+        output_cost_per_million=output_cost_per_million,
     )
 
 
@@ -12284,6 +13037,7 @@ def _execution(
             "prerequisite_spec",
             "preparation_required",
             "evidence_checkpoint_cells",
+            "maximum_infrastructure_replacements",
             "environment",
         },
         "execution policy",
@@ -12300,10 +13054,10 @@ def _execution(
         value.get("evidence_checkpoint_cells", 0),
         "evidence checkpoint cells",
     )
-    if evidence_checkpoint_cells and concurrency != 1:
-        raise ValueError(
-            "evidence checkpoint cells require comparison concurrency 1"
-        )
+    maximum_infrastructure_replacements = _non_negative_int(
+        value.get("maximum_infrastructure_replacements", 0),
+        "maximum infrastructure replacements",
+    )
     raw_mode = str(value.get("evidence_mode") or "").strip()
     if not raw_mode:
         # Missing modes are historical and retain their hosted semantics.
@@ -12477,6 +13231,9 @@ def _execution(
         ),
         preparation_required=bool(value.get("preparation_required", False)),
         evidence_checkpoint_cells=evidence_checkpoint_cells,
+        maximum_infrastructure_replacements=(
+            maximum_infrastructure_replacements
+        ),
         environment=dict(
             _mapping(value.get("environment") or {}, "execution environment")
         ),
