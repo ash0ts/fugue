@@ -4204,6 +4204,14 @@ def test_scorer_preparation_pulls_and_locks_the_declared_platform(
         "platform": profile.platform,
         "profile_digest": profile.profile_digest,
     }
+    inspect_calls = [
+        command for command in calls if command[1:3] == ["image", "inspect"]
+    ]
+    assert len(inspect_calls) == 2
+    assert all(
+        command[3:5] == ["--platform", profile.platform]
+        for command in inspect_calls
+    )
     assert calls[1][1:4] == ["pull", "--platform", profile.platform]
 
 
