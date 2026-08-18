@@ -118,8 +118,8 @@
     },
     {
       "path": "reference-studies/wandb-mcp/comparison.yaml.template",
-      "sha256": "70d4a889e54524cd20a344c342dfc41d95d9075090ae228af316be5b76b31cb5",
-      "size_bytes": 3295
+      "sha256": "58b08a9e600b2f8ac148500e82be60e3f2e4b5ac70ed182f1199734906c89f65",
+      "size_bytes": 3696
     },
     {
       "path": "reference-studies/wandb-mcp/mcp.json.template",

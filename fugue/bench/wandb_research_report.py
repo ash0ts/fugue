@@ -672,7 +672,7 @@ def _report_markdown(
         "**API status: Public Preview.** This W&B Report is an optional "
         "presentation of a Fugue Research index. It lists summary fields from "
         "immutable Fugue ComparisonResultV3 artifacts. It does not create or "
-        "replace first-class Study records.",
+        "replace first-class Study Console records.",
         "",
         "The W&B project and Report settings control access. Fugue does not request "
         "a public share link.",
@@ -681,12 +681,15 @@ def _report_markdown(
         "",
         f"- Research ID: `{_inline_code(projection.research_id)}`",
         f"- Index digest: `{projection.index_digest}`",
-        f"- Studies: {projection.study_count}",
+        f"- Fugue Study entries: {projection.study_count}",
         f"- Result rows: {projection.total_rows}",
         f"- [Index Run]({_safe_bound_url(projection.index_run_url)})",
         f"- [Immutable index Artifact version]({_safe_bound_url(projection.index_artifact_url)})",
         "",
-        "| Study | Comparison | Behavioral finding | Behavioral next action | Governed decision | Decision next action | Task validity | Result rows | Candidates | Evidence integrity (not task quality) | Links |",
+        "Judge evidence is not included in this Research-index projection. Do "
+        "not infer a judge score from its absence.",
+        "",
+        "| Fugue Study key | Comparison | Behavioral finding | Behavioral next action | Governed decision | Decision next action | Task validity | Result rows | Candidates | Evidence integrity (not task quality) | Links |",
         "|---|---|---|---|---|---|---|---:|---|---|---|",
     ]
     for study in sorted(projection.studies, key=lambda item: item.study_id):

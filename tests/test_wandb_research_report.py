@@ -609,7 +609,10 @@ def test_create_uses_one_controlled_block_and_authoritative_readback(
     assert marker in markdown
     assert "Public Preview" in markdown
     assert "optional presentation" in markdown
-    assert "does not create or replace first-class Study records" in markdown
+    assert "does not create or replace first-class Study Console records" in markdown
+    assert "Fugue Study entries:" in markdown
+    assert "| Fugue Study key |" in markdown
+    assert "Do not infer a judge score from its absence." in markdown
     assert "project and Report settings" in markdown
     assert markdown.index("study-a") < markdown.index("study-b")
     assert "Advance to confirmation." in markdown

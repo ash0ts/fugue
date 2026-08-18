@@ -187,9 +187,32 @@ def test_packaged_v8_v7_assets_are_exact_copies(
 def test_packaged_comparison_is_local_and_reference_bound() -> None:
     template = yaml.safe_load(_resource_text("comparison.yaml.template"))
     assert template["schema_version"] == 3
+    assert template["id"] == (
+        "mcp-main-vs-0-4-{{CANDIDATE_SHORT}}-harbor-canary-v11"
+    )
     assert template["execution"]["evidence_mode"] == "local"
     assert template["execution"]["environment"] == {"type": "docker"}
     assert template["execution"]["attempts"] == 1
+    assert template["execution"]["concurrency"] == 1
+    assert template["execution"]["evidence_checkpoint_cells"] == 2
+    assert template["execution"]["research_id"] == (
+        "fugue-mcp-release-qualification-v1"
+    )
+    assert template["execution"]["study_console_base_url"] == (
+        "http://127.0.0.1:18080"
+    )
+    assert template["supersedes"] == [
+        {
+            "result_digest": (
+                "e062f5b392a36d9ebd97adc3ab58b6e253cdd9dd943381342d51d76303bbcf38"
+            ),
+            "reason": (
+                "V10 compared the same locked tasks against the earlier 5c6cc1c9 "
+                "staging candidate; this Study freezes the current staging head "
+                "under a new candidate, preview, approval, and Study identity."
+            ),
+        }
+    ]
     assert template["execution"]["reference_study"] == {
         "id": "wandb-mcp-release",
         "version": 1,

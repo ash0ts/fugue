@@ -1,5 +1,5 @@
 schema_version: 3
-id: wandb-mcp-main-vs-staging-0-4-local-reference-v1
+id: mcp-main-vs-0-4-{{CANDIDATE_SHORT}}-harbor-canary-v11
 question: Does the exact W&B MCP staging/0.4.0 commit improve or preserve factual, bounded maintainer work relative to the exact main baseline on the four locked release-canary behaviors?
 taskset:
   tasks: tasks.jsonl
@@ -11,6 +11,9 @@ candidate:
   label: W&B MCP staging/0.4.0 at {{CANDIDATE_SHA}}
   integrations: ["{{MCP_CANDIDATE_LOCK_ID}}"]
 changed: [integrations]
+supersedes:
+  - result_digest: e062f5b392a36d9ebd97adc3ab58b6e253cdd9dd943381342d51d76303bbcf38
+    reason: V10 compared the same locked tasks against the earlier 5c6cc1c9 staging candidate; this Study freezes the current staging head under a new candidate, preview, approval, and Study identity.
 evaluators:
   - id: tool-surface
     type: deterministic
@@ -47,6 +50,8 @@ execution:
     app_base_url: https://wandb.ai
   evidence_lock: source-evidence.lock.json
   source_conformance_receipt: source-conformance-receipt.json
+  research_id: fugue-mcp-release-qualification-v1
+  study_console_base_url: http://127.0.0.1:18080
   model: anthropic/claude-sonnet-5
   harnesses: [claude-code]
   attempts: 1

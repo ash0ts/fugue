@@ -882,6 +882,7 @@ def _materialize_packaged_reference_study(
     candidate_id = f"wandb-mcp-staging-{candidate_sha[:12]}"
     replacements = {
         "{{CANDIDATE_SHA}}": candidate_sha,
+        "{{CANDIDATE_SHORT}}": candidate_sha[:7],
         "{{CANDIDATE_TREE}}": request.source_lock.source_tree,
         "{{TARGET_PLATFORM}}": request.target_platform,
         "{{MCP_BASELINE_LOCK_ID}}": baseline_id,

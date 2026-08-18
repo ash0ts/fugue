@@ -237,10 +237,13 @@ def test_default_materializer_builds_a_complete_check_ready_bundle(
     comparison = (destination / "comparison.yaml").read_text(encoding="utf-8")
     assert "{{" not in comparison
     assert COMMIT in comparison
+    assert f"mcp-main-vs-0-4-{COMMIT[:7]}-harbor-canary-v11" in comparison
     assert f"wandb-mcp-main-{_BASELINE_FOR_TEST[:12]}" in comparison
     assert f"wandb-mcp-staging-{COMMIT[:12]}" in comparison
     assert "evidence_lock: source-evidence.lock.json" in comparison
     assert "source_evidence_project: wandb/fugue-mcp-release-source-v2" in comparison
+    assert "research_id: fugue-mcp-release-qualification-v1" in comparison
+    assert "study_console_base_url: http://127.0.0.1:18080" in comparison
     assert json.loads((destination / ".fugue-study.json").read_text()) == {
         "kind": "fugue_standalone_study",
         "schema_version": 1,
