@@ -15,6 +15,7 @@ from fugue.bench.analysis_contracts import (
 )
 from fugue.bench.candidates import attempt_id as canonical_attempt_id
 from fugue.bench.candidates import stable_digest
+from fugue.bench.local_evidence import LocalEvidenceDestinationV1
 from fugue.research.display_labels import humanize_display_id
 
 # Existing design/progress builders and V2 result projections keep writing the
@@ -423,6 +424,9 @@ class ExperimentViewV3:
     task_validity: tuple[dict[str, Any], ...]
     scorer_revisions: tuple[dict[str, Any], ...]
     runtime_locks: tuple[dict[str, Any], ...]
+    result_digest: str | None = None
+    qualification_digest: str | None = None
+    runtime_lock_digest: str | None = None
     preview_digest: str | None = None
     approval_state: str | None = None
     phase: str | None = None
@@ -511,7 +515,10 @@ def _experiment_view_v3_from_dict(
         for item in _sequence(raw.get("supersedes"), "supersedes")
     )
     scope = _optional_evidence_scope(raw.get("evidence_scope"))
-    if scope is None or f"{scope.entity}/{scope.project}" != (
+    if isinstance(topology.result_destination, LocalEvidenceDestinationV1):
+        if scope is not None:
+            raise ValueError("local V3 evidence cannot declare a W&B evidence scope")
+    elif scope is None or f"{scope.entity}/{scope.project}" != (
         topology.result_destination.project_slug
     ):
         raise ValueError("V3 evidence scope must equal the result evidence destination")
@@ -636,6 +643,13 @@ def _experiment_view_v3_from_dict(
         task_validity=task_validity,
         scorer_revisions=scorer_revisions,
         runtime_locks=runtime_locks,
+        result_digest=_optional_digest(raw.get("result_digest"), "result_digest"),
+        qualification_digest=_optional_digest(
+            raw.get("qualification_digest"), "qualification_digest"
+        ),
+        runtime_lock_digest=_optional_digest(
+            raw.get("runtime_lock_digest"), "runtime_lock_digest"
+        ),
         supersedes=supersedes,
         judge_summary=_safe_judge_summary(
             raw.get("judge_summary"),
@@ -645,20 +659,37 @@ def _experiment_view_v3_from_dict(
         ),
     )
     _validate_view_shape(view)
+    if view.runtime_lock_digest is not None and view.runtime_lock_digest != stable_digest(
+        list(view.runtime_locks)
+    ):
+        raise ValueError("V3 runtime lock digest does not recompute")
     _validate_v3_evidence_routes(view)
     return view
 
 
 def _validate_v3_evidence_routes(view: ExperimentViewV3) -> None:
     topology = evidence_topology_from_dict(view.evidence_topology)
-    source_project = topology.source_destination.project_slug
-    result_project = topology.result_destination.project_slug
+    source_project = (
+        None
+        if isinstance(topology.source_destination, LocalEvidenceDestinationV1)
+        else topology.source_destination.project_slug
+    )
+    local_result = isinstance(
+        topology.result_destination, LocalEvidenceDestinationV1
+    )
+    result_project = (
+        None if local_result else topology.result_destination.project_slug
+    )
     call_prefix = (
-        f"{topology.result_destination.app_base_url.rstrip('/')}/"
+        ""
+        if local_result
+        else f"{topology.result_destination.app_base_url.rstrip('/')}/"
         f"{result_project}/weave/calls/"
     )
     object_prefix = (
-        f"{topology.result_destination.app_base_url.rstrip('/')}/"
+        ""
+        if local_result
+        else f"{topology.result_destination.app_base_url.rstrip('/')}/"
         f"{result_project}/weave/objects/"
     )
     for pair in view.paired_cases:
@@ -667,7 +698,13 @@ def _validate_v3_evidence_routes(view: ExperimentViewV3) -> None:
             if not isinstance(attempt, Mapping):
                 continue
             scope = tuple(str(item) for item in attempt.get("actual_query_scope") or ())
-            if any(item != source_project for item in scope):
+            if source_project is None and scope:
+                raise ValueError(
+                    "V3 attempt query scope requires a hosted source destination"
+                )
+            if source_project is not None and any(
+                item != source_project for item in scope
+            ):
                 raise ValueError(
                     "V3 attempt query scope escaped the source destination"
                 )
@@ -677,7 +714,21 @@ def _validate_v3_evidence_routes(view: ExperimentViewV3) -> None:
                 if str(link.get("status") or "") != "resolved":
                     continue
                 kind = str(link.get("kind") or "")
+                system = str(link.get("system") or "")
+                ref = str(link.get("ref") or "")
                 url = str(link.get("url") or "")
+                if local_result:
+                    if (
+                        system != "local_artifact"
+                        or not ref.startswith("fugue://local-evidence/")
+                        or url
+                    ):
+                        raise ValueError(
+                            "local V3 evidence must use canonical local-artifact refs"
+                        )
+                    continue
+                if system != "weave":
+                    raise ValueError("hosted V3 evidence must use Weave links")
                 if kind == "dataset":
                     if not url.startswith(object_prefix) or "/versions/" not in url:
                         raise ValueError(
@@ -1598,16 +1649,20 @@ def _build_comparison_evaluation_view_v3(
         and not invalid_tasks
         and decision_value.get("evidence_grade") == "A"
     )
-    scope = ExperimentEvidenceScopeV1(
-        entity=topology.result_destination.entity,
-        project=topology.result_destination.project,
-        evidence_types=(
-            "agent_conversation",
-            "dataset",
-            "evaluation_root",
-            "prediction",
-            "prediction_and_score",
-        ),
+    scope = (
+        None
+        if isinstance(topology.result_destination, LocalEvidenceDestinationV1)
+        else ExperimentEvidenceScopeV1(
+            entity=topology.result_destination.entity,
+            project=topology.result_destination.project,
+            evidence_types=(
+                "agent_conversation",
+                "dataset",
+                "evaluation_root",
+                "prediction",
+                "prediction_and_score",
+            ),
+        )
     )
     view = ExperimentViewV3(
         schema_version=EXPERIMENT_VIEW_V3_SCHEMA_VERSION,
@@ -1677,6 +1732,16 @@ def _build_comparison_evaluation_view_v3(
         runtime_locks=tuple(
             lock_descriptor_from_dict(_mapping(item, "runtime_lock")).to_dict()
             for item in _sequence(result.get("runtime_locks"), "runtime_locks")
+        ),
+        result_digest=_required_digest(result.get("result_digest"), "result_digest"),
+        qualification_digest=_required_digest(
+            result.get("qualification_digest"), "qualification_digest"
+        ),
+        runtime_lock_digest=stable_digest(
+            [
+                lock_descriptor_from_dict(_mapping(item, "runtime_lock")).to_dict()
+                for item in _sequence(result.get("runtime_locks"), "runtime_locks")
+            ]
         ),
         supersedes=tuple(
             superseded_result_from_dict(_mapping(item, "superseded_result")).to_dict()
@@ -2351,6 +2416,9 @@ def _optional_canonical_attempt_v3(raw: Any) -> dict[str, Any] | None:
         "sanitized_answer_excerpt",
         "actual_query_scope",
         "reported_project_identity",
+        "local_evidence_record_digest",
+        "local_prediction_row_sha256",
+        "local_result_row_projection_digest",
     }
     base_allowed = {item for item in value if item not in extras}
     base = _optional_canonical_attempt({key: value[key] for key in base_allowed})
@@ -2415,6 +2483,14 @@ def _optional_canonical_attempt_v3(raw: Any) -> dict[str, Any] | None:
     )
     if reported:
         base["reported_project_identity"] = reported
+    for field_name in (
+        "local_evidence_record_digest",
+        "local_prediction_row_sha256",
+        "local_result_row_projection_digest",
+    ):
+        digest = _optional_digest(value.get(field_name), f"V3 {field_name}")
+        if digest:
+            base[field_name] = digest
     return base
 
 
@@ -2452,15 +2528,23 @@ def _canonical_attempt_evidence_link(raw: Any) -> dict[str, Any]:
     if status not in {"resolved", "missing", "invalid"}:
         raise ValueError("attempt evidence status is unsupported")
     system = _text(value.get("system") or "weave", "attempt evidence system", 100)
-    if system != "weave":
-        raise ValueError("attempt evidence system must be weave")
+    if system not in {"weave", "local_artifact"}:
+        raise ValueError("attempt evidence system must be weave or local_artifact")
     result: dict[str, Any] = {"kind": kind, "status": status, "system": system}
     ref = _optional_text(value.get("ref"), "attempt evidence ref", 2000)
     url = _optional_text(value.get("url"), "attempt evidence url", 2000)
     reason = _optional_text(value.get("reason"), "attempt evidence reason", 1000)
     if status == "resolved":
-        if not ref or not url or not url.startswith("https://"):
-            raise ValueError("resolved attempt evidence requires ref and HTTPS url")
+        if system == "weave" and (
+            not ref or not url or not url.startswith("https://")
+        ):
+            raise ValueError("resolved Weave evidence requires ref and HTTPS url")
+        if system == "local_artifact" and (
+            not ref or not ref.startswith("fugue://local-evidence/") or url
+        ):
+            raise ValueError(
+                "resolved local evidence requires a canonical local-artifact ref"
+            )
     elif not reason:
         raise ValueError("unresolved attempt evidence requires a reason")
     if ref:

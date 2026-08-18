@@ -4374,7 +4374,10 @@ def test_execute_local_comparison_never_requires_or_fetches_weave(
                             "kind": kind,
                             "status": "resolved",
                             "system": "local_artifact",
-                            "ref": f"fugue://evidence/{attempt}/{kind}",
+                            "ref": (
+                                f"fugue://local-evidence/{run_id}/attempt/"
+                                f"{attempt}/{kind}"
+                            ),
                         }
                         for kind in (
                             "evaluation_root",
@@ -4479,6 +4482,20 @@ def test_execute_local_comparison_never_requires_or_fetches_weave(
     assert result.hosted_chain_integrity == "not_applicable"
     assert result.operational_summary["evidence_states"] == {"reconciled": 4}
     assert result.evidence_links == ()
+    view = build_comparison_evaluation_view(result.to_dict())
+    assert isinstance(view, ExperimentViewV3)
+    assert view.evidence_scope is None
+    assert view.evidence_topology["result_destination"]["kind"] == "local"
+    assert view.result_digest == result.result_digest
+    assert view.qualification_digest == result.qualification_digest
+    assert view.runtime_lock_digest == stable_digest(list(view.runtime_locks))
+    assert {
+        link["system"]
+        for pair in view.paired_cases
+        for arm in ("baseline", "candidate")
+        for link in pair[arm]["evidence_links"]
+    } == {"local_artifact"}
+    assert experiment_view_from_dict(view.to_dict()) == view
     assert captured["local_rows"] == 4
     assert result_path.is_file()
     markdown = markdown_path.read_text(encoding="utf-8")
@@ -4496,7 +4513,7 @@ def test_execute_local_comparison_never_requires_or_fetches_weave(
         f".fugue/runtime/{result.local_evidence['run_id']}/evidence/" in markdown
     )
     assert "Portable evidence destination: `fugue-evidence` layout v1" in markdown
-    assert "`fugue://evidence/" in markdown
+    assert "`fugue://local-evidence/" in markdown
     assert "No safe evidence links were available." not in markdown
     approved = dict(captured["approved"])  # type: ignore[arg-type]
     assert approved["approval_required"] is False
