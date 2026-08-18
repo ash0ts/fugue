@@ -430,7 +430,11 @@ def test_local_harness_run_closes_provider_neutral_evidence_manifest(
     conformance = {
         "status": "passed",
         "execution_identity": {"status": "passed", "digest": "x" * 64},
-        "local_artifact_privacy_scan": {"status": "passed", "matches": 0},
+        "local_artifact_privacy_scan": {
+            "status": "passed",
+            "matches": 0,
+            "redaction_pattern_detector": "fugue.redaction.redact_text",
+        },
         "private_label_boundary": {"status": "passed"},
         "docker_cleanup": {"status": "passed", "matched_containers": []},
     }

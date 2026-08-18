@@ -9,6 +9,7 @@ import pytest
 
 import fugue.bench.run_conformance as conformance_module
 from fugue.bench.candidates import stable_digest
+from fugue.bench.local_evidence import _public_payload
 from fugue.bench.run_conformance import (
     _HostedEvidenceSnapshot,
     _required_conversation_ids,
@@ -485,6 +486,10 @@ def test_first_cell_conformance_proves_cleanup_and_private_boundary(
     assert receipt["docker_cleanup"]["matched_networks"] == []
     assert len(receipt["receipt_sha256"]) == 64
     assert "wandb-secret-value" not in json.dumps(receipt)
+    assert _public_payload(
+        receipt,
+        secret_values=("wandb-secret-value",),
+    ) == receipt
 
 
 def test_first_cell_conformance_rejects_unconfigured_token_shaped_secret(
@@ -526,7 +531,7 @@ def test_first_cell_conformance_rejects_unconfigured_token_shaped_secret(
     assert receipt["status"] == "failed"
     assert scan["status"] == "failed"
     assert scan["configured_sensitive_value_count"] == 0
-    assert scan["token_shape_detector"] == "fugue.redaction.redact_text"
+    assert scan["redaction_pattern_detector"] == "fugue.redaction.redact_text"
     assert scan["files_with_matches"] == [
         {
             "path": (

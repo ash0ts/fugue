@@ -1339,7 +1339,7 @@ def _scan_run_artifacts(  # noqa: C901 - one bounded audit reports every gap
             ],
         },
         "configured_sensitive_value_count": len(secrets),
-        "token_shape_detector": "fugue.redaction.redact_text",
+        "redaction_pattern_detector": "fugue.redaction.redact_text",
         "files_scanned": scanned,
         "bytes_scanned": total_bytes,
         "files_with_matches": matched,
