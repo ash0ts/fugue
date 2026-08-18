@@ -672,8 +672,8 @@ def _publish_with_active_weave_sdk(
             ),
             **(
                 {
-                    "wandb_research_id": target.study_scope.research_id,
-                    "wandb_study_id": target.study_scope.study_id,
+                    "fugue_research_id": target.study_scope.research_id,
+                    "fugue_study_key": target.study_scope.study_id,
                 }
                 if target.study_scope is not None
                 else {}
@@ -737,8 +737,8 @@ def _publish_with_active_weave_sdk(
             "fugue.execution_fingerprint": str(attempt.identity["runtime"]),
             **(
                 {
-                    "wandb.research_id": target.study_scope.research_id,
-                    "wandb.study_id": target.study_scope.study_id,
+                    "fugue.research_id": target.study_scope.research_id,
+                    "fugue.study_key": target.study_scope.study_id,
                 }
                 if target.study_scope is not None
                 else {}

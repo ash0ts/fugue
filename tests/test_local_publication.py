@@ -899,12 +899,16 @@ def test_study_scope_is_bound_to_publication_identity_and_weave_attributes(
 
     assert outcome.target.study_scope == scope
     for call in client.calls.values():
-        assert call.attributes["wandb.research_id"] == scope.research_id
-        assert call.attributes["wandb.study_id"] == scope.study_id
+        assert call.attributes["fugue.research_id"] == scope.research_id
+        assert call.attributes["fugue.study_key"] == scope.study_id
+        assert "wandb.research_id" not in call.attributes
+        assert "wandb.study_id" not in call.attributes
         assert call.attributes["fugue.comparison_id"] == result.comparison_id
     dataset = next(iter(client.objects.values()))
-    assert dataset["wandb_research_id"] == scope.research_id
-    assert dataset["wandb_study_id"] == scope.study_id
+    assert dataset["fugue_research_id"] == scope.research_id
+    assert dataset["fugue_study_key"] == scope.study_id
+    assert "wandb_research_id" not in dataset
+    assert "wandb_study_id" not in dataset
 
 
 def test_target_preserves_legacy_positional_schema_version() -> None:

@@ -58,9 +58,12 @@ def _study(study_id: str, *, rows: int, status: str) -> SimpleNamespace:
         study_id=study_id,
         comparison_id=f"comparison-{study_id}",
         behavioral_status=status,
-        recommendation=(
+        behavioral_recommendation=(
             "Advance to confirmation." if status == "improved" else "Repair tasks."
         ),
+        decision_status="inconclusive",
+        decision_recommendation="Package release was not evaluated.",
+        task_validity_status="valid",
         rows=rows,
         evidence_integrity_grade="A",
         evidence_backend="local",
@@ -606,7 +609,7 @@ def test_create_uses_one_controlled_block_and_authoritative_readback(
     assert marker in markdown
     assert "Public Preview" in markdown
     assert "optional presentation" in markdown
-    assert "does not provide a native Study API" in markdown
+    assert "does not create or replace first-class Study records" in markdown
     assert "project and Report settings" in markdown
     assert markdown.index("study-a") < markdown.index("study-b")
     assert "Advance to confirmation." in markdown
@@ -972,7 +975,7 @@ def test_markdown_escapes_untrusted_table_structure() -> None:
             SimpleNamespace(
                 **{
                     **vars(_study("study-a", rows=4, status="improved")),
-                    "recommendation": (
+                    "behavioral_recommendation": (
                         "first | second\nthird [unsafe](https://outside.example) <tag>"
                     ),
                 }

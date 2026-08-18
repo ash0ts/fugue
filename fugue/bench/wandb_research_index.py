@@ -53,7 +53,10 @@ _TABLE_COLUMNS = (
     "comparison_id",
     "project",
     "behavioral_status",
-    "recommendation",
+    "behavioral_recommendation",
+    "decision_status",
+    "decision_recommendation",
+    "task_validity_status",
     "rows",
     "evidence_integrity_grade",
     "evidence_backend",
@@ -150,7 +153,6 @@ def _publish_with_wandb_sdk(
     entity, project_id = _project_parts(target.project)
     _verify_index_bytes(index, index_bytes)
 
-    study_id = _index_study_id(index.research_id)
     run_id = stable_digest(
         {
             "schema_version": 1,
@@ -177,13 +179,11 @@ def _publish_with_wandb_sdk(
     )
     config = _run_config(
         index,
-        study_id=study_id,
         index_file_sha256=index_file_sha256,
         table_file_sha256=table_file_sha256,
     )
     artifact_metadata = _artifact_metadata(
         index,
-        study_id=study_id,
         index_file_sha256=index_file_sha256,
         table_file_sha256=table_file_sha256,
         artifact_files=artifact_files,
@@ -471,13 +471,11 @@ def _read_back_publication(
 def _run_config(
     index: ResearchIndexV1,
     *,
-    study_id: str,
     index_file_sha256: str,
     table_file_sha256: str,
 ) -> dict[str, Any]:
     return {
-        "wandb_research_id": index.research_id,
-        "wandb_study_id": study_id,
+        "fugue_research_id": index.research_id,
         "research_title": index.title,
         "research_objective": index.objective,
         "record_kind": WANDB_STUDY_INDEX_RECORD_KIND,
@@ -492,14 +490,12 @@ def _run_config(
 def _artifact_metadata(
     index: ResearchIndexV1,
     *,
-    study_id: str,
     index_file_sha256: str,
     table_file_sha256: str,
     artifact_files: Mapping[str, bytes],
 ) -> dict[str, Any]:
     return {
-        "wandb_research_id": index.research_id,
-        "wandb_study_id": study_id,
+        "fugue_research_id": index.research_id,
         "research_title": index.title,
         "research_objective": index.objective,
         "record_kind": WANDB_STUDY_INDEX_RECORD_KIND,
@@ -854,7 +850,10 @@ def _study_table_data(
             study.comparison_id,
             study.project,
             study.behavioral_status,
-            study.recommendation,
+            study.behavioral_recommendation,
+            study.decision_status,
+            study.decision_recommendation,
+            study.task_validity_status,
             study.rows,
             study.evidence_integrity_grade,
             study.evidence_backend,
@@ -941,10 +940,6 @@ def _project_parts(project: str) -> tuple[str, str]:
             "W&B Research-index project must be ENTITY/PROJECT"
         )
     return parts[0], parts[1]
-
-
-def _index_study_id(research_id: str) -> str:
-    return f"{research_id}-index"
 
 
 def _safe_name(value: str) -> str:

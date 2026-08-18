@@ -321,15 +321,18 @@ Calls. `fugue publish weave RESULT --project ENTITY/PROJECT` publishes a
 digest-bound sanitized projection and writes a separate publication receipt.
 It does not change or re-score the local result, and it does not relabel a
 provider-neutral Agent receipt as a native Weave Agent Call. The projection
-contains study identities, scores, safe excerpts, and evidence-chain metadata.
+contains Fugue Research-scope and Study-key labels, scores, safe excerpts, and
+evidence-chain metadata. These labels do not claim generated Study Console
+identities.
 Raw local transcript and tool-event artifact files remain local. Review the
 destination project's access policy before publishing.
 CI uses distinct exit codes for a passed gate (`0`), a completed regression
 (`1`), an invalid comparison (`2`), and incomplete required evidence (`3`).
 
-To share several results with colleagues, publish a digest-bound projection of
-each evidence chain with an explicit Research and Study identity. Then build
-one immutable local index and publish that index to a W&B project:
+To share several results with colleagues, publish one digest-bound projection
+for each result. The projection contains that result's evidence chains. Assign
+a Fugue Research scope and Study key to each projection. Then build one
+immutable local index and publish that index to a W&B project:
 
 ```bash
 python -m pip install "fugue[weave]"
@@ -363,13 +366,15 @@ destination.
 `fugue publish wandb-index` creates a deterministic W&B Run and an immutable
 Artifact version. Share the returned Run URL with colleagues who can access the
 target project. The Run contains a digest-bound table that shows each Study's
-behavioral status, recommendation, evidence integrity, exact result and
-qualification digests, candidate assignments, and primary prediction-and-score
-evidence link. The Artifact version preserves the exact Research index and its
-bound result and publication-receipt sources. The supported W&B SDK does not
-provide a native Study API. Fugue publishes a Research index and an optional
-W&B Report; it does not represent either object as a native W&B Study or
-fabricate a Study Console link.
+behavioral status and next action, governed decision and next action, task
+validity, evidence integrity, exact result and qualification digests, candidate
+assignments, and primary prediction-and-score evidence link. The Artifact
+version contains the exact Research index. The index embeds each result and
+its Weave publication receipt and binds both sources by digest. The pinned W&B
+SDK does not provide the first-class
+Research/Study API. Study Console provides a separate `wandb_study` prototype.
+These index and Report commands do not write that store or create a Study
+Console link.
 
 `fugue publish wandb-report` creates a W&B Report that is bound to the
 index-projection digest. Colleagues can read the Report if the W&B project and

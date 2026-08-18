@@ -34,9 +34,11 @@ RESEARCH_INDEX_REPORT_API_STABILITY = "public_preview"
 RESEARCH_INDEX_REPORT_WIDTH = "readable"
 RESEARCH_INDEX_REPORT_WARNING = (
     "API status: Public Preview. This W&B Report is an optional presentation "
-    "of the Fugue Research index. The local Research index and its publication "
-    "receipt remain authoritative. This Report presents Fugue Study results. "
-    "The supported W&B SDK does not provide a native Study API."
+    "of the Fugue Research index. Use the local Research index as the authoritative "
+    "content record. Use the index-publication receipt as the authoritative "
+    "publication record. This Report lists summary fields from immutable Fugue "
+    "ComparisonResultV3 artifacts. It does not create or replace first-class "
+    "Study records."
 )
 
 _DIGEST = re.compile(r"^[0-9a-f]{64}$")
@@ -64,7 +66,10 @@ class ResearchIndexReportStudyV1:
     result_digest: str
     qualification_digest: str
     behavioral_status: str
-    recommendation: str
+    behavioral_recommendation: str
+    decision_status: str
+    decision_recommendation: str
+    task_validity_status: str
     rows: int
     evidence_integrity_grade: str
     evidence_backend: str
@@ -84,7 +89,18 @@ class ResearchIndexReportStudyV1:
         _digest(self.qualification_digest, "qualification digest")
         if self.behavioral_status not in _STATUSES:
             raise ValueError("unsupported behavioral status")
-        _safe_text(self.recommendation, "recommendation", maximum=8_000)
+        _safe_text(
+            self.behavioral_recommendation,
+            "behavioral recommendation",
+            maximum=8_000,
+        )
+        _safe_text(self.decision_status, "decision status", maximum=100)
+        _safe_text(
+            self.decision_recommendation,
+            "decision recommendation",
+            maximum=8_000,
+        )
+        _safe_text(self.task_validity_status, "task validity", maximum=100)
         if (
             not isinstance(self.rows, int)
             or isinstance(self.rows, bool)
@@ -717,7 +733,10 @@ def _report_study(
         result_digest=study.result_digest,
         qualification_digest=study.qualification_digest,
         behavioral_status=study.behavioral_status,
-        recommendation=study.recommendation,
+        behavioral_recommendation=study.behavioral_recommendation,
+        decision_status=study.decision_status,
+        decision_recommendation=study.decision_recommendation,
+        task_validity_status=study.task_validity_status,
         rows=study.rows,
         evidence_integrity_grade=study.evidence_integrity_grade,
         evidence_backend=study.evidence_backend,

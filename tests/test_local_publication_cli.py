@@ -158,7 +158,7 @@ def test_publish_weave_cli_warns_about_the_privacy_boundary(
     output = " ".join(capsys.readouterr().out.split())
     assert "Privacy boundary" in output
     assert "Raw local transcript and tool-event artifact files remain local" in output
-    assert "Canonical local manifest" in output
+    assert "Local evidence manifest digest" in output
 
 
 def test_publish_weave_cli_binds_explicit_research_and_study_scope(

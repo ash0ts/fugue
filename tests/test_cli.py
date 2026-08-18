@@ -87,7 +87,10 @@ def test_public_command_surface_is_intentionally_small() -> None:
         publish_actions.choices["wandb-index"].format_help().split()
     )
     assert "Table lists the indexed Studies" in publish_index_help
-    assert "does not create a native W&B Study or Report" in publish_index_help
+    assert (
+        "does not create a Study Console projection or a W&B Report"
+        in publish_index_help
+    )
     publish_report_help = " ".join(
         publish_actions.choices["wandb-report"].format_help().split()
     )

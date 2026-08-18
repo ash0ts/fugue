@@ -648,7 +648,8 @@ def _report_title(projection: ResearchIndexReportProjectionV1) -> str:
     suffix = projection.projection_digest[:12]
     if not title or len(title) > 128 or not title.endswith(suffix):
         raise WandbResearchReportPublicationError(
-            "W&B Report title must be bounded and digest-addressed"
+            "W&B Report title must contain 128 characters or fewer and end with "
+            "the first 12 characters of the projection digest"
         )
     return title
 
@@ -669,10 +670,11 @@ def _report_markdown(
         "## Fugue Research index",
         "",
         "**API status: Public Preview.** This W&B Report is an optional "
-        "presentation of a Fugue Research index. It presents Fugue Study results. "
-        "The supported W&B SDK does not provide a native Study API.",
+        "presentation of a Fugue Research index. It lists summary fields from "
+        "immutable Fugue ComparisonResultV3 artifacts. It does not create or "
+        "replace first-class Study records.",
         "",
-        "Access follows W&B project and Report settings. Fugue does not request "
+        "The W&B project and Report settings control access. Fugue does not request "
         "a public share link.",
         "",
         marker,
@@ -684,13 +686,13 @@ def _report_markdown(
         f"- [Index Run]({_safe_bound_url(projection.index_run_url)})",
         f"- [Immutable index Artifact version]({_safe_bound_url(projection.index_artifact_url)})",
         "",
-        "| Study | Comparison | Finding | Recommendation | Rows | Candidates | Evidence integrity (not task quality) | Links |",
-        "|---|---|---|---|---:|---|---|---|",
+        "| Study | Comparison | Behavioral finding | Behavioral next action | Governed decision | Decision next action | Task validity | Result rows | Candidates | Evidence integrity (not task quality) | Links |",
+        "|---|---|---|---|---|---|---|---:|---|---|---|",
     ]
     for study in sorted(projection.studies, key=lambda item: item.study_id):
         evidence = (
-            f"grade {_table_text(study.evidence_integrity_grade)} — "
-            "link/privacy integrity; result backend: "
+            f"grade {_table_text(study.evidence_integrity_grade)} for evidence "
+            "links and privacy checks; result backend: "
             f"{_table_text(study.evidence_backend)}; local chain: "
             f"{_table_text(study.local_chain_integrity)}; W&B publication: "
             f"{_table_text(study.published_chain_integrity)}"
@@ -707,7 +709,10 @@ def _report_markdown(
                     _table_text(study.study_id),
                     _table_text(study.comparison_id),
                     _table_text(study.behavioral_status),
-                    _table_text(study.recommendation),
+                    _table_text(study.behavioral_recommendation),
+                    _table_text(study.decision_status),
+                    _table_text(study.decision_recommendation),
+                    _table_text(study.task_validity_status),
                     str(study.rows),
                     _candidate_assignments(study.candidate_assignments),
                     evidence,

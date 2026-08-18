@@ -61,6 +61,7 @@ class _EmbeddedResultV3:
     candidate_definitions: dict[str, dict[str, str]]
     behavioral_summary: SimpleNamespace
     decision: SimpleNamespace
+    task_validity: tuple[SimpleNamespace, ...]
     evidence_backend: str = "local"
     local_chain_integrity: str = "reconciled"
     hosted_chain_integrity: str = "not_applicable"
@@ -106,7 +107,14 @@ def _canonical_embedded_source_fakes(
                 status=str(raw["behavioral_status"]),
                 recommendation=str(raw["recommendation"]),
             ),
-            decision=SimpleNamespace(evidence_grade="A"),
+            decision=SimpleNamespace(
+                evidence_grade="A",
+                status=str(raw["decision_status"]),
+                recommendation=str(raw["decision_recommendation"]),
+            ),
+            task_validity=(
+                SimpleNamespace(status=str(raw["task_validity_status"])),
+            ),
         )
 
     def parse_receipt(raw: dict[str, Any]):
@@ -205,6 +213,9 @@ def _entry(
             "candidate_definition": definition,
             "behavioral_status": behavioral_status,
             "recommendation": recommendation,
+            "decision_status": "inconclusive",
+            "decision_recommendation": "Package release was not evaluated.",
+            "task_validity_status": "valid",
         },
         sort_keys=True,
     )
@@ -244,7 +255,10 @@ def _entry(
         .hexdigest(),
         project=f"wandb/{study_id}",
         behavioral_status=behavioral_status,
-        recommendation=recommendation,
+        behavioral_recommendation=recommendation,
+        decision_status="inconclusive",
+        decision_recommendation="Package release was not evaluated.",
+        task_validity_status="valid",
         rows=rows,
         evidence_integrity_grade="A",
         evidence_backend="local",
@@ -691,8 +705,7 @@ def test_publisher_writes_one_deterministic_safe_run_and_reads_it_back(
     assert call["resume"] == "never"
     assert call["save_code"] is False
     assert call["config"] == {
-        "wandb_research_id": index.research_id,
-        "wandb_study_id": f"{index.research_id}-index",
+        "fugue_research_id": index.research_id,
         "research_title": index.title,
         "research_objective": index.objective,
         "record_kind": WANDB_STUDY_INDEX_RECORD_KIND,
@@ -712,6 +725,8 @@ def test_publisher_writes_one_deterministic_safe_run_and_reads_it_back(
         "study_count": 2,
         "total_rows": 12,
     }
+    assert "wandb_research_id" not in call["config"]
+    assert "wandb_study_id" not in call["config"]
     expected_environment = {
         "WANDB_ENTITY": "wandb",
         "WANDB_PROJECT": "community-studies",

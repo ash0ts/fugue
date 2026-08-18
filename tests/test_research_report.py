@@ -43,7 +43,12 @@ def _sources(
         result_digest=stable_digest({"result": "study-a"}),
         qualification_digest=stable_digest({"qualification": "study-a"}),
         behavioral_status="unchanged",
-        recommendation="Keep the current revision until evidence improves.",
+        behavioral_recommendation=(
+            "Keep the current revision until evidence improves."
+        ),
+        decision_status="inconclusive",
+        decision_recommendation="Package release was not evaluated.",
+        task_validity_status="valid",
         rows=2,
         evidence_integrity_grade="A",
         evidence_backend="weave",

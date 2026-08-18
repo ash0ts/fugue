@@ -287,13 +287,17 @@ def _parser() -> FugueArgumentParser:
     publish_weave.add_argument(
         "--research-id",
         help=(
-            "Attach this published evidence to one Research collection. "
-            "Requires --study-id or uses the result comparison id."
+            "Label this Weave publication with a Fugue Research scope. If you "
+            "omit --study-id, Fugue uses the result comparison id as the Study "
+            "key. This option does not create a Study Console Research record."
         ),
     )
     publish_weave.add_argument(
         "--study-id",
-        help="Stable Study id within --research-id",
+        help=(
+            "Stable Fugue Study key within --research-id. This key is not a "
+            "generated Study Console ID."
+        ),
     )
     publish_weave.add_argument("--manifest", type=Path, help=argparse.SUPPRESS)
     publish_weave.add_argument("--receipt", type=Path)
@@ -302,13 +306,14 @@ def _parser() -> FugueArgumentParser:
     publish_index = publish_actions.add_parser(
         "wandb-index",
         help=(
-            "Publish a W&B index Run and immutable Artifact from an unchanged "
-            "Research index"
+            "Publish a W&B index Run and an immutable Artifact version from an "
+            "unchanged Research index"
         ),
         description=(
             "Publish a deterministic W&B Run whose Table lists the indexed Studies. "
-            "Also publish an immutable Artifact that contains the unchanged Research "
-            "index. This command does not create a native W&B Study or Report."
+            "Also publish an immutable Artifact version that contains the unchanged "
+            "Research index. This command does not create a Study Console projection "
+            "or a W&B Report."
         ),
     )
     publish_index.add_argument("index", type=Path)
@@ -1650,8 +1655,8 @@ def _publish_local_result(args: argparse.Namespace) -> int:
     else:
         scope_lines = (
             (
-                f"Research: {receipt.target.study_scope.research_id}",
-                f"Study: {receipt.target.study_scope.study_id}",
+                f"Fugue Research scope: {receipt.target.study_scope.research_id}",
+                f"Fugue Study key: {receipt.target.study_scope.study_id}",
             )
             if receipt.target.study_scope is not None
             else ()
@@ -1662,10 +1667,10 @@ def _publish_local_result(args: argparse.Namespace) -> int:
                     (
                         f"Target: {receipt.target.project_slug}",
                         *scope_lines,
-                        f"Result: {receipt.result_digest}",
-                        f"Canonical local manifest: {receipt.local_manifest_digest}",
+                        f"Result digest: {receipt.result_digest}",
+                        f"Local evidence manifest digest: {receipt.local_manifest_digest}",
                         f"Hosted objects: {len(receipt.hosted_objects)}",
-                        f"Receipt: {receipt.receipt_digest}",
+                        f"Publication receipt digest: {receipt.receipt_digest}",
                     )
                 ),
                 title="Published local result projection",
@@ -1725,8 +1730,8 @@ def _study_index(args: argparse.Namespace) -> int:
                     (
                         f"Research: {index.research_id}",
                         f"Studies: {index.study_count}",
-                        f"Rows: {index.total_rows}",
-                        f"Index: {index.index_digest}",
+                        f"Result rows: {index.total_rows}",
+                        f"Index digest: {index.index_digest}",
                         f"Path: {output}",
                     )
                 ),
@@ -1786,7 +1791,7 @@ def _publish_research_index(args: argparse.Namespace) -> int:
     if args.json:
         print(json.dumps(receipt.to_dict(), indent=2, sort_keys=True))
     else:
-        report = receipt.report_url or "not available in the installed W&B SDK"
+        report = receipt.report_url or "not created by fugue publish wandb-index"
         CONSOLE.print(
             Panel(
                 "\n".join(
@@ -1794,10 +1799,12 @@ def _publish_research_index(args: argparse.Namespace) -> int:
                         f"Project: {receipt.target.project}",
                         f"Destination: {receipt.target.destination_digest}",
                         f"Index Run: {receipt.run_url}",
-                        f"Artifact: {receipt.artifact_url}",
+                        f"Artifact version: {receipt.artifact_url}",
                         f"Report: {report}",
-                        f"Index: {receipt.index_digest}",
-                        f"Receipt: {receipt.receipt_digest}",
+                        "Next action: run fugue publish wandb-report with this "
+                        "index-publication receipt",
+                        f"Index digest: {receipt.index_digest}",
+                        f"Publication receipt digest: {receipt.receipt_digest}",
                     )
                 ),
                 title="Published W&B Research index",
@@ -1893,9 +1900,9 @@ def _publish_research_report(args: argparse.Namespace) -> int:
                     (
                         f"Project: {receipt.target.project}",
                         f"Report: {receipt.report_url}",
-                        f"Projection: {receipt.projection_digest}",
+                        f"Projection digest: {receipt.projection_digest}",
                         "Verification: saved Report matches the projection digest",
-                        f"Receipt: {receipt.receipt_digest}",
+                        f"Publication receipt digest: {receipt.receipt_digest}",
                         "Access: governed by W&B project and Report settings",
                     )
                 ),

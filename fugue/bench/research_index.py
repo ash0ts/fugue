@@ -39,6 +39,21 @@ EvidenceKind = Literal[
     "dataset",
 ]
 CandidateRole = Literal["baseline", "candidate"]
+DecisionStatus = Literal[
+    "invalid",
+    "blocked",
+    "hold",
+    "inconclusive",
+    "ready_for_signoff",
+    "go",
+]
+TaskValidityStatus = Literal[
+    "valid",
+    "non_discriminating",
+    "drifted",
+    "invalid",
+    "inconclusive",
+]
 
 _KINDS = frozenset(
     {
@@ -55,6 +70,16 @@ _STATUSES = frozenset(
 _CHAINS = frozenset({"reconciled", "unresolved", "invalid", "not_applicable"})
 _GRADES = frozenset({"A", "B", "C", "invalid"})
 _BACKENDS = frozenset({"local", "weave"})
+_DECISION_STATUSES = frozenset(
+    {"invalid", "blocked", "hold", "inconclusive", "ready_for_signoff", "go"}
+)
+_TASK_VALIDITY_STATUSES = (
+    "invalid",
+    "drifted",
+    "inconclusive",
+    "non_discriminating",
+    "valid",
+)
 _DIGEST = re.compile(r"^[0-9a-f]{64}$")
 _SCOPE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._:-]{0,255}$")
 _SLUG = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$")
@@ -156,7 +181,10 @@ class ResearchStudyIndexEntryV1:
     publication_receipt_file_sha256: str
     project: str
     behavioral_status: BehavioralStatus
-    recommendation: str
+    behavioral_recommendation: str
+    decision_status: DecisionStatus
+    decision_recommendation: str
+    task_validity_status: TaskValidityStatus
     rows: int
     evidence_integrity_grade: Literal["A", "B", "C", "invalid"]
     evidence_backend: Literal["local", "weave"]
@@ -185,7 +213,12 @@ class ResearchStudyIndexEntryV1:
         _project(self.project)
         if self.behavioral_status not in _STATUSES:
             raise ValueError("unsupported behavioral status")
-        _text(self.recommendation, "recommendation")
+        _text(self.behavioral_recommendation, "behavioral recommendation")
+        if self.decision_status not in _DECISION_STATUSES:
+            raise ValueError("unsupported decision status")
+        _text(self.decision_recommendation, "decision recommendation")
+        if self.task_validity_status not in _TASK_VALIDITY_STATUSES:
+            raise ValueError("unsupported task validity status")
         if self.rows < 1:
             raise ValueError("Study rows must be positive")
         if self.evidence_integrity_grade not in _GRADES:
@@ -794,7 +827,12 @@ def _entry_projection(
         "behavioral_status": cast(
             BehavioralStatus, result.behavioral_summary.status
         ),
-        "recommendation": str(result.behavioral_summary.recommendation),
+        "behavioral_recommendation": str(
+            result.behavioral_summary.recommendation
+        ),
+        "decision_status": cast(DecisionStatus, result.decision.status),
+        "decision_recommendation": str(result.decision.recommendation),
+        "task_validity_status": _task_validity_status(result),
         "rows": result.rows,
         "evidence_integrity_grade": result.decision.evidence_grade,
         "evidence_backend": result.evidence_backend,
@@ -850,14 +888,28 @@ def _validate_entry_sources(entry: ResearchStudyIndexEntryV1) -> None:
         )
 
 
+def _task_validity_status(result: ComparisonResultV3) -> TaskValidityStatus:
+    statuses = {str(item.status) for item in result.task_validity}
+    if not statuses:
+        raise ResearchIndexError("comparison result has no task-validity evidence")
+    unknown = statuses - set(_TASK_VALIDITY_STATUSES)
+    if unknown:
+        raise ResearchIndexError("comparison result has unsupported task validity")
+    return cast(
+        TaskValidityStatus,
+        next(status for status in _TASK_VALIDITY_STATUSES if status in statuses),
+    )
+
+
 def _parse_entry(raw: Any) -> ResearchStudyIndexEntryV1:
     value = dict(_map(raw))
     _fields(
         value,
         "research_id study_id comparison_id result_digest qualification_digest "
         "result_file_sha256 publication_receipt_digest "
-        "publication_receipt_file_sha256 project behavioral_status recommendation "
-        "rows evidence_integrity_grade evidence_backend local_chain_integrity "
+        "publication_receipt_file_sha256 project behavioral_status "
+        "behavioral_recommendation decision_status decision_recommendation "
+        "task_validity_status rows evidence_integrity_grade evidence_backend local_chain_integrity "
         "result_hosted_chain_integrity published_chain_integrity candidate_ids "
         "candidate_definitions candidate_assignments evidence_refs result_json "
         "publication_receipt_json",

@@ -75,6 +75,7 @@ class _FakeComparisonResultV3:
     candidate_definitions: dict[str, dict[str, str]]
     behavioral_summary: SimpleNamespace
     decision: SimpleNamespace
+    task_validity: tuple[SimpleNamespace, ...]
     evidence_backend: str = "local"
     local_chain_integrity: str = "reconciled"
     hosted_chain_integrity: str = "not_applicable"
@@ -110,7 +111,12 @@ def _result(comparison_id: str) -> _FakeComparisonResultV3:
             status="unchanged",
             recommendation="Keep the current revision pending a stronger result.",
         ),
-        decision=SimpleNamespace(evidence_grade="A"),
+        decision=SimpleNamespace(
+            evidence_grade="A",
+            status="inconclusive",
+            recommendation="Package release was not evaluated by this Study.",
+        ),
+        task_validity=(SimpleNamespace(status="valid"),),
     )
 
 
@@ -289,10 +295,12 @@ def test_build_write_and_read_research_index_is_canonical_and_immutable(
     }
     assert all(item.published_chain_integrity == "reconciled" for item in index.studies)
     assert all(
-        item.recommendation
+        item.behavioral_recommendation
         == "Keep the current revision pending a stronger result."
         for item in index.studies
     )
+    assert all(item.decision_status == "inconclusive" for item in index.studies)
+    assert all(item.task_validity_status == "valid" for item in index.studies)
     assert all(len(item.evidence_refs) == 10 for item in index.studies)
     assert all(len(item.candidate_ids) == 2 for item in index.studies)
     assert all(
@@ -523,7 +531,10 @@ def test_read_rejects_rehashed_embedded_result_identity_conflict(
     "projection",
     [
         "behavioral_status",
-        "recommendation",
+        "behavioral_recommendation",
+        "decision_status",
+        "decision_recommendation",
+        "task_validity_status",
         "candidate_assignments",
         "evidence_refs",
         "study_id",
@@ -541,8 +552,12 @@ def test_read_rederives_every_index_projection_from_embedded_sources(
     study = raw["studies"][0]
     if projection == "behavioral_status":
         study[projection] = "improved"
-    elif projection == "recommendation":
+    elif projection in {"behavioral_recommendation", "decision_recommendation"}:
         study[projection] = "A claim not present in the canonical result."
+    elif projection == "decision_status":
+        study[projection] = "go"
+    elif projection == "task_validity_status":
+        study[projection] = "invalid"
     elif projection == "candidate_assignments":
         first, second = study[projection]
         first["candidate_id"], second["candidate_id"] = (
