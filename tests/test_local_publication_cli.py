@@ -116,4 +116,3 @@ def test_publish_weave_cli_reports_missing_optional_extra(
     assert payload["status"] == "blocked"
     assert payload["error_type"] == "missing_weave_extra"
     assert 'pip install "fugue[weave]"' in payload["message"]
-
