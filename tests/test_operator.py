@@ -27,10 +27,12 @@ from fugue.bench.intervention_provenance import (
 from fugue.bench.library import (
     ContextSelection,
     EvaluationGenerationSpec,
+    ExperimentSpec,
     IntegrationSelection,
     RubricScorerSelection,
     WorkloadSpec,
 )
+from fugue.bench.local_evidence import LocalEvidenceStore
 from fugue.bench.operator import ExperimentRequest, OperatorService, as_json
 from fugue.bench.reproducibility import (
     RunSnapshotV1,
@@ -51,6 +53,24 @@ from fugue.model_plane import (
     trace_project_slug,
 )
 from fugue.preflight import PreflightCheck
+
+
+def test_new_programmatic_experiment_defaults_to_local_evidence() -> None:
+    experiment = ExperimentSpec(id="standalone", title="Standalone")
+
+    assert experiment.evidence_mode == "local"
+    assert experiment.evidence_destination.kind == "local"
+
+
+def test_programmatic_experiment_with_hosted_destination_infers_weave() -> None:
+    experiment = ExperimentSpec(
+        id="hosted",
+        title="Hosted",
+        evidence_project="team/project",
+    )
+
+    assert experiment.evidence_mode == "weave_required"
+    assert experiment.evidence_destination.project == "project"
 
 
 def make_operator_repo(tmp_path: Path) -> OperatorService:
@@ -172,6 +192,187 @@ def test_hosted_evidence_finishes_after_canonical_local_row() -> None:
         ("local", cell, outcome),
         ("hosted", cell, outcome, canonical_row),
     ]
+
+
+def test_legacy_weave_required_operator_keeps_local_and_hosted_evidence_separate(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A pre-evidence-mode study keeps Weave while local evidence is canonical."""
+
+    service = make_operator_repo(tmp_path)
+    experiment = service.experiment("demo")
+    assert experiment.evidence_mode == "weave_required"
+
+    monkeypatch.setattr(operator_module, "agent_runtime_spec", lambda harness: None)
+    monkeypatch.setattr(operator_module, "_verify_rendered_setup", lambda jobs: None)
+    monkeypatch.setattr(
+        "fugue.bench.operator.validate_harbor_job_configs", lambda paths: None
+    )
+    events: list[str] = []
+
+    class LegacyHostedCoordinator:
+        def __init__(self, cells, *, repo_root, project, **kwargs) -> None:
+            assert project == "team/fugue-experiments"
+            self.run_id = cells[0].run_id
+            self.repo_root = repo_root
+            self.results_path = (
+                repo_root
+                / ".fugue"
+                / "runtime"
+                / self.run_id
+                / "hosted-evaluation-results.jsonl"
+            )
+
+        def begin_cell(self, cell):
+            events.append("hosted-begin")
+            return None
+
+        def terminal_row(self, cell_id):
+            return None
+
+        def finish_cell(self, cell, outcome, *, canonical_row) -> None:
+            # Operator must close the immutable provider-neutral chain before
+            # invoking any hosted finalization or network publication.
+            local_store = LocalEvidenceStore(self.repo_root, self.run_id)
+            local_record = local_store.read_attempt(cell.attempt_id)
+            local_rows = [
+                json.loads(line)
+                for line in (
+                    self.repo_root
+                    / ".fugue"
+                    / "runtime"
+                    / self.run_id
+                    / "evaluation-results.jsonl"
+                )
+                .read_text(encoding="utf-8")
+                .splitlines()
+                if line.strip()
+            ]
+            assert len(local_rows) == 1
+            assert canonical_row == local_rows[0]
+            assert canonical_row["evaluation_publication_mode"] == "local"
+            assert canonical_row["local_evidence_record_digest"] == (
+                local_record.record_digest
+            )
+            assert {
+                link["system"] for link in canonical_row["local_evidence_links"]
+            } == {"local_artifact"}
+            events.append("local-closed-before-hosted")
+
+            hosted_row = {
+                "attempt_id": cell.attempt_id,
+                "candidate_id": cell.candidate_id,
+                "execution_fingerprint": cell.execution_fingerprint,
+                "evaluation_publication_mode": "live",
+                "evidence_backend": "weave",
+                "hosted_evidence_links": [
+                    {
+                        "kind": "prediction_and_score",
+                        "system": "weave",
+                        "ref": "weave:///team/fugue-experiments/call/pas-1",
+                    }
+                ],
+                "canonical_local_record_digest": local_record.record_digest,
+            }
+            self.results_path.write_text(
+                json.dumps(hosted_row, sort_keys=True) + "\n",
+                encoding="utf-8",
+            )
+            events.append("hosted-finished")
+
+        def finalize(self) -> PublicationResult:
+            events.append("hosted-finalized")
+            return PublicationResult(
+                published=1,
+                skipped=0,
+                evaluations=(
+                    PublishedEvaluation(
+                        candidate_id="candidate-a",
+                        name="Legacy Weave evaluation",
+                        examples=1,
+                        project="team/fugue-experiments",
+                        url="https://wandb.ai/team/fugue-experiments/weave/evaluations/eval-1",
+                        agent_predictions=1,
+                        linked_agent_predictions=1,
+                    ),
+                ),
+            )
+
+    monkeypatch.setattr(
+        "fugue.bench.operator.LiveEvaluationCoordinator",
+        LegacyHostedCoordinator,
+    )
+
+    def runner(command, **kwargs):
+        assert kwargs["env"]["FUGUE_EVIDENCE_MODE"] == "weave_required"
+        events.append("agent")
+        return subprocess.CompletedProcess(command, 0)
+
+    run_id = "legacy-weave-local-first"
+    result = service.execute_run(
+        ExperimentRequest(experiment_id="demo"),
+        run_id=run_id,
+        cell_runner=runner,
+    )
+
+    assert result.status == "passed"
+    assert events == [
+        "hosted-begin",
+        "agent",
+        "local-closed-before-hosted",
+        "hosted-finished",
+        "hosted-finalized",
+    ]
+
+    store = LocalEvidenceStore(tmp_path, run_id)
+    manifest = store.build_manifest()
+    assert len(manifest.attempt_records) == 1
+    assert manifest.destination.kind == "local"
+    assert manifest.destination.format == "fugue-evidence"
+
+    local_rows = [
+        json.loads(line)
+        for line in (
+            tmp_path / ".fugue/runtime" / run_id / "evaluation-results.jsonl"
+        )
+        .read_text(encoding="utf-8")
+        .splitlines()
+        if line.strip()
+    ]
+    hosted_rows = [
+        json.loads(line)
+        for line in (
+            tmp_path
+            / ".fugue/runtime"
+            / run_id
+            / "hosted-evaluation-results.jsonl"
+        )
+        .read_text(encoding="utf-8")
+        .splitlines()
+        if line.strip()
+    ]
+    assert local_rows[0]["evaluation_publication_mode"] == "local"
+    assert "hosted_evidence_links" not in local_rows[0]
+    assert hosted_rows[0]["evaluation_publication_mode"] == "live"
+    assert hosted_rows[0]["evidence_backend"] == "weave"
+    assert hosted_rows[0]["hosted_evidence_links"][0]["system"] == "weave"
+    assert hosted_rows[0]["canonical_local_record_digest"] == (
+        local_rows[0]["local_evidence_record_digest"]
+    )
+
+    # Existing run readers continue to expose the hosted evaluation without
+    # replacing or reinterpreting the canonical local evidence manifest.
+    assert service.run_evaluation(run_id) == result.evaluations[0]
+    run_manifest = read_run_manifest(tmp_path / ".fugue/runtime" / run_id)
+    assert run_manifest is not None
+    assert run_manifest["local_evidence"]["status"] == manifest.status
+    assert run_manifest["local_evidence"]["plan_digest"] == manifest.plan_digest
+    assert run_manifest["local_evidence"]["attempts"] == 1
+    assert len(run_manifest["local_evidence"]["manifest_digest"]) == 64
+    assert run_manifest["evaluation_runs"][0]["project"] == (
+        "team/fugue-experiments"
+    )
 
 
 def test_intervention_lock_freezes_two_arm_holdout_and_candidate_identity(

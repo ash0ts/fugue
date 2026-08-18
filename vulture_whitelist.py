@@ -73,6 +73,11 @@ aggregation
 evidence_inputs
 rubric_summary
 observation
+
+# `events.jsonl` is an explicitly non-authoritative diagnostic journal. This
+# supported inspection hook is exercised directly by integrity tests but is
+# intentionally absent from canonical manifest/result recomputation.
+_.read_events
 alternative_explanations
 success_definition
 task_title
@@ -183,6 +188,11 @@ _Mem0FastEmbedder
 SweQaProMaterializer
 GeneratedCapabilityMaterializer
 AuthoredTaskMaterializer
+# Harbor imports this terminal-evidence plugin by the class path rendered into
+# each job configuration; its lifecycle methods are invoked by Harbor.
+DurableHarborTerminalPlugin
+_.on_job_start
+_.on_job_end
 
 # Supported public analysis/builders.
 factorial_difference_in_differences
@@ -287,6 +297,17 @@ read_comparison_failure_lock
 # scripts and by third-party operator automation outside the package tree.
 write_intervention_component_lock
 verify_intervention_component_checkout
+# Supported standalone-library surfaces consumed by installed-package clients.
+standalone_templates
+changed_dimension
+_.publication_receipt
+
+# Intentionally unused symbols in shipped mutation/control fixtures. Their
+# unused state is the behavior a template asks an Agent to diagnose or change.
+Account
+notifications_enabled
+create_widget
+DATABASE_PATH
 
 # Protocol, stdlib server, FastAPI state, and Textual callback/member access.
 _.input_messages

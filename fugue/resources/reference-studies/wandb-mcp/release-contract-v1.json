@@ -1,0 +1,40 @@
+{
+  "schema_version": 1,
+  "id": "wandb-mcp-python-0.4-reference",
+  "release_target": "W&B MCP Python package 0.4",
+  "repository": {
+    "url": "https://github.com/wandb/wandb-mcp-server.git",
+    "baseline": {
+      "commit": "53b199a5f4af29aa82077e2c7f1e2c5e5e0c2ca0",
+      "tree": "1f38bd7791184ba14545feb69728773c341bb780"
+    },
+    "candidate": {
+      "ref": "refs/heads/staging/0.4.0",
+      "resolution_policy": "resolve-twice-and-freeze-exact-commit-and-tree"
+    },
+    "release_notes_path": "docs/releases/v0.4.0.md"
+  },
+  "study": {
+    "adapter_id": "wandb-mcp-release",
+    "adapter_version": 1,
+    "intent": "python-package-release-qualification",
+    "task_count": 4,
+    "attempts_per_coordinate": 1,
+    "logical_cell_count": 8,
+    "source_project": "wandb/fugue-mcp-release-source-v2",
+    "result_evidence_mode": "local",
+    "result_project": null
+  },
+  "canary_scope": [
+    "sdk-first structured Run queries with selective projected fields",
+    "bounded cursor continuation and explicit collection coverage",
+    "bounded history targeting on an exact axis value",
+    "direct Evaluation.predict_and_score reconciliation"
+  ],
+  "claim_limits": [
+    "The canary does not qualify every release-note behavior.",
+    "A local behavioral result does not qualify managed service or Helm availability.",
+    "A W&B or Weave publication is optional and cannot change the local result.",
+    "WBAF is task-design provenance only and is not a runtime dependency."
+  ]
+}

@@ -469,6 +469,16 @@ def test_first_cell_conformance_proves_cleanup_and_private_boundary(
     assert receipt["status"] == "passed"
     assert receipt["execution_identity"]["status"] == "passed"
     assert receipt["local_artifact_privacy_scan"]["status"] == "passed"
+    assert (
+        receipt["local_artifact_privacy_scan"][
+            "configured_sensitive_value_count"
+        ]
+        == 1
+    )
+    assert (
+        "configured_secret_count"
+        not in receipt["local_artifact_privacy_scan"]
+    )
     assert receipt["private_label_boundary"]["status"] == "passed"
     assert receipt["docker_cleanup"]["status"] == "passed"
     assert receipt["docker_cleanup"]["matched_containers"] == []
@@ -506,6 +516,102 @@ def test_private_boundary_rejects_neutral_key_private_bundle_copy(
     assert receipt["tainted_agent_inputs"]
 
 
+@pytest.mark.parametrize(
+    ("private_value", "copied_value"),
+    [
+        ("host-only-scalar-string", "host-only-scalar-string"),
+        (314_159, 314_159),
+        (False, False),
+    ],
+    ids=("string", "number", "boolean"),
+)
+def test_private_boundary_rejects_neutral_key_private_scalar_copy(
+    tmp_path: Path,
+    private_value: object,
+    copied_value: object,
+) -> None:
+    run_id = "run-neutral-private-scalar-copy"
+    job = _local_job(tmp_path, run_id)
+    asset_lock = tmp_path / ".fugue/runtime" / run_id / "evaluation-assets.json"
+    asset_lock.write_text(
+        json.dumps(
+            {
+                "schema_version": 1,
+                "predictions": {
+                    "prediction-a": {
+                        "task_id": "public-task-a",
+                        "expected": {"host_value": private_value},
+                    }
+                },
+            }
+        )
+        + "\n"
+    )
+    asset_lock.chmod(0o600)
+    job.config["agents"] = [{"kwargs": {"neutral_value": copied_value}}]
+
+    receipt = conformance_module._private_label_boundary(
+        run_dir=asset_lock.parent,
+        jobs=[job],
+        host_scorer_names=("comparison.deterministic.answer",),
+    )
+
+    assert receipt["status"] == "failed"
+    assert receipt["rendered_private_fields"] == []
+    assert any("neutral_value" in path for path in receipt["tainted_agent_inputs"])
+
+
+def test_private_boundary_rejects_leaves_copied_from_nested_private_list(
+    tmp_path: Path,
+) -> None:
+    run_id = "run-neutral-nested-private-copy"
+    job = _local_job(tmp_path, run_id)
+    asset_lock = tmp_path / ".fugue/runtime" / run_id / "evaluation-assets.json"
+    asset_lock.write_text(
+        json.dumps(
+            {
+                "schema_version": 1,
+                "predictions": {
+                    "prediction-a": {
+                        "task_id": "public-task-a",
+                        "expected": {
+                            "matrix": [
+                                ["host-only-nested-leaf", 271_828],
+                                [True],
+                            ]
+                        },
+                    }
+                },
+            }
+        )
+        + "\n"
+    )
+    asset_lock.chmod(0o600)
+    job.config["agents"] = [
+        {
+            "kwargs": {
+                "neutral_copy": {
+                    "message": "host-only-nested-leaf",
+                    "threshold": 271_828,
+                    "allowed": True,
+                }
+            }
+        }
+    ]
+
+    receipt = conformance_module._private_label_boundary(
+        run_dir=asset_lock.parent,
+        jobs=[job],
+        host_scorer_names=("comparison.deterministic.answer",),
+    )
+
+    assert receipt["status"] == "failed"
+    assert receipt["rendered_private_fields"] == []
+    assert {
+        path.rsplit(".", 1)[-1] for path in receipt["tainted_agent_inputs"]
+    } >= {"allowed", "message", "threshold"}
+
+
 def test_private_boundary_rejects_host_only_bundle_mount(tmp_path: Path) -> None:
     run_id = "run-private-mount"
     job = _local_job(tmp_path, run_id)
@@ -541,6 +647,40 @@ def test_private_boundary_does_not_treat_correct_output_as_input_leakage(
     )
     asset_lock.chmod(0o600)
     job.result_path.write_text(json.dumps({"answer": private_bundle}) + "\n")
+
+    receipt = conformance_module._private_label_boundary(
+        run_dir=asset_lock.parent,
+        jobs=[job],
+        host_scorer_names=("comparison.deterministic.answer",),
+    )
+
+    assert receipt["status"] == "passed"
+    assert receipt["tainted_agent_inputs"] == []
+
+
+def test_private_boundary_does_not_treat_correct_scalar_output_as_input_leakage(
+    tmp_path: Path,
+) -> None:
+    run_id = "run-correct-scalar-output"
+    job = _local_job(tmp_path, run_id)
+    asset_lock = tmp_path / ".fugue/runtime" / run_id / "evaluation-assets.json"
+    private_value = "host-only-correct-scalar"
+    asset_lock.write_text(
+        json.dumps(
+            {
+                "schema_version": 1,
+                "predictions": {
+                    "prediction-a": {
+                        "task_id": "public-task-a",
+                        "expected": {"answer": private_value},
+                    }
+                },
+            }
+        )
+        + "\n"
+    )
+    asset_lock.chmod(0o600)
+    job.result_path.write_text(json.dumps({"answer": private_value}) + "\n")
 
     receipt = conformance_module._private_label_boundary(
         run_dir=asset_lock.parent,

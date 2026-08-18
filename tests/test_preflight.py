@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import os
 import subprocess
 from pathlib import Path
 
@@ -13,6 +14,24 @@ from fugue.preflight import (
     validate_harbor_job_configs,
 )
 from fugue.weave_support import resolved_weave_trace_server_url
+
+
+def test_harbor_resolution_falls_back_to_active_python_environment(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    environment_bin = tmp_path / "venv" / "bin"
+    environment_bin.mkdir(parents=True)
+    python = environment_bin / "python"
+    python.touch()
+    harbor = environment_bin / "harbor"
+    harbor.touch(mode=0o700)
+    monkeypatch.setattr("fugue.preflight.shutil.which", lambda name: None)
+    monkeypatch.setattr("fugue.preflight.sys.executable", python.as_posix())
+
+    from fugue.preflight import _harbor_executable
+
+    assert os.access(harbor, os.X_OK)
+    assert _harbor_executable() == harbor.as_posix()
 
 
 def test_harbor_import_check_uses_resolved_tool_python(
@@ -261,3 +280,30 @@ def test_live_preflight_probes_the_resolved_weave_endpoint(
 
     assert next(check for check in checks if check.name == "weave endpoint").ok
     assert "https://trace.wandb.ai/server_info" in urls
+
+
+def test_local_preflight_does_not_require_or_probe_weave(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    monkeypatch.setattr("fugue.preflight.shutil.which", lambda name: None)
+    monkeypatch.setattr(
+        "fugue.preflight.bridge_status", lambda **_kwargs: {"ok": True}
+    )
+
+    def unexpected_get(*args, **kwargs):
+        raise AssertionError(f"local evidence must not probe Weave: {args}, {kwargs}")
+
+    monkeypatch.setattr("fugue.preflight.httpx.get", unexpected_get)
+
+    checks = run_preflight(
+        "anthropic/claude-sonnet-5",
+        repo_root=tmp_path,
+        env={"ANTHROPIC_API_KEY": "present"},
+        live=True,
+        evidence_mode="local",
+    )
+
+    trace = next(check for check in checks if check.name == "trace env")
+    assert trace.ok is True
+    assert trace.detail == "not applicable; local evidence is canonical"
+    assert not any(check.name == "weave endpoint" for check in checks)

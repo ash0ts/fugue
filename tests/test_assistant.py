@@ -193,6 +193,31 @@ def test_assistant_trace_preserves_weave_conversation_types(monkeypatch) -> None
     assert span.closed is True
 
 
+def test_assistant_trace_is_disabled_in_local_mode_even_with_wandb_key(
+    monkeypatch,
+) -> None:
+    def unexpected_initialize(*args, **kwargs):
+        raise AssertionError(f"local mode initialized Weave: {args}, {kwargs}")
+
+    monkeypatch.setattr("fugue.assistant.initialize_weave", unexpected_initialize)
+    trace = _AssistantTrace(
+        role="composer",
+        route=resolve_model_route("wandb/test-model", {}),
+        env={
+            "FUGUE_EVIDENCE_MODE": "local",
+            "WANDB_API_KEY": "integration-or-model-only-key",
+        },
+        trace_content="full",
+        session_id="session",
+        attributes={},
+    )
+
+    trace.start("question")
+
+    assert trace.conversation is None
+    assert trace.turn is None
+
+
 def test_assistant_retries_unstructured_response_with_terminal_tool_contract() -> None:
     class Client:
         route = resolve_model_route("wandb/test-model", {})

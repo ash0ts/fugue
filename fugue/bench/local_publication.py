@@ -4,6 +4,7 @@ import hashlib
 import importlib
 import json
 import re
+import time
 import uuid
 from collections.abc import Callable, Mapping, Sequence
 from dataclasses import asdict, dataclass
@@ -19,6 +20,7 @@ from fugue.bench.files import atomic_write_json
 from fugue.bench.local_evidence import (
     LocalEvidenceManifestV1,
     LocalEvidenceStore,
+    local_result_attempt_projection_v1,
 )
 from fugue.redaction import redact_text
 
@@ -496,12 +498,28 @@ def _publish_with_weave_sdk(
             "installed Weave SDK lacks the client or object publication API"
         )
     client = get_client()
-    if client is None or not callable(getattr(client, "create_call", None)) or not callable(
-        getattr(client, "finish_call", None)
+    required_client_methods = (
+        "create_call",
+        "finish_call",
+        "flush",
+        "get_call",
+        "get",
+    )
+    if client is None or any(
+        not callable(getattr(client, method, None))
+        for method in required_client_methods
     ):
-        raise RuntimeError("installed Weave SDK cannot publish Fugue evidence Calls")
+        raise RuntimeError(
+            "installed Weave SDK cannot publish and authoritatively read back "
+            "Fugue evidence"
+        )
+    ref_factory = getattr(weave_module, "ref", None)
+    if not callable(ref_factory):
+        raise RuntimeError(
+            "installed Weave SDK lacks the immutable object readback API"
+        )
     client_project = str(getattr(client, "project_id", "") or "")
-    if client_project and client_project != target.project_slug:
+    if client_project != target.project_slug:
         raise RuntimeError("active Weave client disagrees with the requested project")
 
     attempts = {
@@ -513,28 +531,48 @@ def _publish_with_weave_sdk(
         )
         if attempt is not None
     }
+    publication_id = stable_digest(
+        {
+            "schema_version": WEAVE_PUBLICATION_SCHEMA_VERSION,
+            "target": target.to_dict(),
+            "result_digest": result.result_digest,
+            "local_manifest_digest": manifest.manifest_digest,
+        }
+    )
     objects: list[WeaveHostedObjectRefV1] = []
     for attempt_id in manifest.planned_attempt_ids:
         pair, arm, attempt = attempts[attempt_id]
         dataset_payload = {
             "schema_version": 1,
+            "publication_id": publication_id,
             "attempt_id": attempt_id,
             "task_id": pair.task_id,
             "harness": pair.harness,
             "attempt": pair.attempt,
             "arm": arm,
             "result_digest": result.result_digest,
+            "qualification_digest": result.qualification_digest,
             "local_manifest_digest": manifest.manifest_digest,
+            "candidate_id": str(attempt.identity["candidate"]),
+            "execution_fingerprint": str(attempt.identity["runtime"]),
         }
+        dataset_name = f"fugue-local-{stable_digest(dataset_payload)}"
         published_dataset = publish_object(
             dataset_payload,
-            name=f"fugue-local-{result.comparison_id[:48]}-{attempt_id[:12]}",
+            name=dataset_name,
         )
         dataset_ref = _weave_ref_uri(published_dataset)
         dataset_object_id = _weave_object_id(
             dataset_ref,
             target=target,
             object_type="object",
+        )
+        _verify_weave_dataset_readback(
+            client,
+            ref_factory=ref_factory,
+            target=target,
+            dataset_ref=dataset_ref,
+            expected=dataset_payload,
         )
         objects.append(
             WeaveHostedObjectRefV1(
@@ -548,6 +586,7 @@ def _publish_with_weave_sdk(
 
         attributes = {
             "fugue.publication.schema_version": 1,
+            "fugue.publication_id": publication_id,
             "fugue.evidence.source": "canonical_local_result",
             "fugue.result_digest": result.result_digest,
             "fugue.qualification_digest": result.qualification_digest,
@@ -560,53 +599,79 @@ def _publish_with_weave_sdk(
             "fugue.candidate_id": str(attempt.identity["candidate"]),
             "fugue.execution_fingerprint": str(attempt.identity["runtime"]),
         }
-        root = _create_weave_call(
+        root_inputs = {"dataset_ref": dataset_ref, "task_id": pair.task_id}
+        root_output = {
+            "status": "published",
+            "publication_id": publication_id,
+            "result_digest": result.result_digest,
+            "local_manifest_digest": manifest.manifest_digest,
+        }
+        predict_and_score_inputs = {"attempt_id": attempt_id, "arm": arm}
+        predict_and_score_output = {
+            "passed": attempt.passed,
+            "scores": dict(attempt.scores),
+            "evidence_status": attempt.evidence_status,
+        }
+        prediction_inputs = {"attempt_id": attempt_id}
+        prediction_output = {
+            "passed": attempt.passed,
+            "scores": dict(attempt.scores),
+            "score_explanations": dict(attempt.score_explanations),
+            "sanitized_answer_excerpt": attempt.sanitized_answer_excerpt,
+        }
+        agent_inputs = {
+            "attempt_id": attempt_id,
+            "native_agent_call": False,
+            "local_manifest_digest": manifest.manifest_digest,
+        }
+        agent_output = {
+            "status": attempt.execution_status,
+            "evidence_status": attempt.evidence_status,
+            "native_agent_call": False,
+        }
+        root = _ensure_weave_call_started(
             client,
             target=target,
-            publication_id=result.result_digest,
+            publication_id=publication_id,
             attempt_id=attempt_id,
             kind="evaluation_root",
             op="fugue.local_evaluation",
-            inputs={"dataset_ref": dataset_ref, "task_id": pair.task_id},
+            inputs=root_inputs,
             attributes=attributes,
             display_name=f"Fugue local evaluation · {pair.task_id}",
         )
-        predict_and_score = _create_weave_call(
+        predict_and_score = _ensure_weave_call_started(
             client,
             target=target,
-            publication_id=result.result_digest,
+            publication_id=publication_id,
             attempt_id=attempt_id,
             kind="prediction_and_score",
             op="fugue.local_predict_and_score",
-            inputs={"attempt_id": attempt_id, "arm": arm},
+            inputs=predict_and_score_inputs,
             attributes=attributes,
             display_name=f"Fugue predict and score · {pair.task_id}",
             parent=root,
         )
-        prediction = _create_weave_call(
+        prediction = _ensure_weave_call_started(
             client,
             target=target,
-            publication_id=result.result_digest,
+            publication_id=publication_id,
             attempt_id=attempt_id,
             kind="prediction",
             op="fugue.local_prediction",
-            inputs={"attempt_id": attempt_id},
+            inputs=prediction_inputs,
             attributes=attributes,
             display_name=f"Fugue prediction · {pair.task_id}",
             parent=predict_and_score,
         )
-        agent_receipt = _create_weave_call(
+        agent_receipt = _ensure_weave_call_started(
             client,
             target=target,
-            publication_id=result.result_digest,
+            publication_id=publication_id,
             attempt_id=attempt_id,
             kind="agent_evidence_receipt",
             op="fugue.local_agent_evidence_receipt",
-            inputs={
-                "attempt_id": attempt_id,
-                "native_agent_call": False,
-                "local_manifest_digest": manifest.manifest_digest,
-            },
+            inputs=agent_inputs,
             attributes={
                 **attributes,
                 "fugue.evidence.kind": "local_agent_cross_transport_receipt_v1",
@@ -615,56 +680,82 @@ def _publish_with_weave_sdk(
             display_name=f"Fugue Agent evidence receipt · {pair.task_id}",
             parent=prediction,
         )
-        _finish_weave_call(
-            client,
-            agent_receipt,
-            {
-                "status": attempt.execution_status,
-                "evidence_status": attempt.evidence_status,
-                "native_agent_call": False,
-            },
+        call_specs = (
+            (
+                "agent_evidence_receipt",
+                agent_receipt,
+                agent_inputs,
+                agent_output,
+                prediction,
+                {
+                    **attributes,
+                    "fugue.evidence.kind": "local_agent_cross_transport_receipt_v1",
+                    "fugue.native_agent_call": False,
+                },
+            ),
+            (
+                "prediction",
+                prediction,
+                prediction_inputs,
+                prediction_output,
+                predict_and_score,
+                attributes,
+            ),
+            (
+                "prediction_and_score",
+                predict_and_score,
+                predict_and_score_inputs,
+                predict_and_score_output,
+                root,
+                attributes,
+            ),
+            (
+                "evaluation_root",
+                root,
+                root_inputs,
+                root_output,
+                None,
+                attributes,
+            ),
         )
-        _finish_weave_call(
-            client,
-            prediction,
-            {
-                "passed": attempt.passed,
-                "scores": dict(attempt.scores),
-                "score_explanations": dict(attempt.score_explanations),
-                "sanitized_answer_excerpt": attempt.sanitized_answer_excerpt,
-            },
-        )
-        _finish_weave_call(
-            client,
-            predict_and_score,
-            {
-                "passed": attempt.passed,
-                "scores": dict(attempt.scores),
-                "evidence_status": attempt.evidence_status,
-            },
-        )
-        _finish_weave_call(
-            client,
-            root,
-            {
-                "status": "published",
-                "result_digest": result.result_digest,
-                "local_manifest_digest": manifest.manifest_digest,
-            },
-        )
-        flush = getattr(client, "flush", None)
-        if callable(flush):
-            flush()
-        for kind, call in (
-            ("evaluation_root", root),
-            ("prediction_and_score", predict_and_score),
-            ("prediction", prediction),
-            ("agent_evidence_receipt", agent_receipt),
-        ):
+        for _kind, call, _inputs, output, _parent, _attributes in call_specs:
+            _finish_or_verify_weave_call(client, call, output)
+        client.flush()
+
+        # Only authoritative API readback may turn the submission into a
+        # published outcome. Local Call objects and flush completion are not
+        # evidence that the exact project persisted a finished chain.
+        readback: dict[str, Any] = {}
+        for kind, call, inputs, output, parent, expected_attributes in call_specs:
             call_id = str(getattr(call, "id", "") or "")
-            ref = _weave_ref_uri(call) or (
-                f"weave:///{target.project_slug}/call/{call_id}"
+            observed = _read_back_weave_call(client, call_id)
+            _verify_weave_call(
+                observed,
+                target=target,
+                call_id=call_id,
+                parent_id=(str(getattr(parent, "id", "") or "") if parent else None),
+                inputs=inputs,
+                attributes=expected_attributes,
+                output=output,
+                require_finished=True,
             )
+            readback[kind] = observed
+        root_id = str(getattr(readback["evaluation_root"], "id", "") or "")
+        for observed in readback.values():
+            if str(getattr(observed, "trace_id", "") or "") != root_id:
+                raise RuntimeError(
+                    "authoritative Weave readback lost the evidence trace identity"
+                )
+
+        for kind in (
+            "evaluation_root",
+            "prediction_and_score",
+            "prediction",
+            "agent_evidence_receipt",
+        ):
+            call = readback[kind]
+            call_id = str(getattr(call, "id", "") or "")
+            ref = f"weave:///{target.project_slug}/call/{call_id}"
             objects.append(
                 WeaveHostedObjectRefV1(
                     attempt_id=attempt_id,
@@ -679,11 +770,11 @@ def _publish_with_weave_sdk(
         target=target,
         objects=tuple(sorted(objects, key=_object_sort_key)),
         publisher_id="fugue-local-result-weave",
-        publisher_revision=f"v1+weave-{version}",
+        publisher_revision=f"v2-readback+weave-{version}",
     )
 
 
-def _create_weave_call(
+def _ensure_weave_call_started(
     client: Any,
     *,
     target: WeavePublicationTargetV1,
@@ -702,29 +793,176 @@ def _create_weave_call(
             f"fugue:{publication_id}:{attempt_id}:{kind}",
         )
     )
-    call = client.create_call(
-        op,
-        dict(inputs),
-        parent=parent,
-        attributes=dict(attributes),
-        display_name=display_name,
-        use_stack=False,
-        _call_id_override=call_id,
+    call = _get_weave_call_or_none(client, call_id)
+    expected_attributes = {
+        **dict(attributes),
+        "fugue.evidence.object_kind": kind,
+    }
+    if call is None:
+        call = client.create_call(
+            op,
+            dict(inputs),
+            parent=parent,
+            attributes=expected_attributes,
+            display_name=display_name,
+            use_stack=False,
+            _call_id_override=call_id,
+        )
+    _verify_weave_call(
+        call,
+        target=target,
+        call_id=call_id,
+        parent_id=(str(getattr(parent, "id", "") or "") if parent else None),
+        inputs=inputs,
+        attributes=expected_attributes,
+        output=None,
+        require_finished=False,
     )
-    if str(getattr(call, "id", "") or "") != call_id:
-        raise RuntimeError("Weave publication changed a deterministic Call identity")
-    project_id = str(getattr(call, "project_id", "") or "")
-    if project_id != target.project_slug:
-        raise RuntimeError("published Weave Call belongs to another project")
-    if parent is not None and str(getattr(call, "parent_id", "") or "") != str(
-        getattr(parent, "id", "") or ""
-    ):
-        raise RuntimeError("published Weave Call lost its evidence parent")
     return call
 
 
-def _finish_weave_call(client: Any, call: Any, output: Mapping[str, Any]) -> None:
+def _finish_or_verify_weave_call(
+    client: Any,
+    call: Any,
+    output: Mapping[str, Any],
+) -> None:
+    existing_output = getattr(call, "output", None)
+    ended_at = getattr(call, "ended_at", None)
+    if ended_at is not None:
+        if not _canonical_values_equal(existing_output, output):
+            raise RuntimeError(
+                "existing deterministic Weave Call has a conflicting output"
+            )
+        return
+    if existing_output is not None:
+        raise RuntimeError(
+            "existing deterministic Weave Call has output without completion"
+        )
     client.finish_call(call, output=dict(output))
+
+
+def _get_weave_call_or_none(client: Any, call_id: str) -> Any | None:
+    try:
+        return client.get_call(call_id)
+    except ValueError as exc:
+        if "call not found" in str(exc).lower():
+            return None
+        raise
+
+
+def _read_back_weave_call(client: Any, call_id: str) -> Any:
+    for retry in range(5):
+        try:
+            return client.get_call(call_id)
+        except ValueError as exc:
+            if "call not found" not in str(exc).lower() or retry == 4:
+                raise RuntimeError(
+                    "authoritative Weave readback could not resolve a published Call"
+                ) from exc
+            time.sleep(0.05 * (retry + 1))
+    raise AssertionError("unreachable Weave readback retry state")
+
+
+def _verify_weave_call(
+    call: Any,
+    *,
+    target: WeavePublicationTargetV1,
+    call_id: str,
+    parent_id: str | None,
+    inputs: Mapping[str, Any],
+    attributes: Mapping[str, Any],
+    output: Mapping[str, Any] | None,
+    require_finished: bool,
+) -> None:
+    if str(getattr(call, "id", "") or "") != call_id:
+        raise RuntimeError("Weave publication changed a deterministic Call identity")
+    if str(getattr(call, "project_id", "") or "") != target.project_slug:
+        raise RuntimeError("published Weave Call belongs to another project")
+    observed_parent = getattr(call, "parent_id", None)
+    if (str(observed_parent) if observed_parent is not None else None) != parent_id:
+        raise RuntimeError("published Weave Call lost its evidence parent")
+    if not _canonical_values_equal(getattr(call, "inputs", None), inputs):
+        raise RuntimeError("published Weave Call inputs disagree with local evidence")
+    observed_attributes = _mapping_value(getattr(call, "attributes", None))
+    missing_or_changed = {
+        key: value
+        for key, value in attributes.items()
+        if key not in observed_attributes
+        or not _canonical_values_equal(observed_attributes[key], value)
+    }
+    if missing_or_changed:
+        raise RuntimeError(
+            "published Weave Call attributes disagree with local identities"
+        )
+    if not require_finished:
+        return
+    if getattr(call, "ended_at", None) is None:
+        raise RuntimeError("authoritative Weave readback returned an unfinished Call")
+    if getattr(call, "exception", None) not in (None, ""):
+        raise RuntimeError("authoritative Weave readback returned a failed Call")
+    if output is None or not _canonical_values_equal(getattr(call, "output", None), output):
+        raise RuntimeError(
+            "authoritative Weave readback returned a conflicting Call output"
+        )
+
+
+def _verify_weave_dataset_readback(
+    client: Any,
+    *,
+    ref_factory: Callable[[str], Any],
+    target: WeavePublicationTargetV1,
+    dataset_ref: str,
+    expected: Mapping[str, Any],
+) -> None:
+    try:
+        parsed_ref = ref_factory(dataset_ref)
+    except Exception as exc:
+        raise RuntimeError("published Weave Dataset ref could not be parsed") from exc
+    if (
+        str(getattr(parsed_ref, "entity", "") or "") != target.entity
+        or str(getattr(parsed_ref, "project", "") or "") != target.project
+    ):
+        raise RuntimeError("published Weave Dataset belongs to another project")
+    try:
+        observed = client.get(parsed_ref, objectify=False)
+    except Exception as exc:
+        raise RuntimeError(
+            "authoritative Weave readback could not resolve the published Dataset"
+        ) from exc
+    if not _canonical_values_equal(observed, expected):
+        raise RuntimeError(
+            "authoritative Weave Dataset readback disagrees with local identities"
+        )
+
+
+def _mapping_value(value: Any) -> dict[str, Any]:
+    if isinstance(value, Mapping):
+        return dict(value)
+    model_dump = getattr(value, "model_dump", None)
+    if callable(model_dump):
+        dumped = model_dump()
+        if isinstance(dumped, Mapping):
+            return dict(dumped)
+    return {}
+
+
+def _canonical_values_equal(left: Any, right: Any) -> bool:
+    def normalize(value: Any) -> Any:
+        if isinstance(value, Mapping):
+            return {
+                str(key): normalize(item)
+                for key, item in sorted(value.items(), key=lambda item: str(item[0]))
+            }
+        if isinstance(value, Sequence) and not isinstance(
+            value, (str, bytes, bytearray)
+        ):
+            return [normalize(item) for item in value]
+        model_dump = getattr(value, "model_dump", None)
+        if callable(model_dump):
+            return normalize(model_dump())
+        return value
+
+    return normalize(left) == normalize(right)
 
 
 def _weave_ref_uri(value: Any) -> str:
@@ -751,6 +989,12 @@ def _weave_object_id(
     object_id = ref.removeprefix(prefix)
     if not _OBJECT_ID.fullmatch(object_id):
         raise RuntimeError("published Weave object has an invalid identity")
+    if object_type == "object":
+        _name, separator, digest = object_id.rpartition(":")
+        if not separator or digest == "latest" or re.fullmatch(r"v\d+", digest):
+            raise RuntimeError(
+                "published Weave object ref is not an immutable content revision"
+            )
     return object_id
 
 
@@ -822,7 +1066,7 @@ def _read_complete_manifest(
         raise LocalResultPublicationError(
             "Harbor conformance receipt does not match the complete local manifest"
         )
-    return manifest, {
+    binding = {
         "schema_version": 1,
         "run_id": manifest.run_id,
         "manifest_digest": manifest.manifest_digest,
@@ -833,6 +1077,11 @@ def _read_complete_manifest(
         "run_conformance_receipt_digest": receipt_digest,
         "run_conformance_file_sha256": receipt_file_sha256,
     }
+    if manifest.result_row_projection_set_digest is not None:
+        binding["result_row_projection_set_digest"] = (
+            manifest.result_row_projection_set_digest
+        )
+    return manifest, binding
 
 
 def _validate_local_result(
@@ -920,6 +1169,41 @@ def _validate_local_result(
                 "comparison attempt local prediction digest disagrees with its "
                 f"manifest: {attempt.attempt_id}"
             )
+        if record.result_row_projection_digest is not None and (
+            attempt.local_result_row_projection_digest
+            != record.result_row_projection_digest
+        ):
+            raise LocalResultPublicationError(
+                "comparison attempt decision projection digest disagrees with "
+                f"its manifest: {attempt.attempt_id}"
+            )
+        if record.result_row_projection_digest is not None:
+            projection = local_result_attempt_projection_v1(
+                attempt_id=attempt.attempt_id,
+                prediction_id=attempt.prediction_id,
+                passed=attempt.passed,
+                execution_status=attempt.execution_status,
+                evaluation_status=attempt.evaluation_status,
+                cost_usd=attempt.cost_usd,
+                latency_sec=attempt.latency_sec,
+                input_tokens=attempt.input_tokens,
+                output_tokens=attempt.output_tokens,
+                tool_calls=attempt.tool_calls,
+                tools=attempt.tools,
+                queried_projects=attempt.queried_projects,
+                scores=attempt.scores,
+                score_explanations=attempt.score_explanations,
+                sanitized_answer_excerpt=attempt.sanitized_answer_excerpt,
+                actual_query_scope=attempt.actual_query_scope,
+                reported_project_identity=attempt.reported_project_identity,
+                execution_fingerprint=attempt.execution_fingerprint,
+                runtime_lock_digest=attempt.runtime_lock_digest,
+            )
+            if stable_digest(projection) != record.result_row_projection_digest:
+                raise LocalResultPublicationError(
+                    "comparison attempt decision fields disagree with its immutable "
+                    f"prediction artifact: {attempt.attempt_id}"
+                )
     if not _HEX_SHA256.fullmatch(result.result_digest):
         raise LocalResultPublicationError("comparison result digest is invalid")
     if not _HEX_SHA256.fullmatch(result.qualification_digest):

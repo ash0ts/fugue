@@ -6,20 +6,22 @@ autoresearch.**
 An outer research loop can inspect traces, form a hypothesis, and decide what
 to try next. Fugue turns that proposal into a controlled experiment: it fixes
 the comparison, locks the inputs, enforces human approval and budget limits,
-runs isolated Agent cells through Harbor, reconciles each cell with native W&B
-Weave evidence, and returns a result whose scope is explicit.
+runs isolated Agent cells through Harbor, reconciles each cell into a canonical
+local evidence ledger, and returns a result whose scope is explicit. W&B/Weave
+publication is optional and never changes that local result.
 
 Fugue does not replace the research Agent, the execution sandbox, or the
 observability system. It is the laboratory between them.
 
 ```mermaid
 flowchart TB
-    EVIDENCE["Production evidence<br/>Weave calls, evaluations, artifacts"]
+    EVIDENCE["User-owned evidence<br/>tasks, fixtures, traces, artifacts"]
     RESEARCHER["Researcher or outer loop<br/>Aria, Senpai, or a custom Agent"]
     FUGUE["Fugue<br/>design, locks, admission, evaluation"]
     HUMAN["Human operator<br/>approval and spend authority"]
     EXECUTION["Harbor + native Agent harness<br/>one isolated environment per cell"]
-    WEAVE["W&B Weave<br/>conversations, traces, evaluations"]
+    LEDGER["Local evidence ledger<br/>dataset, evaluation, prediction, Agent receipt"]
+    WEAVE["Optional W&B/Weave publication"]
     RESULT["Fugue sourced Result<br/>observation, interpretation, limitations"]
     CONSOLE["Optional Study Console<br/>read-only research projection"]
 
@@ -27,7 +29,8 @@ flowchart TB
     RESEARCHER -->|"question, hypothesis, proposed comparison"| FUGUE
     HUMAN -->|"approve exact preview digest and cap"| FUGUE
     FUGUE -->|"locked task × treatment × attempt cells"| EXECUTION
-    EXECUTION --> WEAVE --> RESULT
+    EXECUTION --> LEDGER --> RESULT
+    RESULT -.->|"explicit publish"| WEAVE
     FUGUE -->|"public-safe lifecycle events"| CONSOLE
 ```
 
@@ -69,7 +72,8 @@ The outer loop remains the researcher. Fugue remains the laboratory.
 | Researcher or outer loop | Evidence review, hypotheses, intervention ideas, research priority, interpretation, the next question | Execution authority, self-approval, hidden changes to an accepted design |
 | Fugue | Experiment validation, immutable identity, matrix expansion, preparation, approval checks, admission, scheduling, recovery, evaluation, evidence reconciliation | Hypothesis generation, winner selection, writable application code, raw trace storage |
 | Harbor | One isolated environment for each admitted Agent cell | Experiment design, scoring, research memory |
-| W&B Weave | Agent conversations, calls, evaluations, annotations, prediction-level evidence | Admission policy, runtime isolation, experiment locking |
+| Local evidence ledger | Dataset, evaluation, prediction, transcript/tool digests, policy, privacy, usage, and cleanup receipts | Admission policy, runtime isolation, optional hosted publication |
+| W&B Weave | Optional hosted copy of an unchanged completed result and its evidence | Canonical scoring, classification, or identity |
 | Study Console or another sink | A public-safe view of why the Study exists, its design, live progress, result, and evidence links | Execution, approval, retries, copied trace bodies |
 
 This division is important. An Agent can say, “these production traces suggest
@@ -114,9 +118,10 @@ flowchart TB
   make control-plane retries safe. An already-launched trial is reconciled,
   never silently launched again.
 - **Reconciled evidence.** Every coordinate becomes terminal, explicitly not
-  applicable, or cancelled. Agent cells must resolve to one native
-  conversation, one `invoke_agent` root, route/runtime receipts, and one
-  normalized prediction row.
+  applicable, or cancelled. Agent cells resolve to one local Dataset record,
+  evaluation, prediction-and-score record, prediction, provider-neutral Agent
+  receipt, and the required policy/privacy/cleanup receipts. Hosted Call links
+  are an additional contract only in `weave_required` mode or after publication.
 - **Bounded conclusions.** Results retain their task, treatment, attempt,
   evidence, uncertainty, exclusions, and limitations. Fugue does not emit a
   universal model or harness ranking.
@@ -155,17 +160,19 @@ flowchart TB
 
     subgraph EVIDENCE["Evidence systems"]
         direction LR
-        WEAVE["W&B Weave<br/>calls, conversations, evaluations"]
+        LEDGER["Canonical local ledger<br/>dataset, evaluation, prediction, Agent receipt"]
+        WEAVE["Optional W&B/Weave publisher"]
         ROW["PredictionRowV1<br/>normalized terminal outcome"]
         STORE["Append-only Study store + outbox<br/>revisions, cursors, public-safe events"]
         UI["Optional Study Console"]
-        WEAVE --> ROW --> STORE --> UI
+        LEDGER --> ROW --> STORE --> UI
+        ROW -.-> WEAVE
     end
 
     CLI --> OPERATOR
     AGENT_API --> RESEARCH
     OPERATOR --> LOCKS
-    CELL --> WEAVE
+    CELL --> LEDGER
     CELL --> ROW
 ```
 
@@ -179,7 +186,8 @@ flowchart TB
     CELL["PlannedCell<br/>task × treatment × attempt"]
     SNAPSHOT["RunSnapshotV1<br/>immutable execution receipt"]
     HARBOR["Rendered Harbor job"]
-    WEAVE["Native Weave evidence"]
+    LOCAL["LocalEvidenceManifestV1<br/>provider-neutral receipts"]
+    WEAVE["Optional hosted publication receipt"]
     ROW["PredictionRowV1<br/>normalized outcome"]
     ANALYSIS["Evaluation and analysis"]
 
@@ -189,9 +197,10 @@ flowchart TB
     CANDIDATE --> SNAPSHOT
     CELL --> SNAPSHOT
     SNAPSHOT --> HARBOR
-    HARBOR --> WEAVE
+    HARBOR --> LOCAL
     HARBOR --> ROW
-    WEAVE --> ROW
+    LOCAL --> ROW
+    ROW -.-> WEAVE
     ROW --> ANALYSIS
 ```
 
@@ -238,20 +247,27 @@ The smallest useful Fugue workflow has five concepts:
 | **Evaluator** | The checks that define “better” |
 | **Execution policy** | Harness, runtime, attempts, approval, limits, and required evidence |
 
-The command surface is deliberately smaller than Fugue’s internal lifecycle:
+The installed-package path is deliberately smaller than Fugue’s internal
+lifecycle and does not require the Fugue source checkout, WBAF, Core, Study
+Console, a GitHub App, or a W&B project:
 
 ```bash
-uv sync --extra research-worker
-
-# No key or model call: replay immutable example rows.
-uv run fugue demo source-use
-
-# Inspect a real Skill comparison before any spend.
-uv run fugue check \
-  examples/comparisons/source-use-skill/comparison.yaml
-uv run fugue compare \
-  examples/comparisons/source-use-skill/comparison.yaml --preview
+python -m pip install "fugue[local-runner]"
+fugue doctor
+fugue init my-study --template prompt-change
+fugue check my-study/comparison.yaml
+fugue compare my-study/comparison.yaml --prepare
+fugue compare my-study/comparison.yaml --preview --json
+fugue approve PREVIEW_DIGEST --max-usd 10 --max-cells 8
+fugue compare my-study/comparison.yaml --run --approval APPROVAL_DIGEST
+fugue result latest
 ```
+
+The default generated templates use `execution.evidence_mode: local`. The only
+credential they request is the credential for the selected model route. Prompt,
+Skill, MCP, memory, and harness templates all use the same lifecycle and result
+schema. Planning and replay support Python 3.12 and 3.13; Harbor execution
+requires Python 3.13 and Docker.
 
 `check` reproduces intended failures, verifies known-good outputs, resolves the
 actual baseline/candidate diff, checks required components and judge
@@ -274,7 +290,8 @@ custom deterministic scorer uses the stable
 `score(task, output, evidence) -> dict[str, bool | float]` interface and runs
 in Fugue's pinned, no-network scorer sandbox. Its declared dimensions are
 qualified against base and gold fixtures before spend; the private expected
-values never enter the Agent cell or Weave task inputs.
+values never enter the Agent cell, local public records, or hosted publication
+payloads.
 
 Paid execution remains an explicit operator action tied to the immutable
 preview:
@@ -287,9 +304,11 @@ uv run fugue result latest
 ```
 
 The result separates deterministic task outcomes, blind-judge dimensions,
-mechanism evidence, infrastructure health, and evidence completeness. Live
-comparison scores are attached to the attempt's existing Weave
-prediction-and-score call rather than published as a second prediction.
+mechanism evidence, infrastructure health, and evidence completeness. Local
+mode writes one canonical Dataset, evaluation, prediction-and-score,
+prediction, and Agent receipt per attempt. `weave_required` mode additionally
+binds native hosted Calls. `fugue publish weave RESULT --project ENTITY/PROJECT`
+can publish a completed local result later without changing its digest.
 CI uses distinct exit codes for a passed gate (`0`), a completed regression
 (`1`), an invalid comparison (`2`), and incomplete required evidence (`3`).
 
@@ -336,9 +355,9 @@ The Research service is bearer-authenticated and available through Python,
 REST, and MCP. Pure preview remains free of preparation and model calls. A
 private worker is the only service allowed to operate Harbor, and paid work
 requires a separate operator approval bound to the exact preview and cost cap.
-Weave remains the prediction-level evidence system. Optional consoles consume a
-generic, public-safe research-record projection rather than copied trace bodies
-or private evaluation data.
+The local ledger remains the canonical prediction-level evidence system.
+W&B/Weave and optional consoles consume immutable, digest-bound projections
+rather than defining execution success or copying private evaluation data.
 
 Fugue 0.1.2 supports Hermes, OpenClaw, Claude Code, and Codex as stable harness
 identities. Experimental evaluation-provider conformance is offline and is not
@@ -366,9 +385,9 @@ Start with:
 [`uv`](https://docs.astral.sh/uv/) is the recommended environment manager.
 
 ```bash
-uv venv --python 3.12
+uv venv --python 3.13
 source .venv/bin/activate
-uv sync --extra dev
+uv pip install "fugue[local-runner]"
 ```
 
 Keep credentials outside the checkout and pass their existing path directly to
@@ -376,13 +395,11 @@ Keep credentials outside the checkout and pass their existing path directly to
 snapshots, jobs, or Git. `.env.example` lists the supported names:
 
 ```dotenv
-WANDB_API_KEY=
-WANDB_ENTITY=
-WANDB_PROJECT=fugue-experiments
-
-OPENAI_API_KEY=
 ANTHROPIC_API_KEY=
-FUGUE_MODEL=openai/gpt-5
+FUGUE_MODEL=anthropic/claude-sonnet-5
+
+# Optional only for a tested W&B integration or explicit Weave publication:
+WANDB_API_KEY=
 ```
 
 Model selection precedence is CLI override, experiment configuration,
@@ -497,11 +514,12 @@ lifecycle; packageability follows the benchmark outcome. The terminal displays
 a unique candidate prefix; JSON and snapshots retain the full SHA-256
 identifier.
 
-Live runs publish one Weave evaluation per candidate and workload. Fugue keeps
-the returned evaluation URLs in the run manifest and attaches each verified
-agent root to its prediction with Weave's GenAI span reference. Open the
-evaluation to compare candidates, then select a prediction to navigate into the
-linked agent conversation and trace.
+Every live run first writes the canonical local evidence chain. In
+`weave_required` mode, Fugue additionally publishes one Weave evaluation per
+candidate and workload, keeps the returned URLs in the run manifest, and
+attaches each verified Agent root to its prediction with Weave's GenAI span
+reference. A completed local result can instead be published afterward through
+the explicit `fugue publish weave` command.
 
 ```mermaid
 flowchart LR

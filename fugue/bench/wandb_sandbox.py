@@ -955,7 +955,11 @@ def _write_build_context(
     source.mkdir()
     for name in ("pyproject.toml", "uv.lock", "README.md", "LICENSE"):
         shutil.copy2(repo_root / name, source / name)
-    shutil.copytree(repo_root / "fugue", source / "fugue")
+    shutil.copytree(
+        repo_root / "fugue",
+        source / "fugue",
+        ignore=_runtime_source_ignore,
+    )
     integration_root = context / "integrations"
     integration_root.mkdir()
     assets = [
@@ -963,7 +967,7 @@ def _write_build_context(
             "kind": "fugue-source",
             "source": "fugue",
             "target": "/fugue-src/fugue",
-            "sha256": _tree_digest(repo_root / "fugue"),
+            "sha256": _tree_digest(source / "fugue"),
         },
         {
             "kind": "dependency-lock",
@@ -1033,6 +1037,29 @@ def _write_build_context(
     )
     (context / "Dockerfile").write_text(dockerfile, encoding="utf-8")
     return assets
+
+
+def _runtime_source_ignore(directory: str, names: list[str]) -> set[str]:
+    """Keep study authoring resources and private truth out of runtime images."""
+
+    path = Path(directory)
+    ignored = {
+        name
+        for name in names
+        if name == "__pycache__" or name.endswith((".pyc", ".pyo"))
+    }
+    if path.name == "resources":
+        ignored.update(
+            name
+            for name in names
+            if name in {
+                "ci",
+                "reference-studies",
+                "source-use-replay",
+                "templates",
+            }
+        )
+    return ignored
 
 
 def _tree_digest_from_image(image: str, path: str) -> str:

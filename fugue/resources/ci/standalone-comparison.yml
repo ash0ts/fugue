@@ -44,10 +44,57 @@ env:
   STUDY_ROOT: ${{ inputs.study_root || '.' }}
 
 jobs:
+  pull-request-smoke:
+    name: Validate the public study surface without private truth
+    if: ${{ github.event_name == 'pull_request' }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - name: Check out the user study
+        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+      - name: Use Python 3.13
+        uses: actions/setup-python@48b55a011bda9f5d6aeb4c2d9c7362e8dae4041e # v6.4.0
+        with:
+          python-version: "3.13"
+      - name: Install the standalone Fugue wheel
+        shell: bash
+        run: |
+          set -euo pipefail
+          wheelhouse="$RUNNER_TEMP/fugue-wheelhouse"
+          mkdir -p "$wheelhouse"
+          python -m pip wheel --disable-pip-version-check \
+            --wheel-dir "$wheelhouse" "$FUGUE_REQUIREMENT"
+          python -m pip install --disable-pip-version-check --no-index \
+            --find-links "$wheelhouse" "$FUGUE_REQUIREMENT"
+      - name: Prove the public checkout is safe and predictably blocked
+        shell: bash
+        run: |
+          set -euo pipefail
+          cd "$STUDY_ROOT"
+          mkdir -p .fugue/ci
+          fugue doctor --workspace . --json > .fugue/ci/doctor.json
+          set +e
+          fugue check "$COMPARISON_PATH" --json \
+            > .fugue/ci/readiness.json
+          status=$?
+          set -e
+          test "$status" -eq 2
+      - name: Upload only the public no-key smoke receipts
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: fugue-public-smoke
+          path: ${{ env.STUDY_ROOT }}/.fugue/ci
+          include-hidden-files: true
+          if-no-files-found: error
+          retention-days: 14
+
   plan:
     name: Prepare exact local preview
+    if: ${{ github.event_name == 'workflow_dispatch' }}
     runs-on: ubuntu-latest
     timeout-minutes: 30
+    environment: fugue-local-experiment
     outputs:
       preview_digest: ${{ steps.preview.outputs.preview_digest }}
     steps:
@@ -73,6 +120,17 @@ jobs:
             --find-links "$wheelhouse" \
             "$FUGUE_REQUIREMENT"
           python -c 'import fugue; print(fugue.__file__)'
+      - name: Restore host-only labels inside the protected environment
+        shell: bash
+        env:
+          FUGUE_PRIVATE_LABELS_B64: ${{ secrets.FUGUE_PRIVATE_LABELS_B64 }}
+        run: |
+          set -euo pipefail
+          test -n "$FUGUE_PRIVATE_LABELS_B64"
+          cd "$STUDY_ROOT"
+          python -m fugue.bench.private_inputs "$COMPARISON_PATH" \
+            --repo-root . \
+            --encoded-env FUGUE_PRIVATE_LABELS_B64
       - name: Doctor, check, prepare, and preview
         id: preview
         shell: bash
@@ -84,21 +142,21 @@ jobs:
           # A fresh prepared-runtime study is expected to report `blocked`
           # until the next command materializes its immutable runtime locks.
           fugue check "$COMPARISON_PATH" \
-            --repo-root . --json > .fugue/ci/readiness.json || test "$?" -eq 2
+            --json > .fugue/ci/readiness.json || test "$?" -eq 2
           fugue compare "$COMPARISON_PATH" \
-            --prepare --repo-root . --json > .fugue/ci/preparation.json
+            --prepare --json > .fugue/ci/preparation.json
           fugue compare "$COMPARISON_PATH" \
-            --preview --repo-root . --json > .fugue/ci/preview.json
+            --preview --json > .fugue/ci/preview.json
           preview_digest="$(python -c \
             'import json; print(json.load(open(".fugue/ci/preview.json"))["preview_digest"])')"
           [[ "$preview_digest" =~ ^[0-9a-f]{64}$ ]]
           printf 'preview_digest=%s\n' "$preview_digest" >> "$GITHUB_OUTPUT"
-      - name: Upload the canonical local planning ledger
-        if: always()
+      - name: Upload the canonical local planning receipts
+        if: success()
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
           name: fugue-local-preview
-          path: ${{ env.STUDY_ROOT }}/.fugue
+          path: ${{ env.STUDY_ROOT }}/.fugue/ci
           include-hidden-files: true
           if-no-files-found: error
           retention-days: 14
@@ -133,6 +191,17 @@ jobs:
             --find-links "$wheelhouse" \
             "$FUGUE_REQUIREMENT"
           python -c 'import fugue; print(fugue.__file__)'
+      - name: Restore host-only labels inside the protected environment
+        shell: bash
+        env:
+          FUGUE_PRIVATE_LABELS_B64: ${{ secrets.FUGUE_PRIVATE_LABELS_B64 }}
+        run: |
+          set -euo pipefail
+          test -n "$FUGUE_PRIVATE_LABELS_B64"
+          cd "$STUDY_ROOT"
+          python -m fugue.bench.private_inputs "$COMPARISON_PATH" \
+            --repo-root . \
+            --encoded-env FUGUE_PRIVATE_LABELS_B64
       - name: Recompute and verify the accepted preview
         shell: bash
         env:
@@ -143,11 +212,11 @@ jobs:
           mkdir -p .fugue/ci
           fugue doctor --workspace . --json > .fugue/ci/doctor.json
           fugue check "$COMPARISON_PATH" \
-            --repo-root . --json > .fugue/ci/readiness.json || test "$?" -eq 2
+            --json > .fugue/ci/readiness.json || test "$?" -eq 2
           fugue compare "$COMPARISON_PATH" \
-            --prepare --repo-root . --json > .fugue/ci/preparation.json
+            --prepare --json > .fugue/ci/preparation.json
           fugue compare "$COMPARISON_PATH" \
-            --preview --repo-root . --json > .fugue/ci/preview.json
+            --preview --json > .fugue/ci/preview.json
           current_digest="$(python -c \
             'import json; print(json.load(open(".fugue/ci/preview.json"))["preview_digest"])')"
           test "$current_digest" = "$ACCEPTED_PREVIEW_DIGEST"
@@ -186,8 +255,12 @@ jobs:
         run: |
           set -euo pipefail
           cd "$STUDY_ROOT"
+          fugue doctor --workspace . \
+            --require local-runner \
+            --model anthropic/claude-sonnet-5 \
+            --json > .fugue/ci/execution-doctor.json
           fugue compare "$COMPARISON_PATH" \
-            --run --approval "$APPROVAL_DIGEST" --repo-root .
+            --run --approval "$APPROVAL_DIGEST"
       - name: Export the canonical local result
         if: ${{ always() && steps.run.outcome != 'skipped' }}
         shell: bash
@@ -196,11 +269,29 @@ jobs:
           cd "$STUDY_ROOT"
           fugue result latest --repo-root . --json > .fugue/ci/result.json
       - name: Upload the canonical local evidence ledger
-        if: always()
+        if: success()
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
           name: fugue-local-result
-          path: ${{ env.STUDY_ROOT }}/.fugue
+          path: |
+            ${{ env.STUDY_ROOT }}/.fugue
+            !${{ env.STUDY_ROOT }}/.fugue/private/**
           include-hidden-files: true
           if-no-files-found: error
           retention-days: 30
+      - name: Write a bounded failure receipt
+        if: failure()
+        shell: bash
+        run: |
+          set -euo pipefail
+          cd "$STUDY_ROOT"
+          mkdir -p .fugue/ci
+          python -c 'import json, os, pathlib; pathlib.Path(".fugue/ci/failure-summary.json").write_text(json.dumps({"schema_version": 1, "status": "failed", "workflow": os.environ.get("GITHUB_WORKFLOW", ""), "run_id": os.environ.get("GITHUB_RUN_ID", "")}, sort_keys=True) + "\n")'
+      - name: Upload only the bounded failure receipt
+        if: failure()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: fugue-local-failure
+          path: ${{ env.STUDY_ROOT }}/.fugue/ci/failure-summary.json
+          if-no-files-found: error
+          retention-days: 14

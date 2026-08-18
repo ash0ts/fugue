@@ -655,7 +655,8 @@ class _AssistantTrace:
 
     def start(self, user_message: str) -> None:
         if (
-            not trace_api_key(self.env)
+            self.env.get("FUGUE_EVIDENCE_MODE") == "local"
+            or not trace_api_key(self.env)
             or self.env.get("FUGUE_DISABLE_WEAVE") == "1"
         ):
             return

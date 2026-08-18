@@ -914,20 +914,6 @@ def _terminal_cell_record(
     return matches[-1] if matches else None
 
 
-def _physical_runner_terminal_outcome(
-    *,
-    repo_root: Path,
-    cell: PlannedCell,
-    physical: PhysicalExecutionIdentityV1,
-) -> CellOutcome | None:
-    observation = _physical_runner_terminal_observation(
-        repo_root=repo_root,
-        cell=cell,
-        physical=physical,
-    )
-    return observation[0] if observation is not None else None
-
-
 def _outcome_identity(outcome: CellOutcome) -> tuple[object, ...]:
     return (
         outcome.status,

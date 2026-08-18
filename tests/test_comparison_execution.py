@@ -15,7 +15,6 @@ from fugue.bench.comparison_execution import (
     _infrastructure_attempt_cost,
     _local_attempt_cost,
     _physical_runner_terminal_observation,
-    _physical_runner_terminal_outcome,
     compile_comparison_execution_binding,
     execute_durable_comparison_cells,
     execution_stage_authorizations,
@@ -37,6 +36,20 @@ from fugue.bench.execution_recovery import (
 )
 from fugue.bench.harbor_terminal import DurableHarborTerminalPlugin
 from fugue.bench.operator import _physical_harbor_cell_from_journal
+
+
+def _physical_runner_terminal_outcome(
+    *,
+    repo_root: Path,
+    cell: PlannedCell,
+    physical: PhysicalExecutionIdentityV1,
+) -> CellOutcome | None:
+    observation = _physical_runner_terminal_observation(
+        repo_root=repo_root,
+        cell=cell,
+        physical=physical,
+    )
+    return observation[0] if observation is not None else None
 
 
 def _attempt(task: str, arm: str, trial: int = 0) -> dict[str, object]:

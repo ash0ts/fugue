@@ -16,6 +16,10 @@ _PROVIDER_UNAVAILABLE_TYPES = frozenset(
         "ApiUsageLimitError",
     }
 )
+_PRE_AGENT_INFRASTRUCTURE_MARKERS = (
+    "all predefined address pools have been fully subnetted",
+    "cannot connect to the docker daemon",
+)
 HARBOR_TERMINAL_CLASSIFIER_DIGEST = stable_digest(
     {
         "schema_version": 1,
@@ -23,6 +27,9 @@ HARBOR_TERMINAL_CLASSIFIER_DIGEST = stable_digest(
         "sandbox_lost": sorted(_SANDBOX_INTERRUPTION_TYPES),
         "transport_interrupted": sorted(_TRANSPORT_INTERRUPTION_TYPES),
         "provider_unavailable_fatal": sorted(_PROVIDER_UNAVAILABLE_TYPES),
+        "pre_agent_infrastructure_markers": list(
+            _PRE_AGENT_INFRASTRUCTURE_MARKERS
+        ),
         "agent_timeout": ["AgentTimeoutError"],
         "cancelled": ["CancelledError"],
         "unknown_pre_agent": "execution_failure",
@@ -59,6 +66,11 @@ def classify_harbor_terminal(
         if isinstance(exception, Mapping)
         else ""
     )
+    exception_message = (
+        str(exception.get("exception_message") or "").lower()
+        if isinstance(exception, Mapping)
+        else ""
+    )
     agent_started = _trial_agent_started(trial)
     environment_phase = _trial_environment_phase(trial)
     if cancelled not in {0, 1} or errored not in {0, 1}:
@@ -92,6 +104,20 @@ def classify_harbor_terminal(
         runtime = "not_started"
         terminal_kind = "sandbox_lost"
         error = f"Harbor sandbox infrastructure failed: {exception_type}"
+        benchmark = "unscored"
+    elif (
+        environment_phase
+        and not agent_started
+        and exception_type == "RuntimeError"
+        and any(
+            marker in exception_message
+            for marker in _PRE_AGENT_INFRASTRUCTURE_MARKERS
+        )
+    ):
+        status = "failed"
+        runtime = "not_started"
+        terminal_kind = "sandbox_lost"
+        error = "Harbor Docker network infrastructure was unavailable"
         benchmark = "unscored"
     elif agent_started and exception_type in _TRANSPORT_INTERRUPTION_TYPES:
         status = "failed"

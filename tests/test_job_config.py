@@ -829,8 +829,6 @@ required_env: [RETRIEVAL_TOKEN]
     )
     assert "env" not in job.config["agents"][0]
     assert job.config["agents"][0]["extra_allowed_hosts"] == [
-        "api.wandb.ai",
-        "trace.wandb.ai",
         "api.openai.com",
     ]
     assert job.config["fugue"]["integration_ids"] == ["retrieval"]
@@ -887,8 +885,6 @@ interfaces:
     agent = job.config["agents"][0]
     assert job.applicable
     assert agent["extra_allowed_hosts"] == [
-        "api.wandb.ai",
-        "trace.wandb.ai",
         "api.example.test",
         "api.openai.com",
     ]
@@ -1052,14 +1048,23 @@ interfaces:
     assert "search" in server["args"]
     assert server["args"][-4:] == ["--", "python", "-m", "example_server"]
     assert agent["env"]["PYTHONPATH"] == "/fugue-src"
-    proxy_mount = next(
-        mount
+    proxy_mounts = {
+        mount["target"]: mount
         for mount in job.config["environment"]["mounts"]
-        if mount["target"] == "/fugue-src/fugue"
+        if str(mount["target"]).startswith("/fugue-src/fugue/")
+    }
+    assert set(proxy_mounts) == {
+        "/fugue-src/fugue/__init__.py",
+        "/fugue-src/fugue/mcp_proxy.py",
+        "/fugue-src/fugue/mcp_evidence.py",
+        "/fugue-src/fugue/redaction.py",
+    }
+    assert all(mount["read_only"] is True for mount in proxy_mounts.values())
+    assert all(Path(mount["source"]).is_file() for mount in proxy_mounts.values())
+    assert not any(
+        "resources" in Path(mount["source"]).parts
+        for mount in proxy_mounts.values()
     )
-    assert proxy_mount["read_only"] is True
-    assert Path(proxy_mount["source"]).resolve() != (tmp_path / "fugue").resolve()
-    assert (Path(proxy_mount["source"]) / "mcp_proxy.py").is_file()
 
 
 def test_attempts_render_as_independent_comparable_trials(tmp_path: Path):

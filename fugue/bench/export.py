@@ -2233,11 +2233,14 @@ def _local_agent_receipt(  # noqa: C901 - one fail-closed receipt boundary
             return [], f"{path.name} is unreadable: {type(exc).__name__}"
         if not text.strip():
             return [], f"{path.name} is empty"
-        try:
-            return [json.loads(text)], None
-        except json.JSONDecodeError:
+
+        def decode_strict(payload: str) -> tuple[list[Any], str | None]:
+            try:
+                return [json.loads(payload)], None
+            except json.JSONDecodeError:
+                pass
             values: list[Any] = []
-            for line_number, line in enumerate(text.splitlines(), start=1):
+            for line_number, line in enumerate(payload.splitlines(), start=1):
                 if not line.strip():
                     continue
                 try:
@@ -2252,6 +2255,35 @@ def _local_agent_receipt(  # noqa: C901 - one fail-closed receipt boundary
                 if values
                 else ([], f"{path.name} has no structured transcript records")
             )
+
+        values, error = decode_strict(text)
+        if error is None:
+            return values, None
+
+        # Claude Code and OpenClaw intentionally merge stderr into their
+        # machine-readable wrapper log. Accept only a bounded, unstructured
+        # prefix before one unambiguous JSON/JSONL suffix. Canonical session
+        # transcripts and every other candidate remain strict JSON.
+        if path.name.lower() not in {"claude-code.txt", "openclaw.txt"}:
+            return [], error
+        lines = text.splitlines()
+        decoded: dict[str, list[Any]] = {}
+        for offset in range(1, min(len(lines), 101)):
+            prefix = [line.strip() for line in lines[:offset] if line.strip()]
+            if not prefix or any(
+                len(line.encode("utf-8")) > 4_096
+                or line.startswith(("{", "["))
+                for line in prefix
+            ):
+                continue
+            candidate, candidate_error = decode_strict("\n".join(lines[offset:]))
+            if candidate_error is None:
+                decoded[stable_digest(candidate)] = candidate
+        if len(decoded) == 1:
+            return next(iter(decoded.values())), None
+        if len(decoded) > 1:
+            return [], f"{path.name} has ambiguous structured transcript suffixes"
+        return [], error
 
     def keyed_values(value: Any, keys: frozenset[str]) -> list[str]:
         found: list[str] = []
@@ -2330,11 +2362,25 @@ def _local_agent_receipt(  # noqa: C901 - one fail-closed receipt boundary
             name in {
                 "claude-code.txt",
                 "openclaw.txt",
+                "openclaw.session.jsonl",
                 "hermes-session.jsonl",
             }
             or "transcript" in name
             or ("sessions" in relative_parts and path.suffix.lower() == ".jsonl")
         )
+
+    def transcript_priority(path: Path) -> int:
+        name = path.name.lower()
+        relative_parts = {
+            part.lower() for part in path.relative_to(agent_dir).parts[:-1]
+        }
+        if name in {"hermes-session.jsonl", "openclaw.session.jsonl"}:
+            return 0
+        if "sessions" in relative_parts and path.suffix.lower() == ".jsonl":
+            return 0
+        if "transcript" in name:
+            return 1
+        return 2
 
     root = repo_root.resolve()
     trial_dir = Path(str(row.get("trial_dir") or cell.result_path.parent)).resolve()
@@ -2426,42 +2472,61 @@ def _local_agent_receipt(  # noqa: C901 - one fail-closed receipt boundary
     transcript_artifact: LocalArtifactRefV1 | None = None
     transcript_values: list[Any] = []
     transcript_failure: str | None = None
-    transcript_candidates = [
-        path for path in sorted(artifact_by_path) if is_transcript_candidate(path)
-    ]
+    transcript_candidates = sorted(
+        (path for path in artifact_by_path if is_transcript_candidate(path)),
+        key=lambda path: (transcript_priority(path), path.as_posix()),
+    )
+    matching_transcripts: list[tuple[int, Path, list[Any]]] = []
+    candidate_failures: list[str] = []
     for path in transcript_candidates:
         values, error = structured_values(path)
         if error:
-            transcript_failure = error
-            break
+            candidate_failures.append(error)
+            continue
         attempt_ids = keyed_values(
             values,
             frozenset({"attempt_id", "fugue.attempt_id"}),
         )
         if any(value != cell.attempt_id for value in attempt_ids):
-            transcript_failure = f"{path.name} belongs to another Fugue attempt"
-            break
+            candidate_failures.append(
+                f"{path.name} belongs to another Fugue attempt"
+            )
+            continue
         session_ids = keyed_values(
             values,
             frozenset({"session_id", "sessionid"}),
+        )
+        canonical_openclaw_session = (
+            cell.harness == "openclaw"
+            and path.name.lower() == "openclaw.session.jsonl"
         )
         matches_session = bool(
             primary_session_id
             and (
                 primary_session_id in session_ids
                 or primary_session_id in path.name
+                or canonical_openclaw_session
             )
         )
         if matches_session:
-            transcript_artifact = artifact_by_path[path]
-            transcript_values = values
-            break
-    if transcript_artifact is None and transcript_failure is None:
-        transcript_failure = (
-            "native Agent transcript artifact is unavailable"
-            if not transcript_candidates
-            else "native Agent transcript does not match the primary session"
-        )
+            matching_transcripts.append((transcript_priority(path), path, values))
+    if matching_transcripts:
+        best_priority = min(item[0] for item in matching_transcripts)
+        best = [item for item in matching_transcripts if item[0] == best_priority]
+        if len(best) == 1:
+            _, selected_path, transcript_values = best[0]
+            transcript_artifact = artifact_by_path[selected_path]
+        else:
+            transcript_failure = (
+                "multiple native Agent transcripts match the primary session: "
+                + ", ".join(item[1].name for item in best)
+            )
+    elif not transcript_candidates:
+        transcript_failure = "native Agent transcript artifact is unavailable"
+    elif candidate_failures:
+        transcript_failure = "; ".join(dict.fromkeys(candidate_failures))
+    else:
+        transcript_failure = "native Agent transcript does not match the primary session"
 
     trajectory: Any = None
     trajectory_error: str | None = None

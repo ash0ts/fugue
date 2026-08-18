@@ -49,6 +49,17 @@ def test_runtime_build_context_uses_frozen_lock_and_locked_agent_id(
     context.mkdir()
     runtime.mkdir(parents=True)
     (repo / "fugue" / "__init__.py").write_text("")
+    resource_root = repo / "fugue" / "resources"
+    (resource_root / "runtime").mkdir(parents=True)
+    (resource_root / "runtime" / "safe.json").write_text("{}")
+    for authoring_directory in (
+        "templates",
+        "reference-studies",
+        "source-use-replay",
+    ):
+        private = resource_root / authoring_directory / "private-labels.jsonl"
+        private.parent.mkdir(parents=True)
+        private.write_text('{"expected":"host-only"}\n')
     (runtime / "server").write_text("runtime")
     for name in ("pyproject.toml", "uv.lock", "README.md", "LICENSE"):
         (repo / name).write_text(name)
@@ -88,6 +99,15 @@ def test_runtime_build_context_uses_frozen_lock_and_locked_agent_id(
     }
     agent_asset = next(item for item in assets if item["kind"] == "agent-runtime")
     assert agent_asset["source"] == "sha256:" + SHA256
+    copied_resources = context / "source" / "fugue" / "resources"
+    assert (copied_resources / "runtime" / "safe.json").is_file()
+    assert not (copied_resources / "templates").exists()
+    assert not (copied_resources / "reference-studies").exists()
+    assert not (copied_resources / "source-use-replay").exists()
+    fugue_asset = next(item for item in assets if item["kind"] == "fugue-source")
+    assert fugue_asset["sha256"] == wandb_sandbox._tree_digest(
+        context / "source" / "fugue"
+    )
 
 
 def test_failed_runtime_scan_reports_critical_and_high_counts(

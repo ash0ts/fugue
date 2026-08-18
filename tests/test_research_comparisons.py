@@ -557,6 +557,18 @@ def test_execute_comparison_surfaces_result_projection_failure_separately(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
+    monkeypatch.setattr(
+        comparison_module,
+        "_run_custom_scorer",
+        lambda _evaluator, *, output, expected, **_kwargs: {
+            "score": 1.0 if output == expected else 0.0,
+            "reason": "isolated scorer test double",
+            "details": {
+                "answer_present": output is not None,
+                "expected_values": output == expected,
+            },
+        },
+    )
     repo_root = tmp_path / "comparison-repo"
     comparison_path = scaffold_comparison(repo_root)
     spec = load_comparison(comparison_path, repo_root=repo_root)
@@ -731,6 +743,18 @@ def test_execute_comparison_requires_research_start_before_preparation_or_run(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
+    monkeypatch.setattr(
+        comparison_module,
+        "_run_custom_scorer",
+        lambda _evaluator, *, output, expected, **_kwargs: {
+            "score": 1.0 if output == expected else 0.0,
+            "reason": "isolated scorer test double",
+            "details": {
+                "answer_present": output is not None,
+                "expected_values": output == expected,
+            },
+        },
+    )
     repo_root = tmp_path / "comparison-repo"
     comparison_path = scaffold_comparison(repo_root)
     spec = load_comparison(comparison_path, repo_root=repo_root)

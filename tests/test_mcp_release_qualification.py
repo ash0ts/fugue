@@ -1704,6 +1704,11 @@ def _prerequisite_v3_result(
             ):
                 integration_id = integration_ids[variant]
                 lock = integration_locks[integration_id]
+                candidate_definition = {
+                    "variant": variant,
+                    "candidate": integration_id,
+                }
+                candidate_id = stable_digest(candidate_definition)
                 call_prefix = f"{variant}-{task_id}-{trial_index}"
                 call_ref_prefix = f"weave:///{result_project}/call/{call_prefix}"
 
@@ -1713,9 +1718,9 @@ def _prerequisite_v3_result(
                         "task_id": task_id,
                         "harness": "claude-code",
                         "trial_index": trial_index,
-                        "candidate_digest": stable_digest(
-                            {"variant": variant, "candidate": integration_id}
-                        ),
+                        "candidate_id": candidate_id,
+                        "candidate_digest": candidate_id,
+                        "candidate_definition": candidate_definition,
                         "execution_fingerprint": (
                             ("a" if variant == "baseline" else "b") * 64
                         ),
@@ -1809,6 +1814,12 @@ def _prerequisite_v3_result(
         "source_evidence_destination": source_destination.to_dict(),
         "source_lock_digest": source_digest,
         "evidence_topology_identity": "e" * 64,
+        "candidate_definitions": {
+            stable_digest(
+                {"variant": variant, "candidate": integration_id}
+            ): {"variant": variant, "candidate": integration_id}
+            for variant, integration_id in integration_ids.items()
+        },
     }
     monkeypatch.setattr(
         comparison_module,
@@ -2251,7 +2262,11 @@ def test_confirmation_tasks_require_every_project_scoped_allowed_tool() -> None:
     assert len(set(map(frozenset, allowed.values()))) == 1
     exact_allowed = next(iter(allowed.values()))
     assert len(exact_allowed) == 13
-    assert exact_allowed == comparison_module._MCP_RELEASE_READ_ONLY_TOOLS
+    from fugue.reference_studies.wandb_mcp_qualification import (
+        WANDB_MCP_READ_ONLY_TOOLS,
+    )
+
+    assert exact_allowed == WANDB_MCP_READ_ONLY_TOOLS
     assert set().union(*required_by_task.values()) == exact_allowed
     assert required_by_task == {
         "maintainer-source-inventory": {

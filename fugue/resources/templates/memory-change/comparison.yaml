@@ -15,7 +15,10 @@ evaluators:
   - id: repository-answer
     type: deterministic
     required: true
-    checks: [answer_present, expected_values]
+    scorer: scorer.py
+    runtime: python312-sandbox-v1
+    dimensions: [answer_present, expected_values]
+    dimension_roles: {answer_present: safety_gate, expected_values: outcome}
 execution:
   model: anthropic/claude-sonnet-5
   harnesses: [claude-code]

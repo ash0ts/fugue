@@ -737,6 +737,7 @@ class OperatorService:
             harnesses=tuple(selected.harnesses),
             builder_model=builder_model,
             judge_model=judge_model,
+            evidence_mode=str(selected.evidence_mode),
         )
         for role, model in (("builder", builder_model), ("judge", judge_model)):
             if not model:
@@ -754,7 +755,11 @@ class OperatorService:
                 detail = str(exc)
             checks.append(PreflightCheck(f"{role} model", present, detail))
         trace_content = request.trace_content or selected.trace_content
-        if trace_content == "metadata" and "claude-code" in selected.harnesses:
+        if (
+            selected.evidence_mode == "weave_required"
+            and trace_content == "metadata"
+            and "claude-code" in selected.harnesses
+        ):
             checks.append(
                 PreflightCheck(
                     "Claude Code trace content",
