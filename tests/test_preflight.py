@@ -25,8 +25,13 @@ def test_harbor_resolution_falls_back_to_active_python_environment(
     python.touch()
     harbor = environment_bin / "harbor"
     harbor.touch(mode=0o700)
-    monkeypatch.setattr("fugue.preflight.shutil.which", lambda name: None)
-    monkeypatch.setattr("fugue.preflight.sys.executable", python.as_posix())
+    monkeypatch.setattr("fugue.bench.executables.shutil.which", lambda name: None)
+    monkeypatch.setattr(
+        "fugue.bench.executables.sys.executable", python.as_posix()
+    )
+    monkeypatch.setattr(
+        "fugue.bench.executables.sysconfig.get_path", lambda _name: None
+    )
 
     from fugue.preflight import _harbor_executable
 

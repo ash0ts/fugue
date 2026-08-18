@@ -4,13 +4,13 @@ import base64
 import os
 import shutil
 import subprocess
-import sys
 from collections.abc import Mapping
 from dataclasses import dataclass
 from pathlib import Path
 
 import httpx
 
+from fugue.bench.executables import resolve_console_script
 from fugue.bridge import bridge_status
 from fugue.model_plane import (
     ModelRoute,
@@ -57,22 +57,9 @@ class PreflightCheck:
 
 
 def _harbor_executable() -> str | None:
-    """Resolve Harbor from PATH or the active Python environment.
+    """Compatibility wrapper around the shared console-script resolver."""
 
-    Console scripts can be invoked by absolute path without activating their virtual
-    environment. In that case ``sys.executable`` still points at the environment's
-    Python, but its ``bin`` directory is not necessarily on PATH. The local-runner
-    extra installs Harbor beside that interpreter, so honor that exact environment
-    before declaring the runner unavailable.
-    """
-
-    executable = shutil.which("harbor")
-    if executable:
-        return executable
-    sibling = Path(sys.executable).parent / "harbor"
-    if sibling.is_file() and os.access(sibling, os.X_OK):
-        return sibling.as_posix()
-    return None
+    return resolve_console_script("harbor")
 
 
 def run_preflight(

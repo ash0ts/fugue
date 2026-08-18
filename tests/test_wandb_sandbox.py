@@ -337,6 +337,21 @@ def test_wandb_binding_uses_exact_image_and_no_secret_values(
     assert all("secret" not in item.lower() for item in command)
 
 
+def test_local_harbor_command_keeps_portable_logical_executable(tmp_path: Path) -> None:
+    command = wandb_harbor_command(
+        tmp_path / "job.json",
+        environment={"type": "docker"},
+        repo_root=tmp_path,
+    )
+
+    assert command == [
+        "harbor",
+        "run",
+        "--config",
+        (tmp_path / "job.json").as_posix(),
+    ]
+
+
 def test_wandb_binding_rejects_uncontrolled_execution_fields(
     tmp_path: Path,
 ) -> None:

@@ -17,6 +17,7 @@ from typing import TYPE_CHECKING, Any, Literal
 from filelock import FileLock
 
 from fugue.bench.candidates import attempt_id, attempt_identity, stable_digest
+from fugue.bench.executables import resolve_console_script
 from fugue.bench.files import atomic_write_json, latest_jsonl_records
 from fugue.bench.files import terminate_process_group as _terminate_process_group
 from fugue.bench.harbor_outcome import (
@@ -741,6 +742,17 @@ def _initialize_cell_evidence(
         return execution_env, True, outcome
 
 
+def _host_process_command(command: Sequence[str]) -> list[str]:
+    """Resolve host executables without changing the approved logical command."""
+
+    resolved = list(command)
+    if resolved and resolved[0] == "harbor":
+        harbor = resolve_console_script("harbor")
+        if harbor is not None:
+            resolved[0] = harbor
+    return resolved
+
+
 def _run_cell_process(
     cell: PlannedCell,
     repo_root: Path,
@@ -755,9 +767,10 @@ def _run_cell_process(
         f"-{cell.physical_execution_id[:12]}" if cell.physical_execution_id else ""
     )
     log_path = store.logs_dir / f"{cell.id}{physical_suffix}.log"
+    command = _host_process_command(cell.command)
     try:
         process = subprocess.Popen(
-            list(cell.command),
+            command,
             stdout=subprocess.PIPE,
             stderr=subprocess.STDOUT,
             text=True,

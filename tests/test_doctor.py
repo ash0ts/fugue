@@ -102,6 +102,9 @@ def test_required_local_runner_reports_ready_when_every_gate_passes(
     monkeypatch.setattr("fugue.doctor.version", lambda name: "0.18.0")
     monkeypatch.setattr("fugue.doctor.importlib.util.find_spec", lambda name: object())
     monkeypatch.setattr(
+        "fugue.doctor.resolve_console_script", lambda name: f"/venv/bin/{name}"
+    )
+    monkeypatch.setattr(
         "fugue.doctor._docker_status",
         lambda **_kwargs: {
             "cli_available": True,
@@ -134,6 +137,9 @@ def test_required_local_runner_does_not_require_an_unselected_model(
     monkeypatch.setattr("fugue.doctor.version", lambda name: "0.18.0")
     monkeypatch.setattr("fugue.doctor.importlib.util.find_spec", lambda name: object())
     monkeypatch.setattr(
+        "fugue.doctor.resolve_console_script", lambda name: f"/venv/bin/{name}"
+    )
+    monkeypatch.setattr(
         "fugue.doctor._docker_status",
         lambda **_kwargs: {
             "cli_available": True,
@@ -162,6 +168,9 @@ def test_required_local_runner_enforces_python_and_architecture(
     monkeypatch.setattr("fugue.doctor._architecture", lambda: "riscv64")
     monkeypatch.setattr("fugue.doctor.version", lambda name: "0.18.0")
     monkeypatch.setattr("fugue.doctor.importlib.util.find_spec", lambda name: object())
+    monkeypatch.setattr(
+        "fugue.doctor.resolve_console_script", lambda name: f"/venv/bin/{name}"
+    )
     monkeypatch.setattr(
         "fugue.doctor._docker_status",
         lambda **_kwargs: {

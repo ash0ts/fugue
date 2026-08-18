@@ -14,6 +14,7 @@ from pathlib import Path
 from typing import Any
 
 from fugue.bench.distribution_assets import runtime_assets, vendor_asset
+from fugue.bench.executables import resolve_console_script
 from fugue.bench.runtime_provenance import (
     resolve_fugue_distribution_provenance,
     resolve_workspace_source_provenance,
@@ -82,9 +83,11 @@ def doctor_report(
     )
     optional["local_runner"]["docker_cli"] = docker["cli_available"]
     optional["local_runner"]["docker_daemon"] = docker["daemon_available"]
+    optional["local_runner"]["executable"] = resolve_console_script("harbor")
     optional["local_runner"]["ready"] = bool(
         optional["local_runner"]["installed"]
         and optional["local_runner"]["version_compatible"]
+        and optional["local_runner"]["executable"]
         and docker["daemon_available"]
         and docker.get("network_ready", True)
     )
