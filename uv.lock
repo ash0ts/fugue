@@ -655,6 +655,10 @@ serve = [
 wandb-index = [
     { name = "wandb" },
 ]
+wandb-report = [
+    { name = "wandb" },
+    { name = "wandb-workspaces" },
+]
 weave = [
     { name = "weave" },
 ]
@@ -704,13 +708,15 @@ requires-dist = [
     { name = "vulture", marker = "extra == 'dev'", specifier = "==2.16" },
     { name = "wandb", marker = "python_full_version >= '3.13' and extra == 'research-worker'", specifier = "==0.28.1" },
     { name = "wandb", marker = "extra == 'wandb-index'", specifier = "==0.28.1" },
+    { name = "wandb", marker = "extra == 'wandb-report'", specifier = "==0.28.1" },
+    { name = "wandb-workspaces", marker = "extra == 'wandb-report'", specifier = "==0.4.5" },
     { name = "weave", marker = "extra == 'dev'", specifier = "==0.53.1" },
     { name = "weave", marker = "extra == 'research-worker'", specifier = "==0.53.1" },
     { name = "weave", marker = "extra == 'serve'", specifier = "==0.53.1" },
     { name = "weave", marker = "extra == 'weave'", specifier = "==0.53.1" },
     { name = "wheel", marker = "extra == 'dev'" },
 ]
-provides-extras = ["dev", "local-runner", "mcp", "weave", "wandb-index", "context", "serve", "research", "research-worker"]
+provides-extras = ["dev", "local-runner", "mcp", "weave", "wandb-index", "wandb-report", "context", "serve", "research", "research-worker"]
 
 [[package]]
 name = "googleapis-common-protos"
@@ -2859,6 +2865,19 @@ wheels = [
     { url = "https://files.pythonhosted.org/packages/b2/83/49deab9447687625371435ca21b6da82f223f1c7d014d77386b9cb91833c/wandb-0.28.1-py3-none-win32.whl", hash = "sha256:4bc461cda3ce23a19d8df5e42981a664d95fa3231efb10fd1e85d9d4824c7d29", size = 24418398, upload-time = "2026-07-16T18:46:57.43Z" },
     { url = "https://files.pythonhosted.org/packages/bf/6f/ed6616b11ea15b8ceabedcaa567286c1c9ec65fa50563230a90bfb627cc5/wandb-0.28.1-py3-none-win_amd64.whl", hash = "sha256:d98a10370162b1e970850237114c56e9c4c58f3cb701e4b8cb38f36f6749fd52", size = 24418404, upload-time = "2026-07-16T18:47:00.427Z" },
     { url = "https://files.pythonhosted.org/packages/07/78/75b6827a6665337a715c5347c5edbd84eca660f7a0f48d8d6d24d1f66bee/wandb-0.28.1-py3-none-win_arm64.whl", hash = "sha256:4aa07f13dd3bcac2c0524c8d0f49f76e83ab5c1054fd09f3b1a436cfcde146a6", size = 22299006, upload-time = "2026-07-16T18:47:02.71Z" },
+]
+
+[[package]]
+name = "wandb-workspaces"
+version = "0.4.5"
+source = { registry = "https://pypi.org/simple" }
+dependencies = [
+    { name = "pydantic" },
+    { name = "wandb" },
+]
+sdist = { url = "https://files.pythonhosted.org/packages/8b/ea/36baee6eb9e6df05fba9425d853c61b298a443ccb87c497e35f9b4cc9c5b/wandb_workspaces-0.4.5.tar.gz", hash = "sha256:4df63f42f8cc9ed37c6b5d50e823baf9b34cc55a3f898b34fd4a72da59ce35d1", size = 245256, upload-time = "2026-08-04T14:23:12.608Z" }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/94/1f/ea940756a5a8f50ec52d0748d11a2dfb2bb8c7fa396545abf2cd504c19a3/wandb_workspaces-0.4.5-py3-none-any.whl", hash = "sha256:c29d9ec33f5726f66fb37e6e66af0ed76043ea86f70a952208b0231b2c0ac767", size = 115180, upload-time = "2026-08-04T14:23:11.036Z" },
 ]
 
 [[package]]

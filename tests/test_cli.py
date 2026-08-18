@@ -88,6 +88,15 @@ def test_public_command_surface_is_intentionally_small() -> None:
     )
     assert "Table lists the indexed Studies" in publish_index_help
     assert "does not create a native W&B Study or Report" in publish_index_help
+    publish_report_help = " ".join(
+        publish_actions.choices["wandb-report"].format_help().split()
+    )
+    assert "--index-receipt" in publish_report_help
+    assert "--project" not in publish_report_help
+    assert "Public Preview" in publish_report_help
+    assert "local index and receipt remain authoritative" in publish_report_help
+    assert "does not change access settings" in publish_report_help
+    assert "request a public share link" in publish_report_help
     research_actions = next(
         action
         for action in subparsers.choices["research"]._actions

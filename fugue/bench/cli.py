@@ -316,6 +316,27 @@ def _parser() -> FugueArgumentParser:
     publish_index.add_argument("--receipt", type=Path)
     _add_common_args(publish_index, json_output=True)
     publish_index.set_defaults(handler=_publish_research_index)
+    publish_report = publish_actions.add_parser(
+        "wandb-report",
+        help=("Publish a verified W&B Report view of one Research index"),
+        description=(
+            "Publish a W&B Report that presents one Research index. Fugue reads the "
+            "saved Report from W&B and verifies the fields and Markdown that it "
+            "wrote. The local index and receipt remain authoritative. The Reports "
+            "API is Public Preview. This command does not change access settings or "
+            "request a public share link."
+        ),
+    )
+    publish_report.add_argument("index", type=Path)
+    publish_report.add_argument(
+        "--index-receipt",
+        required=True,
+        type=Path,
+        help="Immutable receipt from fugue publish wandb-index",
+    )
+    publish_report.add_argument("--receipt", type=Path)
+    _add_common_args(publish_report, json_output=True)
+    publish_report.set_defaults(handler=_publish_research_report)
 
     demo = subparsers.add_parser(
         "demo", help="Run a deterministic no-key comparison replay"
@@ -1777,6 +1798,105 @@ def _publish_research_index(args: argparse.Namespace) -> int:
                     )
                 ),
                 title="Published W&B Research index",
+                border_style="fugue.success",
+            )
+        )
+    return 0
+
+
+def _publish_research_report(args: argparse.Namespace) -> int:
+    from fugue.bench.research_report import (
+        ResearchIndexReportError,
+        publish_research_index_report,
+    )
+    from fugue.bench.wandb_research_report import (
+        MissingWandbReportExtraError,
+        RetryableWandbResearchReportPublicationError,
+        WandbResearchReportPublicationError,
+        wandb_research_report_publisher_from_environment,
+    )
+    from fugue.redaction import secrets_from_env
+
+    root = args.repo_root.resolve()
+    index_path = (
+        args.index.resolve()
+        if args.index.is_absolute()
+        else (root / args.index).resolve()
+    )
+    index_receipt_path = (
+        args.index_receipt.resolve()
+        if args.index_receipt.is_absolute()
+        else (root / args.index_receipt).resolve()
+    )
+    receipt_path = (
+        args.receipt.resolve()
+        if args.receipt is not None and args.receipt.is_absolute()
+        else (root / args.receipt).resolve()
+        if args.receipt is not None
+        else None
+    )
+    env = load_env(args.env_file)
+    try:
+        publisher = wandb_research_report_publisher_from_environment(env)
+        receipt = publish_research_index_report(
+            index_path,
+            index_receipt_path,
+            publisher,
+            receipt_path=receipt_path,
+            secret_values=secrets_from_env(env),
+        )
+    except MissingWandbReportExtraError as exc:
+        payload = {
+            "schema_version": 1,
+            "status": "blocked",
+            "error_type": "missing_wandb_report_extra",
+            "message": str(exc),
+        }
+        if args.json:
+            print(json.dumps(payload, indent=2, sort_keys=True))
+        else:
+            CONSOLE.print(f"[fugue.coral]Blocked:[/] {exc}")
+        return 2
+    except RetryableWandbResearchReportPublicationError as exc:
+        payload = {
+            "schema_version": 1,
+            "status": "retryable",
+            "error_type": "wandb_report_publication_retryable",
+            "message": str(exc),
+        }
+        if args.json:
+            print(json.dumps(payload, indent=2, sort_keys=True))
+        else:
+            CONSOLE.print(f"[fugue.coral]Retryable:[/] {exc}")
+        return 3
+    except (ResearchIndexReportError, WandbResearchReportPublicationError) as exc:
+        payload = {
+            "schema_version": 1,
+            "status": "blocked",
+            "error_type": "wandb_report_publication_blocked",
+            "message": str(exc),
+        }
+        if args.json:
+            print(json.dumps(payload, indent=2, sort_keys=True))
+        else:
+            CONSOLE.print(f"[fugue.coral]Blocked:[/] {exc}")
+        return 2
+    if args.json:
+        print(json.dumps(receipt.to_dict(), indent=2, sort_keys=True))
+    else:
+        CONSOLE.print(
+            Panel(
+                "\n".join(
+                    (
+                        f"Project: {receipt.target.project}",
+                        f"Report: {receipt.report_url}",
+                        f"Projection: {receipt.projection_digest}",
+                        "Verification: saved Report matches the projection digest",
+                        f"Receipt: {receipt.receipt_digest}",
+                        "Access: governed by W&B project and Report settings",
+                    )
+                ),
+                title="W&B Report projection published (Reports API: Public Preview)",
                 border_style="fugue.success",
             )
         )

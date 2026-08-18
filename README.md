@@ -347,7 +347,13 @@ fugue study index \
 
 python -m pip install "fugue[wandb-index]"
 fugue publish wandb-index research-index.json \
-  --project ENTITY/INDEX_PROJECT
+  --project ENTITY/INDEX_PROJECT \
+  --receipt research-index-publication-receipt.json
+
+python -m pip install "fugue[wandb-report]"
+fugue publish wandb-report research-index.json \
+  --index-receipt research-index-publication-receipt.json \
+  --receipt research-index-report-publication-receipt.json
 ```
 
 `fugue publish wandb-index` creates a deterministic W&B Run and an immutable
@@ -358,9 +364,18 @@ candidate assignments, and primary evidence link. The Artifact preserves the
 exact Research index and its bound result and publication-receipt sources. The
 installed W&B SDK does not expose a native `wandb.study` service API. Fugue
 therefore describes this object as a Research index, not a native Study, and
-does not fabricate a Study Console link. A future native publisher can
-implement the same optional publication protocol without changing the local
-index or any result.
+does not fabricate a Study Console link.
+
+`fugue publish wandb-report` creates a digest-addressed W&B Report for
+colleagues who have access under the W&B project and Report settings. W&B
+labels its Reports API Public Preview. This status describes the API maturity;
+it does not make the Report public. Fugue reads the saved Report from W&B and
+verifies the fields and Markdown that it wrote before it writes a local
+receipt. This command does not change access settings or request a public share
+link. The local Research index and its publication receipt remain authoritative.
+The deterministic Run and immutable Artifact are the canonical hosted index
+publication. The Report is an optional presentation view and cannot change the
+local index or any result.
 
 Normal MCP configurations and standard Agent Skills are candidate inputs, not
 special experiment types:

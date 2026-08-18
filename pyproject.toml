@@ -45,6 +45,10 @@ weave = [
 wandb-index = [
     "wandb==0.28.1",
 ]
+wandb-report = [
+    "wandb==0.28.1",
+    "wandb-workspaces==0.4.5",
+]
 context = [
     "fastembed==0.8.0",
     "graphiti-core==0.29.2",
@@ -155,7 +159,9 @@ max-complexity = 20
 known_first_party = ["fugue"]
 optional_dependencies_dev_groups = ["dev"]
 package_module_name_map = { pyyaml = "yaml", mem0ai = "mem0", ag-ui-protocol = "ag_ui" }
-per_rule_ignores = { DEP002 = ["qdrant-client"], DEP004 = ["skills_ref"] }
+# qdrant-client is loaded by a context backend; wandb-workspaces is loaded only
+# when the optional Report publisher is selected. Both imports are dynamic.
+per_rule_ignores = { DEP002 = ["qdrant-client", "wandb-workspaces"], DEP004 = ["skills_ref"] }
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
