@@ -11245,6 +11245,7 @@ def execute_comparison(  # noqa: C901 - one governed execution transaction
         source_checkpoint_drift = _restore_or_verify_checkpoint_receipt(
             spec=spec,
             readiness=current.readiness,
+            approved_comparison=request.approved_comparison,
             repo_root=repo_root,
             env=service.env,
             run_id=run_id,
@@ -11298,6 +11299,7 @@ def execute_comparison(  # noqa: C901 - one governed execution transaction
         source_checkpoint_drift = _restore_or_verify_checkpoint_receipt(
             spec=spec,
             readiness=current.readiness,
+            approved_comparison=request.approved_comparison,
             repo_root=repo_root,
             env=service.env,
             run_id=run_id,
@@ -11575,6 +11577,7 @@ def _restore_or_verify_checkpoint_receipt(
     *,
     spec: ComparisonSpecV1,
     readiness: Mapping[str, Any],
+    approved_comparison: Mapping[str, Any],
     repo_root: Path,
     env: Mapping[str, str],
     run_id: str,
@@ -11614,15 +11617,52 @@ def _restore_or_verify_checkpoint_receipt(
         ):
             raise RuntimeError("comparison checkpoint receipt targets other inputs")
         drift = existing.get("source_drift")
-        return (
+        if (
+            isinstance(
+                spec.execution.source_evidence_destination,
+                LocalEvidenceDestinationV1,
+            )
+            and not isinstance(drift, Mapping)
+        ):
+            raise RuntimeError(
+                "local comparison checkpoint receipt is missing its source-lock "
+                "verification"
+            )
+        restored = (
             EvidenceDriftCheckV1(**dict(drift)) if isinstance(drift, Mapping) else None
         )
+        if restored is not None and restored.status != "matched":
+            raise RuntimeError(
+                "comparison checkpoint source evidence did not match; later "
+                "cells may not be admitted"
+            )
+        if isinstance(
+            spec.execution.source_evidence_destination,
+            LocalEvidenceDestinationV1,
+        ) and restored != _matched_local_source_drift(approved_comparison):
+            raise RuntimeError(
+                "local comparison checkpoint does not bind the approved source "
+                "lock"
+            )
+        return restored
     source_drift = _verify_v3_source_drift(
         spec,
         readiness=readiness,
         repo_root=repo_root,
         env=env,
     )
+    if (
+        source_drift is None
+        and isinstance(
+            spec.execution.source_evidence_destination,
+            LocalEvidenceDestinationV1,
+        )
+    ):
+        _verified_approved_inputs(
+            approved_comparison,
+            repo_root=repo_root,
+        )
+        source_drift = _matched_local_source_drift(approved_comparison)
     if source_drift is not None and source_drift.status != "matched":
         raise RuntimeError(
             "immutable source evidence changed at the pair-complete checkpoint; "
@@ -11718,11 +11758,35 @@ def _bind_local_execution_evidence(
         store.run_conformance_path.read_bytes()
     ).hexdigest()
     records = {item.attempt_id: item for item in manifest.attempt_records}
+    expected_local_destination = manifest.destination.to_dict()
 
     _apply_harbor_conformance(rows, repo_root=repo_root, run_id=run_id)
     for row in rows:
         attempt_id_value = str(row.get("attempt_id") or "")
         record = records[attempt_id_value]
+        if not hosted_evidence_expected:
+            observed_backend = row.get("evidence_backend")
+            if observed_backend not in {None, "local"}:
+                raise RuntimeError(
+                    "local comparison row evidence backend disagrees with "
+                    "its immutable manifest"
+                )
+            row["evidence_backend"] = "local"
+            observed_destination = row.get("trace_receipt")
+            if observed_destination is not None and observed_destination != (
+                expected_local_destination
+            ):
+                raise RuntimeError(
+                    "local comparison row evidence destination disagrees with "
+                    "its immutable manifest"
+                )
+            if observed_destination is None:
+                # The first standalone wheel left this legacy Weave-named
+                # field null even though the complete local ledger was
+                # finalized. Its immutable manifest is the authoritative
+                # destination receipt, so host-side finalization can repair
+                # only this projection without rerunning or rescoring Agent.
+                row["trace_receipt"] = expected_local_destination
         if row.get("local_evidence_record_digest") != record.record_digest:
             raise RuntimeError(
                 "local comparison row record digest disagrees with its manifest"

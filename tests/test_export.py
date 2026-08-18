@@ -4909,6 +4909,11 @@ def test_generated_evaluation_closes_canonical_local_evidence_chain(
                     "cost_usd": 0.02,
                 },
                 "verifier_result": {"rewards": {"reward": 1.0}},
+                # Local Agent wrappers have no hosted trace destination.  The
+                # host coordinator must replace this legacy null value with
+                # the approved canonical local destination.
+                "trace_receipt": None,
+                "evidence_backend": "local",
                 "started_at": "2026-08-17T12:00:00Z",
                 "finished_at": "2026-08-17T12:00:02Z",
             }
@@ -5011,6 +5016,8 @@ def test_generated_evaluation_closes_canonical_local_evidence_chain(
     assert {link["system"] for link in row["local_evidence_links"]} == {
         "local_artifact"
     }
+    assert row["trace_receipt"] == export.LocalEvidenceDestinationV1().to_dict()
+    assert row["trace_project"] is None
     assert {link["kind"] for link in row["local_evidence_links"]} == {
         "evaluation_root",
         "prediction_and_score",

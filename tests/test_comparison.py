@@ -37,6 +37,7 @@ from fugue.bench.comparison import (
     _request_comparison_judge,
     _require_checkpoint_evaluations,
     _require_checkpoint_judges,
+    _restore_or_verify_checkpoint_receipt,
     _result_candidate_definitions,
     _resume_approved_comparison_lock,
     analyze_comparison_rows,
@@ -4242,6 +4243,15 @@ def test_local_execution_binding_reconciles_manifest_and_run_receipt(
     manifest = SimpleNamespace(
         run_id="local-run",
         status="complete",
+        destination=SimpleNamespace(
+            to_dict=lambda: {
+                "schema_version": 1,
+                "kind": "local",
+                "format": "fugue-evidence",
+                "layout_version": 1,
+                "destination_digest": "f" * 64,
+            }
+        ),
         terminal_attempt_ids=attempts,
         manifest_digest="3" * 64,
         plan_digest="7" * 64,
@@ -4270,6 +4280,8 @@ def test_local_execution_binding_reconciles_manifest_and_run_receipt(
     rows = [
         {
             "attempt_id": attempt,
+            # Reproduce the projection gap from the first standalone wheel.
+            "trace_receipt": None,
             "local_evidence_links": [{"system": "local_artifact"}],
             "local_evidence_record_digest": record.record_digest,
         }
@@ -4320,11 +4332,48 @@ def test_local_execution_binding_reconciles_manifest_and_run_receipt(
 
     assert {row["local_evidence_manifest_digest"] for row in rows} == {"3" * 64}
     assert {row["local_evidence_run_receipt_digest"] for row in rows} == {"6" * 64}
+    assert {row["trace_receipt"]["kind"] for row in rows} == {"local"}
     assert {row["hosted_evidence_privacy_scan_status"] for row in rows} == {
         "not_applicable"
     }
 
-    hosted_rows = [dict(row, trace_project="wandb/hosted-evidence") for row in rows]
+    conflicting_rows = [
+        dict(
+            row,
+            trace_receipt={
+                **row["trace_receipt"],
+                "destination_digest": "0" * 64,
+            },
+        )
+        for row in rows
+    ]
+    with pytest.raises(RuntimeError, match="immutable manifest"):
+        _bind_local_execution_evidence(
+            conflicting_rows,
+            repo_root=tmp_path,
+            run_id="local-run",
+        )
+    conflicting_backend_rows = [
+        dict(row, evidence_backend="weave") for row in rows
+    ]
+    with pytest.raises(RuntimeError, match="evidence backend"):
+        _bind_local_execution_evidence(
+            conflicting_backend_rows,
+            repo_root=tmp_path,
+            run_id="local-run",
+        )
+
+    hosted_destination = trace_destination_identity(
+        {"FUGUE_WEAVE_PROJECT": "wandb/hosted-evidence"}
+    )
+    hosted_rows = [
+        dict(
+            row,
+            trace_project="wandb/hosted-evidence",
+            trace_receipt=hosted_destination,
+        )
+        for row in rows
+    ]
     for row in hosted_rows:
         row.pop("hosted_evidence_privacy_scan_status", None)
     _bind_local_execution_evidence(
@@ -4335,8 +4384,158 @@ def test_local_execution_binding_reconciles_manifest_and_run_receipt(
     )
 
     assert {row["trace_project"] for row in hosted_rows} == {"wandb/hosted-evidence"}
+    assert {row["trace_receipt"]["destination_digest"] for row in hosted_rows} == {
+        hosted_destination["destination_digest"]
+    }
     assert all("hosted_evidence_privacy_scan_status" not in row for row in hosted_rows)
     assert {row["local_evidence_manifest_digest"] for row in hosted_rows} == {"3" * 64}
+
+
+def test_local_checkpoint_verifies_and_persists_source_lock(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    comparison_path = scaffold_comparison(tmp_path / "study")
+    spec = load_comparison(comparison_path, repo_root=comparison_path.parent)
+    attempt_ids = ("1" * 64, "2" * 64)
+    rows = {
+        attempt_id: {"attempt_id": attempt_id, "pass": True}
+        for attempt_id in attempt_ids
+    }
+    verified: list[str] = []
+    monkeypatch.setattr(
+        "fugue.bench.comparison._local_comparison_prediction_row",
+        lambda *, attempt_id, **_kwargs: dict(rows[attempt_id]),
+    )
+    monkeypatch.setattr(
+        "fugue.bench.comparison._verify_v3_source_drift",
+        lambda *_args, **_kwargs: None,
+    )
+    monkeypatch.setattr(
+        "fugue.bench.comparison._verified_approved_inputs",
+        lambda approved, **_kwargs: verified.append(approved["source_lock_digest"]),
+    )
+    approved = {"source_lock_digest": "a" * 64}
+    run_dir = tmp_path / "study/.fugue/runtime/local-checkpoint-run"
+    run_dir.mkdir(parents=True)
+
+    drift = _restore_or_verify_checkpoint_receipt(
+        spec=spec,
+        readiness={},
+        approved_comparison=approved,
+        repo_root=comparison_path.parent,
+        env={},
+        run_id="local-checkpoint-run",
+        schedule_digest="b" * 64,
+        checkpoint_attempt_ids=attempt_ids,
+    )
+
+    assert drift is not None and drift.status == "matched"
+    assert verified == ["a" * 64]
+    receipt_path = run_dir / "comparison-checkpoint.json"
+    receipt = json.loads(receipt_path.read_text(encoding="utf-8"))
+    assert receipt["source_drift"] == {
+        "status": "matched",
+        "expected_digest": "a" * 64,
+        "observed_digest": "a" * 64,
+    }
+
+    unsigned = {
+        key: value for key, value in receipt.items() if key != "receipt_digest"
+    }
+    unsigned["source_drift"] = None
+    receipt_path.write_text(
+        json.dumps(
+            {**unsigned, "receipt_digest": stable_digest(unsigned)},
+            sort_keys=True,
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+    with pytest.raises(RuntimeError, match="missing its source-lock verification"):
+        _restore_or_verify_checkpoint_receipt(
+            spec=spec,
+            readiness={},
+            approved_comparison=approved,
+            repo_root=comparison_path.parent,
+            env={},
+            run_id="local-checkpoint-run",
+            schedule_digest="b" * 64,
+            checkpoint_attempt_ids=attempt_ids,
+        )
+
+    unsigned["source_drift"] = {
+        "status": "drifted",
+        "expected_digest": "a" * 64,
+        "observed_digest": "b" * 64,
+    }
+    receipt_path.write_text(
+        json.dumps(
+            {**unsigned, "receipt_digest": stable_digest(unsigned)},
+            sort_keys=True,
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+    with pytest.raises(RuntimeError, match="did not match"):
+        _restore_or_verify_checkpoint_receipt(
+            spec=spec,
+            readiness={},
+            approved_comparison=approved,
+            repo_root=comparison_path.parent,
+            env={},
+            run_id="local-checkpoint-run",
+            schedule_digest="b" * 64,
+            checkpoint_attempt_ids=attempt_ids,
+        )
+
+    unsigned["source_drift"] = {
+        "status": "matched",
+        "expected_digest": "c" * 64,
+        "observed_digest": "c" * 64,
+    }
+    receipt_path.write_text(
+        json.dumps(
+            {**unsigned, "receipt_digest": stable_digest(unsigned)},
+            sort_keys=True,
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+    with pytest.raises(RuntimeError, match="approved source lock"):
+        _restore_or_verify_checkpoint_receipt(
+            spec=spec,
+            readiness={},
+            approved_comparison=approved,
+            repo_root=comparison_path.parent,
+            env={},
+            run_id="local-checkpoint-run",
+            schedule_digest="b" * 64,
+            checkpoint_attempt_ids=attempt_ids,
+        )
+
+    drifted_run_dir = tmp_path / "study/.fugue/runtime/drifted-checkpoint-run"
+    drifted_run_dir.mkdir(parents=True)
+
+    def drifted_inputs(*_args: object, **_kwargs: object) -> None:
+        raise RuntimeError("frozen input changed")
+
+    monkeypatch.setattr(
+        "fugue.bench.comparison._verified_approved_inputs",
+        drifted_inputs,
+    )
+    with pytest.raises(RuntimeError, match="frozen input changed"):
+        _restore_or_verify_checkpoint_receipt(
+            spec=spec,
+            readiness={},
+            approved_comparison=approved,
+            repo_root=comparison_path.parent,
+            env={},
+            run_id="drifted-checkpoint-run",
+            schedule_digest="b" * 64,
+            checkpoint_attempt_ids=attempt_ids,
+        )
+    assert not (drifted_run_dir / "comparison-checkpoint.json").exists()
 
 
 def test_v3_attempt_construction_rejects_exported_decision_field_mutation() -> None:

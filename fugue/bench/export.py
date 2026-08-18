@@ -1885,6 +1885,11 @@ class GeneratedEvaluationCoordinator:
         if evidence_mode not in {"local", "weave_required"}:
             raise ValueError(f"unsupported evidence mode: {evidence_mode}")
         self._evidence_mode = evidence_mode
+        self._evidence_destination = (
+            LocalEvidenceDestinationV1().to_dict()
+            if evidence_mode == "local"
+            else trace_destination_identity(self.env)
+        )
         self._rows_by_attempt: dict[str, dict[str, Any]] = {}
         self._local_attempt_ids: set[str] = set()
         self.path = (
@@ -1898,7 +1903,11 @@ class GeneratedEvaluationCoordinator:
         self._lock = threading.Lock()
 
         planned_rows = [
-            _planned_evaluation_row(cell)
+            _coordinated_planned_evaluation_row(
+                cell,
+                evidence_mode=self._evidence_mode,
+                evidence_destination=self._evidence_destination,
+            )
             for cell in cells
             if cell.applicable and cell.execution_kind == "agent"
         ]
@@ -1929,7 +1938,13 @@ class GeneratedEvaluationCoordinator:
                 cell_id=cell.id,
                 attempt_id=cell.attempt_id,
                 attempt_identity=cell.attempt_identity,
-                prediction_id=str(_planned_evaluation_row(cell)["prediction_id"]),
+                prediction_id=str(
+                    _coordinated_planned_evaluation_row(
+                        cell,
+                        evidence_mode=self._evidence_mode,
+                        evidence_destination=self._evidence_destination,
+                    )["prediction_id"]
+                ),
                 evaluation_scope_id=scopes[cell.attempt_id][0],
                 dataset_id=scopes[cell.attempt_id][1],
             )
@@ -2006,8 +2021,25 @@ class GeneratedEvaluationCoordinator:
         row = _completed_evaluation_row(
             cell,
             outcome,
-            _planned_evaluation_row(cell),
+            _coordinated_planned_evaluation_row(
+                cell,
+                evidence_mode=self._evidence_mode,
+                evidence_destination=self._evidence_destination,
+            ),
         )
+        expected_backend = (
+            "local" if self._evidence_mode == "local" else "weave"
+        )
+        if row.get("trace_receipt") != self._evidence_destination:
+            raise RuntimeError(
+                "generated evaluation evidence destination disagrees with "
+                "the trusted host coordinator"
+            )
+        if row.get("evidence_backend") != expected_backend:
+            raise RuntimeError(
+                "generated evaluation evidence backend disagrees with the "
+                "trusted host coordinator"
+            )
         _verify_coordinated_row_identity(row, cell)
         candidate_definition = _run_candidate_definition(
             self.repo_root,
@@ -2879,6 +2911,27 @@ def _planned_evaluation_row(cell: PlannedCell) -> dict[str, Any]:
     return row
 
 
+def _coordinated_planned_evaluation_row(
+    cell: PlannedCell,
+    *,
+    evidence_mode: str,
+    evidence_destination: Mapping[str, Any],
+) -> dict[str, Any]:
+    """Bind the trusted coordinator's evidence mode into one planned row."""
+
+    row = _planned_evaluation_row(cell)
+    row["trace_receipt"] = dict(evidence_destination)
+    row["evidence_backend"] = (
+        "local" if evidence_mode == "local" else "weave"
+    )
+    row["trace_project"] = (
+        None
+        if evidence_mode == "local"
+        else str(evidence_destination.get("project_slug") or "")
+    )
+    return row
+
+
 def _completed_evaluation_row(
     cell: PlannedCell,
     outcome: CellOutcome,
@@ -2928,6 +2981,8 @@ def _completed_evaluation_row(
         "model_provider",
         "model",
         "trace_project",
+        "trace_receipt",
+        "evidence_backend",
         "execution_fingerprint",
         "execution_kind",
         "identity_schema_version",
