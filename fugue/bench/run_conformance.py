@@ -1321,12 +1321,99 @@ def _scan_run_artifacts(  # noqa: C901 - one bounded audit reports every gap
     }
 
 
-def _private_label_boundary(
+def _private_label_boundary(  # noqa: C901 - one fail-closed taint boundary
     *,
     run_dir: Path,
     jobs: Sequence[RenderedJob],
     host_scorer_names: Sequence[str],
 ) -> dict[str, Any]:
+    def canonical(value: Any) -> str:
+        return json.dumps(value, sort_keys=True, separators=(",", ":"), default=str)
+
+    def structural_taints(value: Any) -> set[str]:
+        taints: set[str] = set()
+        if isinstance(value, Mapping):
+            if value:
+                taints.add(canonical(value))
+            for item in value.values():
+                taints.update(structural_taints(item))
+        elif isinstance(value, list):
+            if value:
+                taints.add(canonical(value))
+            for item in value:
+                taints.update(structural_taints(item))
+        return taints
+
+    def private_label_digests(value: Any) -> set[str]:
+        digests: set[str] = set()
+        if isinstance(value, Mapping):
+            for raw_key, item in value.items():
+                key = str(raw_key).lower()
+                if key in {"private_labels_sha256", "private_labels_digest"}:
+                    rendered = str(item or "")
+                    if _HEX_SHA256.fullmatch(rendered):
+                        digests.add(rendered)
+                digests.update(private_label_digests(item))
+        elif isinstance(value, list):
+            for item in value:
+                digests.update(private_label_digests(item))
+        return digests
+
+    def scan_agent_input(
+        value: Any,
+        *,
+        prefix: str,
+        taints: set[str],
+        private_paths: set[Path],
+        repo_root: Path,
+    ) -> list[str]:
+        matches: list[str] = []
+        if isinstance(value, Mapping):
+            if value and canonical(value) in taints:
+                matches.append(prefix)
+            for raw_key, item in value.items():
+                matches.extend(
+                    scan_agent_input(
+                        item,
+                        prefix=f"{prefix}.{raw_key}",
+                        taints=taints,
+                        private_paths=private_paths,
+                        repo_root=repo_root,
+                    )
+                )
+        elif isinstance(value, list):
+            if value and canonical(value) in taints:
+                matches.append(prefix)
+            for index, item in enumerate(value):
+                matches.extend(
+                    scan_agent_input(
+                        item,
+                        prefix=f"{prefix}[{index}]",
+                        taints=taints,
+                        private_paths=private_paths,
+                        repo_root=repo_root,
+                    )
+                )
+        elif isinstance(value, str):
+            rendered = value.strip()
+            if rendered in taints:
+                matches.append(prefix)
+            if ".fugue/private/" in rendered.replace("\\", "/"):
+                matches.append(prefix)
+            try:
+                candidate = Path(rendered).expanduser()
+            except (OSError, RuntimeError, ValueError):
+                return matches
+            if not candidate.is_absolute():
+                candidate = repo_root / candidate
+            try:
+                resolved = candidate.resolve()
+            except (OSError, RuntimeError):
+                resolved = candidate.absolute()
+            if resolved in private_paths:
+                matches.append(prefix)
+        return matches
+
     if not host_scorer_names:
         return {
             "status": "not_applicable",
@@ -1346,24 +1433,107 @@ def _private_label_boundary(
             "scope": "rendered Harbor Agent-input structures only",
             "rendered_private_fields": findings,
         }
+    repo_root = run_dir.resolve().parents[2]
+    try:
+        asset_payload = json.loads(asset_lock.read_text(encoding="utf-8"))
+    except (OSError, UnicodeDecodeError, json.JSONDecodeError):
+        return {
+            "status": "unavailable",
+            "reason": "the host-only evaluation asset lock is malformed",
+            "scope": "rendered Harbor Agent-input structures only",
+            "rendered_private_fields": sorted(findings),
+        }
+    if not isinstance(asset_payload, Mapping):
+        return {
+            "status": "unavailable",
+            "reason": "the host-only evaluation asset lock is not an object",
+            "scope": "rendered Harbor Agent-input structures only",
+            "rendered_private_fields": sorted(findings),
+        }
+
+    private_paths = {asset_lock.resolve()}
+    taints = structural_taints(asset_payload.get("predictions") or {})
+    declared_private_missing: list[str] = []
+    input_lock = run_dir / "input-lock.json"
+    if input_lock.is_file():
+        try:
+            input_payload = json.loads(input_lock.read_text(encoding="utf-8"))
+        except (OSError, UnicodeDecodeError, json.JSONDecodeError):
+            return {
+                "status": "unavailable",
+                "reason": "the run input lock is malformed",
+                "scope": "rendered Harbor Agent-input structures only",
+                "rendered_private_fields": sorted(findings),
+            }
+        for digest in sorted(private_label_digests(input_payload)):
+            path = (
+                repo_root
+                / ".fugue/private/comparison-inputs/labels"
+                / f"{digest}.jsonl"
+            )
+            if not path.is_file():
+                declared_private_missing.append(digest)
+                continue
+            if hashlib.sha256(path.read_bytes()).hexdigest() != digest:
+                return {
+                    "status": "failed",
+                    "reason": "a frozen private-label bundle failed digest verification",
+                    "scope": "rendered Harbor Agent-input structures only",
+                    "rendered_private_fields": sorted(findings),
+                }
+            private_paths.add(path.resolve())
+            try:
+                for line in path.read_text(encoding="utf-8").splitlines():
+                    if line.strip():
+                        taints.update(structural_taints(json.loads(line)))
+            except (OSError, UnicodeDecodeError, json.JSONDecodeError):
+                return {
+                    "status": "failed",
+                    "reason": "a frozen private-label bundle is malformed",
+                    "scope": "rendered Harbor Agent-input structures only",
+                    "rendered_private_fields": sorted(findings),
+                }
+    if declared_private_missing:
+        return {
+            "status": "unavailable",
+            "reason": "a declared frozen private-label bundle is unavailable",
+            "scope": "rendered Harbor Agent-input structures only",
+            "rendered_private_fields": sorted(findings),
+            "missing_private_bundle_digests": declared_private_missing,
+        }
+
+    tainted_inputs: list[str] = []
+    for job in jobs:
+        tainted_inputs.extend(
+            f"{job.job_name}:{path}"
+            for path in scan_agent_input(
+                job.config,
+                prefix="$",
+                taints=taints,
+                private_paths=private_paths,
+                repo_root=repo_root,
+            )
+        )
     mode = asset_lock.stat().st_mode & 0o777
     restricted = mode & 0o077 == 0
-    if findings or not restricted:
+    if findings or tainted_inputs or not restricted:
         return {
             "status": "failed",
-            "method": "rendered Agent-input structural scan",
+            "method": "rendered Agent-input structural and host-taint scan",
             "scope": "rendered Harbor Agent-input structures only",
             "host_asset_lock": asset_lock.name,
             "host_asset_lock_mode": oct(mode),
             "rendered_private_fields": sorted(findings),
+            "tainted_agent_inputs": sorted(set(tainted_inputs)),
         }
     return {
         "status": "passed",
-        "method": "rendered Agent-input structural scan",
+        "method": "rendered Agent-input structural and host-taint scan",
         "scope": "rendered Harbor Agent-input structures only",
         "host_asset_lock": asset_lock.name,
         "host_asset_lock_mode": oct(mode),
         "rendered_private_fields": [],
+        "tainted_agent_inputs": [],
     }
 
 

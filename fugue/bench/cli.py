@@ -187,6 +187,22 @@ def _parser() -> FugueArgumentParser:
     result.add_argument("--repo-root", type=Path, default=Path.cwd())
     result.set_defaults(handler=_comparison_result)
 
+    publish_command = subparsers.add_parser(
+        "publish", help="Publish an unchanged canonical local result"
+    )
+    publish_actions = publish_command.add_subparsers(
+        dest="publish_action", metavar="BACKEND", required=True
+    )
+    publish_weave = publish_actions.add_parser(
+        "weave", help="Publish a local result's evidence chain to W&B Weave"
+    )
+    publish_weave.add_argument("result", type=Path)
+    publish_weave.add_argument("--project", required=True, metavar="ENTITY/PROJECT")
+    publish_weave.add_argument("--manifest", type=Path, help=argparse.SUPPRESS)
+    publish_weave.add_argument("--receipt", type=Path)
+    _add_common_args(publish_weave, json_output=True)
+    publish_weave.set_defaults(handler=_publish_local_result)
+
     demo = subparsers.add_parser(
         "demo", help="Run a deterministic no-key comparison replay"
     )
@@ -1155,6 +1171,86 @@ def _comparison_result_paths(
     if not result_path.is_file():
         raise FileNotFoundError(f"comparison result not found: {result_path}")
     return result_path, markdown_path
+
+
+def _publish_local_result(args: argparse.Namespace) -> int:
+    from fugue.bench.comparison import ComparisonResultV3, read_comparison_result
+    from fugue.bench.local_evidence import LocalEvidenceStore
+    from fugue.bench.local_publication import (
+        LocalResultPublicationError,
+        MissingWeaveExtraError,
+        publish_local_result_to_weave,
+        weave_publisher_from_environment,
+    )
+    from fugue.redaction import secrets_from_env
+
+    root = args.repo_root.resolve()
+    result_path = (
+        args.result.resolve()
+        if args.result.is_absolute()
+        else (root / args.result).resolve()
+    )
+    result = read_comparison_result(result_path)
+    if not isinstance(result, ComparisonResultV3):
+        raise LocalResultPublicationError(
+            "optional Weave publication requires ComparisonResultV3"
+        )
+    manifest_path = (
+        args.manifest.resolve()
+        if args.manifest is not None and args.manifest.is_absolute()
+        else (root / args.manifest).resolve()
+        if args.manifest is not None
+        else LocalEvidenceStore(root, result.source).manifest_path
+    )
+    receipt_path = (
+        args.receipt.resolve()
+        if args.receipt is not None and args.receipt.is_absolute()
+        else (root / args.receipt).resolve()
+        if args.receipt is not None
+        else None
+    )
+    env = load_env(args.env_file)
+    try:
+        publisher = weave_publisher_from_environment(env)
+        receipt = publish_local_result_to_weave(
+            result_path,
+            manifest_path,
+            target=args.project,
+            publisher=publisher,
+            receipt_path=receipt_path,
+            secret_values=secrets_from_env(env),
+        )
+    except MissingWeaveExtraError as exc:
+        payload = {
+            "schema_version": 1,
+            "status": "blocked",
+            "error_type": "missing_weave_extra",
+            "message": str(exc),
+        }
+        if args.json:
+            print(json.dumps(payload, indent=2, sort_keys=True))
+        else:
+            CONSOLE.print(f"[fugue.coral]Blocked:[/] {exc}")
+        return 2
+    if args.json:
+        print(json.dumps(receipt.to_dict(), indent=2, sort_keys=True))
+    else:
+        CONSOLE.print(
+            Panel(
+                "\n".join(
+                    (
+                        f"Target: {receipt.target.project_slug}",
+                        f"Result: {receipt.result_digest}",
+                        f"Local evidence: {receipt.local_manifest_digest}",
+                        f"Hosted objects: {len(receipt.hosted_objects)}",
+                        f"Receipt: {receipt.receipt_digest}",
+                    )
+                ),
+                title="Published unchanged local result",
+                border_style="fugue.success",
+            )
+        )
+    return 0
 
 
 def _comparison_demo(args: argparse.Namespace) -> int:

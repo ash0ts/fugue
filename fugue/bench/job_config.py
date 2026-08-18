@@ -54,6 +54,7 @@ from fugue.bench.library import (
     FeatureVariant,
     get_prompt,
 )
+from fugue.bench.local_evidence import LocalEvidenceDestinationV1
 from fugue.bench.manifest import BenchmarkManifest, HarnessSpec, TaskSpec
 from fugue.bench.portable_runtime import read_runtime_lock as read_portable_runtime_lock
 from fugue.bench.runtime_manager import read_runtime_lock, render_runtime_compose
@@ -405,6 +406,7 @@ def _build_jobs(
                     tasks[0],
                     repo_root,
                 )
+                local_evidence = experiment.evidence_mode == "local"
                 candidate_execution = {
                     "harbor_version": HARBOR_VERSION,
                     "harbor_config": {
@@ -416,7 +418,9 @@ def _build_jobs(
                         "retry": _merge_dicts(experiment.retry, variant.retry),
                     },
                     "trace_content": experiment.trace_content,
-                    "instrumentation": "weave",
+                    "instrumentation": (
+                        "local_evidence" if local_evidence else "weave"
+                    ),
                     **(
                         {
                             "live_evidence_policy": {
@@ -430,7 +434,11 @@ def _build_jobs(
                         or experiment.evidence_checkpoint_cells
                         else {}
                     ),
-                    "evidence_destination": trace_destination_identity(env),
+                    "evidence_destination": (
+                        LocalEvidenceDestinationV1().to_dict()
+                        if local_evidence
+                        else trace_destination_identity(env)
+                    ),
                     **(
                         {
                             "source_evidence_destination": (
@@ -974,6 +982,7 @@ def _agent_config(
             harness.name,
             selected_mcp_servers,
             integration_binding.allowed_hosts,
+            include_weave=experiment.evidence_mode == "weave_required",
         ),
     }
     if _looks_like_import_path(harness.agent):
@@ -1009,11 +1018,12 @@ def _agent_allowed_hosts(
     harness: str,
     mcp_servers: list[dict[str, Any]],
     integration_hosts: tuple[str, ...],
+    *,
+    include_weave: bool,
 ) -> list[str]:
     bridge_required = _bridge_required(route, harness)
     values = [
-        "api.wandb.ai",
-        "trace.wandb.ai",
+        *(["api.wandb.ai", "trace.wandb.ai"] if include_weave else []),
         *(["host.docker.internal"] if bridge_required else []),
         *integration_hosts,
     ]

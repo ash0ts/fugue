@@ -43,6 +43,7 @@ def test_public_command_surface_is_intentionally_small() -> None:
         "compare",
         "approve",
         "result",
+        "publish",
         "demo",
         "sandbox",
         "mcp",
@@ -62,6 +63,13 @@ def test_public_command_surface_is_intentionally_small() -> None:
     result_help = subparsers.choices["result"].format_help()
     assert "--authorize-followup" in result_help
     assert "--signoff-by" in result_help
+    publish_actions = next(
+        action
+        for action in subparsers.choices["publish"]._actions
+        if isinstance(action, cli.argparse._SubParsersAction)
+    )
+    assert "weave" in publish_actions.choices
+    assert "--project" in publish_actions.choices["weave"].format_help()
     research_actions = next(
         action
         for action in subparsers.choices["research"]._actions

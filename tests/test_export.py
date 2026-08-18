@@ -1,3 +1,4 @@
+import hashlib
 import json
 import sys
 import threading
@@ -11,7 +12,7 @@ import pytest
 
 from fugue.agent_tracing import agent_conversation_id
 from fugue.bench import export, operator
-from fugue.bench.candidates import CANDIDATE_IDENTITY_SCHEMA_VERSION
+from fugue.bench.candidates import CANDIDATE_IDENTITY_SCHEMA_VERSION, stable_digest
 from fugue.bench.execution import CellOutcome, PlannedCell, write_run_manifest
 from fugue.bench.export import (
     GeneratedEvaluationCoordinator,
@@ -4789,7 +4790,9 @@ def test_generated_evaluation_scope_is_shared_and_rubric_sensitive() -> None:
         candidates[0]["evaluation_scope_id"]
     }
     inputs = export._evaluation_inputs(baseline)
-    assert inputs["evaluation_case"] == case
+    assert inputs["evaluation_case"] == {
+        key: value for key, value in case.items() if key != "expected"
+    }
     assert inputs["evaluation_rubrics"] == [rubric]
     assert "candidate_id" not in inputs
     assert "variant_id" not in inputs
@@ -4884,7 +4887,329 @@ def test_local_generated_evaluation_runs_scoring_without_changing_outcome(
     assert result["evaluation_correctness"] == 0.9
     assert result["comparison_deterministic_scores"] == {"fact-correct": True}
     assert "evaluation_overall" not in result
+    assert "expected" not in json.dumps(result)
+    assert "grounded fact" not in json.dumps(result)
     assert "secret-value" not in json.dumps(result)
+
+
+def test_generated_evaluation_closes_canonical_local_evidence_chain(
+    tmp_path: Path,
+) -> None:
+    trial_dir = tmp_path / "jobs" / "cell-a"
+    agent_dir = trial_dir / "agent"
+    agent_dir.mkdir(parents=True)
+    (trial_dir / "result.json").write_text(
+        json.dumps(
+            {
+                "task_name": "suite/task-a",
+                "trial_name": "cell-a",
+                "agent_result": {
+                    "n_input_tokens": 12,
+                    "n_output_tokens": 3,
+                    "cost_usd": 0.02,
+                },
+                "verifier_result": {"rewards": {"reward": 1.0}},
+                "started_at": "2026-08-17T12:00:00Z",
+                "finished_at": "2026-08-17T12:00:02Z",
+            }
+        )
+    )
+    run_key = "run-a:suite:trial:task-a:claude-code:none:baseline:t001"
+    planned_conversation_id = agent_conversation_id("claude-code", run_key)
+    (agent_dir / "fugue-meta.json").write_text(
+        json.dumps(
+            {
+                "candidate_id": "candidate-a",
+                "run_id": "run-a",
+                "trial_index": 1,
+                "native_session_ids": ["native-session-a"],
+                "planned_conversation_id": planned_conversation_id,
+                "conversation_correlation": {
+                    "status": "isolated_trial_directory",
+                    "planned_conversation_id": planned_conversation_id,
+                    "native_session_ids": ["native-session-a"],
+                },
+            }
+        )
+    )
+    (agent_dir / "transcript.jsonl").write_text(
+        json.dumps(
+            {
+                "type": "assistant",
+                "session_id": "native-session-a",
+                "text": "completed",
+            }
+        )
+        + "\n"
+    )
+    cell = PlannedCell(
+        id="cell-a",
+        run_id="run-a",
+        run_name="run-a",
+        workload_id="suite",
+        task_id="task-a",
+        harness="claude-code",
+        context_system_id="none",
+        variant_id="baseline",
+        model_provider="anthropic",
+        model="anthropic/claude-test",
+        trial_index=1,
+        comparison_example_id="example-a",
+        candidate_id="candidate-a",
+        execution_fingerprint="execution-a",
+        config_path=tmp_path / "config.json",
+        result_path=trial_dir / "result.json",
+        command=("harbor", "run"),
+        env={"FUGUE_EVIDENCE_MODE": "local", "FUGUE_DATASET": "suite@v1"},
+        n_attempts=1,
+        evaluation_asset_lock_sha256="e" * 64,
+        run_snapshot_sha256="a" * 64,
+    )
+    conformance = {
+        "status": "passed",
+        "execution_identity": {"status": "passed", "digest": "x" * 64},
+        "local_artifact_privacy_scan": {"status": "passed", "matches": 0},
+        "private_label_boundary": {"status": "passed"},
+        "docker_cleanup": {"status": "passed", "matched_containers": []},
+    }
+    coordinator = GeneratedEvaluationCoordinator(
+        [cell],
+        repo_root=tmp_path,
+        env={"ANTHROPIC_API_KEY": "not-a-real-secret-value"},
+        cell_conformance=lambda _cell: conformance,
+        require_complete_evidence=True,
+        evidence_mode="local",
+    )
+
+    overlay = coordinator.begin_cell(cell)
+    assert overlay is not None
+    assert overlay["FUGUE_EVIDENCE_MODE"] == "local"
+    coordinator.finish_cell(cell, CellOutcome(cell.id, "passed", returncode=0))
+    conformance_path = tmp_path / ".fugue/runtime/run-a/harbor-conformance.json"
+    conformance_receipt = {
+        "schema_version": 2,
+        "run_id": "run-a",
+        "backend": "local_harbor_docker",
+        "status": "passed",
+        "enforced": True,
+        "receipt_sha256": "",
+    }
+    conformance_receipt["receipt_sha256"] = stable_digest(conformance_receipt)
+    conformance_path.write_text(
+        json.dumps(conformance_receipt, sort_keys=True) + "\n",
+        encoding="utf-8",
+    )
+    manifest = coordinator.finalize()
+
+    assert manifest is not None
+    assert manifest.status == "complete"
+    assert len(manifest.attempt_records) == 1
+    [row] = [
+        json.loads(line)
+        for line in coordinator.path.read_text(encoding="utf-8").splitlines()
+    ]
+    assert {link["system"] for link in row["local_evidence_links"]} == {
+        "local_artifact"
+    }
+    assert {link["kind"] for link in row["local_evidence_links"]} == {
+        "evaluation_root",
+        "prediction_and_score",
+        "prediction",
+        "agent_root",
+        "dataset",
+    }
+    attempt_files = list(
+        (tmp_path / ".fugue/runtime/run-a/evidence/attempts").rglob(
+            "prediction-and-score.json"
+        )
+    )
+    assert len(attempt_files) == 1
+    attempt = json.loads(attempt_files[0].read_text(encoding="utf-8"))
+    assert attempt["attempt"]["receipts"]["privacy"]["status"] == "passed"
+    assert attempt["attempt"]["receipts"]["policy"]["status"] == "passed"
+    assert attempt["attempt"]["receipts"]["usage"]["status"] == "passed"
+    assert attempt["attempt"]["receipts"]["cleanup"]["status"] == "passed"
+
+
+def _local_agent_receipt_fixture(
+    tmp_path: Path,
+    *,
+    transcript: str | None,
+    transcript_session: str = "native-session-a",
+    transcript_attempt: str | None = None,
+    response_sha256: str | None = None,
+) -> tuple[PlannedCell, dict[str, object]]:
+    trial_dir = tmp_path / "jobs" / "receipt-cell"
+    agent_dir = trial_dir / "agent"
+    agent_dir.mkdir(parents=True)
+    cell = PlannedCell(
+        id="receipt-cell",
+        run_id="receipt-run",
+        run_name="receipt-run",
+        workload_id="suite",
+        task_id="task-a",
+        harness="claude-code",
+        context_system_id="none",
+        variant_id="baseline",
+        model_provider="anthropic",
+        model="anthropic/claude-test",
+        trial_index=1,
+        comparison_example_id="example-a",
+        candidate_id="candidate-a",
+        execution_fingerprint="execution-a",
+        config_path=tmp_path / "config.json",
+        result_path=trial_dir / "result.json",
+        command=("harbor", "run"),
+        env={"FUGUE_EVIDENCE_MODE": "local"},
+        n_attempts=1,
+    )
+    planned = "planned-session-a"
+    (agent_dir / "fugue-meta.json").write_text(
+        json.dumps(
+            {
+                "candidate_id": cell.candidate_id,
+                "run_id": cell.run_id,
+                "trial_index": cell.trial_index,
+                "planned_conversation_id": planned,
+                "native_session_ids": ["native-session-a"],
+                "conversation_correlation": {
+                    "status": "isolated_trial_directory",
+                    "planned_conversation_id": planned,
+                    "native_session_ids": ["native-session-a"],
+                },
+            }
+        )
+    )
+    if transcript is not None:
+        payload: dict[str, object] = {
+            "type": "assistant",
+            "session_id": transcript_session,
+            "text": transcript,
+        }
+        if transcript_attempt is not None:
+            payload["attempt_id"] = transcript_attempt
+        (agent_dir / "transcript.jsonl").write_text(json.dumps(payload) + "\n")
+    row: dict[str, object] = {
+        "trial_dir": trial_dir.as_posix(),
+        "planned_conversation_id": planned,
+        "native_session_ids": ["native-session-a"],
+    }
+    if response_sha256 is not None:
+        row["agent_response_sha256"] = response_sha256
+    return cell, row
+
+
+def test_local_agent_receipt_binds_transcript_tools_and_response(
+    tmp_path: Path,
+) -> None:
+    response = "bounded answer"
+    cell, row = _local_agent_receipt_fixture(
+        tmp_path,
+        transcript=response,
+        response_sha256=hashlib.sha256(response.encode()).hexdigest(),
+    )
+    trajectory = {
+        "steps": [
+            {
+                "source": "assistant",
+                "message": response,
+                "tool_calls": [
+                    {"tool_call_id": "call-1", "function_name": "read_file"}
+                ],
+            }
+        ]
+    }
+    (Path(str(row["trial_dir"])) / "agent" / "trajectory.json").write_text(
+        json.dumps(trajectory)
+    )
+
+    receipt = export._local_agent_receipt(tmp_path, cell, row)
+
+    assert receipt.status == "resolved"
+    assert receipt.correlation_verified is True
+    assert receipt.transcript_session_id == "native-session-a"
+    assert receipt.transcript_artifact is not None
+    assert receipt.tool_event_count == 1
+    assert receipt.tool_events_sha256 != hashlib.sha256(b"[]").hexdigest()
+    assert receipt.response_sha256 == row["agent_response_sha256"]
+
+
+@pytest.mark.parametrize(
+    ("transcript", "session", "attempt_id", "expected_status", "reason"),
+    [
+        (
+            None,
+            "native-session-a",
+            None,
+            "missing",
+            "transcript artifact is unavailable",
+        ),
+        (
+            "answer",
+            "native-session-b",
+            None,
+            "invalid",
+            "does not match the primary session",
+        ),
+        (
+            "answer",
+            "native-session-a",
+            "f" * 64,
+            "invalid",
+            "another Fugue attempt",
+        ),
+    ],
+)
+def test_local_agent_receipt_rejects_unbound_transcripts(
+    tmp_path: Path,
+    transcript: str | None,
+    session: str,
+    attempt_id: str | None,
+    expected_status: str,
+    reason: str,
+) -> None:
+    cell, row = _local_agent_receipt_fixture(
+        tmp_path,
+        transcript=transcript,
+        transcript_session=session,
+        transcript_attempt=attempt_id,
+    )
+
+    receipt = export._local_agent_receipt(tmp_path, cell, row)
+
+    assert receipt.status == expected_status
+    assert reason in str(receipt.reason)
+
+
+def test_local_agent_receipt_rejects_malformed_transcript(tmp_path: Path) -> None:
+    cell, row = _local_agent_receipt_fixture(tmp_path, transcript="answer")
+    transcript_path = Path(str(row["trial_dir"])) / "agent" / "transcript.jsonl"
+    transcript_path.write_text("{not-json}\n")
+
+    receipt = export._local_agent_receipt(tmp_path, cell, row)
+
+    assert receipt.status == "invalid"
+    assert "malformed JSON" in str(receipt.reason)
+
+
+def test_local_agent_receipt_rejects_response_digest_mismatch(
+    tmp_path: Path,
+) -> None:
+    cell, row = _local_agent_receipt_fixture(
+        tmp_path,
+        transcript="bounded answer",
+        response_sha256="f" * 64,
+    )
+    (Path(str(row["trial_dir"])) / "agent" / "trajectory.json").write_text(
+        json.dumps(
+            {"steps": [{"source": "assistant", "message": "bounded answer"}]}
+        )
+    )
+
+    receipt = export._local_agent_receipt(tmp_path, cell, row)
+
+    assert receipt.status == "invalid"
+    assert "response digest" in str(receipt.reason)
 
 
 def test_completed_evaluation_recovers_setup_failure_and_fingerprint(

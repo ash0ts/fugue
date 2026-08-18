@@ -11,6 +11,7 @@ from urllib.parse import urlparse
 Provider = Literal["wandb", "openai", "anthropic"]
 ToolResultModality = Literal["text", "image"]
 ModelWireProtocol = Literal["chat_completions", "messages", "responses"]
+EvidenceMode = Literal["local", "weave_required"]
 
 DEFAULT_MODEL = "wandb/zai-org/GLM-5.2"
 DEFAULT_WANDB_ENTITY = "wandb"
@@ -557,6 +558,26 @@ def resolve_evidence_destination(
         api_base_url=api_base_url,
         trace_base_url=trace_base_url,
         app_base_url=app_base_url,
+    )
+
+
+def default_evidence_destination(project_slug: str) -> EvidenceDestinationV1:
+    """Build the public-cloud destination for a legacy exact project slug.
+
+    New documents persist the complete destination. This helper is only for
+    backward-compatible programmatic constructors that historically accepted
+    ``entity/project`` without explicit endpoints.
+    """
+
+    parts = str(project_slug or "").split("/")
+    if len(parts) != 2 or any(not part for part in parts):
+        raise ValueError("evidence project must be an exact entity/project slug")
+    return EvidenceDestinationV1(
+        entity=parts[0],
+        project=parts[1],
+        api_base_url=DEFAULT_WANDB_API_BASE_URL,
+        trace_base_url=DEFAULT_WEAVE_TRACE_BASE_URL,
+        app_base_url=DEFAULT_WANDB_APP_BASE_URL,
     )
 
 

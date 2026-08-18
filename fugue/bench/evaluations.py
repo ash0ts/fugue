@@ -59,6 +59,18 @@ MAX_GENERATED_CASE_BYTES = 12_000
 MAX_GENERATED_RUBRIC_BYTES = 12_000
 JUDGE_JSON_REQUEST_POLICY_SCHEMA_VERSION = 1
 JUDGE_JSON_MAX_OUTPUT_TOKENS = 1_200
+_PRIVATE_EVALUATION_FIELDS = frozenset(
+    {
+        "answer_key",
+        "expected",
+        "gold",
+        "gold_output",
+        "private",
+        "private_expected_values",
+        "private_labels",
+        "reference_answer",
+    }
+)
 
 EvaluationAssetKind = Literal[
     "evaluation_cases",
@@ -577,7 +589,10 @@ def apply_generated_evaluation(
         payload, usage = request(
             model=judge_model,
             env=env,
-            case=redact_value(dict(case)),
+            # Expected truth remains in the trusted deterministic scorer. A
+            # qualitative judge sees the task contract and candidate artifact,
+            # never the host-only answer bundle.
+            case=redact_value(public_evaluation_case(case)),
             dimensions=[dict(definitions[value]) for value in dimensions],
             evidence=redact_value(evidence),
             deterministic=redact_value(deterministic),
@@ -622,6 +637,28 @@ def apply_generated_evaluation(
         row["evaluation_error"] = f"{type(exc).__name__}: {exc}"
     finally:
         row["evaluation_judge_latency_ms"] = (time.perf_counter() - started) * 1000
+
+
+def public_evaluation_case(value: Mapping[str, Any]) -> dict[str, Any]:
+    """Project an evaluation case without host-only truth or reference labels."""
+
+    return {
+        str(key): _public_evaluation_value(item)
+        for key, item in value.items()
+        if str(key).lower() not in _PRIVATE_EVALUATION_FIELDS
+    }
+
+
+def _public_evaluation_value(value: Any) -> Any:
+    if isinstance(value, Mapping):
+        return {
+            str(key): _public_evaluation_value(item)
+            for key, item in value.items()
+            if str(key).lower() not in _PRIVATE_EVALUATION_FIELDS
+        }
+    if isinstance(value, list | tuple):
+        return [_public_evaluation_value(item) for item in value]
+    return value
 
 
 def _deterministic_assertions(

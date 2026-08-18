@@ -137,6 +137,43 @@ evidence:
     return OperatorService(tmp_path, tmp_path / ".env")
 
 
+def test_hosted_evidence_finishes_after_canonical_local_row() -> None:
+    events: list[object] = []
+    canonical_row = {"attempt_id": "a" * 64, "evidence_backend": "local"}
+
+    class LocalCoordinator:
+        def finish_cell(self, cell: object, outcome: object) -> dict[str, str]:
+            events.append(("local", cell, outcome))
+            return canonical_row
+
+    class HostedCoordinator:
+        def terminal_row(self, _cell: object) -> None:
+            return None
+
+        def finish_cell(
+            self,
+            cell: object,
+            outcome: object,
+            *,
+            canonical_row: object,
+        ) -> None:
+            events.append(("hosted", cell, outcome, canonical_row))
+
+    cell = object()
+    outcome = object()
+    coordinators = operator_module._EvidenceCoordinators(  # noqa: SLF001
+        local=LocalCoordinator(),  # type: ignore[arg-type]
+        hosted=HostedCoordinator(),  # type: ignore[arg-type]
+    )
+
+    coordinators.finish_cell(cell, outcome)  # type: ignore[arg-type]
+
+    assert events == [
+        ("local", cell, outcome),
+        ("hosted", cell, outcome, canonical_row),
+    ]
+
+
 def test_intervention_lock_freezes_two_arm_holdout_and_candidate_identity(
     tmp_path: Path,
 ) -> None:

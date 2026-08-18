@@ -6,10 +6,16 @@ from dataclasses import asdict, dataclass, field
 from typing import Any, Literal
 
 from fugue.bench.candidates import stable_digest
+from fugue.bench.local_evidence import (
+    LocalEvidenceDestinationV1,
+    local_evidence_destination_from_dict,
+)
 from fugue.model_plane import (
     EvidenceDestinationV1,
     evidence_destination_from_dict,
 )
+
+EvidenceDestination = EvidenceDestinationV1 | LocalEvidenceDestinationV1
 
 DimensionRole = Literal[
     "outcome",
@@ -74,8 +80,8 @@ class EvidenceDriftCheckV1:
 
 @dataclass(frozen=True)
 class EvidenceTopologyV1:
-    source_destination: EvidenceDestinationV1
-    result_destination: EvidenceDestinationV1
+    source_destination: EvidenceDestination
+    result_destination: EvidenceDestination
     source_lock_digest: str
     pre_run_drift: EvidenceDriftCheckV1
     post_run_drift: EvidenceDriftCheckV1
@@ -900,10 +906,10 @@ def evidence_topology_from_dict(value: Mapping[str, Any]) -> EvidenceTopologyV1:
     )
     return EvidenceTopologyV1(
         schema_version=int(value.get("schema_version") or 0),  # type: ignore[arg-type]
-        source_destination=evidence_destination_from_dict(
+        source_destination=_evidence_destination_from_dict(
             _mapping(value.get("source_destination"), "source destination")
         ),
-        result_destination=evidence_destination_from_dict(
+        result_destination=_evidence_destination_from_dict(
             _mapping(value.get("result_destination"), "result destination")
         ),
         source_lock_digest=str(value.get("source_lock_digest") or ""),
@@ -916,6 +922,14 @@ def evidence_topology_from_dict(value: Mapping[str, Any]) -> EvidenceTopologyV1:
         execution_identity=str(value.get("execution_identity") or ""),
         topology_digest=str(value.get("topology_digest") or ""),
     )
+
+
+def _evidence_destination_from_dict(
+    value: Mapping[str, Any],
+) -> EvidenceDestination:
+    if value.get("kind") == "local":
+        return local_evidence_destination_from_dict(value)
+    return evidence_destination_from_dict(value)
 
 
 def task_validity_from_dict(value: Mapping[str, Any]) -> TaskValidityV1:
