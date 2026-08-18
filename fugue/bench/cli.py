@@ -99,7 +99,10 @@ def _internal_context_evaluate(argv: list[str]) -> int:
 def _parser() -> FugueArgumentParser:
     parser = FugueArgumentParser(
         prog="fugue",
-        description="Plan, run, and analyze Harbor agent experiments in W&B Weave.",
+        description=(
+            "Plan, run, and analyze isolated Agent experiments with canonical "
+            "local evidence and optional W&B/Weave publication."
+        ),
     )
     subparsers = parser.add_subparsers(dest="command", metavar="COMMAND")
 
@@ -140,6 +143,15 @@ def _parser() -> FugueArgumentParser:
     )
     action.add_argument("--preview", action="store_true")
     action.add_argument("--run", action="store_true")
+    action.add_argument(
+        "--resume",
+        metavar="RUN_ID",
+        help=(
+            "Resume one immutable run without rerunning valid cells; requires "
+            "a current --approval receipt for the same exact preview. The "
+            "run retains its original immutable approval and stage locks."
+        ),
+    )
     compare.add_argument("--approval")
     compare.add_argument("--fetch-weave", action="store_true")
     _add_common_args(compare, json_output=True)
@@ -973,7 +985,7 @@ def _comparison_compare(args: argparse.Namespace) -> int:
             )
         return 2
     if not args.approval:
-        raise ValueError("--run requires --approval APPROVAL_DIGEST")
+        raise ValueError("--run or --resume requires --approval APPROVAL_DIGEST")
     publication_error: ComparisonPublicationError | None = None
     try:
         result, json_path, markdown_path = execute_comparison(
@@ -982,6 +994,7 @@ def _comparison_compare(args: argparse.Namespace) -> int:
             repo_root=root,
             env_file=args.env_file,
             fetch_weave=args.fetch_weave,
+            resume_run_id=args.resume,
         )
     except ComparisonPublicationError as exc:
         publication_error = exc

@@ -19,6 +19,18 @@ finalized_at
 active_runs
 remaining_cost_usd
 status_digest
+# Durable execution-recovery snapshot fields are serialized for operator
+# inspection and controller rehydration rather than read by package code.
+inspected_harbor_resources
+discovered_harbor_resources
+removed_harbor_resources
+remaining_harbor_resources
+cleanup_receipt_reference
+cost_source
+cost_receipt_reference
+canonical_reconciliation
+event_count
+event_chain_digest
 private_labels_digest
 declared_changes
 deterministic_evaluators
@@ -292,6 +304,13 @@ _.research_service
 _.research_worker_embedded
 _.watch
 _.reconstruct_study
+# Public recovery operations invoked by an external controller after
+# authoritative cost or interrupted-execution evidence arrives.
+_.select_canonical
+_.reconcile_interrupted_physical
+# Public adapter intentionally remains disconnected from comparison execution
+# until the stacked evidence/trace layer can satisfy its fail-closed callbacks.
+execute_recoverable_cells
 DEFAULT_CSS
 TITLE
 ENABLE_COMMAND_PALETTE

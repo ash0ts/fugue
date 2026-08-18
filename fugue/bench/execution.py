@@ -7,7 +7,7 @@ import subprocess
 import threading
 import time
 import uuid
-from collections.abc import Callable, Mapping
+from collections.abc import Callable, Mapping, Sequence
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
@@ -16,9 +16,13 @@ from typing import TYPE_CHECKING, Any, Literal
 
 from filelock import FileLock
 
-from fugue.bench.candidates import attempt_id, attempt_identity
+from fugue.bench.candidates import attempt_id, attempt_identity, stable_digest
 from fugue.bench.files import atomic_write_json, latest_jsonl_records
 from fugue.bench.files import terminate_process_group as _terminate_process_group
+from fugue.bench.harbor_outcome import (
+    HARBOR_TERMINAL_CLASSIFIER_DIGEST,
+    classify_harbor_terminal,
+)
 from fugue.bench.sandbox_policy import verify_harbor_job_attestation
 from fugue.redaction import redact_text, secrets_from_env
 
@@ -41,8 +45,24 @@ RuntimeOutcome = Literal[
     "completed",
     "timed_out",
     "cancelled",
+    "interrupted",
     "not_started",
     "not_applicable",
+]
+CellTerminalKind = Literal[
+    "success",
+    "task_failure",
+    "agent_timeout",
+    "cancelled",
+    "runner_start_failure",
+    "sandbox_lost",
+    "transport_interrupted",
+    "routing_failure",
+    "identity_drift",
+    "privacy_failure",
+    "evidence_failure",
+    "cleanup_failure",
+    "execution_failure",
 ]
 CellStartedCallback = Callable[["PlannedCell"], Mapping[str, str] | None]
 CellFinishedCallback = Callable[["PlannedCell", "CellOutcome"], None]
@@ -89,6 +109,8 @@ class PlannedCell:
     runtime_assets: tuple[tuple[str, str], ...] = ()
     approved_comparison: dict[str, Any] = field(default_factory=dict)
     integration_provenance: tuple[dict[str, Any], ...] = ()
+    physical_execution_id: str = ""
+    retry_ordinal: int = 0
 
     @property
     def attempt_identity(self) -> dict[str, Any]:
@@ -126,6 +148,8 @@ class PlannedCell:
             "candidate_id": self.candidate_id,
             "execution_fingerprint": self.execution_fingerprint,
             "execution_kind": self.execution_kind,
+            "physical_execution_id": self.physical_execution_id or None,
+            "retry_ordinal": self.retry_ordinal,
             "outer_wall_time_sec": self.outer_wall_time_sec,
             "execution_limits_digest": self.execution_limits_digest or None,
             "applicable": self.applicable,
@@ -161,6 +185,35 @@ class CellOutcome:
     benchmark_outcome: BenchmarkOutcome = "unscored"
     reward: float | None = None
     runtime_outcome: RuntimeOutcome = "not_started"
+    terminal_kind: CellTerminalKind | None = None
+
+
+class TypedInfrastructureFailure(RuntimeError):
+    """A runner-provided, predeclared infrastructure interruption.
+
+    Generic exceptions are deliberately excluded: retry permission must come
+    from structured runner evidence, never from exception text.
+    """
+
+    terminal_kind: Literal[
+        "runner_start_failure", "sandbox_lost", "transport_interrupted"
+    ]
+
+    def __init__(
+        self,
+        terminal_kind: Literal[
+            "runner_start_failure", "sandbox_lost", "transport_interrupted"
+        ],
+        message: str,
+    ) -> None:
+        if terminal_kind not in {
+            "runner_start_failure",
+            "sandbox_lost",
+            "transport_interrupted",
+        }:
+            raise ValueError("unknown infrastructure terminal kind")
+        super().__init__(message)
+        self.terminal_kind = terminal_kind
 
 
 @dataclass(frozen=True)
@@ -168,6 +221,8 @@ class _HarborJobResult:
     error: str | None
     benchmark_outcome: BenchmarkOutcome
     reward: float | None = None
+    terminal_kind: CellTerminalKind | None = None
+    runtime_outcome: RuntimeOutcome | None = None
 
 
 class _CellWallTimeExceeded(RuntimeError):
@@ -242,9 +297,7 @@ def plan_cells(
                 scorer_refs=job.scorer_refs,
                 applicable=job.applicable,
                 skip_reason=job.skip_reason,
-                config_sha256=(
-                    _path_digest(job.config_path) if verify_inputs else ""
-                ),
+                config_sha256=(_path_digest(job.config_path) if verify_inputs else ""),
                 runtime_assets=(
                     tuple(
                         (path.as_posix(), _path_digest(path))
@@ -283,7 +336,7 @@ def schedule_cells(
     )
 
 
-def execute_cells(
+def execute_cells(  # noqa: C901 - owns the complete cell lifecycle
     cells: list[PlannedCell],
     *,
     repo_root: Path,
@@ -295,6 +348,7 @@ def execute_cells(
     cell_finished: CellFinishedCallback | None = None,
     cancellation_event: threading.Event | None = None,
     cancellation_message: str = "Run cancelled by the operator.",
+    redaction_secrets: Sequence[str] = (),
 ) -> list[CellOutcome]:
     if max_workers < 1:
         raise ValueError("cell concurrency must be positive")
@@ -304,6 +358,27 @@ def execute_cells(
     cell_ids = [cell.id for cell in cells]
     if len(set(cell_ids)) != len(cell_ids):
         raise ValueError("cell ids must be unique within an execution")
+    secrets = tuple(
+        sorted(
+            set(redaction_secrets)
+            | {value for cell in cells for value in secrets_from_env(cell.env)},
+            key=len,
+            reverse=True,
+        )
+    )
+
+    def safe_outcome(outcome: CellOutcome) -> CellOutcome:
+        return CellOutcome(
+            cell_id=outcome.cell_id,
+            status=outcome.status,
+            returncode=outcome.returncode,
+            error=(redact_text(outcome.error, secrets) if outcome.error else None),
+            benchmark_outcome=outcome.benchmark_outcome,
+            reward=outcome.reward,
+            runtime_outcome=outcome.runtime_outcome,
+            terminal_kind=outcome.terminal_kind,
+        )
+
     store = (
         _RunStore(repo_root / ".fugue" / "runtime" / cells[0].run_id, event_callback)
         if cells
@@ -343,19 +418,23 @@ def execute_cells(
     def run_one(cell: PlannedCell) -> CellOutcome:
         assert store is not None
         if cancellation_event is not None and cancellation_event.is_set():
-            outcome = CellOutcome(
-                cell.id,
-                "cancelled",
-                error=cancellation_message,
-                runtime_outcome="cancelled",
+            outcome = safe_outcome(
+                CellOutcome(
+                    cell.id,
+                    "cancelled",
+                    error=cancellation_message,
+                    runtime_outcome="cancelled",
+                    terminal_kind="cancelled",
+                )
             )
             ended = datetime.now(UTC)
             store.append_cell(
                 cell.record(
                     "cancelled",
-                    error=cancellation_message,
+                    error=outcome.error,
                     benchmark_outcome=outcome.benchmark_outcome,
                     runtime_outcome="cancelled",
+                    terminal_kind=outcome.terminal_kind,
                     ended_at=ended.isoformat(),
                 )
             )
@@ -363,46 +442,63 @@ def execute_cells(
                 "cell_state",
                 cell=cell,
                 status="cancelled",
-                message=cancellation_message,
+                message=outcome.error,
+                terminal_kind=outcome.terminal_kind,
             )
             return outcome
         try:
             _verify_cell_inputs(cell, repo_root)
         except Exception as exc:
-            error = f"immutable run input verification failed: {exc}"
-            outcome = CellOutcome(cell.id, "failed", error=error)
+            error = redact_text(
+                f"immutable run input verification failed: {exc}", secrets
+            )
+            outcome = CellOutcome(
+                cell.id,
+                "failed",
+                error=error,
+                terminal_kind="identity_drift",
+            )
             store.append_cell(
                 cell.record(
                     "failed",
                     error=error,
                     benchmark_outcome="unscored",
                     runtime_outcome="not_started",
+                    terminal_kind=outcome.terminal_kind,
                     ended_at=datetime.now(UTC).isoformat(),
                 )
             )
-            store.append_event("cell_state", cell=cell, status="failed", message=error)
+            store.append_event(
+                "cell_state",
+                cell=cell,
+                status="failed",
+                message=error,
+                terminal_kind=outcome.terminal_kind,
+            )
             return outcome
         store.append_cell(cell.record("running"))
         store.append_event("cell_state", cell=cell, status="running")
         started = datetime.now(UTC)
-        execution_env, cell_started_called, start_failure = (
-            _initialize_cell_evidence(
-                cell,
-                store=store,
-                started=started,
-                cell_started=cell_started,
-                require_success=require_cell_started_success,
-                cancellation_event=cancellation_event,
-            )
+        execution_env, cell_started_called, start_failure = _initialize_cell_evidence(
+            cell,
+            store=store,
+            started=started,
+            cell_started=cell_started,
+            require_success=require_cell_started_success,
+            cancellation_event=cancellation_event,
+            redaction_secrets=secrets,
         )
         if start_failure is not None:
             return start_failure
         if cancellation_event is not None and cancellation_event.is_set():
-            outcome = CellOutcome(
-                cell.id,
-                "cancelled",
-                error=cancellation_message,
-                runtime_outcome="cancelled",
+            outcome = safe_outcome(
+                CellOutcome(
+                    cell.id,
+                    "cancelled",
+                    error=cancellation_message,
+                    runtime_outcome="cancelled",
+                    terminal_kind="cancelled",
+                )
             )
             ended = datetime.now(UTC)
             if cell_started_called and cell_finished is not None:
@@ -412,14 +508,15 @@ def execute_cells(
                     store.append_event(
                         "observability_error",
                         cell=cell,
-                        message=f"{type(exc).__name__}: {exc}",
+                        message=redact_text(f"{type(exc).__name__}: {exc}", secrets),
                     )
             store.append_cell(
                 cell.record(
                     "cancelled",
-                    error=cancellation_message,
+                    error=outcome.error,
                     benchmark_outcome=outcome.benchmark_outcome,
                     runtime_outcome="cancelled",
+                    terminal_kind=outcome.terminal_kind,
                     started_at=started.isoformat(),
                     ended_at=ended.isoformat(),
                     wall_time_sec=(ended - started).total_seconds(),
@@ -429,7 +526,8 @@ def execute_cells(
                 "cell_state",
                 cell=cell,
                 status="cancelled",
-                message=cancellation_message,
+                message=outcome.error,
+                terminal_kind=outcome.terminal_kind,
                 wall_time_sec=(ended - started).total_seconds(),
             )
             return outcome
@@ -463,13 +561,31 @@ def execute_cells(
             cancellation_requested = bool(
                 cancellation_event is not None and cancellation_event.is_set()
             )
-            if cancellation_requested and (returncode != 0 or trial_error is not None):
-                status: CellStatus = "cancelled"
+            if harbor_result.terminal_kind is not None:
+                terminal_kind = harbor_result.terminal_kind
+                status = (
+                    "passed"
+                    if terminal_kind == "success"
+                    else "cancelled"
+                    if terminal_kind == "cancelled"
+                    else "failed"
+                )
+                runtime_outcome = harbor_result.runtime_outcome or (
+                    "completed" if status != "cancelled" else "cancelled"
+                )
+            elif cancellation_requested and (
+                returncode != 0 or trial_error is not None
+            ):
+                status = "cancelled"
                 trial_error = cancellation_message
+                terminal_kind = "cancelled"
+                runtime_outcome = "cancelled"
             else:
                 status = (
                     "passed" if returncode == 0 and trial_error is None else "failed"
                 )
+                terminal_kind = "success" if status == "passed" else "task_failure"
+                runtime_outcome = "completed"
             outcome = CellOutcome(
                 cell.id,
                 status,
@@ -477,9 +593,16 @@ def execute_cells(
                 error=trial_error,
                 benchmark_outcome=harbor_result.benchmark_outcome,
                 reward=harbor_result.reward,
-                runtime_outcome=(
-                    "cancelled" if status == "cancelled" else "completed"
-                ),
+                runtime_outcome=runtime_outcome,
+                terminal_kind=terminal_kind,
+            )
+        except TypedInfrastructureFailure as exc:
+            outcome = CellOutcome(
+                cell.id,
+                "failed",
+                error=str(exc),
+                runtime_outcome="not_started",
+                terminal_kind=exc.terminal_kind,
             )
         except _CellWallTimeExceeded as exc:
             outcome = CellOutcome(
@@ -488,6 +611,7 @@ def execute_cells(
                 error=str(exc),
                 benchmark_outcome="unscored",
                 runtime_outcome="timed_out",
+                terminal_kind="agent_timeout",
             )
         except Exception as exc:
             outcome = CellOutcome(
@@ -495,7 +619,28 @@ def execute_cells(
                 "failed",
                 error=f"{type(exc).__name__}: {exc}",
                 runtime_outcome="not_started",
+                terminal_kind="execution_failure",
             )
+        outcome = safe_outcome(outcome)
+        if cell.physical_execution_id:
+            try:
+                _write_physical_runner_terminal_observation(
+                    repo_root=repo_root,
+                    cell=cell,
+                    outcome=outcome,
+                )
+            except Exception as exc:
+                outcome = CellOutcome(
+                    cell.id,
+                    "failed",
+                    error=(
+                        "required physical runner terminal receipt failed: "
+                        f"{type(exc).__name__}: {exc}"
+                    ),
+                    benchmark_outcome="unscored",
+                    runtime_outcome="not_started",
+                    terminal_kind="evidence_failure",
+                )
         ended = datetime.now(UTC)
         if cell_finished is not None:
             try:
@@ -504,7 +649,7 @@ def execute_cells(
                 store.append_event(
                     "observability_error",
                     cell=cell,
-                    message=f"{type(exc).__name__}: {exc}",
+                    message=redact_text(f"{type(exc).__name__}: {exc}", secrets),
                 )
         store.append_cell(
             cell.record(
@@ -514,6 +659,7 @@ def execute_cells(
                 benchmark_outcome=outcome.benchmark_outcome,
                 reward=outcome.reward,
                 runtime_outcome=outcome.runtime_outcome,
+                terminal_kind=outcome.terminal_kind,
                 started_at=started.isoformat(),
                 ended_at=ended.isoformat(),
                 wall_time_sec=(ended - started).total_seconds(),
@@ -528,6 +674,7 @@ def execute_cells(
             benchmark_outcome=outcome.benchmark_outcome,
             reward=outcome.reward,
             runtime_outcome=outcome.runtime_outcome,
+            terminal_kind=outcome.terminal_kind,
             wall_time_sec=(ended - started).total_seconds(),
         )
         return outcome
@@ -547,6 +694,7 @@ def _initialize_cell_evidence(
     cell_started: CellStartedCallback | None,
     require_success: bool,
     cancellation_event: threading.Event | None,
+    redaction_secrets: Sequence[str],
 ) -> tuple[dict[str, str], bool, CellOutcome | None]:
     execution_env = dict(cell.env)
     if cell_started is None or (
@@ -557,7 +705,7 @@ def _initialize_cell_evidence(
         execution_env.update(cell_started(cell) or {})
         return execution_env, True, None
     except Exception as exc:
-        error = f"{type(exc).__name__}: {exc}"
+        error = redact_text(f"{type(exc).__name__}: {exc}", redaction_secrets)
         store.append_event("observability_error", cell=cell, message=error)
         if not require_success:
             return execution_env, True, None
@@ -566,6 +714,7 @@ def _initialize_cell_evidence(
             "failed",
             error=f"required live-evidence initialization failed: {error}",
             runtime_outcome="not_started",
+            terminal_kind="evidence_failure",
         )
         ended = datetime.now(UTC)
         wall_time = (ended - started).total_seconds()
@@ -575,6 +724,7 @@ def _initialize_cell_evidence(
                 error=outcome.error,
                 benchmark_outcome="unscored",
                 runtime_outcome="not_started",
+                terminal_kind=outcome.terminal_kind,
                 started_at=started.isoformat(),
                 ended_at=ended.isoformat(),
                 wall_time_sec=wall_time,
@@ -585,6 +735,7 @@ def _initialize_cell_evidence(
             cell=cell,
             status="failed",
             message=outcome.error,
+            terminal_kind=outcome.terminal_kind,
             wall_time_sec=wall_time,
         )
         return execution_env, True, outcome
@@ -600,17 +751,26 @@ def _run_cell_process(
 ) -> int:
     if cell.execution_kind == "agent":
         verify_harbor_job_attestation(cell.config_path, repo_root)
-    log_path = store.logs_dir / f"{cell.id}.log"
-    process = subprocess.Popen(
-        list(cell.command),
-        stdout=subprocess.PIPE,
-        stderr=subprocess.STDOUT,
-        text=True,
-        bufsize=1,
-        env=dict(env),
-        cwd=repo_root,
-        start_new_session=True,
+    physical_suffix = (
+        f"-{cell.physical_execution_id[:12]}" if cell.physical_execution_id else ""
     )
+    log_path = store.logs_dir / f"{cell.id}{physical_suffix}.log"
+    try:
+        process = subprocess.Popen(
+            list(cell.command),
+            stdout=subprocess.PIPE,
+            stderr=subprocess.STDOUT,
+            text=True,
+            bufsize=1,
+            env=dict(env),
+            cwd=repo_root,
+            start_new_session=True,
+        )
+    except OSError as exc:
+        raise TypedInfrastructureFailure(
+            "runner_start_failure",
+            f"runner process could not start: {exc}",
+        ) from exc
     store.append_cell(
         cell.record(
             "running",
@@ -704,9 +864,23 @@ def _harbor_job_result(cell: PlannedCell, repo_root: Path) -> _HarborJobResult:
         return _HarborJobResult(
             f"Harbor did not produce a readable job result: {exc}", "unscored"
         )
+    bound_terminal = _bound_harbor_terminal_result(
+        cell=cell,
+        repo_root=repo_root,
+        raw_job=result,
+    )
+    if bound_terminal is not None:
+        return bound_terminal
     stats = result.get("stats") or {}
     errored = int(stats.get("n_errored_trials") or 0)
     cancelled = int(stats.get("n_cancelled_trials") or 0)
+    if cell.physical_execution_id and errored:
+        return _HarborJobResult(
+            "durable Harbor trial error lacks structured terminal evidence",
+            "unscored",
+            terminal_kind="evidence_failure",
+            runtime_outcome="not_started",
+        )
     if errored:
         return _HarborJobResult(f"{errored} Harbor trial(s) errored", "unscored")
     if cancelled:
@@ -746,6 +920,163 @@ def _harbor_job_result(cell: PlannedCell, repo_root: Path) -> _HarborJobResult:
         "passed" if reward == 1.0 else "failed",
         reward,
     )
+
+
+def _bound_harbor_terminal_result(
+    *,
+    cell: PlannedCell,
+    repo_root: Path,
+    raw_job: Mapping[str, Any],
+) -> _HarborJobResult | None:
+    if not cell.physical_execution_id:
+        return None
+    physical_root = (
+        repo_root
+        / ".fugue"
+        / "runtime"
+        / cell.run_id
+        / "physical-executions"
+        / cell.physical_execution_id
+    ).resolve()
+    receipt_path = physical_root / "harbor-terminal.json"
+    if not receipt_path.is_file() or receipt_path.is_symlink():
+        return None
+    try:
+        receipt = json.loads(receipt_path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return None
+    if not isinstance(receipt, Mapping):
+        return None
+    unsigned = {key: value for key, value in receipt.items() if key != "receipt_digest"}
+    if (
+        receipt.get("receipt_digest") != stable_digest(unsigned)
+        or receipt.get("classifier_digest")
+        != HARBOR_TERMINAL_CLASSIFIER_DIGEST
+        or receipt.get("logical_attempt_id") != cell.attempt_id
+        or receipt.get("physical_execution_id") != cell.physical_execution_id
+        or receipt.get("retry_ordinal") != cell.retry_ordinal
+        or receipt.get("config_sha256") != cell.config_sha256
+        or receipt.get("source_result_path")
+        != _absolute_cell_path(cell.result_path, repo_root).resolve().as_posix()
+    ):
+        return None
+    raw_trial_path = receipt.get("terminal_trial_path")
+    raw_snapshot_path = receipt.get("terminal_result_path")
+    if not isinstance(raw_trial_path, str) or not isinstance(
+        raw_snapshot_path, str
+    ):
+        return None
+    trial_path = Path(raw_trial_path).resolve()
+    snapshot_path = Path(raw_snapshot_path).resolve()
+    try:
+        trial_path.relative_to(physical_root)
+        snapshot_path.relative_to(physical_root)
+    except ValueError:
+        return None
+    result_path = _absolute_cell_path(cell.result_path, repo_root)
+    if any(
+        not candidate.is_file() or candidate.is_symlink()
+        for candidate in (trial_path, snapshot_path, result_path)
+    ):
+        return None
+    if (
+        hashlib.sha256(trial_path.read_bytes()).hexdigest()
+        != receipt.get("terminal_trial_sha256")
+        or hashlib.sha256(snapshot_path.read_bytes()).hexdigest()
+        != receipt.get("terminal_result_sha256")
+    ):
+        return None
+    try:
+        trial = json.loads(trial_path.read_text(encoding="utf-8"))
+        snapshot_job = json.loads(snapshot_path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return None
+    if not isinstance(trial, Mapping) or not isinstance(snapshot_job, Mapping):
+        return None
+    try:
+        snapshot_outcome = classify_harbor_terminal(
+            snapshot_job,
+            cell_id=cell.id,
+            trial=trial,
+        )
+        outcome = classify_harbor_terminal(
+            raw_job,
+            cell_id=cell.id,
+            trial=trial,
+        )
+    except (TypeError, ValueError):
+        return None
+    if receipt.get("cell_outcome") != snapshot_outcome or outcome != snapshot_outcome:
+        return None
+    return _HarborJobResult(
+        error=str(outcome["error"]) if outcome.get("error") is not None else None,
+        benchmark_outcome=str(outcome["benchmark_outcome"]),  # type: ignore[arg-type]
+        reward=(
+            float(outcome["reward"]) if outcome.get("reward") is not None else None
+        ),
+        terminal_kind=str(outcome["terminal_kind"]),  # type: ignore[arg-type]
+        runtime_outcome=str(outcome["runtime_outcome"]),  # type: ignore[arg-type]
+    )
+
+
+def _absolute_cell_path(path: Path, repo_root: Path) -> Path:
+    return path if path.is_absolute() else repo_root / path
+
+
+def _write_physical_runner_terminal_observation(
+    *,
+    repo_root: Path,
+    cell: PlannedCell,
+    outcome: CellOutcome,
+) -> Path:
+    """Persist the runner exit observation before host-only finalization."""
+
+    result_path = cell.result_path
+    if not result_path.is_absolute():
+        result_path = repo_root / result_path
+    result_reference = None
+    result_sha256 = None
+    if result_path.is_file() and not result_path.is_symlink():
+        result_reference = result_path.resolve().relative_to(
+            repo_root.resolve()
+        ).as_posix()
+        result_sha256 = hashlib.sha256(result_path.read_bytes()).hexdigest()
+    unsigned = {
+        "schema_version": 1,
+        "logical_attempt_id": cell.attempt_id,
+        "physical_execution_id": cell.physical_execution_id,
+        "retry_ordinal": cell.retry_ordinal,
+        "config_sha256": cell.config_sha256,
+        "result_reference": result_reference,
+        "result_sha256": result_sha256,
+        "cell_outcome": {
+            "cell_id": outcome.cell_id,
+            "status": outcome.status,
+            "returncode": outcome.returncode,
+            "error": outcome.error,
+            "benchmark_outcome": outcome.benchmark_outcome,
+            "reward": outcome.reward,
+            "runtime_outcome": outcome.runtime_outcome,
+            "terminal_kind": outcome.terminal_kind,
+        },
+    }
+    payload = {**unsigned, "receipt_digest": stable_digest(unsigned)}
+    path = (
+        repo_root
+        / ".fugue"
+        / "runtime"
+        / cell.run_id
+        / "physical-executions"
+        / cell.physical_execution_id
+        / "runner-terminal.json"
+    )
+    if path.is_file():
+        existing = json.loads(path.read_text(encoding="utf-8"))
+        if existing != payload:
+            raise RuntimeError("physical runner terminal receipt changed")
+    else:
+        atomic_write_json(path, payload)
+    return path
 
 
 def update_run_manifest(
@@ -833,6 +1164,49 @@ def mark_unfinished_cells(
 
 def latest_cell_records(path: Path) -> list[dict[str, Any]]:
     return latest_jsonl_records(path, "cell_id")
+
+
+def record_recovered_cell_outcome(
+    repo_root: Path,
+    cell: PlannedCell,
+    outcome: CellOutcome,
+) -> None:
+    """Idempotently repair the canonical run ledger from durable recovery state."""
+
+    run_dir = repo_root / ".fugue" / "runtime" / cell.run_id
+    latest = {
+        str(item.get("cell_id") or ""): item
+        for item in latest_cell_records(run_dir / "cells.jsonl")
+    }.get(cell.id)
+    if (
+        latest is not None
+        and latest.get("physical_execution_id") == cell.physical_execution_id
+        and latest.get("terminal_kind") == outcome.terminal_kind
+        and latest.get("status") == outcome.status
+    ):
+        return
+    store = _RunStore(run_dir)
+    ended = datetime.now(UTC).isoformat()
+    store.append_cell(
+        cell.record(
+            outcome.status,
+            returncode=outcome.returncode,
+            error=outcome.error,
+            benchmark_outcome=outcome.benchmark_outcome,
+            reward=outcome.reward,
+            runtime_outcome=outcome.runtime_outcome,
+            terminal_kind=outcome.terminal_kind,
+            recovered=True,
+            ended_at=ended,
+        )
+    )
+    store.append_event(
+        "cell_state_recovered",
+        cell=cell,
+        status=outcome.status,
+        message=outcome.error,
+        terminal_kind=outcome.terminal_kind,
+    )
 
 
 class _RunStore:

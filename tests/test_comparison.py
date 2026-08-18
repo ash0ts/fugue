@@ -2,6 +2,9 @@ from __future__ import annotations
 
 import hashlib
 import json
+import threading
+import time
+from concurrent.futures import ThreadPoolExecutor
 from dataclasses import replace
 from pathlib import Path
 from types import SimpleNamespace
@@ -13,11 +16,13 @@ import yaml
 from fugue.bench.candidates import attempt_id, attempt_identity, stable_digest
 from fugue.bench.comparison import (
     COMPARISON_RUNTIME_ROOT,
+    MAX_COMPARISON_JUDGE_PROMPT_CHARACTERS,
     ComparisonEvaluatorV1,
     ComparisonResultV3,
     ComparisonSpecV1,
     DecisionAttestationV1,
     _apply_decision_attestation,
+    _approved_comparison_execution_lock,
     _bind_local_execution_evidence,
     _canonical_decision_gate_policies,
     _comparison_qualification_digest,
@@ -26,7 +31,10 @@ from fugue.bench.comparison import (
     _evaluate_decision,
     _evaluator_digest,
     _paired_attempt_view_v3,
+    _request_comparison_judge,
+    _require_checkpoint_evaluations,
     _require_checkpoint_judges,
+    _resume_approved_comparison_lock,
     _sanitized_answer_excerpt,
     analyze_comparison_rows,
     check_comparison,
@@ -45,9 +53,12 @@ from fugue.bench.comparison import (
 )
 from fugue.bench.comparison import _decision_policy as parse_decision_policy
 from fugue.bench.evaluations import JudgeResponseError
+from fugue.bench.execution_recovery import ExecutionFinalizationPending
 from fugue.bench.operator import OperatorService
 from fugue.model_plane import trace_destination_identity
 from fugue.research.approvals import ApprovalLedger
+from fugue.research.contracts import ResearchError
+from fugue.research.database import connect_database
 from fugue.research.experiment_views import (
     ExperimentViewV2,
     ExperimentViewV3,
@@ -95,6 +106,51 @@ def test_source_use_comparison_is_ready_and_exact() -> None:
     assert reparsed == spec
     assert isinstance(preview.comparison["evaluators"], list)
     assert isinstance(preview.comparison["execution"]["harnesses"], list)
+
+
+def test_resume_reads_original_approved_lock_without_rewriting_it(
+    tmp_path: Path,
+) -> None:
+    root = Path.cwd()
+    spec = load_comparison(EXAMPLE / "comparison.yaml", repo_root=root)
+    preview = preview_comparison(spec, repo_root=root)
+    _, _, public_rows = compile_comparison(spec, repo_root=root)
+    approved = _approved_comparison_execution_lock(
+        preview,
+        approval_digest="a" * 64,
+        repo_root=root,
+        public_rows=public_rows,
+    )
+    run_id = "resume-original-lock"
+    snapshot = {
+        "schema_version": 1,
+        "run_id": run_id,
+        "request": {"approved_comparison": approved},
+        "snapshot_sha256": "",
+        "lock_sha256": "",
+    }
+    digest = stable_digest(snapshot)
+    snapshot["snapshot_sha256"] = digest
+    snapshot["lock_sha256"] = digest
+    path = tmp_path / ".fugue" / "runtime" / run_id / "input-lock.json"
+    path.parent.mkdir(parents=True)
+    path.write_text(json.dumps(snapshot), encoding="utf-8")
+
+    assert _resume_approved_comparison_lock(
+        repo_root=tmp_path,
+        run_id=run_id,
+        preview=preview,
+    ) == approved
+
+    changed = dict(snapshot)
+    changed["request"] = {"approved_comparison": {**approved, "approval_digest": "b" * 64}}
+    path.write_text(json.dumps(changed), encoding="utf-8")
+    with pytest.raises(ValueError, match="input lock digest"):
+        _resume_approved_comparison_lock(
+            repo_root=tmp_path,
+            run_id=run_id,
+            preview=preview,
+        )
     assert not (root / COMPARISON_RUNTIME_ROOT / spec.spec_digest).exists()
 
 
@@ -122,6 +178,82 @@ def test_exact_approval_may_acknowledge_reviewable_canary(
         approval_digest=approval.approval_digest,
         repo_root=tmp_path,
     )
+
+
+def test_approval_ledger_supports_exact_preview_renewal_and_migration(
+    tmp_path: Path,
+) -> None:
+    database = StudyStore(tmp_path).path
+    ledger = ApprovalLedger(database)
+    first = ledger.approve(
+        subject_kind="experiment",
+        preview_digest="a" * 64,
+        maximum_cost_usd=10,
+        maximum_cells=8,
+        approved_by="operator",
+        operation_id="initial-exact-approval",
+    )
+    assert ledger.approve(
+        subject_kind="experiment",
+        preview_digest="a" * 64,
+        maximum_cost_usd=10,
+        maximum_cells=8,
+        approved_by="operator",
+        operation_id="initial-exact-approval",
+    ) == first
+    with pytest.raises(ResearchError, match="operation id"):
+        ledger.approve(
+            subject_kind="experiment",
+            preview_digest="a" * 64,
+            maximum_cost_usd=11,
+            maximum_cells=8,
+            approved_by="operator",
+            operation_id="initial-exact-approval",
+        )
+
+    # Reproduce the pre-renewal schema and prove initialization migrates it
+    # without deleting the existing immutable receipt.
+    with connect_database(database) as conn:
+        conn.executescript(
+            """
+            DROP INDEX IF EXISTS approval_subject_lookup;
+            CREATE UNIQUE INDEX approval_subject
+                ON execution_approvals(subject_kind, preview_digest);
+            """
+        )
+    ledger = ApprovalLedger(database)
+    renewal = ledger.approve(
+        subject_kind="experiment",
+        preview_digest="a" * 64,
+        maximum_cost_usd=10,
+        maximum_cells=8,
+        approved_by="operator",
+        operation_id="renew-exact-approval",
+    )
+    assert renewal.approval_digest != first.approval_digest
+    assert renewal.approval_id != first.approval_id
+    assert ledger.get(first.approval_digest) == first
+    assert ledger.get_for_preview(
+        subject_kind="experiment", preview_digest="a" * 64
+    ) == renewal
+
+    ledger.claim(
+        approval_digest=renewal.approval_digest,
+        subject_kind="experiment",
+        preview_digest="a" * 64,
+        subject_id="comparison-run-renewed",
+        estimated_cells=8,
+        estimated_cost_usd=10,
+    )
+    with pytest.raises(ResearchError, match="already consumed"):
+        ledger.claim(
+            approval_digest=renewal.approval_digest,
+            subject_kind="experiment",
+            preview_digest="a" * 64,
+            subject_id="comparison-run-other",
+            estimated_cells=8,
+            estimated_cost_usd=10,
+        )
 
 
 def test_materialization_reuses_preview_operator_context(
@@ -200,17 +332,24 @@ def test_mcp_maintenance_examples_have_exact_staged_designs(
     assert any("not adjudicated" in item for item in readiness.blockers)
 
 
-def test_evidence_checkpoint_requires_serial_execution() -> None:
+def test_evidence_checkpoint_compiles_serial_execution_schedule() -> None:
     root = Path.cwd()
     raw = yaml.safe_load((EXAMPLE / "comparison.yaml").read_text())
     raw["execution"]["evidence_checkpoint_cells"] = 1
     raw["execution"]["concurrency"] = 2
 
-    with pytest.raises(
-        ValueError,
-        match="evidence checkpoint cells require comparison concurrency 1",
-    ):
-        comparison_from_dict(raw, repo_root=root, source=EXAMPLE)
+    spec = comparison_from_dict(raw, repo_root=root, source=EXAMPLE)
+    preview = preview_comparison(spec, repo_root=root)
+    schedule = preview.execution_schedule["schedule"]
+    checkpoint = [
+        item
+        for item in schedule["logical_attempts"]
+        if item["stage_id"] == "checkpoint"
+    ]
+
+    assert len(checkpoint) == 2
+    assert [item["block_ordinal"] for item in checkpoint] == [0, 1]
+    assert all(item["attempt_ordinal"] == 0 for item in checkpoint)
 
 
 def test_comparison_rejects_unknown_fields_and_undeclared_changes() -> None:
@@ -2224,7 +2363,10 @@ def test_approved_comparison_manifest_reconciles_exact_run_and_coordinates(
     ]
     with pytest.raises(
         ValueError,
-        match="candidate definitions|per-arm identity drift",
+        match=(
+            "candidate definitions|per-arm identity drift|"
+            "execution schedule does not cover exact cells"
+        ),
     ):
         analyze_comparison_rows(
             comparison_id=spec.id,
@@ -2618,6 +2760,8 @@ def test_required_judge_needs_reviewed_calibration(tmp_path: Path) -> None:
         dimensions=("evidence_grounding", "calibration"),
         evidence=("tool_names",),
         reserve_cost_usd=0.1,
+        input_cost_per_million=1.0,
+        output_cost_per_million=2.0,
     )
     blocked = replace(spec, evaluators=(*spec.evaluators, judge))
     readiness = check_comparison(blocked, repo_root=root)
@@ -2905,6 +3049,19 @@ def test_checkpoint_stops_when_required_judge_does_not_score() -> None:
     ]
 
 
+def test_checkpoint_stops_when_required_deterministic_scorer_is_unavailable() -> None:
+    root = Path.cwd()
+    spec = load_comparison(EXAMPLE / "comparison.yaml", repo_root=root)
+    row = {
+        "comparison_evaluation_status": "unavailable",
+        "comparison_required_evaluation_complete": False,
+        "comparison_evaluation_reason": "deterministic scorer raised",
+    }
+
+    with pytest.raises(RuntimeError, match="required evaluation did not complete"):
+        _require_checkpoint_evaluations(spec, row, checkpoint_index=0)
+
+
 def test_decision_policy_accepts_release_notes_without_infrastructure_gates() -> (
     None
 ):
@@ -3156,6 +3313,192 @@ def test_blind_judge_rejects_secret_before_provider_call(
     assert provider_calls == []
     assert rows[0]["comparison_judge_status"] == "unavailable"
     assert rows[0]["comparison_required_evaluation_complete"] is False
+    assert rows[0]["comparison_judges"]["maintainer-review"]["cost_usd"] == 0.0
+
+
+def test_durable_judge_request_reuses_completed_response_without_respend(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    judge = ComparisonEvaluatorV1(
+        id="durable-review",
+        type="llm_judge",
+        required=True,
+        profile="wandb/openai/gpt-oss-120b",
+        rubric="Score maintenance actionability.",
+        dimensions=("maintenance_actionability",),
+        input_cost_per_million=1.0,
+        output_cost_per_million=2.0,
+    )
+    provider_calls: list[str] = []
+    prompt_lengths: list[int] = []
+
+    def fake_post(*args, **_kwargs):
+        provider_calls.append("called")
+        prompt_lengths.append(len(str(args[-1])))
+        return (
+            {
+                "scores": {"maintenance_actionability": 0.8},
+                "overall_assessment": "strong",
+                "uncertainty": 0.1,
+                "rationale": "The response is grounded in the inspected source.",
+            },
+            {"input_tokens": 100, "output_tokens": 40},
+        )
+
+    monkeypatch.setattr("fugue.bench.evaluations._post_judge", fake_post)
+    row = {
+        "run_id": "durable-judge",
+        "attempt_id": "a" * 64,
+        "answer": "A" * 60_000,
+    }
+    env = {
+        "WANDB_API_KEY": "secret",
+        "FUGUE_WANDB_INFERENCE_PROJECT": "wandb/test",
+        "FUGUE_EVIDENCE_MODE": "local",
+        "FUGUE_HOST_REPO_ROOT": tmp_path.as_posix(),
+        "FUGUE_RUN_ID": "durable-judge",
+    }
+
+    first = _request_comparison_judge(
+        evaluator=judge,
+        public_task={"input": "Review the maintenance response."},
+        row=row,
+        env=env,
+    )
+    second = _request_comparison_judge(
+        evaluator=judge,
+        public_task={"input": "Review the maintenance response."},
+        row=row,
+        env=env,
+    )
+
+    assert provider_calls == ["called"]
+    assert prompt_lengths == [MAX_COMPARISON_JUDGE_PROMPT_CHARACTERS]
+    assert second[0] == first[0]
+    assert second[1] == first[1]
+    assert first[2]["durable_request_reused"] is False
+    assert second[2]["durable_request_reused"] is True
+    receipt = Path(str(second[2]["durable_request_receipt"]))
+    assert receipt.stat().st_mode & 0o777 == 0o600
+
+
+def test_concurrent_durable_judge_finalization_spends_once(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    judge = ComparisonEvaluatorV1(
+        id="concurrent-review",
+        type="llm_judge",
+        required=True,
+        profile="wandb/openai/gpt-oss-120b",
+        rubric="Score maintenance actionability.",
+        dimensions=("maintenance_actionability",),
+        input_cost_per_million=1.0,
+        output_cost_per_million=2.0,
+    )
+    provider_calls = 0
+    provider_started = threading.Event()
+    release_provider = threading.Event()
+
+    def fake_post(*_args, **_kwargs):
+        nonlocal provider_calls
+        provider_calls += 1
+        provider_started.set()
+        assert release_provider.wait(timeout=5)
+        return (
+            {
+                "scores": {"maintenance_actionability": 0.8},
+                "overall_assessment": "strong",
+                "uncertainty": 0.1,
+                "rationale": "The response is grounded in inspected source.",
+            },
+            {"input_tokens": 100, "output_tokens": 40},
+        )
+
+    monkeypatch.setattr("fugue.bench.evaluations._post_judge", fake_post)
+    request = {
+        "evaluator": judge,
+        "public_task": {"input": "Review the maintenance response."},
+        "row": {
+            "run_id": "concurrent-judge",
+            "attempt_id": "c" * 64,
+            "answer": "A bounded maintainer recommendation.",
+        },
+        "env": {
+            "WANDB_API_KEY": "secret",
+            "FUGUE_WANDB_INFERENCE_PROJECT": "wandb/test",
+            "FUGUE_EVIDENCE_MODE": "local",
+            "FUGUE_HOST_REPO_ROOT": tmp_path.as_posix(),
+            "FUGUE_RUN_ID": "concurrent-judge",
+        },
+    }
+
+    with ThreadPoolExecutor(max_workers=2) as pool:
+        first = pool.submit(_request_comparison_judge, **request)
+        assert provider_started.wait(timeout=5)
+        second = pool.submit(_request_comparison_judge, **request)
+        time.sleep(0.1)
+        assert provider_calls == 1
+        release_provider.set()
+        first_result = first.result(timeout=5)
+        second_result = second.result(timeout=5)
+
+    assert provider_calls == 1
+    assert first_result[0] == second_result[0]
+    assert {first_result[2]["durable_request_reused"], second_result[2][
+        "durable_request_reused"
+    ]} == {False, True}
+
+
+def test_durable_judge_pending_request_never_resends_ambiguous_spend(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    judge = ComparisonEvaluatorV1(
+        id="pending-review",
+        type="llm_judge",
+        required=True,
+        profile="wandb/openai/gpt-oss-120b",
+        rubric="Score maintenance actionability.",
+        dimensions=("maintenance_actionability",),
+        input_cost_per_million=1.0,
+        output_cost_per_million=2.0,
+    )
+    provider_calls: list[str] = []
+
+    def ambiguous_failure(*_args, **_kwargs):
+        provider_calls.append("called")
+        raise RuntimeError("connection lost after request submission")
+
+    monkeypatch.setattr(
+        "fugue.bench.evaluations._post_judge", ambiguous_failure
+    )
+    row = {
+        "run_id": "pending-judge",
+        "attempt_id": "b" * 64,
+        "answer": "A bounded maintainer recommendation.",
+    }
+    env = {
+        "WANDB_API_KEY": "secret",
+        "FUGUE_WANDB_INFERENCE_PROJECT": "wandb/test",
+        "FUGUE_EVIDENCE_MODE": "local",
+        "FUGUE_HOST_REPO_ROOT": tmp_path.as_posix(),
+        "FUGUE_RUN_ID": "pending-judge",
+    }
+    request = {
+        "evaluator": judge,
+        "public_task": {"input": "Review the maintenance response."},
+        "row": row,
+        "env": env,
+    }
+
+    with pytest.raises(RuntimeError, match="connection lost"):
+        _request_comparison_judge(**request)
+    with pytest.raises(ExecutionFinalizationPending, match="will not be resent"):
+        _request_comparison_judge(**request)
+
+    assert provider_calls == ["called"]
 
 
 def test_blind_judge_read_timeout_is_not_retried(
@@ -3221,6 +3564,19 @@ def test_blind_judge_read_timeout_is_not_retried(
             "automatic_retries": 0,
         },
     }
+    assert rows[0]["comparison_judges"]["maintainer-review"]["cost_usd"] is None
+    assert (
+        rows[0]["comparison_judges"]["maintainer-review"][
+            "accounted_cost_usd"
+        ]
+        == 0.1
+    )
+    assert (
+        rows[0]["comparison_judges"]["maintainer-review"][
+            "cost_observation_complete"
+        ]
+        is False
+    )
 
 
 def test_blind_judge_records_safe_no_json_failure_metadata(
@@ -3343,8 +3699,9 @@ def test_blind_judge_distinguishes_strict_rubric_validation_failure() -> None:
         "stage": "rubric_validation",
         "code": "invalid_rubric_payload",
         "message": "judge response failed strict rubric validation",
-        "exception_type": "ValueError",
-        "request_policy": {
+            "exception_type": "ValueError",
+            "usage": {"input_tokens": 100, "output_tokens": 20},
+            "request_policy": {
             "schema_version": 1,
             "timeout_sec": 300,
             "max_output_tokens": 1_200,
@@ -3725,6 +4082,12 @@ def test_execute_local_comparison_never_requires_or_fetches_weave(
     markdown = markdown_path.read_text(encoding="utf-8")
     assert "]()" not in markdown
     assert "No safe evidence links were available." in markdown
+    approved = dict(captured["approved"])  # type: ignore[arg-type]
+    assert approved["approval_required"] is False
+    assert approved["approval_digest"] == ""
+    authorization = str(approved["execution_authorization_digest"])
+    assert len(authorization) == 64
+    assert set(authorization) <= set("0123456789abcdef")
 
 
 def test_local_execution_binding_reconciles_manifest_and_run_receipt(

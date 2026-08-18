@@ -368,6 +368,38 @@ class LiveEvaluationCoordinator:
         return dict(matches[0]) if matches else None
 
     def begin_cell(self, cell: PlannedCell) -> Mapping[str, str] | None:
+        with self._prediction_lock:
+            existing = self._predictions.get(cell.id)
+        if existing is not None:
+            call = existing.prediction.predict_and_score_call
+            overlay = {
+                "FUGUE_ATTEMPT_ID": cell.attempt_id,
+                "FUGUE_WEAVE_EVAL_PREDICT_AND_SCORE_CALL_ID": str(call.id),
+                "FUGUE_WEAVE_EVAL_PROJECT_ID": str(call.project_id),
+                "FUGUE_WEAVE_EVAL_NAME": _evaluation_name(
+                    existing.session.candidate
+                ),
+                "FUGUE_EVALUATION_SCOPE_ID": existing.session.candidate[
+                    "evaluation_scope_id"
+                ],
+            }
+            trace_id = str(
+                existing.row.get("weave_agent_bridge_otel_trace_id") or ""
+            )
+            span_id = str(
+                existing.row.get("weave_agent_bridge_otel_span_id") or ""
+            )
+            if trace_id and span_id:
+                overlay["FUGUE_WEAVE_TRACEPARENT"] = (
+                    f"00-{trace_id}-{span_id}-01"
+                )
+            self._append_event(
+                "prediction_reused_for_physical_retry",
+                cell_id=cell.id,
+                candidate_id=cell.candidate_id,
+                eval_predict_and_score_call_id=str(call.id),
+            )
+            return overlay
         session = self._sessions_by_cell.get(cell.id)
         if session is None:
             return None
@@ -524,6 +556,30 @@ class LiveEvaluationCoordinator:
         if traceparent:
             overlay["FUGUE_WEAVE_TRACEPARENT"] = traceparent
         return overlay
+
+    def invalidate_physical_execution(
+        self,
+        cell: PlannedCell,
+        *,
+        reason: str,
+    ) -> None:
+        """Keep the logical prediction open while replacing infrastructure."""
+
+        with self._prediction_lock:
+            active = self._predictions.get(cell.id)
+        if active is None:
+            raise RuntimeError(
+                "retryable physical execution has no live logical prediction"
+            )
+        self._append_event(
+            "physical_execution_invalidated",
+            cell_id=cell.id,
+            candidate_id=cell.candidate_id,
+            error=reason,
+            eval_predict_and_score_call_id=str(
+                active.prediction.predict_and_score_call.id
+            ),
+        )
 
     def _open_agent_bridge(
         self,
@@ -2073,6 +2129,71 @@ class GeneratedEvaluationCoordinator:
                 )
         return public_row
 
+    def restore_finished_cell(self, cell: PlannedCell) -> dict[str, Any]:
+        """Restore one canonical row without evaluating or judging it again.
+
+        The local attempt record is written before the convenience JSONL row.
+        A controller crash in that narrow window must repair the export from
+        the immutable prediction artifact instead of invoking the evaluator a
+        second time.
+        """
+
+        if self._local is None or cell.attempt_id not in self._local_attempt_ids:
+            raise RuntimeError("local attempt evidence is unavailable for recovery")
+        record = self._local.store.read_attempt(cell.attempt_id)
+        prediction = next(
+            (
+                node
+                for node in record.nodes
+                if node.kind == "prediction" and node.artifact is not None
+            ),
+            None,
+        )
+        if prediction is None or prediction.artifact is None:
+            raise RuntimeError("local prediction artifact is unavailable for recovery")
+        artifact_path = self._local.store.root / prediction.artifact.path
+        try:
+            raw = json.loads(artifact_path.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError) as exc:
+            raise RuntimeError("local prediction artifact is unreadable") from exc
+        if not isinstance(raw, dict):
+            raise RuntimeError("local prediction artifact must be an object")
+        if stable_digest(raw) != record.prediction_row_sha256:
+            raise RuntimeError("local prediction artifact digest changed")
+        _verify_coordinated_row_identity(raw, cell)
+        restored = {
+            **raw,
+            "local_evidence_record_digest": record.record_digest,
+            "local_evidence_integrity": record.integrity_status,
+        }
+        redacted = redact_value(restored)
+        if not isinstance(redacted, dict):  # pragma: no cover - fixed mapping
+            raise TypeError("restored local prediction row must be a mapping")
+        with self._lock:
+            existing: list[dict[str, Any]] = []
+            if self.path.is_file():
+                for line in self.path.read_text(encoding="utf-8").splitlines():
+                    if not line.strip():
+                        continue
+                    value = json.loads(line)
+                    if (
+                        isinstance(value, dict)
+                        and value.get("attempt_id") == cell.attempt_id
+                    ):
+                        existing.append(value)
+            if existing:
+                if any(stable_digest(value) != stable_digest(redacted) for value in existing):
+                    raise RuntimeError("local export row conflicts with canonical evidence")
+            else:
+                with self.path.open("a", encoding="utf-8") as handle:
+                    handle.write(
+                        json.dumps(redacted, sort_keys=True, default=str) + "\n"
+                    )
+                    handle.flush()
+                    os.fsync(handle.fileno())
+            self._rows_by_attempt[cell.attempt_id] = redacted
+        return redacted
+
     def finalize(self) -> LocalEvidenceManifestV1 | None:
         if self._local is None:
             return None
@@ -2479,6 +2600,46 @@ def _local_attempt_receipts(row: Mapping[str, Any]) -> dict[str, Any]:
         )
         if row.get(key) is not None
     }
+    judges = row.get("comparison_judges")
+    attempted_judges = [
+        value
+        for value in judges.values()
+        if isinstance(value, Mapping)
+        and (
+            value.get("status") == "scored"
+            or value.get("reason") != "judge execution was not requested"
+        )
+    ] if isinstance(judges, Mapping) else []
+    judge_costs = [
+        float(value["cost_usd"])
+        for value in attempted_judges
+        if isinstance(value.get("cost_usd"), int | float)
+        and not isinstance(value.get("cost_usd"), bool)
+    ]
+    judge_accounted_costs = [
+        float(value["accounted_cost_usd"])
+        for value in attempted_judges
+        if isinstance(value.get("accounted_cost_usd"), int | float)
+        and not isinstance(value.get("accounted_cost_usd"), bool)
+    ]
+    if attempted_judges:
+        usage_fields["judge_cost_required"] = True
+        usage_fields["judge_cost_complete"] = (
+            len(judge_costs) == len(attempted_judges)
+        )
+        usage_fields["judge_cost_usd"] = (
+            sum(judge_costs)
+            if len(judge_costs) == len(attempted_judges)
+            else None
+        )
+        usage_fields["judge_accounted_cost_complete"] = (
+            len(judge_accounted_costs) == len(attempted_judges)
+        )
+        usage_fields["judge_accounted_cost_usd"] = (
+            sum(judge_accounted_costs)
+            if len(judge_accounted_costs) == len(attempted_judges)
+            else None
+        )
     policy_statuses = {
         str(value.get("status") or "unavailable")
         for value in (execution_identity, private_boundary)
