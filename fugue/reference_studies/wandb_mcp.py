@@ -38,6 +38,7 @@ _REFERENCE_RESOURCE_ROOT = ("resources", "reference-studies", "wandb-mcp")
 _REFERENCE_RESOURCE_NAMES = (
     "README.md",
     "comparison.yaml.template",
+    "configs/fugue/task-authoring/profiles.yaml",
     "mcp.json.template",
     "private-labels.jsonl",
     "release-contract-v1.json",
@@ -894,6 +895,10 @@ def _materialize_packaged_reference_study(
     _write_prepared_file(request.staging_root / "mcp.json", mcp_config)
     for resource_name, destination_name in (
         ("README.md", "README.md"),
+        (
+            "configs/fugue/task-authoring/profiles.yaml",
+            "configs/fugue/task-authoring/profiles.yaml",
+        ),
         ("tasks.jsonl", "tasks.jsonl"),
         ("private-labels.jsonl", "private-labels.jsonl"),
         ("release-contract-v1.json", "release-contract-v1.json"),

@@ -250,6 +250,7 @@ def test_default_materializer_builds_a_complete_check_ready_bundle(
         "template": "mcp-change",
     }
     for name in (
+        "configs/fugue/task-authoring/profiles.yaml",
         "source-evidence.lock.json",
         "source-conformance-receipt.json",
         "release-notes.lock.json",

@@ -248,6 +248,23 @@ def test_packaged_comparison_is_local_and_reference_bound() -> None:
     assert len(_resource_text("private-labels.jsonl").splitlines()) == 4
 
 
+def test_packaged_reference_contains_the_pinned_scorer_runtime_profile() -> None:
+    profile = yaml.safe_load(
+        _resource_text("configs/fugue/task-authoring/profiles.yaml")
+    )
+    [scorer] = profile["scorer_runtimes"]
+    assert scorer == {
+        "id": "python312-sandbox-v1",
+        "title": "Isolated Python 3.12 scorer",
+        "image": (
+            "python:3.12.10-slim-bookworm@sha256:"
+            "fd95fa221297a88e1cf49c55ec1828edd7c5a428187e67b5d1805692d11588db"
+        ),
+        "platform": "{{FUGUE_SCORER_PLATFORM}}",
+        "command": ["python", "/input/scorer.py", "/input/input.json"],
+    }
+
+
 def test_release_contract_and_wbaf_provenance_are_exact_and_bounded() -> None:
     from fugue.reference_studies.wandb_mcp import (
         WBAF_TASK_DESIGN_PROVENANCE,

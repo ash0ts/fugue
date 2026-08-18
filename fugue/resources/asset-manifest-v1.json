@@ -122,6 +122,11 @@
       "size_bytes": 3696
     },
     {
+      "path": "reference-studies/wandb-mcp/configs/fugue/task-authoring/profiles.yaml",
+      "sha256": "57df480c4e48d39c759459a6536c9d6abac5a250f03447d63def38e0934c097f",
+      "size_bytes": 773
+    },
+    {
       "path": "reference-studies/wandb-mcp/mcp.json.template",
       "sha256": "c501e82fb77bf809f460473602792145b9d2ae0dfbb8074ca2e8df79ece72567",
       "size_bytes": 2126
