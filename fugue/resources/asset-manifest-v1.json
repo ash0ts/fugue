@@ -113,8 +113,8 @@
     },
     {
       "path": "reference-studies/wandb-mcp/README.md",
-      "sha256": "30d13febe6a4943c9fd77b774890f5829022373d790bcdc1712d14281efa0925",
-      "size_bytes": 3837
+      "sha256": "1d048080a612325d5e10a5235b926ccd6a94825c07f39bb42b307be9544022d8",
+      "size_bytes": 4991
     },
     {
       "path": "reference-studies/wandb-mcp/comparison.yaml.template",
@@ -125,6 +125,11 @@
       "path": "reference-studies/wandb-mcp/configs/fugue/task-authoring/profiles.yaml",
       "sha256": "57df480c4e48d39c759459a6536c9d6abac5a250f03447d63def38e0934c097f",
       "size_bytes": 773
+    },
+    {
+      "path": "reference-studies/wandb-mcp/human-readable-evidence-canary.yaml.template",
+      "sha256": "d48e1a8eb1c7bc4652eef4972c97106965f242df1b510e4ac4bde2626a24be9a",
+      "size_bytes": 4896
     },
     {
       "path": "reference-studies/wandb-mcp/mcp.json.template",
