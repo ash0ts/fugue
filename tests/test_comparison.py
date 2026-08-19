@@ -42,10 +42,14 @@ from fugue.bench.comparison import (
     _restore_or_verify_checkpoint_receipt,
     _result_candidate_definitions,
     _result_markdown,
+    _result_scorer_review_markdown,
     _resume_approved_comparison_lock,
     _safe_comparison_score_details,
+    _sanitized_scorer_review,
     _score_deterministic_output,
     _scorer_revisions_v3,
+    _v3_canonical_attempt_rows,
+    _weave_attempt_evidence_links,
     analyze_comparison_rows,
     check_comparison,
     claim_comparison_approval,
@@ -1433,6 +1437,8 @@ def test_v3_result_round_trips_source_topology_and_canonical_view(
         row["weave_agent_root_ref"] = (
             f"weave:///wandb/result-project/call/{call_prefix}-agent"
         )
+        row["weave_agent_root_evidence_kind"] = "native_weave_call_v1"
+        row["weave_agent_root_is_native_call"] = True
         rows.append(row)
 
     result = analyze_comparison_rows(
@@ -2164,6 +2170,47 @@ def test_unverified_agent_relationship_invalidates_behavioral_evidence() -> None
     assert isinstance(view, ExperimentViewV2)
     assert view.paired_cases == ()
     assert "cells" not in view.to_dict()
+
+
+def test_v3_unverified_cross_transport_receipt_does_not_claim_correlation() -> None:
+    row = _decision_row(variant="candidate", passed=True)
+    row.update(
+        {
+            "weave_agent_root_evidence_kind": (
+                "native_otel_cross_transport_receipt_v1"
+            ),
+            "weave_agent_root_is_native_call": False,
+            "otel_trace_id": "trace-1",
+            "otel_root_span_id": "span-1",
+            "agent_cross_transport_edge": {
+                "status": "unverified",
+                "source_system": "otel",
+                "source_trace_id": "trace-1",
+                "source_span_id": "span-1",
+                "receipt_system": "weave",
+                "receipt_call_id": row["native_agent_root_call_id"],
+            },
+        }
+    )
+
+    links = _weave_attempt_evidence_links(row, require_agent_typing=True)
+    agent = next(link for link in links if link.kind == "agent_evidence_receipt")
+
+    assert agent.status == "invalid"
+    assert agent.native_trajectory_status == "unresolved"
+    assert agent.conversation_correlation_status == "unverified"
+
+    row["agent_cross_transport_edge"]["status"] = "verified"
+    verified_links = _weave_attempt_evidence_links(
+        row,
+        require_agent_typing=True,
+    )
+    verified = next(
+        link for link in verified_links if link.kind == "agent_evidence_receipt"
+    )
+    assert verified.status == "resolved"
+    assert verified.native_trajectory_status == "otel_correlated"
+    assert verified.conversation_correlation_status == "verified"
 
 
 @pytest.mark.parametrize(
@@ -3116,6 +3163,101 @@ def test_mechanism_summary_keeps_assignment_registration_and_use_distinct() -> N
     assert "task_passed" not in historical
 
 
+def test_mechanism_summary_publishes_generic_treatment_use_only_from_evidence() -> None:
+    summary = _mechanism_summary(
+        [
+            {
+                "variant_id": "candidate",
+                "comparison_mechanism": {
+                    "skill_registered": "observed",
+                    "skill_invoked": "unavailable",
+                },
+                "comparison_deterministic_scores": {
+                    "skill.assigned_skill_opened": True,
+                    "skill.relevant_rule_opened": False,
+                    "skill.requested_constraints_present": True,
+                },
+                "comparison_dimension_roles": {
+                    "skill.assigned_skill_opened": "mechanism",
+                    "skill.relevant_rule_opened": "mechanism",
+                    "skill.requested_constraints_present": "outcome",
+                },
+            },
+            {"variant_id": "baseline"},
+        ]
+    )
+
+    assert summary["treatment_registered"]["candidate"] == {
+        "observed": 1,
+        "not_observed": 0,
+        "applicable": 1,
+        "unavailable": 0,
+    }
+    assert summary["treatment_opened"]["candidate"]["observed"] == 1
+    assert (
+        summary["treatment_relevant_content_opened"]["candidate"]["not_observed"]
+        == 1
+    )
+    assert summary["treatment_invoked"]["candidate"] == {
+        "observed": 0,
+        "not_observed": 0,
+        "applicable": 1,
+        "unavailable": 1,
+    }
+    assert "treatment_requested_constraints_present" not in summary
+
+
+def test_mechanism_summary_normalizes_typed_treatment_use_evidence() -> None:
+    summary = _mechanism_summary(
+        [
+            {
+                "variant_id": "candidate",
+                "treatment_use_evidence": {
+                    "registered": True,
+                    "opened": 1,
+                    "relevant_content_opened": False,
+                    "invoked": "observed",
+                },
+            },
+            {
+                "variant_id": "candidate",
+                "treatment_use_evidence": {
+                    "registered": 0,
+                    "opened": "not_observed",
+                    "relevant_content_opened": "unknown",
+                    "invoked": "not_observed",
+                },
+                "comparison_mechanism": {"skill_invoked": True},
+            },
+        ]
+    )
+
+    assert summary["treatment_registered"]["candidate"] == {
+        "observed": 1,
+        "not_observed": 1,
+        "applicable": 2,
+        "unavailable": 0,
+    }
+    assert summary["treatment_opened"]["candidate"] == {
+        "observed": 1,
+        "not_observed": 1,
+        "applicable": 2,
+        "unavailable": 0,
+    }
+    assert summary["treatment_relevant_content_opened"]["candidate"] == {
+        "observed": 0,
+        "not_observed": 1,
+        "applicable": 1,
+        "unavailable": 0,
+    }
+    assert summary["treatment_invoked"]["candidate"] == {
+        "observed": 1,
+        "not_observed": 0,
+        "applicable": 2,
+        "unavailable": 1,
+    }
+
+
 def test_eight_row_report_uses_real_pair_counts_and_neutral_study_language() -> None:
     rows = [
         _decision_row(variant=variant, task_id=f"task-{task}", passed=True)
@@ -3617,6 +3759,122 @@ def test_scorer_revision_distinguishes_digest_only_source() -> None:
         "source_reference_status": "digest_only",
         "task_pass_roles": ["outcome", "safety_gate"],
     }
+
+
+def test_scorer_review_uses_public_contract_without_private_truth(
+    tmp_path: Path,
+) -> None:
+    scorer = tmp_path / "scorers/skill_package.py"
+    scorer.parent.mkdir()
+    scorer.write_text("def score(payload):\n    return payload\n", encoding="utf-8")
+    evaluator = ComparisonEvaluatorV1(
+        id="skill-package",
+        type="deterministic",
+        required=True,
+        scorer="scorers/skill_package.py",
+        runtime="python312-sandbox-v1",
+        dimensions=("package_contract_valid", "assigned_skill_opened"),
+        dimension_roles={
+            "package_contract_valid": "safety_gate",
+            "assigned_skill_opened": "mechanism",
+        },
+        dimension_guidance={
+            "package_contract_valid": "Checks the public package schema.",
+        },
+    )
+
+    review = _sanitized_scorer_review(evaluator, repo_root=tmp_path)
+
+    assert review["source_reference"] == "scorers/skill_package.py"
+    assert review["declared_dimensions"] == [
+        {
+            "id": "package_contract_valid",
+            "role": "safety_gate",
+            "guidance": "Checks the public package schema.",
+        },
+        {
+            "id": "assigned_skill_opened",
+            "role": "mechanism",
+            "guidance": (
+                "Checks whether the Agent opened the exact Skill revision assigned "
+                "to this attempt."
+            ),
+        },
+    ]
+    serialized = json.dumps(review, sort_keys=True)
+    assert "gold_output" not in serialized
+    assert "answer_key" not in serialized
+    assert "private labels" in serialized
+
+
+def test_scorer_review_omits_private_or_absolute_source_reference(
+    tmp_path: Path,
+) -> None:
+    private_scorer = tmp_path / "private/answer_key/scorer.py"
+    private_scorer.parent.mkdir(parents=True)
+    private_scorer.write_text("def score(payload):\n    return payload\n", encoding="utf-8")
+    evaluator = ComparisonEvaluatorV1(
+        id="facts",
+        type="deterministic",
+        required=True,
+        scorer=str(private_scorer),
+        runtime="python312-sandbox-v1",
+        dimensions=("answer_correct",),
+        dimension_roles={"answer_correct": "outcome"},
+    )
+
+    review = _sanitized_scorer_review(evaluator, repo_root=tmp_path)
+
+    assert "source_reference" not in review
+
+
+def test_scorer_revision_and_report_publish_bound_review_artifact(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from fugue.bench import comparison as comparison_module
+
+    digest = "1" * 64
+    revisions = _scorer_revisions_v3(
+        {
+            "scorer_digests": {"skill-package": digest},
+            "approved_inputs": {
+                "evaluator_artifacts": {
+                    "skill-package": {"scorer_sha256": "2" * 64}
+                },
+                "scorer_reviews": {
+                    "skill-package": {
+                        "schema_version": 1,
+                        "kind": "deterministic_scorer_review",
+                        "declared_dimensions": [
+                            {
+                                "id": "package_contract_valid",
+                                "role": "safety_gate",
+                                "guidance": "Checks the public package schema.",
+                            }
+                        ],
+                        "source_reference": "scorers/skill_package.py",
+                    }
+                },
+            },
+        }
+    )
+    artifact = revisions[0].details["review_artifact"]
+    assert artifact["scorer_id"] == "skill-package"
+    assert artifact["immutable_digest"] == digest
+
+    class StoredV3:
+        scorer_revisions = revisions
+
+    monkeypatch.setattr(comparison_module, "ComparisonResultV3", StoredV3)
+    markdown = _result_scorer_review_markdown(StoredV3())
+
+    assert "## Deterministic scorer review" in markdown
+    assert "Skill Package" in markdown
+    assert digest in markdown
+    assert "Safety Gate" not in markdown
+    assert "safety_gate" in markdown
+    assert "Checks the public package schema." in markdown
+    assert "host-only expected values" in markdown
 
 
 def test_v3_attempt_exports_blind_judge_scores_without_rationale() -> None:
@@ -5118,6 +5376,22 @@ def test_execute_local_comparison_never_requires_or_fetches_weave(
     assert "Portable evidence destination: `fugue-evidence` layout v1" in markdown
     assert "`fugue://local-evidence/" in markdown
     assert "No safe evidence links were available." not in markdown
+
+    first_pair = result.paired_cases[0]
+    assert first_pair.candidate is not None
+    hosted_id_attempt = replace(
+        first_pair.candidate,
+        weave_agent_root_call_id="hosted-agent-call",
+    )
+    hosted_id_result = replace(
+        result,
+        paired_cases=(
+            replace(first_pair, candidate=hosted_id_attempt),
+            *result.paired_cases[1:],
+        ),
+    )
+    with pytest.raises(ValueError, match="cannot claim hosted Agent Call IDs"):
+        _v3_canonical_attempt_rows(hosted_id_result)
 
     governed = replace(
         result,

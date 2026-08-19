@@ -2314,6 +2314,7 @@ def _optional_canonical_attempt(raw: Any) -> dict[str, Any] | None:
         "scores",
         "evidence_links",
         "weave_agent_root_call_id",
+        "weave_agent_evidence_call_id",
         "otel_root_span_id",
         "execution_fingerprint",
         "runtime_lock_digest",
@@ -2330,10 +2331,15 @@ def _optional_canonical_attempt(raw: Any) -> dict[str, Any] | None:
         "evaluation_root",
         "prediction_and_score",
         "prediction",
-        "agent_root",
         "dataset",
     }
-    if len(links) != 5 or {str(item["kind"]) for item in links} != expected_kinds:
+    agent_kinds = {"agent_root", "agent_evidence_receipt", "agent_evidence"}
+    observed_kinds = {str(item["kind"]) for item in links}
+    if (
+        len(links) != 5
+        or observed_kinds - agent_kinds != expected_kinds
+        or len(observed_kinds & agent_kinds) != 1
+    ):
         raise ValueError(
             "paired_attempt.evidence_links must contain exactly five unique slots"
         )
@@ -2395,6 +2401,7 @@ def _optional_canonical_attempt(raw: Any) -> dict[str, Any] | None:
     for field_name in (
         "prediction_id",
         "weave_agent_root_call_id",
+        "weave_agent_evidence_call_id",
         "otel_root_span_id",
         "execution_fingerprint",
         "runtime_lock_digest",
@@ -2645,11 +2652,21 @@ def _canonical_attempt_identity(raw: Any) -> dict[str, Any]:
     }
 
 
-def _canonical_attempt_evidence_link(raw: Any) -> dict[str, Any]:
+def _canonical_attempt_evidence_link(raw: Any) -> dict[str, Any]:  # noqa: C901
     value = _mapping(raw, "paired_attempt.evidence_link")
     _reject_unknown(
         value,
-        {"kind", "status", "system", "ref", "url", "reason"},
+        {
+            "kind",
+            "status",
+            "system",
+            "ref",
+            "url",
+            "reason",
+            "evidence_kind",
+            "native_trajectory_status",
+            "conversation_correlation_status",
+        },
         "paired_attempt.evidence_link",
     )
     kind = _text(value.get("kind"), "attempt evidence kind", 100)
@@ -2658,6 +2675,8 @@ def _canonical_attempt_evidence_link(raw: Any) -> dict[str, Any]:
         "prediction_and_score",
         "prediction",
         "agent_root",
+        "agent_evidence_receipt",
+        "agent_evidence",
         "dataset",
     }:
         raise ValueError("attempt evidence kind is unsupported")
@@ -2671,6 +2690,44 @@ def _canonical_attempt_evidence_link(raw: Any) -> dict[str, Any]:
     ref = _optional_text(value.get("ref"), "attempt evidence ref", 2000)
     url = _optional_text(value.get("url"), "attempt evidence url", 2000)
     reason = _optional_text(value.get("reason"), "attempt evidence reason", 1000)
+    evidence_kind = _optional_text(
+        value.get("evidence_kind"), "attempt Agent evidence kind", 100
+    )
+    native_status = _optional_text(
+        value.get("native_trajectory_status"), "attempt native trajectory status", 100
+    )
+    correlation_status = _optional_text(
+        value.get("conversation_correlation_status"),
+        "attempt conversation correlation status",
+        100,
+    )
+    if evidence_kind not in {
+        None,
+        "native_weave_call_v1",
+        "native_otel_cross_transport_receipt_v1",
+        "unclassified_legacy_agent_evidence_v1",
+    }:
+        raise ValueError("attempt Agent evidence kind is unsupported")
+    if native_status not in {
+        None,
+        "native_weave_call",
+        "otel_correlated",
+        "unresolved",
+    }:
+        raise ValueError("attempt native trajectory status is unsupported")
+    if correlation_status not in {
+        None,
+        "verified",
+        "unverified",
+        "not_recorded",
+    }:
+        raise ValueError("attempt conversation correlation status is unsupported")
+    agent_kinds = {"agent_root", "agent_evidence_receipt", "agent_evidence"}
+    typed = (evidence_kind, native_status, correlation_status)
+    if kind not in agent_kinds and any(item is not None for item in typed):
+        raise ValueError("non-Agent evidence cannot carry Agent evidence typing")
+    if system == "local_artifact" and any(item is not None for item in typed):
+        raise ValueError("local Agent evidence cannot claim hosted evidence typing")
     if status == "resolved":
         if system == "weave" and (not ref or not url or not url.startswith("https://")):
             raise ValueError("resolved Weave evidence requires ref and HTTPS url")
@@ -2679,6 +2736,18 @@ def _canonical_attempt_evidence_link(raw: Any) -> dict[str, Any]:
         ):
             raise ValueError(
                 "resolved local evidence requires a canonical local-artifact ref"
+            )
+        if evidence_kind == "native_weave_call_v1" and (
+            kind != "agent_root" or native_status != "native_weave_call"
+        ):
+            raise ValueError("native Weave Agent evidence requires a native Agent root")
+        if evidence_kind == "native_otel_cross_transport_receipt_v1" and (
+            kind not in {"agent_evidence_receipt", "agent_evidence"}
+            or native_status != "otel_correlated"
+            or correlation_status != "verified"
+        ):
+            raise ValueError(
+                "cross-transport Agent evidence requires a verified receipt"
             )
     elif not reason:
         raise ValueError("unresolved attempt evidence requires a reason")
@@ -2690,6 +2759,12 @@ def _canonical_attempt_evidence_link(raw: Any) -> dict[str, Any]:
         result["url"] = url
     if reason:
         result["reason"] = reason
+    if evidence_kind:
+        result["evidence_kind"] = evidence_kind
+    if native_status:
+        result["native_trajectory_status"] = native_status
+    if correlation_status:
+        result["conversation_correlation_status"] = correlation_status
     return result
 
 

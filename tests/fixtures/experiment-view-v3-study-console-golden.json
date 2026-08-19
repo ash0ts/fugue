@@ -248,9 +248,12 @@
             "system": "weave",
             "url": "https://wandb.ai/wandb/fugue-mcp-release-qualification-v1/weave/calls/baseline-prediction"
           },
-          {
-            "kind": "agent_root",
-            "ref": "baseline-agent_root",
+        {
+          "conversation_correlation_status": "not_recorded",
+          "evidence_kind": "native_weave_call_v1",
+          "kind": "agent_root",
+          "native_trajectory_status": "native_weave_call",
+          "ref": "baseline-agent_root",
             "status": "resolved",
             "system": "weave",
             "url": "https://wandb.ai/wandb/fugue-mcp-release-qualification-v1/weave/calls/baseline-agent_root"
@@ -343,9 +346,12 @@
             "system": "weave",
             "url": "https://wandb.ai/wandb/fugue-mcp-release-qualification-v1/weave/calls/candidate-prediction"
           },
-          {
-            "kind": "agent_root",
-            "ref": "candidate-agent_root",
+        {
+          "conversation_correlation_status": "not_recorded",
+          "evidence_kind": "native_weave_call_v1",
+          "kind": "agent_root",
+          "native_trajectory_status": "native_weave_call",
+          "ref": "candidate-agent_root",
             "status": "resolved",
             "system": "weave",
             "url": "https://wandb.ai/wandb/fugue-mcp-release-qualification-v1/weave/calls/candidate-agent_root"

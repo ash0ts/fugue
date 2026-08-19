@@ -1779,6 +1779,8 @@ def _prerequisite_v3_result(
                         "evaluation_prediction_graph_verified": True,
                         "native_agent_root_call_id": f"{call_prefix}-agent",
                         "weave_agent_root_ref": f"{call_ref_prefix}-agent",
+                        "weave_agent_root_evidence_kind": "native_weave_call_v1",
+                        "weave_agent_root_is_native_call": True,
                         "trace_link_status": "linked",
                         "agent_graph_verified": True,
                         "infrastructure_conformance_complete": True,

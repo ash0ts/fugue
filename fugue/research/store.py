@@ -45,16 +45,24 @@ from fugue.research.database import connect_database
 from fugue.research.display_labels import preview_with_governed_display_labels
 from fugue.research.experiment_views import (
     ExperimentViewV1,
+    ExperimentViewV2,
+    ExperimentViewV3,
     build_design_view,
     build_evaluation_view,
     build_progress_view,
     experiment_view_from_dict,
 )
 from fugue.research.records import (
+    RESEARCH_LOG_MAX_BYTES,
+    ExperimentViewManifestV1,
+    ExperimentViewPageV1,
     ResearchEvidenceRefV1,
     ResearchLogEventV1,
     ResearchRelationshipV1,
     event_state,
+    experiment_view_manifest_from_dict,
+    experiment_view_page_from_dict,
+    experiment_view_page_set_id,
     public_evidence_selector,
     research_log_event_from_dict,
     sign_research_log_event,
@@ -65,6 +73,116 @@ _RESULT_PROJECTION_VERSION = 3
 # could show synthetic "fixed" values even though the immutable treatment map
 # contained the real factor levels.
 _EXPERIMENT_VIEW_PROJECTION_VERSION = 13
+_EXPERIMENT_VIEW_PAGE_TARGET_BYTES = RESEARCH_LOG_MAX_BYTES // 2
+
+
+def _paged_terminal_experiment_view(
+    view: ExperimentViewV3,
+) -> tuple[tuple[ExperimentViewPageV1, ...], ExperimentViewManifestV1]:
+    """Split one terminal V3 projection without inventing attempt rows."""
+
+    projection = view.to_dict()
+    pairs = list(projection.get("paired_cases") or ())
+    if not pairs:
+        raise ValueError(
+            "oversized terminal V3 view cannot be paged without paired cases"
+        )
+
+    attempts: list[dict[str, Any]] = []
+    seen_attempts: set[str] = set()
+    pair_units: list[tuple[dict[str, Any], list[dict[str, Any]]]] = []
+    for raw_pair in pairs:
+        pair = dict(raw_pair)
+        pair_attempts: list[dict[str, Any]] = []
+        for arm in ("baseline", "candidate"):
+            raw_attempt = pair.get(arm)
+            if not isinstance(raw_attempt, Mapping):
+                continue
+            attempt = dict(raw_attempt)
+            attempt_id = str(attempt.get("attempt_id") or "")
+            if not attempt_id or attempt_id in seen_attempts:
+                raise ValueError(
+                    "paged V3 paired cases require unique non-empty attempt identities"
+                )
+            seen_attempts.add(attempt_id)
+            attempts.append(attempt)
+            pair_attempts.append(attempt)
+        pair_units.append((pair, pair_attempts))
+
+    full_projection = {**projection, "attempts": attempts}
+    projection_digest = stable_digest(full_projection)
+    projection_header = dict(full_projection)
+    projection_header.pop("attempts", None)
+    projection_header.pop("paired_cases", None)
+
+    chunks: list[tuple[list[dict[str, Any]], list[dict[str, Any]]]] = []
+    chunk_pairs: list[dict[str, Any]] = []
+    chunk_attempts: list[dict[str, Any]] = []
+    for pair, pair_attempts in pair_units:
+        next_pairs = [*chunk_pairs, pair]
+        next_attempts = [*chunk_attempts, *pair_attempts]
+        payload_size = len(
+            json.dumps(
+                {"attempts": next_attempts, "paired_cases": next_pairs},
+                separators=(",", ":"),
+            ).encode()
+        )
+        if chunk_pairs and payload_size > _EXPERIMENT_VIEW_PAGE_TARGET_BYTES:
+            chunks.append((chunk_attempts, chunk_pairs))
+            chunk_pairs = [pair]
+            chunk_attempts = list(pair_attempts)
+        else:
+            chunk_pairs = next_pairs
+            chunk_attempts = next_attempts
+    if chunk_pairs:
+        chunks.append((chunk_attempts, chunk_pairs))
+
+    page_count = len(chunks)
+    attempt_count = len(attempts)
+    paired_case_count = len(pairs)
+    page_set_id = experiment_view_page_set_id(
+        projection_digest=projection_digest,
+        page_count=page_count,
+        attempt_count=attempt_count,
+        paired_case_count=paired_case_count,
+    )
+    pages: list[ExperimentViewPageV1] = []
+    for page_index, (page_attempts, page_pairs) in enumerate(chunks):
+        unsigned_page = {
+            "schema_version": RESEARCH_SCHEMA_VERSION,
+            "page_set_id": page_set_id,
+            "projection_digest": projection_digest,
+            "page_index": page_index,
+            "page_count": page_count,
+            "attempt_count": attempt_count,
+            "paired_case_count": paired_case_count,
+            "attempts": page_attempts,
+            "paired_cases": page_pairs,
+        }
+        pages.append(
+            experiment_view_page_from_dict(
+                {
+                    **unsigned_page,
+                    "page_digest": stable_digest(unsigned_page),
+                }
+            )
+        )
+    unsigned_manifest = {
+        "schema_version": RESEARCH_SCHEMA_VERSION,
+        "page_set_id": page_set_id,
+        "projection_digest": projection_digest,
+        "page_count": page_count,
+        "attempt_count": attempt_count,
+        "paired_case_count": paired_case_count,
+        "projection": projection_header,
+    }
+    manifest = experiment_view_manifest_from_dict(
+        {
+            **unsigned_manifest,
+            "manifest_digest": stable_digest(unsigned_manifest),
+        }
+    )
+    return tuple(pages), manifest
 
 
 class StudyStore:
@@ -2100,34 +2218,90 @@ class StudyStore:
         classification: Any,
         state: Any,
         message: str,
-        view: ExperimentViewV1,
+        view: ExperimentViewV1 | ExperimentViewV2 | ExperimentViewV3,
         progress: Mapping[str, Any] | None = None,
         reserved_cost_usd: float | None = None,
         observed_cost_usd: float | None = None,
         evidence: tuple[ResearchEvidenceRefV1, ...] = (),
         attribution: AttributionV1 | None = None,
     ) -> ResearchLogEventV1:
-        """Append one idempotent, schema-checked canonical experiment view."""
+        """Append one idempotent canonical view or its bounded V3 page set."""
 
         self.get_study(research_id)
         accepted = experiment_view_from_dict(view.to_dict())
         with self._connect() as conn:
             conn.execute("BEGIN IMMEDIATE")
-            event = self._append_research_log_event(
-                conn,
-                producer_event_id=producer_event_id,
-                research_id=research_id,
-                study_id=experiment_id,
-                classification=classification,
-                state=state,
-                message=message,
-                progress=progress,
-                reserved_cost_usd=reserved_cost_usd,
-                observed_cost_usd=observed_cost_usd,
-                evidence=evidence,
-                summary={"experiment_view": accepted.to_dict()},
-                actor=attribution,
-            )
+            try:
+                event = self._append_research_log_event(
+                    conn,
+                    producer_event_id=producer_event_id,
+                    research_id=research_id,
+                    study_id=experiment_id,
+                    classification=classification,
+                    state=state,
+                    message=message,
+                    progress=progress,
+                    reserved_cost_usd=reserved_cost_usd,
+                    observed_cost_usd=observed_cost_usd,
+                    evidence=evidence,
+                    summary={"experiment_view": accepted.to_dict()},
+                    actor=attribution,
+                )
+            except ValueError as exc:
+                if str(exc) != "research log event exceeds the publication size limit":
+                    raise
+                if not isinstance(accepted, ExperimentViewV3) or state not in {
+                    "completed",
+                    "failed",
+                    "cancelled",
+                }:
+                    raise ValueError(
+                        "only terminal V3 evaluation views can use paged publication"
+                    ) from exc
+                pages, manifest = _paged_terminal_experiment_view(accepted)
+                for page in pages:
+                    page_event_id = (
+                        "fugue:experiment-view-page:"
+                        + stable_digest(
+                            {
+                                "producer_event_id": producer_event_id,
+                                "page_index": page.page_index,
+                            }
+                        )
+                    )
+                    self._append_research_log_event(
+                        conn,
+                        producer_event_id=page_event_id,
+                        research_id=research_id,
+                        study_id=experiment_id,
+                        classification="evidence",
+                        state="evaluating",
+                        message=(
+                            "Published terminal experiment evidence page "
+                            f"{page.page_index + 1} of {page.page_count}."
+                        ),
+                        progress={
+                            "page_index": page.page_index,
+                            "page_count": page.page_count,
+                        },
+                        summary={"experiment_view_page": page.to_dict()},
+                        actor=attribution,
+                    )
+                event = self._append_research_log_event(
+                    conn,
+                    producer_event_id=producer_event_id,
+                    research_id=research_id,
+                    study_id=experiment_id,
+                    classification=classification,
+                    state=state,
+                    message=message,
+                    progress=progress,
+                    reserved_cost_usd=reserved_cost_usd,
+                    observed_cost_usd=observed_cost_usd,
+                    evidence=evidence,
+                    summary={"experiment_view_manifest": manifest.to_dict()},
+                    actor=attribution,
+                )
             conn.commit()
         return event
 

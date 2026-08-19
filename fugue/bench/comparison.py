@@ -392,6 +392,8 @@ EvidenceLinkKind = Literal[
     "prediction_and_score",
     "prediction",
     "agent_root",
+    "agent_evidence_receipt",
+    "agent_evidence",
     "dataset",
 ]
 
@@ -404,6 +406,17 @@ class AttemptEvidenceLinkV1:
     ref: str | None = None
     url: str | None = None
     reason: str | None = None
+    evidence_kind: Literal[
+        "native_weave_call_v1",
+        "native_otel_cross_transport_receipt_v1",
+        "unclassified_legacy_agent_evidence_v1",
+    ] | None = None
+    native_trajectory_status: Literal[
+        "native_weave_call", "otel_correlated", "unresolved"
+    ] | None = None
+    conversation_correlation_status: Literal[
+        "verified", "unverified", "not_recorded"
+    ] | None = None
 
     def to_dict(self) -> dict[str, Any]:
         return _drop_empty(asdict(self), preserve_false=True)
@@ -543,6 +556,7 @@ class PairedAttemptV3:
     reported_project_identity: str | None
     evidence_links: tuple[AttemptEvidenceLinkV1, ...]
     weave_agent_root_call_id: str | None = None
+    weave_agent_evidence_call_id: str | None = None
     otel_root_span_id: str | None = None
     execution_fingerprint: str | None = None
     runtime_lock_digest: str | None = None
@@ -3183,6 +3197,7 @@ def _approved_input_manifest(
         "preview evaluator digests",
     )
     evaluator_artifacts: dict[str, dict[str, str]] = {}
+    scorer_reviews: dict[str, dict[str, Any]] = {}
     for evaluator in spec.evaluators:
         if _evaluator_digest(evaluator, repo_root) != str(
             expected_evaluators.get(evaluator.id) or ""
@@ -3208,6 +3223,9 @@ def _approved_input_manifest(
                 )
             )
         evaluator_artifacts[evaluator.id] = artifacts
+        review = _sanitized_scorer_review(evaluator, repo_root=repo_root)
+        if review:
+            scorer_reviews[evaluator.id] = review
     source = _mapping(
         _mapping(preview.manifest.get("dataset"), "preview dataset").get("source"),
         "preview dataset source",
@@ -3234,6 +3252,7 @@ def _approved_input_manifest(
         "private_labels_sha256": private_digest,
         "evaluator_digests": dict(sorted(expected_evaluators.items())),
         "evaluator_artifacts": dict(sorted(evaluator_artifacts.items())),
+        "scorer_reviews": dict(sorted(scorer_reviews.items())),
         "task_resources": resources,
     }
 
@@ -3876,8 +3895,13 @@ def analyze_comparison_rows(
         (
             "not_applicable"
             if local_result
-            else _evidence_link_set_status(_weave_attempt_evidence_links(row))
-            if row.get("local_evidence_links")
+            else _evidence_link_set_status(
+                _weave_attempt_evidence_links(
+                    row,
+                    require_agent_typing=result_schema_version == 3,
+                )
+            )
+            if row.get("local_evidence_links") or result_schema_version == 3
             else status
         )
         for row, status in zip(normalized, evidence_statuses, strict=True)
@@ -4794,10 +4818,21 @@ def _scorer_revisions_v3(
     scorers = _mapping_or_empty(execution_lock.get("scorer_digests"))
     approved_inputs = _mapping_or_empty(execution_lock.get("approved_inputs"))
     artifacts = _mapping_or_empty(approved_inputs.get("evaluator_artifacts"))
+    reviews = _mapping_or_empty(approved_inputs.get("scorer_reviews"))
     revisions: list[LockDescriptorV1] = []
     for scorer_id, digest in sorted(scorers.items()):
         source_digest = str(
             _mapping_or_empty(artifacts.get(scorer_id)).get("scorer_sha256") or ""
+        )
+        review = _mapping_or_empty(reviews.get(scorer_id))
+        review_artifact = (
+            {
+                **review,
+                "scorer_id": str(scorer_id),
+                "immutable_digest": str(digest),
+            }
+            if review
+            else None
         )
         revisions.append(
             LockDescriptorV1(
@@ -4812,11 +4847,87 @@ def _scorer_revisions_v3(
                             "digest_only" if source_digest else "unavailable"
                         ),
                         "task_pass_roles": ["outcome", "safety_gate"],
+                        "review_artifact": review_artifact,
                     }
                 ),
             )
         )
     return tuple(revisions)
+
+
+def _sanitized_scorer_review(
+    evaluator: ComparisonEvaluatorV1,
+    *,
+    repo_root: Path,
+) -> dict[str, Any]:
+    """Return public scorer semantics without host-only truth or label values."""
+
+    if evaluator.type != "deterministic":
+        return {}
+    dimensions = evaluator.dimensions or evaluator.checks
+    declared_dimensions: list[dict[str, str]] = []
+    for dimension in dimensions:
+        guidance = evaluator.dimension_guidance.get(
+            dimension,
+            _default_dimension_guidance(dimension),
+        )
+        if redact_value(guidance) != guidance:
+            raise ValueError(
+                f"evaluator {evaluator.id!r} guidance contains sensitive text"
+            )
+        declared_dimensions.append(
+            _drop_empty(
+                {
+                    "id": dimension,
+                    "role": evaluator.dimension_roles.get(dimension),
+                    "guidance": " ".join(guidance.split()),
+                }
+            )
+        )
+    source_reference = _public_scorer_source_reference(evaluator, repo_root=repo_root)
+    return _drop_empty(
+        {
+            "schema_version": 1,
+            "kind": "deterministic_scorer_review",
+            "declared_dimensions": declared_dimensions,
+            "source_reference": source_reference,
+            "privacy_note": (
+                "This review describes public scoring criteria. It excludes "
+                "host-only expected values and private labels."
+            ),
+        }
+    )
+
+
+def _public_scorer_source_reference(
+    evaluator: ComparisonEvaluatorV1,
+    *,
+    repo_root: Path,
+) -> str | None:
+    if not evaluator.scorer:
+        return None
+    declared = PurePosixPath(evaluator.scorer)
+    if (
+        declared.is_absolute()
+        or not declared.parts
+        or any(part in {"", ".", ".."} for part in declared.parts)
+    ):
+        return None
+    relative = _safe_input_path(
+        Path(evaluator.scorer),
+        repo_root,
+        "deterministic scorer",
+    ).relative_to(repo_root.resolve())
+    reference = relative.as_posix()
+    normalized_parts = {
+        token
+        for part in relative.parts
+        for token in re.split(r"[^a-z0-9]+", part.lower())
+        if token
+    }
+    if normalized_parts & _PRIVATE_WORDS or redact_value(reference) != reference:
+        return None
+    return reference
 
 
 def _runtime_locks_v3(
@@ -6159,8 +6270,19 @@ def _paired_attempt_view_v3(
         return None
     projection = local_result_row_projection_v1(row)
     scores = dict(_mapping_or_empty(projection.get("scores")))
+    evidence_links = (
+        _attempt_evidence_links(row)
+        if row.get("local_evidence_links") is not None
+        else _weave_attempt_evidence_links(
+            row,
+            require_agent_typing=True,
+        )
+    )
     hosted_links = (
-        _weave_attempt_evidence_links(row)
+        _weave_attempt_evidence_links(
+            row,
+            require_agent_typing=True,
+        )
         if row.get("local_evidence_links") and require_hosted_evidence
         else ()
     )
@@ -6175,7 +6297,7 @@ def _paired_attempt_view_v3(
         ),
         execution_status=str(projection["execution_status"]),
         evaluation_status=str(projection["evaluation_status"]),
-        evidence_status=legacy.evidence_status,
+        evidence_status=_evidence_link_set_status(evidence_links),
         cost_usd=_number_or_none(projection.get("cost_usd")),
         latency_sec=_number_or_none(projection.get("latency_sec")),
         input_tokens=_number_or_none(projection.get("input_tokens")),
@@ -6206,12 +6328,28 @@ def _paired_attempt_view_v3(
             if projection.get("reported_project_identity") is not None
             else None
         ),
-        evidence_links=legacy.evidence_links,
+        evidence_links=evidence_links,
         weave_agent_root_call_id=(
-            _row_text(row, "weave_agent_root_call_id")
+            (
+                _row_text(row, "weave_agent_root_call_id")
+                or _row_text(row, "native_agent_root_call_id")
+            )
+            if any(
+                link.system == "weave" and link.kind == "agent_root"
+                for link in (hosted_links or evidence_links)
+            )
+            else None
+        ),
+        weave_agent_evidence_call_id=(
+            _row_text(row, "weave_agent_evidence_call_id")
+            or _row_text(row, "weave_agent_root_call_id")
             or _row_text(row, "native_agent_root_call_id")
-            if require_hosted_evidence
-            else legacy.weave_agent_root_call_id
+            if any(
+                link.system == "weave"
+                and link.kind in {"agent_evidence_receipt", "agent_evidence"}
+                for link in (hosted_links or evidence_links)
+            )
+            else None
         ),
         otel_root_span_id=legacy.otel_root_span_id,
         execution_fingerprint=(
@@ -6859,6 +6997,8 @@ def _safe_reported_project_slug(value: Any) -> str | None:
 
 def _attempt_evidence_links(
     row: Mapping[str, Any],
+    *,
+    require_agent_typing: bool = False,
 ) -> tuple[AttemptEvidenceLinkV1, ...]:
     local_links = row.get("local_evidence_links")
     if local_links is not None:
@@ -6874,11 +7014,16 @@ def _attempt_evidence_links(
                 "local attempt evidence links must use local_artifact refs"
             )
         return parsed
-    return _weave_attempt_evidence_links(row)
+    return _weave_attempt_evidence_links(
+        row,
+        require_agent_typing=require_agent_typing,
+    )
 
 
 def _weave_attempt_evidence_links(
     row: Mapping[str, Any],
+    *,
+    require_agent_typing: bool = False,
 ) -> tuple[AttemptEvidenceLinkV1, ...]:
     project = str(row.get("trace_project") or "")
     result: list[AttemptEvidenceLinkV1] = []
@@ -6911,6 +7056,9 @@ def _weave_attempt_evidence_links(
         *,
         relationship_ok: bool = True,
         missing_reason: str,
+        evidence_kind: str | None = None,
+        native_trajectory_status: str | None = None,
+        conversation_correlation_status: str | None = None,
     ) -> None:
         if not call_id or not stable_ref:
             result.append(
@@ -6918,6 +7066,9 @@ def _weave_attempt_evidence_links(
                     kind=kind,
                     status="missing",
                     reason=missing_reason,
+                    evidence_kind=evidence_kind,  # type: ignore[arg-type]
+                    native_trajectory_status=native_trajectory_status,  # type: ignore[arg-type]
+                    conversation_correlation_status=conversation_correlation_status,  # type: ignore[arg-type]
                 )
             )
             return
@@ -6932,6 +7083,9 @@ def _weave_attempt_evidence_links(
                         "evidence Call identity or application origin does "
                         "not match the locked destination"
                     ),
+                    evidence_kind=evidence_kind,  # type: ignore[arg-type]
+                    native_trajectory_status=native_trajectory_status,  # type: ignore[arg-type]
+                    conversation_correlation_status=conversation_correlation_status,  # type: ignore[arg-type]
                 )
             )
             return
@@ -6948,6 +7102,9 @@ def _weave_attempt_evidence_links(
                     ref=stable_ref,
                     url=uri,
                     reason="evidence relationship did not reconcile",
+                    evidence_kind=evidence_kind,  # type: ignore[arg-type]
+                    native_trajectory_status=native_trajectory_status,  # type: ignore[arg-type]
+                    conversation_correlation_status=conversation_correlation_status,  # type: ignore[arg-type]
                 )
             )
             return
@@ -6957,6 +7114,9 @@ def _weave_attempt_evidence_links(
                 status="resolved",
                 ref=stable_ref,
                 url=uri,
+                evidence_kind=evidence_kind,  # type: ignore[arg-type]
+                native_trajectory_status=native_trajectory_status,  # type: ignore[arg-type]
+                conversation_correlation_status=conversation_correlation_status,  # type: ignore[arg-type]
             )
         )
 
@@ -7049,6 +7209,23 @@ def _weave_attempt_evidence_links(
             ("weave_agent_root_ref",),
         ),
     ):
+        if kind == "agent_root":
+            declared_agent_kind = str(
+                row.get("weave_agent_root_evidence_kind") or ""
+            )
+            if (
+                declared_agent_kind == "native_otel_cross_transport_receipt_v1"
+                or row.get("weave_agent_root_is_native_call") is False
+            ):
+                id_fields = (
+                    "weave_agent_evidence_call_id",
+                    "weave_agent_root_call_id",
+                    "native_agent_root_call_id",
+                )
+                ref_fields = (
+                    "weave_agent_evidence_ref",
+                    "weave_agent_root_ref",
+                )
         ref = next(
             (str(row.get(field) or "") for field in id_fields if row.get(field)),
             "",
@@ -7075,8 +7252,72 @@ def _weave_attempt_evidence_links(
                 and row.get("evaluation_prediction_graph_verified") is True
             )
         )
+        link_kind: EvidenceLinkKind = kind  # type: ignore[assignment]
+        evidence_kind: str | None = None
+        native_trajectory_status: str | None = None
+        conversation_correlation_status: str | None = None
+        if kind == "agent_root":
+            evidence_kind = str(
+                row.get("weave_agent_root_evidence_kind") or ""
+            )
+            is_native = row.get("weave_agent_root_is_native_call")
+            if not evidence_kind:
+                if is_native is True:
+                    evidence_kind = "native_weave_call_v1"
+                elif is_native is False:
+                    evidence_kind = "native_otel_cross_transport_receipt_v1"
+                elif require_agent_typing:
+                    evidence_kind = "unclassified_legacy_agent_evidence_v1"
+                else:
+                    # V1/V2 artifacts predate explicit Agent evidence typing.
+                    # Preserve their original relationship semantics when they
+                    # are read, but never infer a native trajectory for V3.
+                    evidence_kind = ""
+            if evidence_kind == "native_weave_call_v1":
+                native_trajectory_status = (
+                    "native_weave_call" if is_native is True else "unresolved"
+                )
+                conversation_correlation_status = "not_recorded"
+                relationship_ok = relationship_ok and is_native is True
+            elif evidence_kind == "native_otel_cross_transport_receipt_v1":
+                link_kind = "agent_evidence_receipt"
+                edge = row.get("agent_cross_transport_edge")
+                edge_verified = bool(
+                    ref
+                    and is_native is False
+                    and isinstance(edge, Mapping)
+                    and edge.get("status") == "verified"
+                    and edge.get("source_system") == "otel"
+                    and (source_trace_id := str(
+                        row.get("otel_trace_id") or row.get("trace_id") or ""
+                    ))
+                    and str(edge.get("source_trace_id") or "") == source_trace_id
+                    and (source_span_id := str(
+                        row.get("otel_root_span_id")
+                        or row.get("root_span_id")
+                        or ""
+                    ))
+                    and str(edge.get("source_span_id") or "") == source_span_id
+                    and edge.get("receipt_system") == "weave"
+                    and str(edge.get("receipt_call_id") or "") == ref
+                )
+                native_trajectory_status = (
+                    "otel_correlated" if edge_verified else "unresolved"
+                )
+                conversation_correlation_status = (
+                    "verified" if edge_verified else "unverified"
+                )
+                relationship_ok = relationship_ok and edge_verified
+            else:
+                if require_agent_typing:
+                    evidence_kind = "unclassified_legacy_agent_evidence_v1"
+                    native_trajectory_status = "unresolved"
+                    conversation_correlation_status = "not_recorded"
+                    relationship_ok = False
+                else:
+                    evidence_kind = None
         add_call(
-            kind,  # type: ignore[arg-type]
+            link_kind,
             ref,
             stable_ref,
             relationship_ok=relationship_ok,
@@ -7085,6 +7326,9 @@ def _weave_attempt_evidence_links(
                 if kind == "agent_root"
                 else f"{kind.replace('_', ' ').title()} Call is unavailable"
             ),
+            evidence_kind=evidence_kind,
+            native_trajectory_status=native_trajectory_status,
+            conversation_correlation_status=conversation_correlation_status,
         )
     return tuple(result)
 
@@ -7480,7 +7724,17 @@ def _attempt_evidence_link(raw: Any) -> AttemptEvidenceLinkV1:
     value = _mapping(raw, "attempt evidence link")
     _reject_unknown(
         value,
-        {"kind", "status", "system", "ref", "url", "reason"},
+        {
+            "kind",
+            "status",
+            "system",
+            "ref",
+            "url",
+            "reason",
+            "evidence_kind",
+            "native_trajectory_status",
+            "conversation_correlation_status",
+        },
         "attempt evidence link",
     )
     kind = str(value.get("kind") or "")
@@ -7489,6 +7743,8 @@ def _attempt_evidence_link(raw: Any) -> AttemptEvidenceLinkV1:
         "prediction_and_score",
         "prediction",
         "agent_root",
+        "agent_evidence_receipt",
+        "agent_evidence",
         "dataset",
     }:
         raise ValueError(f"unknown attempt evidence link kind: {kind}")
@@ -7501,6 +7757,59 @@ def _attempt_evidence_link(raw: Any) -> AttemptEvidenceLinkV1:
     ref = _optional_text(value.get("ref"), "attempt evidence ref", 2_000)
     url = _optional_text(value.get("url"), "attempt evidence URL", 2_000)
     reason = _optional_text(value.get("reason"), "attempt evidence reason", 1_000)
+    evidence_kind = _optional_text(
+        value.get("evidence_kind"), "Agent evidence kind", 100
+    )
+    if evidence_kind not in {
+        None,
+        "native_weave_call_v1",
+        "native_otel_cross_transport_receipt_v1",
+        "unclassified_legacy_agent_evidence_v1",
+    }:
+        raise ValueError("attempt Agent evidence kind is unsupported")
+    native_trajectory_status = _optional_text(
+        value.get("native_trajectory_status"),
+        "Agent native trajectory status",
+        100,
+    )
+    if native_trajectory_status not in {
+        None,
+        "native_weave_call",
+        "otel_correlated",
+        "unresolved",
+    }:
+        raise ValueError("attempt Agent native trajectory status is unsupported")
+    conversation_correlation_status = _optional_text(
+        value.get("conversation_correlation_status"),
+        "Agent conversation correlation status",
+        100,
+    )
+    if conversation_correlation_status not in {
+        None,
+        "verified",
+        "unverified",
+        "not_recorded",
+    }:
+        raise ValueError("attempt Agent conversation correlation status is unsupported")
+    agent_kinds = {"agent_root", "agent_evidence_receipt", "agent_evidence"}
+    if kind not in agent_kinds and any(
+        item is not None
+        for item in (
+            evidence_kind,
+            native_trajectory_status,
+            conversation_correlation_status,
+        )
+    ):
+        raise ValueError("non-Agent evidence cannot carry Agent evidence typing")
+    if system == "local_artifact" and any(
+        item is not None
+        for item in (
+            evidence_kind,
+            native_trajectory_status,
+            conversation_correlation_status,
+        )
+    ):
+        raise ValueError("local Agent evidence cannot claim hosted evidence typing")
     if status == "resolved":
         if not ref or (system == "weave" and not url):
             raise ValueError(
@@ -7511,6 +7820,19 @@ def _attempt_evidence_link(raw: Any) -> AttemptEvidenceLinkV1:
             raise ValueError(
                 "resolved attempt evidence cannot carry an unresolved reason"
             )
+        if evidence_kind == "native_weave_call_v1" and (
+            kind != "agent_root"
+            or native_trajectory_status != "native_weave_call"
+        ):
+            raise ValueError("native Weave Agent evidence requires a native Agent root")
+        if evidence_kind == "native_otel_cross_transport_receipt_v1" and (
+            kind not in {"agent_evidence_receipt", "agent_evidence"}
+            or native_trajectory_status != "otel_correlated"
+            or conversation_correlation_status != "verified"
+        ):
+            raise ValueError(
+                "cross-transport Agent evidence requires a verified receipt"
+            )
     elif not reason:
         raise ValueError("unresolved attempt evidence requires a reason")
     return AttemptEvidenceLinkV1(
@@ -7520,6 +7842,9 @@ def _attempt_evidence_link(raw: Any) -> AttemptEvidenceLinkV1:
         ref=ref,
         url=url,
         reason=reason,
+        evidence_kind=evidence_kind,  # type: ignore[arg-type]
+        native_trajectory_status=native_trajectory_status,  # type: ignore[arg-type]
+        conversation_correlation_status=conversation_correlation_status,  # type: ignore[arg-type]
     )
 
 
@@ -7727,6 +8052,9 @@ def _paired_attempt_v3(raw: Any) -> PairedAttemptV3 | None:
         ),
         weave_agent_root_call_id=(
             str(value.get("weave_agent_root_call_id") or "") or None
+        ),
+        weave_agent_evidence_call_id=(
+            str(value.get("weave_agent_evidence_call_id") or "") or None
         ),
         otel_root_span_id=str(value.get("otel_root_span_id") or "") or None,
         execution_fingerprint=(str(value.get("execution_fingerprint") or "") or None),
@@ -9359,16 +9687,21 @@ def _v3_canonical_attempt_rows(  # noqa: C901 - one bounded audit checks every V
                 )
 
             links_by_kind = {item.kind: item for item in attempt.evidence_links}
-            expected_link_kinds = {
+            required_link_kinds = {
                 "evaluation_root",
                 "prediction_and_score",
                 "prediction",
-                "agent_root",
                 "dataset",
+            }
+            agent_link_kinds = {
+                "agent_root",
+                "agent_evidence_receipt",
+                "agent_evidence",
             }
             if (
                 len(attempt.evidence_links) != 5
-                or set(links_by_kind) != expected_link_kinds
+                or set(links_by_kind) - agent_link_kinds != required_link_kinds
+                or len(set(links_by_kind) & agent_link_kinds) != 1
             ):
                 raise ValueError(
                     "ComparisonResultV3 attempts require exactly five unique "
@@ -9391,6 +9724,17 @@ def _v3_canonical_attempt_rows(  # noqa: C901 - one bounded audit checks every V
             canonical_systems = {item.system for item in attempt.evidence_links}
             if canonical_systems == {"local_artifact"}:
                 _verify_local_attempt_links(attempt.evidence_links)
+                if (
+                    local_backend
+                    and (
+                        attempt.weave_agent_root_call_id is not None
+                        or attempt.weave_agent_evidence_call_id is not None
+                    )
+                ):
+                    raise ValueError(
+                        "ComparisonResultV3 local attempts cannot claim hosted "
+                        "Agent Call IDs"
+                    )
                 resolved_call_ids: dict[str, str] = {}
             elif canonical_systems == {"weave"} and not local_backend:
                 # Historical hosted V3 results predate the canonical local
@@ -9416,7 +9760,9 @@ def _v3_canonical_attempt_rows(  # noqa: C901 - one bounded audit checks every V
                 hosted_by_kind = {item.kind: item for item in hosted_links}
                 if (
                     len(hosted_links) != 5
-                    or set(hosted_by_kind) != expected_link_kinds
+                    or set(hosted_by_kind) - agent_link_kinds
+                    != required_link_kinds
+                    or len(set(hosted_by_kind) & agent_link_kinds) != 1
                     or any(item.system != "weave" for item in hosted_links)
                     or local_backend
                 ):
@@ -9437,6 +9783,18 @@ def _v3_canonical_attempt_rows(  # noqa: C901 - one bounded audit checks every V
             ):
                 raise ValueError(
                     "ComparisonResultV3 Agent root ID disagrees with its "
+                    "verified Weave link"
+                )
+            agent_evidence_call_id = resolved_call_ids.get(
+                "agent_evidence_receipt"
+            ) or resolved_call_ids.get("agent_evidence")
+            if (
+                not local_backend
+                and agent_evidence_call_id is not None
+                and attempt.weave_agent_evidence_call_id != agent_evidence_call_id
+            ):
+                raise ValueError(
+                    "ComparisonResultV3 Agent receipt ID disagrees with its "
                     "verified Weave link"
                 )
             if attempt.otel_root_span_id and attempt.otel_root_span_id in {
@@ -11572,7 +11930,7 @@ def _mechanism_summary(rows: Sequence[Mapping[str, Any]]) -> dict[str, Any]:
             if str(key) not in {"task_passed"}
         }
     )
-    return {
+    result = {
         stage: {
             variant: {
                 "observed": sum(
@@ -11596,6 +11954,102 @@ def _mechanism_summary(rows: Sequence[Mapping[str, Any]]) -> dict[str, Any]:
         }
         for stage in stages
     }
+    treatment_stages = {
+        "registered": ("skill_registered",),
+        "opened": ("assigned_skill_opened", "skill_opened"),
+        "relevant_content_opened": ("relevant_rule_opened",),
+        "invoked": ("skill_native_invoked", "skill_invoked"),
+    }
+    for stage, aliases in treatment_stages.items():
+        states = [_treatment_use_state(row, stage=stage, aliases=aliases) for row in rows]
+        if not any(state is not None for state in states):
+            continue
+        result[f"treatment_{stage}"] = {
+            variant: {
+                "observed": sum(
+                    state == "observed"
+                    for row, state in zip(rows, states, strict=True)
+                    if str(row.get("variant_id") or "") == variant
+                ),
+                "not_observed": sum(
+                    state == "not_observed"
+                    for row, state in zip(rows, states, strict=True)
+                    if str(row.get("variant_id") or "") == variant
+                ),
+                "applicable": sum(
+                    state not in {None, "not_applicable"}
+                    for row, state in zip(rows, states, strict=True)
+                    if str(row.get("variant_id") or "") == variant
+                ),
+                "unavailable": sum(
+                    state == "unavailable"
+                    for row, state in zip(rows, states, strict=True)
+                    if str(row.get("variant_id") or "") == variant
+                ),
+            }
+            for variant in ("baseline", "candidate")
+        }
+    return result
+
+
+def _treatment_use_state(
+    row: Mapping[str, Any],
+    *,
+    stage: str,
+    aliases: Sequence[str],
+) -> str | None:
+    states: list[str] = []
+    direct = row.get("treatment_use_evidence")
+    if isinstance(direct, Mapping) and stage in direct:
+        if (normalized := _normalize_treatment_use_state(direct[stage])) is not None:
+            states.append(normalized)
+    mechanism = row.get("comparison_mechanism")
+    if isinstance(mechanism, Mapping):
+        for alias in (stage, *aliases):
+            if alias in mechanism:
+                normalized = _normalize_treatment_use_state(mechanism[alias])
+                if normalized is not None:
+                    states.append(normalized)
+    scores = _mapping_or_empty(row.get("comparison_deterministic_scores"))
+    roles = _mapping_or_empty(row.get("comparison_dimension_roles"))
+    for full_dimension, raw_score in scores.items():
+        dimension = str(full_dimension).rsplit(".", 1)[-1]
+        if dimension not in aliases or roles.get(full_dimension) != "mechanism":
+            continue
+        passed = _bool_score(raw_score)
+        states.append(
+            "observed"
+            if passed is True
+            else "not_observed"
+            if passed is False
+            else "unavailable"
+        )
+    valid = {
+        state
+        for state in states
+        if state in {"observed", "not_observed", "unavailable", "not_applicable"}
+    }
+    if not valid:
+        return None
+    if len(valid) == 1:
+        return next(iter(valid))
+    # Conflicting evidence cannot prove that a treatment-use stage occurred.
+    return "unavailable"
+
+
+def _normalize_treatment_use_state(value: Any) -> str | None:
+    if value is True or value == 1:
+        return "observed"
+    if value is False or value == 0:
+        return "not_observed"
+    if isinstance(value, str) and value in {
+        "observed",
+        "not_observed",
+        "unavailable",
+        "not_applicable",
+    }:
+        return value
+    return None
 
 
 def _comparison_evidence_links(
@@ -14672,7 +15126,18 @@ def _result_markdown(result: ComparisonResult) -> str:
         applicable = int(value.get("applicable") or 0)
         if applicable == 0:
             return "not applicable"
-        return f"{int(value.get('observed') or 0)}/{applicable} observed"
+        unavailable = int(value.get("unavailable") or 0)
+        suffix = f"; {unavailable} unavailable" if unavailable else ""
+        return f"{int(value.get('observed') or 0)}/{applicable} observed{suffix}"
+
+    generic_treatment_stages = {
+        "skill_registered": "treatment_registered",
+        "assigned_skill_opened": "treatment_opened",
+        "skill_opened": "treatment_opened",
+        "relevant_rule_opened": "treatment_relevant_content_opened",
+        "skill_native_invoked": "treatment_invoked",
+        "skill_invoked": "treatment_invoked",
+    }
 
     mechanism = "".join(
         f"- {stage.replace('_', ' ').title()}: "
@@ -14680,6 +15145,7 @@ def _result_markdown(result: ComparisonResult) -> str:
         f"candidate {mechanism_arm(values['candidate'])}\n"
         for stage, values in result.mechanism_summary.items()
         if stage != "task_passed"
+        and generic_treatment_stages.get(stage) not in result.mechanism_summary
     )
     judge = (
         "No blind judge was used.\n"
@@ -14736,6 +15202,7 @@ def _result_markdown(result: ComparisonResult) -> str:
         invalid_behavior=invalid_behavior,
     )
     treatment_identities = _result_treatment_identities_markdown(result)
+    scorer_review = _result_scorer_review_markdown(result)
     destination = _result_evidence_destination_markdown(result)
     integration_tools = result.operational_summary.get("mcp_tool_usage") or {}
     tool_usage = "".join(
@@ -14846,6 +15313,7 @@ def _result_markdown(result: ComparisonResult) -> str:
         + destination
         + "\n"
         + treatment_identities
+        + scorer_review
         + "## Aligned cases\n\n"
         + pairs
         + "\n"
@@ -14905,6 +15373,96 @@ def _result_treatment_identities_markdown(result: ComparisonResult) -> str:
         lines.append(f"- `{candidate_id}` — " + "; ".join(details) + "\n")
     lines.append("\n")
     return "".join(lines)
+
+
+def _result_scorer_review_markdown(result: ComparisonResult) -> str:
+    """Render only the public review contract bound to immutable scorer locks."""
+
+    if not isinstance(result, ComparisonResultV3):
+        return ""
+    sections: list[str] = []
+    for revision in result.scorer_revisions:
+        review = _mapping_or_empty(revision.details.get("review_artifact"))
+        if review.get("kind") != "deterministic_scorer_review":
+            continue
+        if (
+            review.get("scorer_id") != revision.id
+            or review.get("immutable_digest") != revision.digest
+        ):
+            continue
+        dimensions = review.get("declared_dimensions")
+        if not isinstance(dimensions, list) or not dimensions:
+            continue
+        rows: list[str] = []
+        for raw in dimensions:
+            if not isinstance(raw, Mapping):
+                continue
+            dimension = _safe_markdown_text(raw.get("id"), maximum=300)
+            guidance = _safe_markdown_text(raw.get("guidance"), maximum=1000)
+            role = _safe_markdown_text(raw.get("role"), maximum=100)
+            if not dimension or not guidance:
+                continue
+            rows.append(
+                f"| {_markdown_cell(dimension.replace('_', ' ').title())} | "
+                f"{_markdown_cell(role or 'not declared')} | "
+                f"{_markdown_cell(guidance)} |\n"
+            )
+        if not rows:
+            continue
+        source = _safe_public_scorer_reference(review.get("source_reference"))
+        source_line = (
+            f"- Public scorer source: `{source}`\n"
+            if source
+            else "- Public scorer source: unavailable; use the immutable digest.\n"
+        )
+        sections.append(
+            f"### {revision.label}\n\n"
+            f"- Scorer ID: `{revision.id}`\n"
+            f"- Immutable scorer digest: `{revision.digest}`\n"
+            + source_line
+            + "- Privacy: This review excludes host-only expected values and "
+            "private labels.\n\n"
+            "| Criterion | Role | What the scorer checks |\n"
+            "| --- | --- | --- |\n"
+            + "".join(rows)
+            + "\n"
+        )
+    if not sections:
+        return ""
+    return "## Deterministic scorer review\n\n" + "".join(sections)
+
+
+def _safe_markdown_text(value: Any, *, maximum: int) -> str:
+    text = " ".join(str(value or "").split())
+    if not text or len(text) > maximum or redact_value(text) != text:
+        return ""
+    return text
+
+
+def _markdown_cell(value: str) -> str:
+    return value.replace("|", "\\|")
+
+
+def _safe_public_scorer_reference(value: Any) -> str | None:
+    text = _safe_markdown_text(value, maximum=1000)
+    if not text:
+        return None
+    path = PurePosixPath(text)
+    if (
+        path.is_absolute()
+        or not path.parts
+        or any(part in {"", ".", ".."} for part in path.parts)
+    ):
+        return None
+    normalized_parts = {
+        token
+        for part in path.parts
+        for token in re.split(r"[^a-z0-9]+", part.lower())
+        if token
+    }
+    if normalized_parts & _PRIVATE_WORDS:
+        return None
+    return path.as_posix()
 
 
 def _candidate_component_ids(value: Any) -> tuple[str, ...]:
