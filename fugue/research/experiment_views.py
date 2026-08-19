@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import math
+import urllib.parse
 from collections import Counter, defaultdict
 from collections.abc import Mapping, Sequence
 from dataclasses import asdict, dataclass, field
@@ -2797,7 +2798,8 @@ def _comparison_evidence_links(
     result_digest: str,
 ) -> tuple[dict[str, str], ...]:
     links: list[dict[str, str]] = []
-    for item in _sequence(raw, "comparison evidence links"):
+    raw_links = _sequence(raw, "comparison evidence links")
+    for item in raw_links:
         if not isinstance(item, Mapping):
             continue
         label = str(item.get("label") or "Evidence")
@@ -2814,12 +2816,13 @@ def _comparison_evidence_links(
             link["uri"] = url
         links.append(link)
     digest = result_digest if len(result_digest) == 64 else ""
-    if result_source and len(result_source) <= 1000:
+    comparison_rows_ref = result_source
+    if comparison_rows_ref and len(comparison_rows_ref) <= 1000:
         links.append(
             {
-                "system": "wandb",
+                "system": "fugue",
                 "kind": "comparison_rows",
-                "ref": result_source,
+                "ref": comparison_rows_ref,
             }
         )
     if result_ref and len(result_ref) <= 1000:
@@ -2832,6 +2835,19 @@ def _comparison_evidence_links(
             }
         )
     return _evidence_links(links)
+
+
+def _wandb_run_id_from_url(value: str) -> str | None:
+    if not value.startswith("https://") or len(value) > 2000:
+        return None
+    parsed = urllib.parse.urlsplit(value)
+    if not parsed.netloc or parsed.username or parsed.password:
+        return None
+    path_parts = tuple(part for part in parsed.path.split("/") if part)
+    for index, part in enumerate(path_parts):
+        if part == "runs" and index + 1 < len(path_parts):
+            return path_parts[index + 1]
+    return None
 
 
 def _comparison_behavioral_measures(
@@ -5696,15 +5712,41 @@ def _evidence_links(raw: Any) -> tuple[dict[str, str], ...]:
         _reject_unknown(
             link, {"system", "kind", "ref", "uri", "digest"}, "evidence_link"
         )
-        projected = {
-            "system": _text(link.get("system"), "evidence_link.system", 100),
-            "kind": _text(link.get("kind"), "evidence_link.kind", 100),
-            "ref": _text(link.get("ref"), "evidence_link.ref", 1000),
-        }
+        system = _text(link.get("system"), "evidence_link.system", 100)
+        kind = _text(link.get("kind"), "evidence_link.kind", 100)
+        ref = _text(link.get("ref"), "evidence_link.ref", 1000)
         uri = _optional_text(link.get("uri"), "evidence_link.uri", 2000)
         if uri:
             if not uri.startswith("https://"):
                 raise ValueError("evidence link URIs must use https")
+        if kind == "comparison_rows":
+            if system == "wandb" and uri is None:
+                # Historical local projections mislabeled a Fugue run ID as a
+                # W&B Run. Keep those records readable without manufacturing a
+                # hosted link.
+                system = "fugue"
+            elif system == "wandb":
+                run_id = _wandb_run_id_from_url(uri or "")
+                if run_id is None:
+                    raise ValueError(
+                        "hosted comparison rows require a canonical W&B Run URL"
+                    )
+                if ref != run_id:
+                    raise ValueError(
+                        "hosted comparison rows Run ID must match its URL"
+                    )
+            elif system in {"fugue", "local_artifact"}:
+                if uri is not None:
+                    raise ValueError(
+                        "local comparison rows cannot declare a hosted URI"
+                    )
+                system = "fugue"
+            elif system != "wandb":
+                raise ValueError(
+                    "comparison rows evidence must use fugue or wandb"
+                )
+        projected = {"system": system, "kind": kind, "ref": ref}
+        if uri:
             projected["uri"] = uri
         digest = _optional_digest(link.get("digest"), "evidence_link.digest")
         if digest:

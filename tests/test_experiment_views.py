@@ -26,6 +26,121 @@ _V3_STUDY_CONSOLE_GOLDEN = (
 _REPO_ROOT = Path(__file__).parents[1]
 
 
+def test_local_comparison_rows_use_a_non_clickable_fugue_identity() -> None:
+    links = experiment_views_module._comparison_evidence_links(
+        (),
+        result_ref=None,
+        result_source="local-fugue-run-1",
+        result_digest="a" * 64,
+    )
+
+    assert links == (
+        {
+            "system": "fugue",
+            "kind": "comparison_rows",
+            "ref": "local-fugue-run-1",
+        },
+    )
+    assert "uri" not in links[0]
+
+
+def test_reader_preserves_a_declared_hosted_comparison_rows_link() -> None:
+    run_url = "https://wandb.ai/wandb/fugue-results/runs/hosted-run-1"
+    links = experiment_views_module._evidence_links(
+        (
+            {
+                "system": "wandb",
+                "kind": "comparison_rows",
+                "ref": "hosted-run-1",
+                "uri": run_url,
+            },
+        ),
+    )
+
+    assert links == (
+        {
+            "system": "wandb",
+            "kind": "comparison_rows",
+            "ref": "hosted-run-1",
+            "uri": run_url,
+        },
+    )
+
+
+def test_wandb_run_label_does_not_promote_local_rows_to_hosted_evidence() -> None:
+    run_url = "https://wandb.ai/wandb/fugue-results/runs/unverified-run-1"
+    links = experiment_views_module._comparison_evidence_links(
+        ({"label": "W&B Run", "url": run_url},),
+        result_ref=None,
+        result_source="local-fugue-run-1",
+        result_digest="a" * 64,
+    )
+
+    assert links == (
+        {
+            "system": "wandb",
+            "kind": "w&b_run",
+            "ref": run_url,
+            "uri": run_url,
+        },
+        {
+            "system": "fugue",
+            "kind": "comparison_rows",
+            "ref": "local-fugue-run-1",
+        },
+    )
+
+
+def test_legacy_local_rows_link_remains_readable_without_a_fake_deep_link() -> None:
+    links = experiment_views_module._evidence_links(
+        (
+            {
+                "system": "wandb",
+                "kind": "comparison_rows",
+                "ref": "legacy-local-run-1",
+            },
+        )
+    )
+
+    assert links == (
+        {
+            "system": "fugue",
+            "kind": "comparison_rows",
+            "ref": "legacy-local-run-1",
+        },
+    )
+
+
+def test_comparison_rows_reject_a_non_run_wandb_deep_link() -> None:
+    with pytest.raises(ValueError, match="canonical W&B Run URL"):
+        experiment_views_module._evidence_links(
+            (
+                {
+                    "system": "wandb",
+                    "kind": "comparison_rows",
+                    "ref": "not-a-run",
+                    "uri": (
+                        "https://wandb.ai/wandb/fugue-results/weave/calls/not-a-run"
+                    ),
+                },
+            )
+        )
+
+
+def test_comparison_rows_reject_a_wandb_run_id_that_disagrees_with_its_url() -> None:
+    with pytest.raises(ValueError, match="Run ID must match"):
+        experiment_views_module._evidence_links(
+            (
+                {
+                    "system": "wandb",
+                    "kind": "comparison_rows",
+                    "ref": "different-run",
+                    "uri": "https://wandb.ai/wandb/project/runs/declared-run",
+                },
+            ),
+        )
+
+
 def test_v3_study_console_wire_golden_is_byte_structure_stable() -> None:
     payload = json.loads(_V3_STUDY_CONSOLE_GOLDEN.read_text(encoding="utf-8"))
 

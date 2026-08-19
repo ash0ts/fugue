@@ -311,6 +311,16 @@ def test_result_projection_is_safe_and_result_digest_is_verified(
         "score_summaries",
     } & view.keys()
     assert any(item["kind"] == "comparison_result" for item in view["evidence_links"])
+    [comparison_rows_link] = [
+        item
+        for item in view["evidence_links"]
+        if item["kind"] == "comparison_rows"
+    ]
+    assert comparison_rows_link == {
+        "system": "fugue",
+        "kind": "comparison_rows",
+        "ref": "wandb-artifact://entity/project/comparison:v1",
+    }
 
     result_service = ComparisonControlService(
         tmp_path,
@@ -404,7 +414,18 @@ def test_v1_result_projection_remains_backward_compatible(tmp_path: Path) -> Non
         if item.summary.get("experiment_view", {}).get("kind") == "evaluation"
     ]
     assert len(evaluations) == 1
-    assert evaluations[0].summary["experiment_view"]["schema_version"] == 1
+    legacy_view = evaluations[0].summary["experiment_view"]
+    assert legacy_view["schema_version"] == 1
+    [comparison_rows_link] = [
+        item
+        for item in legacy_view["evidence_links"]
+        if item["kind"] == "comparison_rows"
+    ]
+    assert comparison_rows_link == {
+        "system": "fugue",
+        "kind": "comparison_rows",
+        "ref": "legacy-run",
+    }
 
 
 def test_direct_comparison_projection_is_idempotent_and_preserves_v2_pairs(
@@ -505,6 +526,16 @@ def test_direct_comparison_projection_is_idempotent_and_preserves_v2_pairs(
     )
     assert evaluation["schema_version"] == 2
     assert evaluation["behavioral_summary"]["status"] == "improved"
+    [comparison_rows_link] = [
+        link
+        for link in evaluation["evidence_links"]
+        if link["kind"] == "comparison_rows"
+    ]
+    assert comparison_rows_link == {
+        "system": "fugue",
+        "kind": "comparison_rows",
+        "ref": "local-run-1",
+    }
     [projected_pair] = evaluation["paired_cases"]
     assert projected_pair["pair_id"] == result.paired_cases[0].pair_id
     assert projected_pair["task_id"] == "task-1"

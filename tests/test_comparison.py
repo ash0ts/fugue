@@ -1462,6 +1462,17 @@ def test_v3_result_round_trips_source_topology_and_canonical_view(
     assert result.paired_cases[0].candidate.usage_reconciliation_status == "resolved"
     projected_view = build_comparison_evaluation_view(result.to_dict())
     projected_candidate = projected_view.paired_cases[0]["candidate"]
+    [comparison_rows_link] = [
+        link
+        for link in projected_view.evidence_links
+        if link["kind"] == "comparison_rows"
+    ]
+    assert comparison_rows_link == {
+        "system": "fugue",
+        "kind": "comparison_rows",
+        "ref": "v3-run",
+    }
+    assert any(link["system"] == "weave" for link in projected_view.evidence_links)
     assert projected_candidate["cost_reconciliation_status"] == "resolved"
     assert projected_candidate["latency_reconciliation_status"] == "resolved"
     assert projected_candidate["usage_reconciliation_status"] == "resolved"
@@ -5022,6 +5033,14 @@ def test_execute_local_comparison_never_requires_or_fetches_weave(
     assert view.result_digest == result.result_digest
     assert view.qualification_digest == result.qualification_digest
     assert view.runtime_lock_digest == stable_digest(list(view.runtime_locks))
+    [comparison_rows_link] = [
+        link for link in view.evidence_links if link["kind"] == "comparison_rows"
+    ]
+    assert comparison_rows_link == {
+        "system": "fugue",
+        "kind": "comparison_rows",
+        "ref": result.source,
+    }
     assert {
         link["system"]
         for pair in view.paired_cases
