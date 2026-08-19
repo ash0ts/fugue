@@ -385,6 +385,7 @@ class LiveEvaluationCoordinator:
                 {
                     "fugue.attempt_id": cell.attempt_id,
                     "fugue.cell_id": cell.id,
+                    "fugue.run_id": cell.run_id,
                     "fugue.task_id": cell.task_id,
                     "fugue.task_title": _task_title(row),
                     "fugue.variant_id": cell.variant_id,
@@ -426,12 +427,6 @@ class LiveEvaluationCoordinator:
                     prediction_entered = True
             dataset = self._datasets[session.candidate["evaluation_scope_id"]]
             _remember_session_evaluation(session, prediction)
-            _apply_evaluation_evidence(
-                row,
-                evaluation_call=prediction.evaluate_call,
-                dataset=dataset,
-                project=self.project,
-            )
             predict_call = getattr(prediction, "predict_call", None)
             if predict_call is not None:
                 _apply_call_evidence(
@@ -601,6 +596,7 @@ class LiveEvaluationCoordinator:
             attributes={
                 "fugue.attempt_id": cell.attempt_id,
                 "fugue.cell_id": cell.id,
+                "fugue.run_id": cell.run_id,
                 "fugue.run_key": str(row.get("run_key") or ""),
                 "fugue.harness": cell.harness,
                 "fugue.task_id": cell.task_id,
@@ -953,6 +949,7 @@ class LiveEvaluationCoordinator:
             "fugue.evidence.cross_transport_edge_verified": True,
             "fugue.native_agent_root_receipt": True,
             "fugue.native_agent_root_receipt_version": 1,
+            "fugue.run_id": str(row["run_id"]),
             "fugue.run_key": str(row["run_key"]),
             "fugue.harness": str(row["harness"]),
             "fugue.task_id": str(row["task_id"]),
@@ -4889,6 +4886,9 @@ def _evaluation_model(candidate: dict[str, Any]) -> dict[str, Any]:
 
 def _evaluation_scope_attributes(candidate: dict[str, Any]) -> dict[str, Any]:
     row = candidate["rows"][0]
+    run_ids = sorted(
+        {str(item["run_id"]) for item in candidate["rows"] if item.get("run_id")}
+    )
     attempt_ids = sorted(
         str(item["attempt_id"]) for item in candidate["rows"] if item.get("attempt_id")
     )
@@ -4914,6 +4914,8 @@ def _evaluation_scope_attributes(candidate: dict[str, Any]) -> dict[str, Any]:
             "fugue.arm_label": _arm_label(row),
             "fugue.treatment_summary": _treatment_summary(row),
             "fugue.candidate_id": row.get("candidate_id"),
+            "fugue.run_id": run_ids[0] if len(run_ids) == 1 else None,
+            "fugue.run_ids": "|".join(run_ids) or None,
             "fugue.attempt_ids": "|".join(attempt_ids) or None,
             "fugue.execution_fingerprints": ("|".join(execution_fingerprints) or None),
         }
@@ -5885,12 +5887,23 @@ def _apply_evaluation_evidence(
     project: str,
 ) -> None:
     evaluation_inputs = getattr(evaluation_call, "inputs", None)
-    evaluation = (
+    evaluation_input = (
         evaluation_inputs.get("self")
         if isinstance(evaluation_inputs, Mapping)
         else None
     )
-    evaluation_ref = _ref_uri(evaluation)
+    evaluation_input_ref = _ref_uri(evaluation_input)
+    evaluation = evaluation_input
+    evaluation_get = getattr(evaluation_input, "get", None)
+    row.pop("evaluation_root_resolution_error", None)
+    if callable(evaluation_get):
+        try:
+            evaluation = evaluation_get()
+        except Exception as exc:
+            evaluation = None
+            row["evaluation_root_resolution_error"] = type(exc).__name__
+    resolved_evaluation_ref = _ref_uri(evaluation)
+    evaluation_ref = evaluation_input_ref or resolved_evaluation_ref
     evaluation_call_id = _live_call_value(evaluation_call, "id")
     receipt = row.get("trace_receipt")
     app_base_url = (
@@ -5937,13 +5950,10 @@ def _apply_evaluation_evidence(
     if dataset_url:
         row["weave_dataset_url"] = dataset_url
         row["dataset_url"] = dataset_url
-    evaluation_input_ref = (
-        _ref_uri(evaluation_inputs.get("self"))
-        if isinstance(evaluation_inputs, Mapping)
-        else None
-    )
     root_owns_evaluation = bool(
-        evaluation_ref and evaluation_input_ref == evaluation_ref
+        evaluation_input_ref
+        and resolved_evaluation_ref
+        and evaluation_input_ref == resolved_evaluation_ref
     )
     evaluation_dataset_ref = _object_ref(getattr(evaluation, "dataset", None))
     evaluation_owns_dataset = bool(

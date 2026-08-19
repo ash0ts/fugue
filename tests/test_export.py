@@ -443,6 +443,8 @@ def test_weave_publication_uses_current_signature_and_local_ledger(
                 "This legacy row did not publish a canonical treatment summary."
             ),
             "fugue.candidate_id": "candidate-1",
+            "fugue.run_id": "run-1",
+            "fugue.run_ids": "run-1",
         }
         assert logger.dataset.rows == [
             {
@@ -1480,6 +1482,18 @@ def test_live_evaluation_links_native_root_and_finalizes_cleanly(
 ) -> None:
     loggers = []
     predictions = []
+    attribute_contexts: list[dict[str, object]] = []
+
+    class AttributeContext:
+        def __enter__(self):
+            return None
+
+        def __exit__(self, exc_type, exc, traceback) -> None:
+            return None
+
+    def attributes(values):
+        attribute_contexts.append(dict(values))
+        return AttributeContext()
 
     class FakeDataset:
         def __init__(self, *, name, rows) -> None:
@@ -1564,6 +1578,7 @@ def test_live_evaluation_links_native_root_and_finalizes_cleanly(
     fake_weave = SimpleNamespace(
         Dataset=FakeDataset,
         EvaluationLogger=FakeLogger,
+        attributes=attributes,
         get_client=lambda: client,
     )
     cell = PlannedCell(
@@ -1718,6 +1733,9 @@ def test_live_evaluation_links_native_root_and_finalizes_cleanly(
     )
     overlay = coordinator.begin_cell(cell)
     assert overlay is not None
+    assert any(
+        values.get("fugue.run_id") == "run-a" for values in attribute_contexts
+    )
     traceparent = overlay.pop("FUGUE_WEAVE_TRACEPARENT")
     assert traceparent.startswith(f"00-{'a' * 32}-")
     assert traceparent.endswith("-01")
@@ -1913,6 +1931,122 @@ def test_live_evaluation_graph_rejects_navigation_only_or_wrong_ancestry(
     assert row["evaluation_prediction_graph_error"]
 
 
+def test_live_evaluation_graph_resolves_immutable_evaluation_object_ref() -> None:
+    project = "entity/project"
+    dataset = SimpleNamespace(
+        ref=SimpleNamespace(uri="weave:///entity/project/object/tasks:dataset-v1")
+    )
+    evaluation = SimpleNamespace(
+        dataset=dataset,
+        ref=SimpleNamespace(uri="weave:///entity/project/object/eval:v1"),
+    )
+
+    class EvaluationObjectRef:
+        def __init__(self) -> None:
+            self.get_calls = 0
+
+        @staticmethod
+        def uri() -> str:
+            return "weave:///entity/project/object/eval:v1"
+
+        def get(self):
+            self.get_calls += 1
+            return evaluation
+
+    evaluation_ref = EvaluationObjectRef()
+    evaluation_call = SimpleNamespace(
+        id="evaluation-root",
+        project_id=project,
+        parent_id=None,
+        trace_id="weave-trace",
+        inputs={"self": evaluation_ref},
+        ref=SimpleNamespace(uri="weave:///entity/project/call/evaluation-root"),
+    )
+    predict_and_score = SimpleNamespace(
+        id="predict-and-score",
+        project_id=project,
+        parent_id=evaluation_call.id,
+        trace_id=evaluation_call.trace_id,
+    )
+    predict = SimpleNamespace(
+        id="prediction",
+        project_id=project,
+        parent_id=predict_and_score.id,
+        trace_id=evaluation_call.trace_id,
+    )
+    prediction = SimpleNamespace(
+        evaluate_call=evaluation_call,
+        predict_and_score_call=predict_and_score,
+        predict_call=predict,
+    )
+
+    row: dict[str, object] = {}
+    export._verify_live_evaluation_graph(
+        row,
+        dataset=dataset,
+        prediction=prediction,
+        project=project,
+    )
+
+    assert evaluation_ref.get_calls == 1
+    assert row["evaluation_root_object_verified"] is True
+    assert row["evaluation_root_dataset_relationship_verified"] is True
+    assert row["evaluation_prediction_graph_verified"] is True
+
+
+def test_live_evaluation_graph_fails_closed_when_object_ref_resolution_fails() -> None:
+    project = "entity/project"
+    dataset = SimpleNamespace(
+        ref=SimpleNamespace(uri="weave:///entity/project/object/tasks:dataset-v1")
+    )
+
+    class BrokenEvaluationObjectRef:
+        @staticmethod
+        def uri() -> str:
+            return "weave:///entity/project/object/eval:v1"
+
+        @staticmethod
+        def get():
+            raise RuntimeError("object unavailable")
+
+    evaluation_call = SimpleNamespace(
+        id="evaluation-root",
+        project_id=project,
+        parent_id=None,
+        trace_id="weave-trace",
+        inputs={"self": BrokenEvaluationObjectRef()},
+    )
+    predict_and_score = SimpleNamespace(
+        id="predict-and-score",
+        project_id=project,
+        parent_id=evaluation_call.id,
+        trace_id=evaluation_call.trace_id,
+    )
+    predict = SimpleNamespace(
+        id="prediction",
+        project_id=project,
+        parent_id=predict_and_score.id,
+        trace_id=evaluation_call.trace_id,
+    )
+
+    row: dict[str, object] = {}
+    export._verify_live_evaluation_graph(
+        row,
+        dataset=dataset,
+        prediction=SimpleNamespace(
+            evaluate_call=evaluation_call,
+            predict_and_score_call=predict_and_score,
+            predict_call=predict,
+        ),
+        project=project,
+    )
+
+    assert row["evaluation_root_resolution_error"] == "RuntimeError"
+    assert row["evaluation_root_object_verified"] is False
+    assert row["evaluation_root_dataset_relationship_verified"] is False
+    assert row["evaluation_prediction_graph_verified"] is False
+
+
 def test_claude_live_evaluation_opens_real_otel_parent_bridge() -> None:
     project = "entity/project"
     trace_id = "a" * 32
@@ -2005,6 +2139,7 @@ def test_claude_live_evaluation_opens_real_otel_parent_bridge() -> None:
     assert row["weave_agent_bridge_parent_id"] == prediction_call.id
     assert row["weave_agent_bridge_trace_id"] == trace_id
     assert row["weave_agent_bridge_object_verified"] is True
+    assert created[0]["attributes"]["fugue.run_id"] == "run-bridge"
 
     active = export._LivePrediction(
         session=SimpleNamespace(),
@@ -2536,6 +2671,7 @@ def test_claude_materializes_real_call_from_verified_native_otel_root() -> None:
         "native_agent_root_cross_transport_receipt"
     )
     assert created[0]["attributes"]["fugue.attempt_id"] == "a" * 64
+    assert created[0]["attributes"]["fugue.run_id"] == "run-a"
     assert len(str(created[0]["id"])) == 36
     assert str(export.uuid.UUID(str(created[0]["id"]))) == created[0]["id"]
     assert created[0]["id"] != root["span_id"]
