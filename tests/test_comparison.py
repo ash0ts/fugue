@@ -3524,6 +3524,55 @@ def test_score_details_preserve_partial_numeric_score_as_failure() -> None:
     assert "blocks task pass" in answer["why"]
 
 
+def test_score_details_explain_skill_outcomes_safety_and_use() -> None:
+    evaluator = ComparisonEvaluatorV1(
+        id="skill-package",
+        type="deterministic",
+        required=True,
+        scorer="scorer.py",
+        runtime="python312-sandbox-v1",
+        dimensions=(
+            "requested_constraints_present",
+            "package_contract_valid",
+            "assigned_skill_opened",
+        ),
+        dimension_roles={
+            "requested_constraints_present": "outcome",
+            "package_contract_valid": "safety_gate",
+            "assigned_skill_opened": "mechanism",
+        },
+    )
+
+    details = _safe_comparison_score_details(
+        {
+            "skill-package.requested_constraints_present": False,
+            "skill-package.package_contract_valid": False,
+            "skill-package.assigned_skill_opened": True,
+        },
+        evaluators=(evaluator,),
+        row={},
+        critical_dimensions=frozenset(
+            {
+                "skill-package.requested_constraints_present",
+                "skill-package.package_contract_valid",
+            }
+        ),
+    )
+
+    constraints = details["skill-package.requested_constraints_present"]
+    package = details["skill-package.package_contract_valid"]
+    opened = details["skill-package.assigned_skill_opened"]
+    assert "every public constraint" in constraints["what"]
+    assert "omits or contradicts" in constraints["observed"]
+    assert "blocks task pass" in constraints["why"]
+    assert "package and schema contract" in package["what"]
+    assert "failed at least one" in package["observed"]
+    assert "safety failure blocks task pass" in package["why"]
+    assert "exact Skill revision" in opened["what"]
+    assert "opened the assigned Skill revision" in opened["observed"]
+    assert "does not determine task pass" in opened["why"]
+
+
 def test_score_details_keep_ambiguous_legacy_checks_backward_readable() -> None:
     evaluators = tuple(
         ComparisonEvaluatorV1(

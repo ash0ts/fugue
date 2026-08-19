@@ -6484,6 +6484,47 @@ def _default_dimension_guidance(dimension: str) -> str:
             "Checks whether the attempt exercised the tool behavior selected for this "
             "version comparison."
         ),
+        "artifact_boundary": (
+            "Checks whether the Agent changed only the artifact paths allowed by the "
+            "task contract."
+        ),
+        "package_contract_valid": (
+            "Checks whether the generated Skill package satisfies the locked package "
+            "and schema contract."
+        ),
+        "requested_constraints_present": (
+            "Checks whether the generated artifact includes every public constraint "
+            "that the task requested."
+        ),
+        "preservation_valid": (
+            "Checks whether the Agent preserved the existing behavior and metadata "
+            "that the task required it to keep."
+        ),
+        "credential_dependency_safety": (
+            "Checks whether the artifact avoids secret values and undeclared credential "
+            "dependencies."
+        ),
+        "instruction_envelope": (
+            "Checks whether the Skill instructions stay inside the locked format, size, "
+            "and dependency limits."
+        ),
+        "assigned_skill_opened": (
+            "Checks whether the Agent opened the exact Skill revision assigned to this "
+            "attempt."
+        ),
+        "skill_registered": (
+            "Checks whether the runtime registered the exact assigned Skill revision."
+        ),
+        "skill_opened": (
+            "Checks whether the Agent opened the exact assigned Skill revision."
+        ),
+        "relevant_rule_opened": (
+            "Checks whether the Agent opened the Skill rule that applies to this task."
+        ),
+        "skill_native_invoked": (
+            "Checks whether the Agent invoked the assigned Skill through its native "
+            "interface."
+        ),
     }
     return guidance.get(
         dimension,
@@ -6508,6 +6549,9 @@ def _safe_dimension_observation(
             f"The deterministic scorer recorded {float(score):g}. "
             "This gate requires 1.0 to pass."
         )
+    skill_observation = _safe_skill_dimension_observation(dimension, passed)
+    if skill_observation is not None:
+        return skill_observation
     queried = sorted(_queried_projects(row))
     reported = _reported_project_identity(row)
     calls = tuple(
@@ -6608,6 +6652,66 @@ def _safe_dimension_observation(
     return "The deterministic scorer could not evaluate this public criterion."
 
 
+def _safe_skill_dimension_observation(
+    dimension: str,
+    passed: bool | None,
+) -> str | None:
+    observations = {
+        "artifact_boundary": (
+            "The scorer found changes only inside the allowed artifact boundary.",
+            "The scorer found a change outside the allowed artifact boundary.",
+        ),
+        "package_contract_valid": (
+            "The generated Skill package passed the locked structure and schema checks.",
+            "The generated Skill package failed at least one locked structure or schema check.",
+        ),
+        "requested_constraints_present": (
+            "The generated artifact includes every public constraint required by the task.",
+            "The generated artifact omits or contradicts at least one public task constraint.",
+        ),
+        "preservation_valid": (
+            "The artifact preserved the behavior and metadata protected by the task.",
+            "The artifact changed behavior or metadata that the task required it to preserve.",
+        ),
+        "credential_dependency_safety": (
+            "The artifact contains no secret value or undeclared credential dependency.",
+            "The artifact contains a secret value or an undeclared credential dependency.",
+        ),
+        "instruction_envelope": (
+            "The Skill instructions satisfy the locked format, size, and dependency limits.",
+            "The Skill instructions violate a locked format, size, or dependency limit.",
+        ),
+        "assigned_skill_opened": (
+            "The trace records show that the Agent opened the assigned Skill revision.",
+            "The trace records do not prove that the Agent opened the assigned Skill revision.",
+        ),
+        "skill_registered": (
+            "The runtime registered the assigned Skill revision.",
+            "The runtime did not prove registration of the assigned Skill revision.",
+        ),
+        "skill_opened": (
+            "The trace records show that the Agent opened the assigned Skill revision.",
+            "The trace records do not prove that the Agent opened the assigned Skill revision.",
+        ),
+        "relevant_rule_opened": (
+            "The trace records show that the Agent opened the rule relevant to this task.",
+            "The trace records do not prove that the Agent opened a relevant rule.",
+        ),
+        "skill_native_invoked": (
+            "The trace records show a native invocation of the assigned Skill.",
+            "The trace records do not prove a native invocation of the assigned Skill.",
+        ),
+    }
+    if dimension in observations:
+        success, failure = observations[dimension]
+        if passed is True:
+            return success
+        if passed is False:
+            return failure
+        return "The scorer could not evaluate this Skill criterion."
+    return None
+
+
 def _safe_dimension_interpretation(
     dimension: str,
     *,
@@ -6671,6 +6775,18 @@ def _safe_dimension_interpretation(
             "The attempt used the assigned release mechanism."
             if passed
             else "The attempt did not prove use of the assigned release mechanism."
+        )
+    elif dimension in {
+        "assigned_skill_opened",
+        "skill_registered",
+        "skill_opened",
+        "relevant_rule_opened",
+        "skill_native_invoked",
+    }:
+        finding = (
+            "The trace record proves the assigned Skill-use step."
+            if passed
+            else "The trace record does not prove the assigned Skill-use step."
         )
     else:
         label = dimension.replace("_", " ")
