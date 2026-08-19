@@ -1,0 +1,135 @@
+schema_version: 3
+id: mcp-main-vs-0-4-{{CANDIDATE_SHORT}}-human-readable-evidence-canary-v1
+question: Does the exact W&B MCP staging/0.4.0 commit improve or preserve factual, bounded maintainer work on the two tasks selected for human-readable evidence review?
+taskset:
+  tasks: human-readable-evidence-tasks.jsonl
+  private_labels: human-readable-evidence-private-labels.jsonl
+baseline:
+  label: W&B MCP main at 53b199a5
+  integrations: ["{{MCP_BASELINE_LOCK_ID}}"]
+candidate:
+  label: W&B MCP staging/0.4.0 at {{CANDIDATE_SHA}}
+  integrations: ["{{MCP_CANDIDATE_LOCK_ID}}"]
+changed: [integrations]
+evaluators:
+  - id: tool-surface
+    type: deterministic
+    required: true
+    scorer: tool_surface_scorer_v7.py
+    runtime: python312-sandbox-v1
+    dimensions:
+      - answer_correct
+      - target_behavior_satisfied
+      - actual_query_scope
+      - reported_project_identity
+      - bounded_evidence
+      - evidence_honesty
+      - release_mechanism_used
+    dimension_roles:
+      answer_correct: outcome
+      target_behavior_satisfied: mechanism
+      actual_query_scope: safety_gate
+      reported_project_identity: safety_gate
+      bounded_evidence: safety_gate
+      evidence_honesty: safety_gate
+      release_mechanism_used: mechanism
+    dimension_guidance:
+      answer_correct: >-
+        Checks whether the Agent's final answer is factually correct. The Agent
+        can pass this check when it correctly diagnoses a defect in the MCP.
+      target_behavior_satisfied: >-
+        Checks whether the MCP version under test produced the required result
+        without the Agent diagnosing or working around an MCP defect.
+      actual_query_scope: >-
+        Checks whether every recorded MCP query stayed in the locked source
+        project.
+      reported_project_identity: >-
+        Checks whether the final answer names the same project that the MCP
+        queried.
+      bounded_evidence: >-
+        Checks whether the Agent used finite queries and honored recorded
+        pagination before it stopped.
+      evidence_honesty: >-
+        Checks whether the final answer limits each claim to the evidence that
+        the Agent inspected.
+      release_mechanism_used: >-
+        Checks whether the attempt exercised the MCP behavior selected for this
+        version comparison. This mechanism check does not determine task pass.
+execution:
+  reference_study:
+    id: wandb-mcp-release
+    version: 1
+    intent: python-package-release-qualification
+  evidence_mode: weave_required
+  source_evidence_project: wandb/fugue-mcp-release-source-v2
+  source_evidence_destination:
+    entity: wandb
+    project: fugue-mcp-release-source-v2
+    api_base_url: https://api.wandb.ai
+    trace_base_url: https://trace.wandb.ai
+    app_base_url: https://wandb.ai
+  evidence_project: wandb/fugue-mcp-release-qualification-v1
+  evidence_destination:
+    entity: wandb
+    project: fugue-mcp-release-qualification-v1
+    api_base_url: https://api.wandb.ai
+    trace_base_url: https://trace.wandb.ai
+    app_base_url: https://wandb.ai
+  evidence_lock: source-evidence.lock.json
+  source_conformance_receipt: source-conformance-receipt.json
+  release_notes_lock: release-notes.lock.json
+  mechanism_receipt: mechanism-receipt.json
+  research_id: fugue-mcp-release-qualification-v1
+  study_console_base_url: http://127.0.0.1:18080
+  model: anthropic/claude-sonnet-5
+  harnesses: [claude-code]
+  attempts: 1
+  concurrency: 1
+  evidence_checkpoint_cells: 2
+  max_cost_usd: 10
+  reserve_per_attempt_usd: 2.5
+  approval_required: true
+  preparation_required: true
+  trace_content: full
+  environment: {type: docker}
+decision_policy:
+  release_target: W&B MCP human-readable hosted evidence canary; package, managed-service, and Helm release gates are separate
+  candidate_sha: "{{CANDIDATE_SHA}}"
+  minimum_evidence_grade: A
+  human_signoff_required: true
+  gates:
+    - id: four-terminal-cells
+      label: Four unique terminal cells with hosted evidence
+      category: integrity
+      source: matrix.terminal_rows
+      operator: gte
+      target: 4
+      critical: true
+    - id: candidate-passes-two-tasks
+      label: Candidate passes both critical evidence tasks
+      category: task
+      source: task.candidate_passed
+      operator: gte
+      target: 2
+      critical: true
+    - id: candidate-critical-dimensions
+      label: Candidate has no critical outcome or safety failure
+      category: task
+      source: task.candidate_critical_failures
+      operator: eq
+      target: 0
+      critical: true
+    - id: no-leaks
+      label: No credentials or private labels leaked
+      category: privacy
+      source: privacy.leaks
+      operator: eq
+      target: 0
+      critical: true
+    - id: no-harbor-orphans
+      label: No run-scoped Harbor resources remain
+      category: infrastructure
+      source: cleanup.orphans
+      operator: eq
+      target: 0
+      critical: true

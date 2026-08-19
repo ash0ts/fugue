@@ -2668,6 +2668,7 @@ def _tui(args: argparse.Namespace) -> int:
 def _component_mcp(args: argparse.Namespace) -> int:
     if args.mcp_action == "prepare-wandb-release":
         from fugue.reference_studies.wandb_mcp import (
+            HUMAN_READABLE_COMPARISON_NAME,
             prepare_wandb_mcp_reference_study,
         )
 
@@ -2691,12 +2692,22 @@ def _component_mcp(args: argparse.Namespace) -> int:
             raise RuntimeError(
                 "W&B MCP preparation did not materialize a runnable comparison"
             )
+        if HUMAN_READABLE_COMPARISON_NAME not in artifact_paths:
+            raise RuntimeError(
+                "W&B MCP preparation did not materialize the human-readable "
+                "evidence canary"
+            )
         comparison_path = (
             args.repo_root.resolve() / str(payload["destination"]) / "comparison.yaml"
         )
         payload.update(
             candidate_sha=str(payload["source_commit"]),
             comparison_path=comparison_path.as_posix(),
+            human_readable_comparison_path=(
+                args.repo_root.resolve()
+                / str(payload["destination"])
+                / HUMAN_READABLE_COMPARISON_NAME
+            ).as_posix(),
         )
         print(json.dumps(payload, indent=2, sort_keys=True))
         return 0
