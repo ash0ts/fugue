@@ -224,6 +224,113 @@ def test_hosted_evidence_finishes_after_canonical_local_row() -> None:
     ]
 
 
+def test_combined_evidence_overlay_names_local_and_hosted_scopes_explicitly() -> (
+    None
+):
+    class LocalCoordinator:
+        @staticmethod
+        def begin_cell(cell):
+            del cell
+            return {
+                "FUGUE_ATTEMPT_ID": "attempt-a",
+                "FUGUE_LOCAL_EVALUATION_SCOPE_ID": "local-scope-a",
+                "FUGUE_EVALUATION_SCOPE_ID": "local-scope-a",
+            }
+
+    class HostedCoordinator:
+        @staticmethod
+        def begin_cell(cell):
+            del cell
+            return {
+                "FUGUE_ATTEMPT_ID": "attempt-a",
+                "FUGUE_EVALUATION_SCOPE_ID": "hosted-scope-a",
+            }
+
+    coordinators = operator_module._EvidenceCoordinators(  # noqa: SLF001
+        local=LocalCoordinator(),  # type: ignore[arg-type]
+        hosted=HostedCoordinator(),  # type: ignore[arg-type]
+    )
+
+    overlay = coordinators.begin_cell(object())  # type: ignore[arg-type]
+
+    assert overlay == {
+        "FUGUE_ATTEMPT_ID": "attempt-a",
+        "FUGUE_LOCAL_EVALUATION_SCOPE_ID": "local-scope-a",
+        "FUGUE_EVALUATION_SCOPE_ID": "hosted-scope-a",
+    }
+
+
+def test_combined_evidence_overlay_still_rejects_attempt_identity_mismatch() -> None:
+    class LocalCoordinator:
+        @staticmethod
+        def begin_cell(cell):
+            del cell
+            return {
+                "FUGUE_ATTEMPT_ID": "attempt-a",
+                "FUGUE_LOCAL_EVALUATION_SCOPE_ID": "local-scope-a",
+                "FUGUE_EVALUATION_SCOPE_ID": "local-scope-a",
+            }
+
+    class HostedCoordinator:
+        @staticmethod
+        def begin_cell(cell):
+            del cell
+            return {
+                "FUGUE_ATTEMPT_ID": "attempt-b",
+                "FUGUE_EVALUATION_SCOPE_ID": "hosted-scope-a",
+            }
+
+    coordinators = operator_module._EvidenceCoordinators(  # noqa: SLF001
+        local=LocalCoordinator(),  # type: ignore[arg-type]
+        hosted=HostedCoordinator(),  # type: ignore[arg-type]
+    )
+
+    with pytest.raises(
+        RuntimeError,
+        match="local and hosted evidence overlays disagree: FUGUE_ATTEMPT_ID",
+    ):
+        coordinators.begin_cell(object())  # type: ignore[arg-type]
+
+
+def test_hosted_restore_rejects_duplicate_logical_attempts(tmp_path: Path) -> None:
+    results_path = tmp_path / "hosted-results.jsonl"
+    row = {
+        "attempt_id": "attempt-a",
+        "candidate_id": "candidate-a",
+        "execution_fingerprint": "execution-a",
+    }
+    results_path.write_text(
+        "\n".join(json.dumps(row, sort_keys=True) for _ in range(2)) + "\n",
+        encoding="utf-8",
+    )
+
+    class LocalCoordinator:
+        @staticmethod
+        def restore_finished_cell(_cell):
+            return row
+
+    class HostedCoordinator:
+        def __init__(self) -> None:
+            self.results_path = results_path
+
+        @staticmethod
+        def finish_cell(_cell, _outcome, *, canonical_row):
+            assert canonical_row == row
+
+    coordinators = operator_module._EvidenceCoordinators(  # noqa: SLF001
+        local=LocalCoordinator(),  # type: ignore[arg-type]
+        hosted=HostedCoordinator(),  # type: ignore[arg-type]
+    )
+    cell = SimpleNamespace(
+        attempt_id="attempt-a",
+        candidate_id="candidate-a",
+        execution_fingerprint="execution-a",
+    )
+
+    with pytest.raises(RuntimeError, match="duplicate logical attempts"):
+        coordinators.restore_finished_cell(cell, object())  # type: ignore[arg-type]
+
+
 def test_legacy_weave_required_operator_keeps_local_and_hosted_evidence_separate(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,

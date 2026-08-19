@@ -1661,6 +1661,7 @@ class LocalEvidenceStore:
                 )
         return {
             "FUGUE_ATTEMPT_ID": attempt.attempt_id,
+            "FUGUE_LOCAL_EVALUATION_SCOPE_ID": attempt.evaluation_scope_id,
             "FUGUE_EVALUATION_SCOPE_ID": attempt.evaluation_scope_id,
             "FUGUE_LOCAL_PREDICTION_ID": attempt.prediction_id,
             "FUGUE_LOCAL_EVIDENCE_ROOT": self.root.as_posix(),

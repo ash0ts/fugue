@@ -271,6 +271,17 @@ class _EvidenceCoordinators:
         overlay = dict(self.local.begin_cell(cell) or {})
         hosted = self.hosted.begin_cell(cell) if self.hosted is not None else None
         if hosted:
+            local_scope = overlay.get("FUGUE_LOCAL_EVALUATION_SCOPE_ID")
+            legacy_scope = overlay.get("FUGUE_EVALUATION_SCOPE_ID")
+            if local_scope is not None:
+                if legacy_scope != local_scope:
+                    raise RuntimeError(
+                        "local evidence scope aliases disagree before hosted merge"
+                    )
+                # In a combined weave_required run the unqualified name means
+                # the hosted Evaluation scope.  The attempt-scoped canonical
+                # local identity remains available under its explicit name.
+                overlay.pop("FUGUE_EVALUATION_SCOPE_ID", None)
             overlap = {
                 key for key in overlay if key in hosted and overlay[key] != hosted[key]
             }
@@ -322,6 +333,10 @@ class _EvidenceCoordinators:
             raise ExecutionFinalizationPending(
                 "hosted evidence finalization is incomplete; Agent work was "
                 "preserved and will not be rerun"
+            )
+        if len(matches) > 1:
+            raise RuntimeError(
+                "restored hosted evidence contains duplicate logical attempts"
             )
         for row in matches:
             for key, expected in (
@@ -2891,6 +2906,7 @@ class OperatorService:
             )
             raise
         except KeyboardInterrupt:
+            _cancel_live_evaluation(live, "Run interrupted by the operator.")
             _finalize_run(
                 self.repo_root,
                 run_id,
@@ -2915,6 +2931,7 @@ class OperatorService:
                 )
             else:
                 error = f"{type(exc).__name__}: {exc}"
+                _cancel_live_evaluation(live, error)
                 _finalize_run(
                     self.repo_root,
                     run_id,

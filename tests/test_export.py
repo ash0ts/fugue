@@ -7,7 +7,6 @@ from dataclasses import asdict, replace
 from pathlib import Path
 from types import SimpleNamespace
 
-import httpx
 import pytest
 
 from fugue.agent_tracing import agent_conversation_id
@@ -134,6 +133,30 @@ def _attach_public_call_handles(
             ),
         )
     return prediction
+
+
+def _live_test_cell(*, cell_id: str, run_id: str) -> PlannedCell:
+    return PlannedCell(
+        id=cell_id,
+        run_id=run_id,
+        run_name=run_id,
+        workload_id="coding",
+        task_id="task-a",
+        harness="claude-code",
+        context_system_id="none",
+        variant_id="candidate",
+        model_provider="anthropic",
+        model="anthropic/claude-sonnet-5",
+        trial_index=1,
+        comparison_example_id="example-a",
+        candidate_id="candidate-a",
+        execution_fingerprint="execution-a",
+        config_path=Path("config.yaml"),
+        result_path=Path("jobs/result.json"),
+        command=("harbor", "run"),
+        env={"WANDB_API_KEY": "test-only"},
+        n_attempts=1,
+    )
 
 
 def _write_export_fixture(tmp_path: Path) -> Path:
@@ -684,6 +707,195 @@ def test_live_evaluation_dataset_excludes_future_scripted_turns(
     serialized = json.dumps(datasets[0].rows, sort_keys=True)
     assert "Inspect the repository and report the current finding." in serialized
     assert "hidden follow-up" not in serialized
+
+
+def test_live_evaluation_leases_destination_before_objects_and_releases_on_init_error(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    events: list[str] = []
+
+    class FakeDataset:
+        def __init__(self, **_kwargs) -> None:
+            events.append("dataset")
+
+    class BrokenLogger:
+        def __init__(self, **_kwargs) -> None:
+            events.append("evaluation-root")
+            raise RuntimeError("logger failed")
+
+    fake_weave = SimpleNamespace(
+        Dataset=FakeDataset,
+        EvaluationLogger=BrokenLogger,
+        get_client=lambda: SimpleNamespace(project_id="entity/project"),
+    )
+
+    def acquire(project, env):
+        assert project == "entity/project"
+        assert env["FUGUE_WEAVE_PROJECT"] == "entity/project"
+        events.append("lease-acquired")
+        return "lease-a"
+
+    def initialize(project, env):
+        assert project == "entity/project"
+        assert env["FUGUE_WEAVE_PROJECT"] == "entity/project"
+        events.append("client-active")
+        return fake_weave
+
+    def release(lease):
+        assert lease == "lease-a"
+        events.append("lease-released")
+
+    monkeypatch.setattr(export, "acquire_weave_destination_lease", acquire)
+    monkeypatch.setattr(export, "initialize_weave", initialize)
+    monkeypatch.setattr(export, "release_weave_destination_lease", release)
+    cell = PlannedCell(
+        id="cell-init-failure",
+        run_id="run-init-failure",
+        run_name="init failure",
+        workload_id="coding",
+        task_id="task-a",
+        harness="codex",
+        context_system_id="none",
+        variant_id="none",
+        model_provider="anthropic",
+        model="anthropic/claude-sonnet-5",
+        trial_index=1,
+        comparison_example_id="example-a",
+        candidate_id="candidate-a",
+        execution_fingerprint="execution-a",
+        config_path=Path("config.yaml"),
+        result_path=Path("jobs/result.json"),
+        command=("harbor", "run"),
+        env={"WANDB_API_KEY": "test-only"},
+        n_attempts=1,
+    )
+
+    with pytest.raises(RuntimeError, match="logger failed"):
+        LiveEvaluationCoordinator(
+            [cell],
+            repo_root=tmp_path,
+            project="entity/project",
+            env=cell.env,
+        )
+
+    assert events == [
+        "lease-acquired",
+        "client-active",
+        "dataset",
+        "client-active",
+        "evaluation-root",
+        "lease-released",
+    ]
+
+
+def test_constructor_isolates_root_interrupt_and_releases_destination_lease(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    events: list[str] = []
+
+    class FakeDataset:
+        def __init__(self, **_kwargs) -> None:
+            pass
+
+    class InterruptingLogger:
+        created = 0
+
+        def __init__(self, **_kwargs) -> None:
+            type(self).created += 1
+            if type(self).created == 2:
+                raise RuntimeError("second root failed")
+
+        @staticmethod
+        def fail(_error) -> None:
+            events.append("first-root-close-attempted")
+            raise KeyboardInterrupt
+
+    client = SimpleNamespace(project_id="entity/project")
+    fake_weave = SimpleNamespace(
+        Dataset=FakeDataset,
+        EvaluationLogger=InterruptingLogger,
+        get_client=lambda: client,
+    )
+    monkeypatch.setattr(
+        export,
+        "acquire_weave_destination_lease",
+        lambda _project, _env: "lease-a",
+    )
+    monkeypatch.setattr(export, "initialize_weave", lambda _project, _env: fake_weave)
+    monkeypatch.setattr(
+        export,
+        "release_weave_destination_lease",
+        lambda lease: events.append(f"released:{lease}"),
+    )
+    first = _live_test_cell(cell_id="cell-a", run_id="run-init-roots")
+    second = replace(
+        first,
+        id="cell-b",
+        variant_id="candidate-b",
+        candidate_id="candidate-b",
+        comparison_example_id="example-b",
+    )
+
+    with pytest.raises(RuntimeError, match="second root failed"):
+        LiveEvaluationCoordinator(
+            [first, second],
+            repo_root=tmp_path,
+            project="entity/project",
+            env=first.env,
+        )
+
+    assert events == ["first-root-close-attempted", "released:lease-a"]
+
+
+def test_live_finalize_releases_destination_lease_when_cleanup_raises(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    released: list[str] = []
+    coordinator = object.__new__(LiveEvaluationCoordinator)
+    coordinator._destination_lease = "lease-a"
+
+    def fail_cleanup(*, cancelled: bool):
+        assert cancelled is False
+        raise RuntimeError("cleanup failed")
+
+    coordinator._finalize_without_lease_release = fail_cleanup
+    monkeypatch.setattr(
+        export,
+        "release_weave_destination_lease",
+        released.append,
+    )
+
+    with pytest.raises(RuntimeError, match="cleanup failed"):
+        coordinator.finalize()
+
+    assert released == ["lease-a"]
+    assert coordinator._destination_lease is None
+
+
+def test_hosted_dynamic_row_merge_rejects_nonempty_identity_conflict() -> None:
+    canonical = {
+        "weave_evaluation_root_call_id": "local-claimed-root",
+        "task_id": "task-a",
+        "comparison_deterministic_scores": {"fact-correct": True},
+    }
+
+    with pytest.raises(
+        RuntimeError,
+        match="hosted lifecycle field weave_evaluation_root_call_id",
+    ):
+        export._merge_hosted_dynamic_row_fields(
+            canonical,
+            {
+                "weave_evaluation_root_call_id": "hosted-root",
+                "task_id": "hosted-must-not-merge",
+                "comparison_deterministic_scores": {"fact-correct": False},
+            },
+        )
+
+    assert canonical["task_id"] == "task-a"
+    assert canonical["comparison_deterministic_scores"] == {"fact-correct": True}
 
 
 def test_posthoc_publication_rejects_exact_env_secret_before_remote_write(
@@ -1514,6 +1726,7 @@ def test_live_evaluation_links_native_root_and_finalizes_cleanly(
                 summary=None,
                 ref=SimpleNamespace(uri=f"weave:///entity/project/call/{call_id}"),
                 ui_url=f"https://wandb.test/calls/{call_id}",
+                ended_at=None,
             )
             self.predict_call = SimpleNamespace(
                 id=f"{call_id}-model",
@@ -1524,10 +1737,13 @@ def test_live_evaluation_links_native_root_and_finalizes_cleanly(
                     uri=f"weave:///entity/project/call/{call_id}-model"
                 ),
                 ui_url=f"https://wandb.test/calls/{call_id}-model",
+                ended_at=None,
             )
             self.output = None
             self.scores = {}
             self.finished = False
+            client.public_calls[call_id] = self.predict_and_score_call
+            client.public_calls[f"{call_id}-model"] = self.predict_call
 
         def __enter__(self):
             return self
@@ -1537,6 +1753,8 @@ def test_live_evaluation_links_native_root_and_finalizes_cleanly(
 
         def __exit__(self, exc_type, exc, traceback) -> None:
             self.finished = True
+            self.predict_and_score_call.ended_at = "terminal"
+            self.predict_call.ended_at = "terminal"
 
     class FakeLogger(_PublicEvaluationLoggerMixin):
         def __init__(self, **kwargs) -> None:
@@ -1546,16 +1764,29 @@ def test_live_evaluation_links_native_root_and_finalizes_cleanly(
                 dataset=self.dataset,
                 ref=SimpleNamespace(uri="weave:///entity/project/object/eval:shared"),
             )
+
+            class EvaluationObjectRef:
+                @staticmethod
+                def uri() -> str:
+                    return "weave:///entity/project/object/eval:shared"
+
+                def get(inner_self):
+                    del inner_self
+                    assert "flush" not in client.events
+                    client.events.append("evaluation-ref-resolved")
+                    return self._pseudo_evaluation
+
             self._evaluate_call = SimpleNamespace(
                 id="evaluation-root-1",
                 project_id="entity/project",
                 parent_id=None,
                 trace_id="a" * 32,
-                inputs={"self": self._pseudo_evaluation},
+                inputs={"self": EvaluationObjectRef()},
                 ref=SimpleNamespace(
                     uri="weave:///entity/project/call/evaluation-root-1"
                 ),
             )
+            client.public_calls[self._evaluate_call.id] = self._evaluate_call
             self.summarized = False
             loggers.append(self)
 
@@ -1570,11 +1801,15 @@ def test_live_evaluation_links_native_root_and_finalizes_cleanly(
         def log_summary(self) -> None:
             self.summarized = True
             self.ui_url = "https://wandb.test/evaluations/live"
+            self._evaluate_call.ended_at = "terminal"
 
         def fail(self, exception) -> None:
             raise AssertionError(exception)
 
-    client = _OutOfOrderWeaveClient("entity/project")
+    client = _OutOfOrderWeaveClient(
+        "entity/project",
+        forbid_flush_while_evaluation_children_open=True,
+    )
     fake_weave = SimpleNamespace(
         Dataset=FakeDataset,
         EvaluationLogger=FakeLogger,
@@ -1617,10 +1852,21 @@ def test_live_evaluation_links_native_root_and_finalizes_cleanly(
 
     def summaries(**kwargs):
         call_id = predictions[0].predict_and_score_call.id
+        pending_calls = {
+            call.id: call
+            for kind, call, _output in client.pending
+            if kind == "start"
+        }
         bridge_ids = [
             call_id_value
-            for call_id_value, call in client.remote.items()
-            if call.get("parent_id") == f"{call_id}-model"
+            for call_id_value, call in {
+                **{
+                    key: SimpleNamespace(**value)
+                    for key, value in client.remote.items()
+                },
+                **pending_calls,
+            }.items()
+            if getattr(call, "parent_id", None) == f"{call_id}-model"
         ]
         bridge_id = bridge_ids[0] if bridge_ids else ""
         agent_ids = [value for value in client.remote if value not in bridge_ids]
@@ -1631,9 +1877,11 @@ def test_live_evaluation_links_native_root_and_finalizes_cleanly(
             "trace_id": "a" * 32,
             "span_id": "b" * 16,
             "otel_parent_span_id": str(
-                (client.remote.get(bridge_id, {}).get("attributes") or {}).get(
-                    "fugue.agent_bridge_otel_parent_span_id"
-                )
+                (
+                    client.remote.get(bridge_id, {}).get("attributes")
+                    or getattr(pending_calls.get(bridge_id), "attributes", {})
+                    or {}
+                ).get("fugue.agent_bridge_otel_parent_span_id")
                 or ""
             ),
             "run_key": ("run-a:coding:trial:task-a:codex:rag-bm25:rag-bm25:t001"),
@@ -1731,8 +1979,37 @@ def test_live_evaluation_links_native_root_and_finalizes_cleanly(
             "comparison.deterministic.citation-quality",
         ),
     )
-    overlay = coordinator.begin_cell(cell)
+
+    class CanonicalLocalCoordinator:
+        @staticmethod
+        def begin_cell(_cell):
+            return {}
+
+        @staticmethod
+        def finish_cell(_cell, outcome):
+            row = export._completed_evaluation_row(
+                cell,
+                outcome,
+                export._planned_evaluation_row(cell),
+            )
+            host_evaluator(row)
+            row["evaluation_judge_status"] = "not_requested"
+            export._set_adapter_outcome(row)
+            assert "weave_evaluation_root_call_id" not in row
+            assert "eval_predict_and_score_call_id" not in row
+            assert "weave_prediction_call_id" not in row
+            assert "weave_agent_bridge_call_id" not in row
+            assert "weave_hosted_evidence_receipt_call_id" not in row
+            return row
+
+    evidence = operator._EvidenceCoordinators(
+        local=CanonicalLocalCoordinator(),  # type: ignore[arg-type]
+        hosted=coordinator,
+    )
+    overlay = evidence.begin_cell(cell)
     assert overlay is not None
+    assert "evaluation-ref-resolved" in client.events
+    assert "flush" not in client.events
     assert any(
         values.get("fugue.run_id") == "run-a" for values in attribute_contexts
     )
@@ -1757,8 +2034,18 @@ def test_live_evaluation_links_native_root_and_finalizes_cleanly(
         ],
     }
 
-    coordinator.finish_cell(cell, CellOutcome(cell.id, "passed", returncode=0))
+    evidence.finish_cell(cell, CellOutcome(cell.id, "passed", returncode=0))
+    immutable_pas_output = json.loads(json.dumps(predictions[0].output))
+    assert "flush" not in client.events
     publication = coordinator.finalize()
+    assert client.events.index("evaluation-ref-resolved") < client.events.index(
+        "flush"
+    )
+    assert client.events.index("flush") < max(
+        index
+        for index, event in enumerate(client.events)
+        if event == "get-call:evaluation-root-1"
+    )
 
     assert publication.published == 1
     assert publication.failures == ()
@@ -1767,7 +2054,14 @@ def test_live_evaluation_links_native_root_and_finalizes_cleanly(
     assert publication.evaluations[0].direct_predictions == 0
     assert predictions[0].finished is True
     assert predictions[0].output["observed_conversation_id"] == "native-conversation"
-    assert predictions[0].output["trace_link_status"] == "linked"
+    assert (
+        predictions[0].output["trace_link_status"]
+        == "pending_terminal_reconciliation"
+    )
+    assert predictions[0].output["task_verdict_owner"] == "predict_and_score"
+    assert predictions[0].output["hosted_evidence_verification"]["status"] == (
+        "pending_post_close_verification"
+    )
     live_row = json.loads(
         (tmp_path / ".fugue/runtime/run-a/evaluation-results.jsonl").read_text()
     )
@@ -1816,6 +2110,22 @@ def test_live_evaluation_links_native_root_and_finalizes_cleanly(
     assert live_row["weave_prediction_object_verified"] is True
     assert live_row["evaluation_prediction_graph_verified"] is True
     assert live_row["agent_graph_verified"] is True
+    assert live_row["agent_cross_transport_edge"]["status"] == "verified"
+    assert (
+        live_row["weave_agent_bridge_cross_transport_edge"]["status"]
+        == "verified"
+    )
+    assert live_row["evaluation_root_terminal_verified"] is True
+    assert live_row["hosted_evidence_verification_status"] == "verified"
+    assert live_row["terminal_hosted_visibility_verified"] is True
+    receipt_call_id = live_row["weave_hosted_evidence_receipt_call_id"]
+    assert client.remote[receipt_call_id]["terminal"] is True
+    assert client.remote[receipt_call_id]["parent_id"] == "predict-1"
+    assert client.remote[receipt_call_id]["inputs"]["attempt_id"] == cell.attempt_id
+    assert client.remote[receipt_call_id]["inputs"]["predict_and_score_call_id"] == (
+        "predict-1"
+    )
+    assert predictions[0].output == immutable_pas_output
     assert live_row["evaluation_judge_status"] == "not_requested"
     assert predictions[0].output["judge_evidence"] == {
         "status": "unavailable",
@@ -1832,13 +2142,274 @@ def test_live_evaluation_links_native_root_and_finalizes_cleanly(
         "weave": {"genai_span_ref": [{"trace_id": "a" * 32, "span_id": "b" * 16}]}
     }
     assert loggers[0].summarized is True
-    statuses = [
-        json.loads(line)["status"]
+    events = [
+        json.loads(line)
         for line in (tmp_path / ".fugue/runtime/run-a/evaluations.jsonl")
         .read_text()
         .splitlines()
     ]
-    assert statuses == ["pending", "prediction_open", "trace_linked", "finalized"]
+    statuses = [event["status"] for event in events]
+    assert statuses == [
+        "pending",
+        "prediction_open",
+        "trace_linked",
+        "hosted_evidence_verified",
+        "finalized",
+    ]
+    opened = events[1]
+    assert opened["evaluation_root_call_id"] == "evaluation-root-1"
+    assert opened["eval_predict_and_score_call_id"] == "predict-1"
+    assert opened["prediction_call_id"] == "predict-1-model"
+    assert opened["agent_bridge_call_id"] == live_row["weave_agent_bridge_call_id"]
+    assert opened["evaluation_trace_id"] == "a" * 32
+
+
+def test_hosted_verification_receipt_closes_after_finish_interruption(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    project = "entity/project"
+    trace_id = "a" * 32
+    evaluation_root = SimpleNamespace(
+        id="evaluation-root",
+        project_id=project,
+        parent_id=None,
+        trace_id=trace_id,
+    )
+    predict_and_score = SimpleNamespace(
+        id="predict-and-score",
+        project_id=project,
+        parent_id=evaluation_root.id,
+        trace_id=trace_id,
+    )
+    finished: list[dict[str, object]] = []
+
+    class PublicClient:
+        project_id = project
+
+        @staticmethod
+        def create_call(
+            _op,
+            inputs,
+            parent=None,
+            attributes=None,
+            display_name=None,
+            *,
+            use_stack=True,
+            _call_id_override=None,
+        ):
+            del attributes, display_name, use_stack
+            return SimpleNamespace(
+                id=_call_id_override,
+                parent_id=parent.id,
+                project_id=project,
+                trace_id=parent.trace_id,
+                inputs=inputs,
+            )
+
+        @staticmethod
+        def finish_call(_call, output=None):
+            finished.append(dict(output or {}))
+
+    coordinator = object.__new__(LiveEvaluationCoordinator)
+    coordinator.project = project
+    coordinator.weave = SimpleNamespace(get_client=lambda: PublicClient)
+    row = {
+        "run_id": "run-a",
+        "cell_id": "cell-a",
+        "attempt_id": "a" * 64,
+        "weave_evaluation_root_call_id": evaluation_root.id,
+        "eval_predict_and_score_call_id": predict_and_score.id,
+        "weave_prediction_call_id": "prediction",
+        "weave_dataset_ref": "weave:///entity/project/object/tasks:v1",
+        "weave_agent_bridge_call_id": "bridge",
+        "weave_agent_root_call_id": "agent-receipt",
+    }
+    coordinator._prepare_hosted_evidence_verification_receipt(row)
+    active = export._LivePrediction(
+        session=SimpleNamespace(),
+        prediction=SimpleNamespace(
+            evaluate_call=evaluation_root,
+            predict_and_score_call=predict_and_score,
+        ),
+        bridge_call=SimpleNamespace(),
+        bridge_client=PublicClient,
+        row=row,
+        opened_monotonic=0.0,
+    )
+    original_finish = coordinator._finish_evidence_call
+    finish_attempts = 0
+
+    def interrupt_first_finish(*args, **kwargs):
+        nonlocal finish_attempts
+        finish_attempts += 1
+        if finish_attempts == 1:
+            raise KeyboardInterrupt
+        return original_finish(*args, **kwargs)
+
+    monkeypatch.setattr(
+        coordinator,
+        "_finish_evidence_call",
+        interrupt_first_finish,
+    )
+    with pytest.raises(KeyboardInterrupt):
+        coordinator._publish_hosted_evidence_verification_receipt(
+            active=active,
+            row=row,
+        )
+
+    assert finish_attempts == 2
+    assert len(finished) == 1
+    assert finished[0]["hosted_evidence_integrity"] == "verified"
+    assert len(str(finished[0]["bindings_digest"])) == 64
+    assert finished[0]["task_verdict_owner"] == "predict_and_score"
+    assert finished[0]["cleanup_after_failure"] is True
+
+
+def test_eager_call_owners_recover_side_effect_before_create_interruption() -> None:
+    project = "entity/project"
+    trace_id = "a" * 32
+
+    class InterruptingClient:
+        project_id = project
+
+        def __init__(self) -> None:
+            self.calls: dict[str, object] = {}
+            self.finished: list[dict[str, object]] = []
+
+        def create_call(
+            self,
+            _op,
+            _inputs,
+            parent=None,
+            attributes=None,
+            display_name=None,
+            *,
+            use_stack=True,
+            _call_id_override=None,
+        ):
+            del attributes, display_name, use_stack
+            self.calls[_call_id_override] = SimpleNamespace(
+                id=_call_id_override,
+                parent_id=parent.id,
+                project_id=project,
+                trace_id=parent.trace_id,
+            )
+            raise KeyboardInterrupt
+
+        def get_call(self, call_id):
+            return self.calls[call_id]
+
+        def finish_call(self, _call, output=None):
+            self.finished.append(dict(output or {}))
+
+    def coordinator_for(client):
+        value = object.__new__(LiveEvaluationCoordinator)
+        value.project = project
+        value.weave = SimpleNamespace(get_client=lambda: client)
+        value._weave_requires_reactivation = False
+        return value
+
+    bridge_client = InterruptingClient()
+    bridge_coordinator = coordinator_for(bridge_client)
+    cell = _live_test_cell(cell_id="cell-bridge-owner", run_id="run-bridge-owner")
+    with pytest.raises(KeyboardInterrupt):
+        bridge_coordinator._open_agent_bridge(
+            cell=cell,
+            row={},
+            prediction=SimpleNamespace(
+                predict_call=SimpleNamespace(
+                    id="prediction",
+                    project_id=project,
+                    trace_id=trace_id,
+                )
+            ),
+        )
+    assert bridge_client.finished == [{"status": "bridge_create_interrupted"}]
+
+    agent_client = InterruptingClient()
+    agent_coordinator = coordinator_for(agent_client)
+    bridge = SimpleNamespace(id="bridge", project_id=project, trace_id=trace_id)
+    agent_row = {
+        "run_id": "run-a",
+        "cell_id": "cell-a",
+        "run_key": "run-key",
+        "harness": "claude-code",
+        "task_id": "task-a",
+        "candidate_id": "candidate-a",
+        "attempt_id": "a" * 64,
+        "execution_fingerprint": "e" * 64,
+        "comparison_example_id": "example-a",
+        "trial_index": 1,
+        "eval_predict_and_score_call_id": "pas",
+        "weave_evaluation_root_call_id": "evaluation",
+        "trace_project": project,
+        "status": "passed",
+    }
+    with pytest.raises(KeyboardInterrupt):
+        agent_coordinator._materialize_native_agent_call(
+            active=export._LivePrediction(
+                session=SimpleNamespace(),
+                prediction=SimpleNamespace(),
+                bridge_call=bridge,
+                bridge_client=agent_client,
+                row=agent_row,
+                opened_monotonic=0.0,
+            ),
+            row=agent_row,
+            root={
+                "conversation_id": "conversation",
+                "trace_id": trace_id,
+                "span_id": "b" * 16,
+            },
+        )
+    assert agent_client.finished == [
+        {"status": "native_agent_receipt_create_interrupted"}
+    ]
+
+    hosted_client = InterruptingClient()
+    hosted_coordinator = coordinator_for(hosted_client)
+    evaluation = SimpleNamespace(
+        id="evaluation",
+        project_id=project,
+        parent_id=None,
+        trace_id=trace_id,
+    )
+    pas = SimpleNamespace(
+        id="pas",
+        project_id=project,
+        parent_id=evaluation.id,
+        trace_id=trace_id,
+    )
+    hosted_row = {
+        "run_id": "run-a",
+        "cell_id": "cell-a",
+        "attempt_id": "a" * 64,
+        "weave_evaluation_root_call_id": evaluation.id,
+        "eval_predict_and_score_call_id": pas.id,
+        "weave_prediction_call_id": "prediction",
+        "weave_dataset_ref": "weave:///entity/project/object/tasks:v1",
+        "weave_agent_bridge_call_id": "bridge",
+        "weave_agent_root_call_id": "agent",
+    }
+    hosted_coordinator._prepare_hosted_evidence_verification_receipt(hosted_row)
+    with pytest.raises(KeyboardInterrupt):
+        hosted_coordinator._publish_hosted_evidence_verification_receipt(
+            active=export._LivePrediction(
+                session=SimpleNamespace(),
+                prediction=SimpleNamespace(
+                    evaluate_call=evaluation,
+                    predict_and_score_call=pas,
+                ),
+                bridge_call=bridge,
+                bridge_client=hosted_client,
+                row=hosted_row,
+                opened_monotonic=0.0,
+            ),
+            row=hosted_row,
+        )
+    assert hosted_client.finished == [
+        {"status": "hosted_evidence_receipt_create_interrupted"}
+    ]
 
 
 @pytest.mark.parametrize(
@@ -2047,7 +2618,9 @@ def test_live_evaluation_graph_fails_closed_when_object_ref_resolution_fails() -
     assert row["evaluation_prediction_graph_verified"] is False
 
 
-def test_claude_live_evaluation_opens_real_otel_parent_bridge() -> None:
+def test_claude_live_evaluation_opens_real_otel_parent_bridge(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     project = "entity/project"
     trace_id = "a" * 32
     prediction_call = SimpleNamespace(
@@ -2138,7 +2711,8 @@ def test_claude_live_evaluation_opens_real_otel_parent_bridge() -> None:
     assert bridge.id != bridge_parent_span
     assert row["weave_agent_bridge_parent_id"] == prediction_call.id
     assert row["weave_agent_bridge_trace_id"] == trace_id
-    assert row["weave_agent_bridge_object_verified"] is True
+    assert row["weave_agent_bridge_local_identity_verified"] is True
+    assert row["weave_agent_bridge_object_verified"] is False
     assert created[0]["attributes"]["fugue.run_id"] == "run-bridge"
 
     active = export._LivePrediction(
@@ -2162,9 +2736,23 @@ def test_claude_live_evaluation_opens_real_otel_parent_bridge() -> None:
     )
     assert finished == [(bridge, {"agent_execution_status": "completed"})]
     assert row["weave_agent_bridge_close_status"] == "linked"
-    assert row["weave_agent_bridge_closed_verified"] is True
+    assert row["weave_agent_bridge_close_recorded"] is True
+    assert row["weave_agent_bridge_closed_verified"] is False
     assert terminal_row["weave_agent_bridge_close_status"] == "linked"
-    assert terminal_row["weave_agent_bridge_closed_verified"] is True
+    assert terminal_row["weave_agent_bridge_close_recorded"] is True
+    assert terminal_row["weave_agent_bridge_closed_verified"] is False
+
+    def interrupt_after_validation(*_args, **_kwargs) -> None:
+        raise KeyboardInterrupt
+
+    monkeypatch.setattr(export, "_apply_call_evidence", interrupt_after_validation)
+    with pytest.raises(KeyboardInterrupt):
+        coordinator._open_agent_bridge(
+            cell=cell,
+            row={},
+            prediction=SimpleNamespace(predict_call=prediction_call),
+        )
+    assert finished[-1][1] == {"status": "start_failed"}
 
     class FailingClient:
         @staticmethod
@@ -2184,16 +2772,64 @@ def test_claude_live_evaluation_opens_real_otel_parent_bridge() -> None:
     assert failed_row["weave_agent_bridge_closed_verified"] is False
     assert failed_row["weave_agent_bridge_close_error"] == "RuntimeError"
 
+    class InterruptingClient:
+        @staticmethod
+        def finish_call(call, output=None):
+            raise KeyboardInterrupt
+
+    interrupted_row: dict[str, object] = {}
+    coordinator._finish_agent_bridge(
+        export._LivePrediction(
+            session=SimpleNamespace(),
+            prediction=SimpleNamespace(),
+            bridge_call=bridge,
+            bridge_client=InterruptingClient(),
+            row=interrupted_row,
+            opened_monotonic=0.0,
+        ),
+        status="interrupted",
+    )
+    assert interrupted_row["weave_agent_bridge_closed_verified"] is False
+    assert interrupted_row["weave_agent_bridge_close_error"] == "KeyboardInterrupt"
+
 
 class _OutOfOrderWeaveClient:
     """Model Weave's async start/end queues with hostile flush ordering."""
 
-    def __init__(self, project: str, *, drop_ends: bool = False) -> None:
+    def __init__(
+        self,
+        project: str,
+        *,
+        drop_ends: bool = False,
+        forbid_flush_while_evaluation_children_open: bool = False,
+    ) -> None:
         self.project_id = project
         self.drop_ends = drop_ends
+        self.forbid_flush_while_evaluation_children_open = (
+            forbid_flush_while_evaluation_children_open
+        )
         self.pending: list[tuple[str, object, object]] = []
         self.remote: dict[str, dict[str, object]] = {}
+        self.public_calls: dict[str, object] = {}
         self.events: list[str] = []
+
+    def get_call(self, call_id: str):
+        self.events.append(f"get-call:{call_id}")
+        if call_id in self.public_calls:
+            return self.public_calls[call_id]
+        value = self.remote[call_id]
+        return SimpleNamespace(
+            id=value["call_id"],
+            parent_id=value.get("parent_id"),
+            project_id=value["project_id"],
+            trace_id=value["trace_id"],
+            ended_at="terminal" if value.get("terminal") else None,
+            inputs=value.get("inputs"),
+        )
+
+    @staticmethod
+    def get(ref):
+        return ref.get()
 
     def create_call(
         self,
@@ -2220,11 +2856,58 @@ class _OutOfOrderWeaveClient:
         return call
 
     def finish_call(self, call, output=None):
+        if self.forbid_flush_while_evaluation_children_open:
+            start = next(
+                (
+                    item
+                    for item in self.pending
+                    if item[0] == "start" and item[1].id == call.id
+                ),
+                None,
+            )
+            if start is not None:
+                self.pending.remove(start)
+                self.remote[call.id] = {
+                    "call_id": call.id,
+                    "parent_id": call.parent_id,
+                    "project_id": call.project_id,
+                    "trace_id": call.trace_id,
+                    "terminal": True,
+                    "attributes": dict(call.attributes),
+                    "inputs": dict(call.inputs),
+                    "output": output,
+                }
+                self.events.append(f"calls-complete-published:{call.id}")
+                return
         self.pending.append(("end", call, output))
         self.events.append(f"end-scheduled:{call.id}")
 
     def flush(self) -> None:
+        if self.forbid_flush_while_evaluation_children_open and any(
+            getattr(call, "parent_id", None)
+            and getattr(call, "ended_at", None) is None
+            for call in self.public_calls.values()
+        ):
+            raise AssertionError(
+                "full flush would wait for open prediction-and-score Calls"
+            )
+        self.events.append("flush")
         pending, self.pending = self.pending, []
+        if self.forbid_flush_while_evaluation_children_open:
+            starts = {call.id: call for kind, call, _ in pending if kind == "start"}
+            ends = {call.id: output for kind, call, output in pending if kind == "end"}
+            for call_id, call in starts.items():
+                self.remote[call_id] = {
+                    "call_id": call.id,
+                    "parent_id": call.parent_id,
+                    "project_id": call.project_id,
+                    "trace_id": call.trace_id,
+                    "terminal": call_id in ends,
+                    "attributes": dict(call.attributes),
+                    "inputs": dict(call.inputs),
+                    "output": ends.get(call_id),
+                }
+            return
         # If start and end are flushed together, process the end first. That
         # reproduces the SDK race which dropped the V5 terminal update.
         for kind, call, output in reversed(pending):
@@ -2236,6 +2919,7 @@ class _OutOfOrderWeaveClient:
                     "trace_id": call.trace_id,
                     "terminal": False,
                     "attributes": dict(call.attributes),
+                    "inputs": dict(call.inputs),
                 }
                 self.events.append(f"start-published:{call.id}")
             elif self.drop_ends or call.id not in self.remote:
@@ -2308,7 +2992,10 @@ def test_claude_call_lifecycle_flushes_start_before_end_across_a_b_a(
 ) -> None:
     project_a = "entity/project-a"
     project_b = "entity/project-b"
-    client_a = _OutOfOrderWeaveClient(project_a)
+    client_a = _OutOfOrderWeaveClient(
+        project_a,
+        forbid_flush_while_evaluation_children_open=True,
+    )
     client_b = _OutOfOrderWeaveClient(project_b)
     clients = {project_a: client_a, project_b: client_b}
     active = {"client": client_b}
@@ -2384,8 +3071,7 @@ def test_claude_call_lifecycle_flushes_start_before_end_across_a_b_a(
         row=row,
         prediction=SimpleNamespace(predict_call=prediction_call),
     )
-    assert row["weave_agent_bridge_start_verified"] is True
-    activate(project_b, {})
+    assert row["weave_agent_bridge_start_verified"] is False
     active_prediction = export._LivePrediction(
         session=SimpleNamespace(),
         prediction=SimpleNamespace(),
@@ -2405,7 +3091,6 @@ def test_claude_call_lifecycle_flushes_start_before_end_across_a_b_a(
         row=row,
         root=root,
     )
-    activate(project_b, {})
     coordinator._finish_agent_bridge(
         active_prediction,
         status="agent_completed",
@@ -2413,27 +3098,17 @@ def test_claude_call_lifecycle_flushes_start_before_end_across_a_b_a(
     )
 
     native_id = str(row["weave_agent_root_call_id"])
-    assert activations == [
-        project_a,
-        project_b,
-        project_a,
-        project_b,
-        project_a,
-    ]
+    assert activations == [project_a, project_a, project_a, project_a]
     assert client_a.remote[native_id]["terminal"] is True
     assert client_a.remote[bridge.id]["terminal"] is True
-    assert row["weave_agent_root_call_start_verified"] is True
-    assert row["weave_agent_root_call_terminal_verified"] is True
-    assert row["weave_agent_bridge_closed_verified"] is True
-    assert f"start-published:{native_id}" in client_a.events
-    assert client_a.events.index(f"start-published:{native_id}") < (
-        client_a.events.index(f"end-published:{native_id}")
-    )
-    assert f"end-dropped:{native_id}" not in client_a.events
+    assert row["weave_agent_root_call_start_verified"] is False
+    assert row["weave_agent_root_call_terminal_verified"] is False
+    assert row["weave_agent_bridge_closed_verified"] is False
+    assert f"calls-complete-published:{native_id}" in client_a.events
     assert client_b.remote == {}
 
 
-def test_claude_native_call_rejects_a_missing_remote_terminal_end() -> None:
+def test_claude_native_call_keeps_missing_remote_terminal_end_pending() -> None:
     project = "entity/project"
     client = _OutOfOrderWeaveClient(project, drop_ends=True)
     bridge = SimpleNamespace(
@@ -2476,26 +3151,27 @@ def test_claude_native_call_rejects_a_missing_remote_terminal_end() -> None:
         opened_monotonic=0.0,
     )
 
-    with pytest.raises(
-        RuntimeError,
-        match="Agent evidence receipt end was not durably published",
-    ):
-        coordinator._materialize_native_agent_call(
-            active=active_prediction,
-            row=row,
-            root={
-                "conversation_id": "native-session",
-                "trace_id": "a" * 32,
-                "span_id": "c" * 16,
-            },
-        )
+    coordinator._materialize_native_agent_call(
+        active=active_prediction,
+        row=row,
+        root={
+            "conversation_id": "native-session",
+            "trace_id": "a" * 32,
+            "span_id": "c" * 16,
+        },
+    )
 
     native_id = str(row["weave_agent_root_call_id"])
-    assert client.remote[native_id]["terminal"] is False
-    assert row["weave_agent_root_call_start_verified"] is True
+    assert native_id not in client.remote
+    assert row["weave_agent_root_call_start_verified"] is False
     assert row["weave_agent_root_call_terminal_verified"] is False
-    assert "weave_agent_root_call_object_created" not in row
-    assert f"end-dropped:{native_id}" in client.events
+    assert row["weave_agent_root_call_object_created"] is True
+    assert row["weave_agent_root_call_terminal_recorded"] is True
+    assert (
+        row["weave_agent_root_call_publication_status"]
+        == "pending_terminal_reconciliation"
+    )
+    assert f"end-scheduled:{native_id}" in client.events
 
 
 def test_claude_live_evaluation_normalizes_weave_uuid_traceparent() -> None:
@@ -2571,7 +3247,7 @@ def test_claude_live_evaluation_normalizes_weave_uuid_traceparent() -> None:
     assert len(bridge_parent_span) == 16
     assert row["weave_agent_bridge_cross_transport_edge"] == {
         "schema_version": 1,
-        "status": "verified",
+        "status": "local_recorded",
         "weave_call_id": bridge.id,
         "otel_trace_id": compact,
         "otel_span_id": bridge_parent_span,
@@ -2580,7 +3256,9 @@ def test_claude_live_evaluation_normalizes_weave_uuid_traceparent() -> None:
     assert row["weave_agent_bridge_otel_trace_id"] == compact
 
 
-def test_claude_materializes_real_call_from_verified_native_otel_root() -> None:
+def test_claude_materializes_real_call_from_verified_native_otel_root(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     project = "entity/project"
     weave_trace_id = "019fb117-8955-7662-8225-67228a32b976"
     bridge = SimpleNamespace(
@@ -2684,8 +3362,35 @@ def test_claude_materializes_real_call_from_verified_native_otel_root() -> None:
         "native_otel_cross_transport_receipt_v1"
     )
     assert row["weave_agent_root_is_native_call"] is False
-    assert row["agent_cross_transport_edge"]["status"] == "verified"
+    assert row["agent_cross_transport_edge"]["status"] == "local_recorded"
+    assert created[0]["attributes"][
+        "fugue.evidence.cross_transport_edge_status"
+    ] == "local_recorded"
     assert row["weave_agent_root_call_otel_span_id"] == "b" * 16
+
+    original_finish = coordinator._finish_evidence_call
+    finish_attempts = 0
+
+    def interrupt_first_finish(*args, **kwargs):
+        nonlocal finish_attempts
+        finish_attempts += 1
+        if finish_attempts == 1:
+            raise KeyboardInterrupt
+        return original_finish(*args, **kwargs)
+
+    monkeypatch.setattr(
+        coordinator,
+        "_finish_evidence_call",
+        interrupt_first_finish,
+    )
+    with pytest.raises(KeyboardInterrupt):
+        coordinator._materialize_native_agent_call(
+            active=active,
+            row=dict(row),
+            root=root,
+        )
+    assert finish_attempts == 2
+    assert finished[-1][1]["cleanup_after_failure"] is True
 
 
 def test_verified_native_claude_root_requires_bridge_otel_parent() -> None:
@@ -2752,7 +3457,7 @@ def test_verified_native_root_rejects_missing_bridge_otel_parent_identity() -> N
 
 
 @pytest.mark.parametrize("harness", ["hermes", "openclaw", "claude-code", "codex"])
-def test_agent_trace_is_remotely_verified_before_evaluation_output(
+def test_agent_trace_stays_pending_until_evaluation_output_closes(
     monkeypatch: pytest.MonkeyPatch,
     harness: str,
 ) -> None:
@@ -2826,9 +3531,12 @@ def test_agent_trace_is_remotely_verified_before_evaluation_output(
         predict_and_score_call_id="predict-and-score",
     )
 
-    assert events == ["bridge-finished", "verified"]
-    assert export._evaluation_output(row)["trace_link_status"] == "linked"
-    assert "remote_verification_pending" not in json.dumps(row)
+    assert events == ["bridge-finished"]
+    assert row["trace_link_status"] == "pending_terminal_reconciliation"
+    assert (
+        export._evaluation_output(row)["trace_link_status"]
+        == "pending_terminal_reconciliation"
+    )
 
 
 def test_live_evaluation_uses_only_public_prediction_call_handles() -> None:
@@ -2923,10 +3631,541 @@ def test_claude_begin_failure_closes_entered_prediction(
     assert statuses == ["pending", "prediction_start_failed"]
 
 
+def test_live_begin_closes_prediction_when_enter_is_interrupted(tmp_path: Path) -> None:
+    class InterruptedPrediction:
+        def __init__(self) -> None:
+            self.predict_and_score_call = SimpleNamespace(id="pas-a")
+            self.output = None
+            self.exit_count = 0
+
+        def __enter__(self):
+            raise KeyboardInterrupt
+
+        def __exit__(self, exc_type, exc, traceback) -> None:
+            self.exit_count += 1
+
+    prediction = InterruptedPrediction()
+
+    class FakeLogger:
+        def __init__(self, **_kwargs) -> None:
+            pass
+
+        @staticmethod
+        def log_prediction(inputs, **_metadata):
+            del inputs
+            return prediction
+
+    cell = _live_test_cell(
+        cell_id="cell-enter-interrupt",
+        run_id="run-enter-interrupt",
+    )
+    coordinator = LiveEvaluationCoordinator(
+        [cell],
+        repo_root=tmp_path,
+        project="entity/project",
+        env=cell.env,
+        weave_module=SimpleNamespace(EvaluationLogger=FakeLogger),
+    )
+
+    with pytest.raises(KeyboardInterrupt):
+        coordinator.begin_cell(cell)
+
+    assert prediction.exit_count == 1
+    assert coordinator._predictions == {}
+
+
+def test_live_begin_closes_prediction_when_bridge_create_is_interrupted(
+    tmp_path: Path,
+) -> None:
+    class Prediction:
+        def __init__(self) -> None:
+            self.predict_and_score_call = SimpleNamespace(
+                id="pas-a",
+                project_id="entity/project",
+                summary=None,
+            )
+            self.output = None
+            self.exit_count = 0
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, exc_type, exc, traceback) -> None:
+            self.exit_count += 1
+
+    prediction = _attach_public_call_handles(Prediction())
+
+    class FakeLogger:
+        def __init__(self, **_kwargs) -> None:
+            pass
+
+        @staticmethod
+        def log_prediction(inputs, **_metadata):
+            del inputs
+            return prediction
+
+    class InterruptedClient:
+        project_id = "entity/project"
+
+        @staticmethod
+        def create_call(*_args, **_kwargs):
+            raise KeyboardInterrupt
+
+    client = InterruptedClient()
+    cell = _live_test_cell(
+        cell_id="cell-bridge-interrupt",
+        run_id="run-bridge-interrupt",
+    )
+    coordinator = LiveEvaluationCoordinator(
+        [cell],
+        repo_root=tmp_path,
+        project="entity/project",
+        env=cell.env,
+        weave_module=SimpleNamespace(
+            EvaluationLogger=FakeLogger,
+            get_client=lambda: client,
+        ),
+    )
+
+    def verify_root(row, **_kwargs) -> None:
+        row["evaluation_root_dataset_relationship_verified"] = True
+
+    coordinator._verify_eager_evaluation_root = verify_root
+
+    with pytest.raises(KeyboardInterrupt):
+        coordinator.begin_cell(cell)
+
+    assert prediction.exit_count == 1
+    assert coordinator._predictions == {}
+
+
+@pytest.mark.parametrize("phase", ("display", "reconcile"))
+def test_live_finish_records_interruption_without_open_prediction(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    phase: str,
+) -> None:
+    class Prediction:
+        def __init__(self) -> None:
+            self.predict_and_score_call = SimpleNamespace(
+                id="pas-a",
+                project_id="entity/project",
+                summary=None,
+            )
+            self.output = None
+            self.scores: dict[str, object] = {}
+            self.exit_count = 0
+
+        def __enter__(self):
+            return self
+
+        def log_score(self, name, value) -> None:
+            self.scores[name] = value
+
+        def __exit__(self, exc_type, exc, traceback) -> None:
+            self.exit_count += 1
+
+    prediction = _attach_public_call_handles(Prediction())
+
+    class FakeLogger:
+        def __init__(self, **_kwargs) -> None:
+            pass
+
+        @staticmethod
+        def log_prediction(inputs, **_metadata):
+            del inputs
+            return prediction
+
+    cell = _live_test_cell(
+        cell_id=f"cell-finish-{phase}",
+        run_id=f"run-finish-{phase}",
+    )
+    coordinator = LiveEvaluationCoordinator(
+        [cell],
+        repo_root=tmp_path,
+        project="entity/project",
+        env=cell.env,
+        weave_module=SimpleNamespace(EvaluationLogger=FakeLogger),
+    )
+    _stub_live_agent_bridge(monkeypatch, coordinator)
+    coordinator._prepare_terminal_agent_trace = lambda **_kwargs: None
+    coordinator.begin_cell(cell)
+    if phase == "display":
+        monkeypatch.setattr(
+            export,
+            "_set_prediction_display_names",
+            lambda *_args, **_kwargs: (_ for _ in ()).throw(KeyboardInterrupt()),
+        )
+    else:
+        coordinator._reconcile_terminal_hosted_evidence = (
+            lambda **_kwargs: (_ for _ in ()).throw(KeyboardInterrupt())
+        )
+
+    with pytest.raises(KeyboardInterrupt):
+        coordinator.finish_cell(
+            cell,
+            CellOutcome(cell.id, "passed", returncode=0),
+        )
+
+    assert coordinator._predictions == {}
+    assert prediction.exit_count == 1
+    rows = [
+        json.loads(line)
+        for line in coordinator.results_path.read_text().splitlines()
+        if line.strip()
+    ]
+    assert len(rows) == 1
+    assert rows[0]["hosted_terminal_interruption"] == "KeyboardInterrupt"
+    events = [
+        json.loads(line)["status"]
+        for line in coordinator.events_path.read_text().splitlines()
+        if line.strip()
+    ]
+    assert events.count("interrupted") == 1
+
+
+@pytest.mark.parametrize("write_phase", ("result", "finalized_event"))
+def test_terminal_side_effect_interruption_resumes_exactly_once(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    write_phase: str,
+) -> None:
+    class Prediction:
+        def __init__(self) -> None:
+            self.predict_and_score_call = SimpleNamespace(
+                id="pas-a",
+                project_id="entity/project",
+                summary=None,
+            )
+            self.output = None
+            self.exit_count = 0
+
+        def __enter__(self):
+            return self
+
+        @staticmethod
+        def log_score(_name, _value) -> None:
+            return None
+
+        def __exit__(self, exc_type, exc, traceback) -> None:
+            self.exit_count += 1
+
+    prediction = _attach_public_call_handles(Prediction())
+
+    class FakeLogger:
+        def __init__(self, **_kwargs) -> None:
+            pass
+
+        @staticmethod
+        def log_prediction(inputs, **_metadata):
+            del inputs
+            return prediction
+
+    cell = _live_test_cell(
+        cell_id=f"cell-side-effect-{write_phase}",
+        run_id=f"run-side-effect-{write_phase}",
+    )
+    coordinator = LiveEvaluationCoordinator(
+        [cell],
+        repo_root=tmp_path,
+        project="entity/project",
+        env=cell.env,
+        weave_module=SimpleNamespace(EvaluationLogger=FakeLogger),
+    )
+    _stub_live_agent_bridge(monkeypatch, coordinator)
+    coordinator._prepare_terminal_agent_trace = lambda **_kwargs: None
+    coordinator.begin_cell(cell)
+    if write_phase == "result":
+        append_result = coordinator._append_result
+
+        def append_then_interrupt(row):
+            append_result(row)
+            raise KeyboardInterrupt
+
+        monkeypatch.setattr(coordinator, "_append_result", append_then_interrupt)
+    else:
+        append_event = coordinator._append_event
+
+        def append_then_interrupt(status, **values):
+            append_event(status, **values)
+            if status == "finalized":
+                raise KeyboardInterrupt
+
+        monkeypatch.setattr(coordinator, "_append_event", append_then_interrupt)
+
+    with pytest.raises(KeyboardInterrupt):
+        coordinator.finish_cell(
+            cell,
+            CellOutcome(cell.id, "passed", returncode=0),
+        )
+
+    results = [
+        json.loads(line)
+        for line in coordinator.results_path.read_text().splitlines()
+        if line.strip()
+    ]
+    terminal_events = [
+        json.loads(line)
+        for line in coordinator.events_path.read_text().splitlines()
+        if line.strip()
+        and json.loads(line).get("status") in export._TERMINAL_EVENT_STATUSES
+    ]
+    assert len(results) == 1
+    assert len(terminal_events) == 1
+    assert terminal_events[0]["status"] == "finalized"
+    assert "hosted_terminal_interruption" not in results[0]
+
+    monkeypatch.undo()
+    assert coordinator._recover_finalized_terminal_persistence(
+        cell=cell,
+        row=results[0],
+        call_id="pas-a",
+    )
+    assert len(coordinator.results_path.read_text().splitlines()) == 1
+    terminal_events = [
+        json.loads(line)
+        for line in coordinator.events_path.read_text().splitlines()
+        if line.strip()
+        and json.loads(line).get("status") in export._TERMINAL_EVENT_STATUSES
+    ]
+    assert len(terminal_events) == 1
+
+
+def test_terminal_ledgers_reject_conflicting_or_duplicate_logical_attempts(
+    tmp_path: Path,
+) -> None:
+    coordinator = object.__new__(LiveEvaluationCoordinator)
+    coordinator.run_id = "run-a"
+    coordinator.results_path = tmp_path / "results.jsonl"
+    coordinator.events_path = tmp_path / "events.jsonl"
+    coordinator._event_lock = threading.RLock()
+    row = {
+        "run_id": "run-a",
+        "cell_id": "cell-a",
+        "attempt_id": "attempt-a",
+        "candidate_id": "candidate-a",
+    }
+
+    coordinator._append_result(row)
+    with pytest.raises(RuntimeError, match="conflicts with the persisted"):
+        coordinator._append_result({**row, "candidate_id": "candidate-b"})
+    with coordinator.results_path.open("a", encoding="utf-8") as handle:
+        handle.write(json.dumps(row, sort_keys=True) + "\n")
+    with pytest.raises(RuntimeError, match="duplicate logical attempts"):
+        coordinator._terminal_result_is_persisted(row)
+
+    event_values = {
+        "cell_id": "event-cell",
+        "attempt_id": "event-attempt",
+        "candidate_id": "candidate-a",
+    }
+    coordinator._append_event("finalized", **event_values)
+    with pytest.raises(RuntimeError, match="conflicts with the persisted"):
+        coordinator._append_event("interrupted", **event_values)
+
+
+def test_terminal_evaluation_poll_does_not_flush_another_open_prediction() -> None:
+    project = "entity/project"
+    trace_id = "a" * 32
+    dataset = SimpleNamespace(
+        ref=SimpleNamespace(uri=f"weave:///{project}/object/tasks:v1")
+    )
+    evaluation = SimpleNamespace(
+        dataset=dataset,
+        ref=SimpleNamespace(uri=f"weave:///{project}/object/evaluation:v1"),
+    )
+
+    class EvaluationRef:
+        @staticmethod
+        def uri() -> str:
+            return f"weave:///{project}/object/evaluation:v1"
+
+        @staticmethod
+        def get():
+            return evaluation
+
+    evaluation_call = SimpleNamespace(
+        id="evaluation-a",
+        project_id=project,
+        parent_id=None,
+        trace_id=trace_id,
+        inputs={"self": EvaluationRef()},
+    )
+    predict_and_score = SimpleNamespace(
+        id="pas-a",
+        project_id=project,
+        parent_id=evaluation_call.id,
+        trace_id=trace_id,
+        ended_at="terminal",
+    )
+    prediction_call = SimpleNamespace(
+        id="prediction-a",
+        project_id=project,
+        parent_id=predict_and_score.id,
+        trace_id=trace_id,
+        ended_at="terminal",
+    )
+    another_open_prediction = SimpleNamespace(
+        id="pas-b",
+        project_id=project,
+        parent_id="evaluation-b",
+        trace_id="b" * 32,
+        ended_at=None,
+    )
+    calls = {
+        value.id: value
+        for value in (
+            evaluation_call,
+            predict_and_score,
+            prediction_call,
+            another_open_prediction,
+        )
+    }
+
+    class PublicClient:
+        project_id = project
+        flush_calls = 0
+
+        @staticmethod
+        def get_call(call_id):
+            return calls[call_id]
+
+        @staticmethod
+        def get(ref):
+            return ref.get()
+
+        @classmethod
+        def flush(cls):
+            cls.flush_calls += 1
+            raise AssertionError("per-cell reconciliation must not flush")
+
+    coordinator = object.__new__(LiveEvaluationCoordinator)
+    coordinator.project = project
+    coordinator.env = {}
+    coordinator.trace_timeout_sec = 0
+    coordinator._weave_requires_reactivation = False
+    coordinator.weave = SimpleNamespace(get_client=lambda: PublicClient)
+    coordinator._datasets = {"scope-a": dataset}
+    active = export._LivePrediction(
+        session=SimpleNamespace(candidate={"evaluation_scope_id": "scope-a"}),
+        prediction=SimpleNamespace(
+            evaluate_call=evaluation_call,
+            predict_and_score_call=predict_and_score,
+            predict_call=prediction_call,
+        ),
+        bridge_call=None,
+        bridge_client=PublicClient,
+        row={},
+        opened_monotonic=0.0,
+    )
+    row = {"agent_execution_status": "not_started"}
+
+    coordinator._reconcile_terminal_hosted_evidence(
+        active=active,
+        cell=SimpleNamespace(),
+        row=row,
+        predict_and_score_call_id=predict_and_score.id,
+        native_root=None,
+    )
+
+    assert row["evaluation_prediction_graph_verified"] is True
+    assert row["evaluation_children_terminal_verified"] is True
+    assert another_open_prediction.ended_at is None
+    assert PublicClient.flush_calls == 0
+
+
+def test_public_terminal_call_poll_stops_immediately_when_cancelled() -> None:
+    cancellation = threading.Event()
+    cancellation.set()
+
+    class PublicClient:
+        project_id = "entity/project"
+        get_calls = 0
+
+        @classmethod
+        def get_call(cls, _call_id):
+            cls.get_calls += 1
+            raise AssertionError("cancelled poll must not call Weave")
+
+    coordinator = object.__new__(LiveEvaluationCoordinator)
+    coordinator.project = "entity/project"
+    coordinator.env = {}
+    coordinator.weave = SimpleNamespace(get_client=lambda: PublicClient)
+    coordinator.trace_timeout_sec = 60
+    coordinator._weave_requires_reactivation = False
+    coordinator._cancellation_event = cancellation
+
+    with pytest.raises(export._TracePollingCancelled):
+        coordinator._wait_for_public_terminal_call(
+            client=PublicClient,
+            call_id="call-a",
+            phase="test Call",
+        )
+
+    assert PublicClient.get_calls == 0
+
+
+def test_terminal_evaluation_root_requires_exact_terminal_root() -> None:
+    local_root = SimpleNamespace(
+        id="evaluation-a",
+        project_id="entity/project",
+        parent_id=None,
+        trace_id="a" * 32,
+    )
+    remote_root = SimpleNamespace(
+        id="evaluation-a",
+        project_id="entity/project",
+        parent_id=None,
+        trace_id="a" * 32,
+        ended_at=None,
+    )
+
+    class PublicClient:
+        project_id = "entity/project"
+
+        @staticmethod
+        def get_call(_call_id):
+            return remote_root
+
+    coordinator = object.__new__(LiveEvaluationCoordinator)
+    coordinator.project = "entity/project"
+    coordinator.env = {}
+    coordinator.weave = SimpleNamespace(get_client=lambda: PublicClient)
+    coordinator.trace_timeout_sec = 0
+    coordinator._weave_requires_reactivation = False
+    coordinator._cancellation_event = threading.Event()
+    session = export._LiveCandidate(
+        candidate={"candidate_id": "candidate-a"},
+        logger=SimpleNamespace(),
+        evaluation_call=local_root,
+    )
+
+    with pytest.raises(RuntimeError, match="Evaluation root was not published"):
+        coordinator._verify_terminal_evaluation_root(session)
+
+
 def _stub_live_agent_bridge(
     monkeypatch: pytest.MonkeyPatch,
     coordinator: LiveEvaluationCoordinator,
 ) -> None:
+    def verified_eager_root(row, **_kwargs) -> None:
+        row.update(
+            {
+                "evaluation_root_object_verified": True,
+                "evaluation_root_dataset_relationship_verified": True,
+                "evaluation_root_call_authoritatively_verified": True,
+                "evaluation_children_local_identity_verified": True,
+                "evaluation_prediction_graph_status": (
+                    "pending_terminal_reconciliation"
+                ),
+            }
+        )
+
+    coordinator._verify_eager_evaluation_root = verified_eager_root
+    coordinator._flush_after_evaluation_roots_close = lambda: None
+    coordinator._verify_terminal_evaluation_root = lambda _session: None
+    coordinator._reconcile_terminal_hosted_evidence = lambda **_kwargs: None
+
     def verified_graph(row, **_kwargs) -> None:
         row["evaluation_prediction_graph_verified"] = True
 
@@ -4519,6 +5758,7 @@ def test_first_cell_evidence_checkpoint_requires_real_graph_and_host_scorer() ->
         "evaluation_prediction_graph_verified": True,
         "agent_graph_verified": True,
         "conversation_correlation_verified": True,
+        "weave_hosted_evidence_receipt_terminal_verified": True,
         "trace_link_status": "linked",
         "weave_eval_span_link_status": "complete",
         "weave_agent_root_call_id": "agent-call",
@@ -4615,6 +5855,7 @@ def test_evidence_checkpoint_covers_every_planned_cell_and_cancels_after_late_fa
         "evaluation_prediction_graph_verified": True,
         "agent_graph_verified": True,
         "conversation_correlation_verified": True,
+        "weave_hosted_evidence_receipt_terminal_verified": True,
         "trace_link_status": "linked",
         "weave_eval_span_link_status": "complete",
         "weave_agent_root_call_id": "agent-call",
@@ -4897,42 +6138,11 @@ def test_authoritative_graph_recovers_a_transient_bridge_close_poll_timeout() ->
     assert row["weave_agent_bridge_close_poll_error"] == "ReadTimeout"
     assert "weave_agent_bridge_close_error" not in row
 
+    row["weave_authoritative_call_graph"][2]["terminal"] = False
+    export._verify_authoritative_agent_graph(row)
 
-def test_authoritative_call_state_retries_a_transient_read_timeout() -> None:
-    calls = 0
-
-    def summary_fetcher(**_kwargs):
-        nonlocal calls
-        calls += 1
-        if calls == 1:
-            raise httpx.ReadTimeout("temporary trace API timeout")
-        return {
-            "run-key": {
-                "weave_authoritative_call_graph": [
-                    {
-                        "call_id": "bridge",
-                        "project_id": "entity/project",
-                        "terminal": True,
-                    }
-                ]
-            }
-        }
-
-    coordinator = object.__new__(LiveEvaluationCoordinator)
-    coordinator.project = "entity/project"
-    coordinator.trace_timeout_sec = 1
-    coordinator.env = {}
-    coordinator._summary_fetcher = summary_fetcher
-    coordinator._cancellation_event = threading.Event()
-
-    coordinator._wait_for_authoritative_call_state(
-        row={"run_key": "run-key"},
-        call_id="bridge",
-        terminal=True,
-        phase="bridge close",
-    )
-
-    assert calls == 2
+    assert row["weave_authoritative_call_graph_verified"] is False
+    assert "prediction terminal state" in row["weave_authoritative_call_graph_error"]
 
 
 def test_invalid_authoritative_graph_does_not_recover_bridge_close() -> None:

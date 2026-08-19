@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import base64
+import copy
 import hashlib
 import json
 import keyword
@@ -18,6 +19,7 @@ from contextlib import nullcontext
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from pathlib import Path
+from types import SimpleNamespace
 from typing import Any
 
 import httpx
@@ -61,7 +63,13 @@ from fugue.model_plane import (
     trace_project_slug,
 )
 from fugue.redaction import redact_value, secrets_from_env
-from fugue.weave_support import WEAVE_AGENTS_BASE_URL, initialize_weave
+from fugue.weave_support import (
+    EVIDENCE_ROUTING_LOCK,
+    WEAVE_AGENTS_BASE_URL,
+    acquire_weave_destination_lease,
+    initialize_weave,
+    release_weave_destination_lease,
+)
 
 PREDICTION_SCHEMA_VERSION = 1
 PUBLICATION_SCHEMA_VERSION = 1
@@ -178,6 +186,65 @@ class _TracePollingCancelled(Exception):
 
 _WEAVE_CALL_SOURCE = "weave_calls"
 _WEAVE_AGENT_SPAN_SOURCE = "weave_agents"
+_TERMINAL_EVENT_STATUSES = frozenset(
+    {"cancelled", "failed", "finalized", "interrupted"}
+)
+
+# Only these live-hosted fields may cross into a canonical local row. Task,
+# scorer, private-boundary, candidate, and local-evidence fields remain owned
+# by the local coordinator.
+_HOSTED_DYNAMIC_ROW_FIELDS = (
+    "weave_evaluation_name",
+    "weave_evaluation_root_call_id",
+    "weave_evaluation_root_ref",
+    "weave_evaluation_root_url",
+    "weave_evaluation_root_trace_id",
+    "weave_evaluation_id",
+    "weave_evaluation_ref",
+    "weave_evaluation_url",
+    "weave_dataset_id",
+    "weave_dataset_ref",
+    "weave_dataset_url",
+    "eval_predict_and_score_call_id",
+    "eval_predict_and_score_ref",
+    "eval_predict_and_score_url",
+    "eval_predict_and_score_trace_id",
+    "eval_predict_and_score_object_verified",
+    "weave_prediction_call_id",
+    "weave_prediction_ref",
+    "weave_prediction_url",
+    "weave_prediction_trace_id",
+    "weave_prediction_object_verified",
+    "evaluation_root_object_verified",
+    "evaluation_root_dataset_relationship_verified",
+    "dataset_version_object_verified",
+    "evaluation_root_prediction_relationship_verified",
+    "prediction_child_relationship_verified",
+    "evaluation_root_call_authoritatively_verified",
+    "evaluation_root_verification_source",
+    "evaluation_prediction_graph_status",
+    "weave_evidence_verification_source",
+    "weave_agent_bridge_call_id",
+    "weave_agent_bridge_ref",
+    "weave_agent_bridge_url",
+    "weave_agent_bridge_parent_id",
+    "weave_agent_bridge_project_id",
+    "weave_agent_bridge_trace_id",
+    "weave_agent_bridge_otel_trace_id",
+    "weave_agent_bridge_otel_span_id",
+    "weave_agent_bridge_cross_transport_edge",
+    "weave_agent_bridge_local_identity_verified",
+    "weave_agent_bridge_object_verified",
+    "weave_agent_bridge_start_verified",
+    "weave_agent_bridge_publication_status",
+    "weave_hosted_evidence_receipt_call_id",
+    "weave_hosted_evidence_receipt_ref",
+    "weave_hosted_evidence_receipt_url",
+    "hosted_evidence_verification_status",
+    "hosted_evidence_verification_owner",
+    "terminal_hosted_visibility_verified",
+    "task_verdict_owner",
+)
 
 
 def _eager_call_op(weave_module: Any, name: str) -> Any:
@@ -239,6 +306,7 @@ class LiveEvaluationCoordinator:
         self._predictions: dict[str, _LivePrediction] = {}
         self._prediction_lock = threading.Lock()
         self._terminal_cells: set[str] = set()
+        self._cleanup_failures: list[str] = []
         self._cancellation_event = cancellation_event or threading.Event()
         self._host_evaluator = host_evaluator
         if evidence_checkpoint_cells < 0:
@@ -275,7 +343,29 @@ class LiveEvaluationCoordinator:
             label="live Evaluation task inputs",
         )
         self._weave_requires_reactivation = weave_module is None
-        self.weave = weave_module or initialize_weave(project, env)
+        self._destination_lease: str | None = None
+        try:
+            if self._weave_requires_reactivation:
+                # Acquire the process-global destination before any Dataset or
+                # Evaluation root can be created. A concurrent A -> B switch
+                # must fail before Weave receives an object for the wrong
+                # project.
+                self._destination_lease = acquire_weave_destination_lease(
+                    project,
+                    self.env,
+                )
+            self.weave = weave_module or initialize_weave(project, self.env)
+            self._initialize_live_sessions(planned)
+        except BaseException as exc:
+            try:
+                self._close_initialized_evaluation_roots(exc)
+            finally:
+                self._release_destination_lease()
+            raise
+
+    def _initialize_live_sessions(self, planned: list[dict[str, Any]]) -> None:
+        """Create Dataset and Evaluation roots while the destination is leased."""
+
         self._agent_bridge_op = _eager_call_op(
             self.weave,
             "fugue.agent_execution_bridge",
@@ -283,6 +373,10 @@ class LiveEvaluationCoordinator:
         self._native_agent_root_op = _eager_call_op(
             self.weave,
             "fugue.native_agent_evidence_receipt",
+        )
+        self._hosted_evidence_receipt_op = _eager_call_op(
+            self.weave,
+            "fugue.hosted_evidence_verification_receipt",
         )
         logger_cls = getattr(self.weave, "EvaluationLogger", None)
         if logger_cls is None:
@@ -310,14 +404,16 @@ class LiveEvaluationCoordinator:
                 if attributes is not None
                 else nullcontext()
             )
-            with context:
-                logger = logger_cls(
-                    name=_evaluation_name(candidate),
-                    model=_evaluation_model(candidate),
-                    dataset=datasets[scope_id],
-                    eval_attributes=_evaluation_scope_attributes(candidate),
-                    scorers=_weave_predefined_scorer_names(candidate["scorers"]),
-                )
+            with EVIDENCE_ROUTING_LOCK:
+                self._activate_evidence_client()
+                with context:
+                    logger = logger_cls(
+                        name=_evaluation_name(candidate),
+                        model=_evaluation_model(candidate),
+                        dataset=datasets[scope_id],
+                        eval_attributes=_evaluation_scope_attributes(candidate),
+                        scorers=_weave_predefined_scorer_names(candidate["scorers"]),
+                    )
             session = _LiveCandidate(candidate=candidate, logger=logger)
             for row, inputs in zip(
                 candidate["rows"], candidate["prediction_inputs"], strict=True
@@ -334,6 +430,27 @@ class LiveEvaluationCoordinator:
         self._unique_sessions = tuple(
             {id(value): value for value in self._sessions_by_cell.values()}.values()
         )
+
+    def _close_initialized_evaluation_roots(self, error: BaseException) -> None:
+        """Close every known root when coordinator initialization fails."""
+
+        sessions = tuple(
+            {
+                id(value): value
+                for value in getattr(self, "_sessions_by_cell", {}).values()
+            }.values()
+        )
+        for session in sessions:
+            try:
+                with EVIDENCE_ROUTING_LOCK:
+                    self._activate_evidence_client()
+                    with session.lock:
+                        session.logger.fail(error)
+            except BaseException:
+                # The constructor failure remains authoritative. Calls from a
+                # logger that cannot close remain invalid evidence and the
+                # destination lease still releases in the outer error path.
+                pass
 
     def terminal_row(self, cell_id: str) -> dict[str, Any] | None:
         """Return the hosted row for coordination, never as a second result."""
@@ -376,7 +493,6 @@ class LiveEvaluationCoordinator:
             return None
         row = _planned_evaluation_row(cell)
         prediction = None
-        prediction_entered = False
         bridge_call = None
         bridge_client = None
         attributes = getattr(self.weave, "attributes", None)
@@ -411,20 +527,21 @@ class LiveEvaluationCoordinator:
             else nullcontext()
         )
         try:
-            with session.lock:
-                with context:
-                    prediction = session.logger.log_prediction(
-                        inputs=self._inputs_by_cell[cell.id],
-                        example_id=str(row.get("task_id") or cell.task_id),
-                        row_digest=_evaluation_row_digest(
-                            row,
-                            self._inputs_by_cell[cell.id],
-                        ),
-                        trial_index=max(cell.trial_index - 1, 0),
-                        eval_kind="agent",
-                    )
-                    prediction.__enter__()
-                    prediction_entered = True
+            with EVIDENCE_ROUTING_LOCK:
+                self._activate_evidence_client()
+                with session.lock:
+                    with context:
+                        prediction = session.logger.log_prediction(
+                            inputs=self._inputs_by_cell[cell.id],
+                            example_id=str(row.get("task_id") or cell.task_id),
+                            row_digest=_evaluation_row_digest(
+                                row,
+                                self._inputs_by_cell[cell.id],
+                            ),
+                            trial_index=max(cell.trial_index - 1, 0),
+                            eval_kind="agent",
+                        )
+                        prediction.__enter__()
             dataset = self._datasets[session.candidate["evaluation_scope_id"]]
             _remember_session_evaluation(session, prediction)
             predict_call = getattr(prediction, "predict_call", None)
@@ -442,27 +559,27 @@ class LiveEvaluationCoordinator:
                 call=call,
                 project=self.project,
             )
-            _verify_live_evaluation_graph(
+            self._verify_eager_evaluation_root(
                 row,
                 dataset=dataset,
                 prediction=prediction,
-                project=self.project,
             )
             _set_prediction_display_names(
                 prediction,
                 row,
                 terminal=False,
             )
-            if row.get("evaluation_prediction_graph_verified") is not True:
+            if row.get("evaluation_root_dataset_relationship_verified") is not True:
                 raise RuntimeError(
-                    "live Evaluation graph is unresolved before Agent execution"
+                    "live Evaluation root and Dataset are unresolved before Agent execution"
                 )
             bridge_call, bridge_client, traceparent = self._open_agent_bridge(
                 cell=cell,
                 row=row,
                 prediction=prediction,
             )
-        except Exception as exc:
+            self._prepare_hosted_evidence_verification_receipt(row)
+        except BaseException as exc:
             if self._evidence_checkpoint_cells:
                 self._cancellation_event.set()
                 self._append_event(
@@ -481,7 +598,7 @@ class LiveEvaluationCoordinator:
                     opened_monotonic=time.monotonic(),
                 )
                 self._finish_agent_bridge(failed_active, status="start_failed")
-            if prediction is not None and prediction_entered:
+            if prediction is not None:
                 row.update(
                     {
                         "status": "failed",
@@ -495,9 +612,11 @@ class LiveEvaluationCoordinator:
                 except Exception:
                     pass
                 try:
-                    with session.lock:
-                        prediction.__exit__(type(exc), exc, exc.__traceback__)
-                except Exception:
+                    with EVIDENCE_ROUTING_LOCK:
+                        self._activate_evidence_client()
+                        with session.lock:
+                            prediction.__exit__(type(exc), exc, exc.__traceback__)
+                except BaseException:
                     # The original start failure remains authoritative. A
                     # broken SDK close must not leave the cell eligible to run.
                     pass
@@ -522,7 +641,11 @@ class LiveEvaluationCoordinator:
             "prediction_open",
             cell_id=cell.id,
             candidate_id=cell.candidate_id,
+            evaluation_root_call_id=row.get("weave_evaluation_root_call_id"),
             eval_predict_and_score_call_id=call_id,
+            prediction_call_id=row.get("weave_prediction_call_id"),
+            agent_bridge_call_id=row.get("weave_agent_bridge_call_id"),
+            evaluation_trace_id=_live_call_value(call, "trace_id"),
         )
         overlay = _evaluation_span_environment(
             row=row,
@@ -567,11 +690,6 @@ class LiveEvaluationCoordinator:
     ) -> tuple[Any, Any, str]:
         """Create the real Call bridge used to parent the Agent's OTel root."""
 
-        client = self._activate_evidence_client()
-        if client is None or not callable(getattr(client, "create_call", None)):
-            raise RuntimeError(
-                "installed Weave runtime cannot create the Agent ancestry bridge"
-            )
         parent = getattr(prediction, "predict_call", None)
         if parent is None:
             raise RuntimeError("live Evaluation prediction Call is unavailable")
@@ -580,7 +698,8 @@ class LiveEvaluationCoordinator:
         # of making a 16-hex Call ID masquerade as an OTel span.
         bridge_id = str(uuid.uuid4())
         bridge_otel_span_id = secrets.token_hex(8)
-        bridge = client.create_call(
+        bridge, client = self._create_owned_eager_call(
+            None,
             getattr(
                 self,
                 "_agent_bridge_op",
@@ -592,6 +711,9 @@ class LiveEvaluationCoordinator:
                 "candidate_id": cell.candidate_id,
                 "execution_fingerprint": cell.execution_fingerprint,
             },
+            call_id=bridge_id,
+            expected_parent_id=str(_live_call_value(parent, "id")),
+            failure_status="bridge_create_interrupted",
             parent=parent,
             attributes={
                 "fugue.attempt_id": cell.attempt_id,
@@ -647,30 +769,31 @@ class LiveEvaluationCoordinator:
                 f"{_arm_label(row)} · Attempt {cell.trial_index}"
             ),
             use_stack=False,
-            _call_id_override=bridge_id,
         )
-        parent_id = _live_call_value(bridge, "parent_id")
-        project_id = _live_call_value(bridge, "project_id")
-        trace_id = _live_call_value(bridge, "trace_id")
-        expected_parent = _live_call_value(parent, "id")
-        expected_trace = _live_call_value(parent, "trace_id")
-        otel_trace_id = _w3c_trace_id(trace_id)
-        if (
-            _live_call_value(bridge, "id") != bridge_id
-            or parent_id != expected_parent
-            or project_id != self.project
-            or not _same_nonempty_trace(trace_id, expected_trace)
-            or otel_trace_id is None
-        ):
-            try:
-                client.finish_call(
-                    bridge,
-                    output={"status": "invalid_bridge"},
-                )
-            finally:
+        try:
+            parent_id = _live_call_value(bridge, "parent_id")
+            project_id = _live_call_value(bridge, "project_id")
+            trace_id = _live_call_value(bridge, "trace_id")
+            expected_parent = _live_call_value(parent, "id")
+            expected_trace = _live_call_value(parent, "trace_id")
+            otel_trace_id = _w3c_trace_id(trace_id)
+            if (
+                _live_call_value(bridge, "id") != bridge_id
+                or parent_id != expected_parent
+                or project_id != self.project
+                or not _same_nonempty_trace(trace_id, expected_trace)
+                or otel_trace_id is None
+            ):
                 raise RuntimeError(
                     "Weave Agent ancestry bridge did not preserve prediction ownership"
                 )
+        except BaseException:
+            self._best_effort_finish_evidence_call(
+                client,
+                bridge,
+                output={"status": "invalid_bridge"},
+            )
+            raise
         try:
             row.update(
                 {
@@ -682,7 +805,7 @@ class LiveEvaluationCoordinator:
                     "weave_agent_bridge_otel_span_id": bridge_otel_span_id,
                     "weave_agent_bridge_cross_transport_edge": {
                         "schema_version": 1,
-                        "status": "verified",
+                        "status": "local_recorded",
                         "weave_call_id": bridge_id,
                         "otel_trace_id": otel_trace_id,
                         "otel_span_id": bridge_otel_span_id,
@@ -695,24 +818,18 @@ class LiveEvaluationCoordinator:
                 call=bridge,
                 project=self.project,
             )
-            row["weave_agent_bridge_object_verified"] = True
-            self._flush_weave_client(client)
-            self._wait_for_authoritative_call_state(
-                row=row,
-                call_id=bridge_id,
-                terminal=False,
-                phase="Agent ancestry bridge start",
+            row["weave_agent_bridge_local_identity_verified"] = True
+            row["weave_agent_bridge_object_verified"] = False
+            row["weave_agent_bridge_start_verified"] = False
+            row["weave_agent_bridge_publication_status"] = (
+                "pending_terminal_reconciliation"
             )
-            row["weave_agent_bridge_start_verified"] = True
-        except Exception:
-            try:
-                client.finish_call(
-                    bridge,
-                    output={"status": "start_failed"},
-                )
-                self._flush_weave_client(client)
-            except Exception:
-                pass
+        except BaseException:
+            self._best_effort_finish_evidence_call(
+                client,
+                bridge,
+                output={"status": "start_failed"},
+            )
             raise
         return (
             bridge,
@@ -753,85 +870,452 @@ class LiveEvaluationCoordinator:
                 )
         return client
 
+    def _create_evidence_call(
+        self,
+        client: Any | None,
+        op: Any,
+        inputs: Mapping[str, Any],
+        **kwargs: Any,
+    ) -> tuple[Any, Any]:
+        """Create a Call while the exact process-global destination is locked."""
+
+        with EVIDENCE_ROUTING_LOCK:
+            active_client = self._activate_evidence_client(client)
+            create_call = getattr(active_client, "create_call", None)
+            if active_client is None or not callable(create_call):
+                raise RuntimeError("Weave evidence client cannot create Calls")
+            return create_call(op, dict(inputs), **kwargs), active_client
+
+    def _create_owned_eager_call(
+        self,
+        client: Any | None,
+        op: Any,
+        inputs: Mapping[str, Any],
+        *,
+        call_id: str,
+        expected_parent_id: str,
+        failure_status: str,
+        **kwargs: Any,
+    ) -> tuple[Any, Any]:
+        """Create an eager Call and recover ownership after SDK interruption."""
+
+        try:
+            return self._create_evidence_call(
+                client,
+                op,
+                inputs,
+                _call_id_override=call_id,
+                **kwargs,
+            )
+        except BaseException:
+            self._recover_eager_call_after_create_failure(
+                client,
+                call_id=call_id,
+                expected_parent_id=expected_parent_id,
+                failure_status=failure_status,
+            )
+            raise
+
+    def _recover_eager_call_after_create_failure(
+        self,
+        client: Any | None,
+        *,
+        call_id: str,
+        expected_parent_id: str,
+        failure_status: str,
+    ) -> None:
+        """Resolve and terminate a Call whose create operation raised late."""
+
+        try:
+            with EVIDENCE_ROUTING_LOCK:
+                active_client = self._activate_evidence_client(client)
+                get_call = getattr(active_client, "get_call", None)
+                if active_client is None or not callable(get_call):
+                    return
+                call = get_call(call_id)
+            if (
+                _live_call_value(call, "id") != call_id
+                or _live_call_value(call, "project_id") != self.project
+                or _live_call_value(call, "parent_id") != expected_parent_id
+            ):
+                return
+            self._best_effort_finish_evidence_call(
+                active_client,
+                call,
+                output={"status": failure_status},
+            )
+        except BaseException:
+            pass
+
+    def _finish_evidence_call(
+        self,
+        client: Any | None,
+        call: Any,
+        *,
+        output: Mapping[str, Any],
+    ) -> Any:
+        """Finish a Call while the exact process-global destination is locked."""
+
+        with EVIDENCE_ROUTING_LOCK:
+            active_client = self._activate_evidence_client(client)
+            finish_call = getattr(active_client, "finish_call", None)
+            if active_client is None or not callable(finish_call):
+                raise RuntimeError("Weave evidence client cannot finish Calls")
+            finish_call(call, output=dict(output))
+            return active_client
+
+    def _best_effort_finish_evidence_call(
+        self,
+        client: Any | None,
+        call: Any,
+        *,
+        output: Mapping[str, Any],
+    ) -> None:
+        """Try to terminate an eager Call without masking its primary failure."""
+
+        try:
+            self._finish_evidence_call(client, call, output=output)
+        except BaseException:
+            pass
+
+    def _prepare_hosted_evidence_verification_receipt(
+        self,
+        row: dict[str, Any],
+    ) -> None:
+        """Preallocate the immutable receipt named by the scored attempt."""
+
+        call_id = _hosted_evidence_verification_call_id(row)
+        receipt = row.get("trace_receipt")
+        app_base_url = (
+            str(receipt.get("app_base_url") or "https://wandb.ai")
+            if isinstance(receipt, Mapping)
+            else "https://wandb.ai"
+        )
+        row.update(
+            {
+                "weave_hosted_evidence_receipt_call_id": call_id,
+                "weave_hosted_evidence_receipt_ref": _weave_call_ref(
+                    self.project,
+                    call_id,
+                ),
+                "weave_hosted_evidence_receipt_url": _weave_call_url(
+                    self.project,
+                    call_id,
+                    app_base_url=app_base_url,
+                ),
+                "hosted_evidence_verification_status": (
+                    "pending_post_close_verification"
+                ),
+                "hosted_evidence_verification_owner": (
+                    "post_close_verification_receipt"
+                ),
+                "task_verdict_owner": "predict_and_score",
+                "terminal_hosted_visibility_verified": False,
+            }
+        )
+
+    def _wait_for_public_terminal_call(
+        self,
+        *,
+        client: Any,
+        call_id: str,
+        phase: str,
+    ) -> Any:
+        """Poll one exact public Call without flushing unrelated open Calls."""
+
+        deadline = time.monotonic() + max(self.trace_timeout_sec, 0.0)
+        latest_error = "Call was not returned"
+        while True:
+            self._raise_if_cancelled()
+            try:
+                with EVIDENCE_ROUTING_LOCK:
+                    active_client = self._activate_evidence_client(client)
+                    get_call = getattr(active_client, "get_call", None)
+                    if not callable(get_call):
+                        raise RuntimeError("Weave client has no public get_call API")
+                    remote = get_call(call_id)
+            except _TracePollingCancelled:
+                raise
+            except Exception as exc:
+                latest_error = f"{type(exc).__name__}: {exc}"
+            else:
+                if getattr(remote, "ended_at", None) is not None:
+                    return remote
+                latest_error = "Call was not terminal"
+            if time.monotonic() >= deadline:
+                raise RuntimeError(f"{phase} was not published: {latest_error}")
+            wait_sec = min(0.1, max(deadline - time.monotonic(), 0.0))
+            if self._cancellation_event.wait(wait_sec):
+                raise _TracePollingCancelled
+
+    def _publish_hosted_evidence_verification_receipt(
+        self,
+        *,
+        active: _LivePrediction,
+        row: dict[str, Any],
+    ) -> None:
+        """Publish the immutable decision about the closed hosted evidence chain."""
+
+        call_id = str(row.get("weave_hosted_evidence_receipt_call_id") or "")
+        evaluation_root = getattr(active.prediction, "evaluate_call", None)
+        if not call_id or evaluation_root is None:
+            raise RuntimeError("hosted evidence verification receipt was not prepared")
+        bindings = {
+            "schema_version": 1,
+            "attempt_id": str(row.get("attempt_id") or ""),
+            "evaluation_root_call_id": str(
+                row.get("weave_evaluation_root_call_id") or ""
+            ),
+            "predict_and_score_call_id": str(
+                row.get("eval_predict_and_score_call_id") or ""
+            ),
+            "prediction_call_id": str(row.get("weave_prediction_call_id") or ""),
+            "dataset_ref": str(row.get("weave_dataset_ref") or ""),
+            "agent_bridge_call_id": str(
+                row.get("weave_agent_bridge_call_id") or ""
+            ),
+            "agent_receipt_call_id": str(row.get("weave_agent_root_call_id") or ""),
+            "evidence_project": self.project,
+        }
+        if any(not value for key, value in bindings.items() if key != "schema_version"):
+            raise RuntimeError("hosted evidence verification bindings are incomplete")
+        bindings_digest = stable_digest(bindings)
+        receipt_call, client = self._create_owned_eager_call(
+            active.bridge_client,
+            getattr(
+                self,
+                "_hosted_evidence_receipt_op",
+                "fugue.hosted_evidence_verification_receipt",
+            ),
+            bindings,
+            call_id=call_id,
+            expected_parent_id=bindings["predict_and_score_call_id"],
+            failure_status="hosted_evidence_receipt_create_interrupted",
+            parent=active.prediction.predict_and_score_call,
+            attributes={
+                "fugue.evidence.kind": "post_close_hosted_evidence_verification",
+                "fugue.evidence.schema_version": 1,
+                "fugue.evidence.status": "verified",
+                "fugue.evidence.bindings_digest": bindings_digest,
+                "fugue.run_id": str(row.get("run_id") or ""),
+                "fugue.cell_id": str(row.get("cell_id") or ""),
+                "fugue.attempt_id": bindings["attempt_id"],
+                "weave.eval.run_id": bindings["evaluation_root_call_id"],
+                "weave.eval.predict_and_score_call_id": bindings[
+                    "predict_and_score_call_id"
+                ],
+            },
+            display_name=(
+                f"Evidence verified · {_task_title(row)} · {_arm_label(row)} · "
+                f"Attempt {_positive_int(row.get('trial_index')) or 1}"
+            ),
+            use_stack=False,
+        )
+        try:
+            identity_valid = bool(
+                _live_call_value(receipt_call, "id") == call_id
+                and _live_call_value(receipt_call, "project_id") == self.project
+                and _live_call_value(receipt_call, "parent_id")
+                == bindings["predict_and_score_call_id"]
+                and _same_nonempty_trace(
+                    _live_call_value(receipt_call, "trace_id"),
+                    _live_call_value(evaluation_root, "trace_id"),
+                )
+            )
+            if not identity_valid:
+                raise RuntimeError(
+                    "hosted evidence verification receipt changed identity or ancestry"
+                )
+        except BaseException:
+            self._best_effort_finish_evidence_call(
+                client,
+                receipt_call,
+                output={"status": "invalid_hosted_evidence_receipt"},
+            )
+            raise
+        terminal_output = {
+            "hosted_evidence_integrity": "verified",
+            "bindings_digest": bindings_digest,
+            "task_verdict_owner": "predict_and_score",
+        }
+        try:
+            self._finish_evidence_call(
+                client,
+                receipt_call,
+                output=terminal_output,
+            )
+        except BaseException:
+            self._best_effort_finish_evidence_call(
+                client,
+                receipt_call,
+                output={**terminal_output, "cleanup_after_failure": True},
+            )
+            raise
+        remote = self._wait_for_public_terminal_call(
+            client=client,
+            call_id=call_id,
+            phase="hosted evidence verification receipt",
+        )
+        remote_inputs = getattr(remote, "inputs", None)
+        if (
+            _live_call_value(remote, "id") != call_id
+            or _live_call_value(remote, "project_id") != self.project
+            or _live_call_value(remote, "parent_id")
+            != bindings["predict_and_score_call_id"]
+            or not _same_nonempty_trace(
+                _live_call_value(remote, "trace_id"),
+                _live_call_value(evaluation_root, "trace_id"),
+            )
+            or not isinstance(remote_inputs, Mapping)
+            or stable_digest(dict(remote_inputs)) != bindings_digest
+        ):
+            raise RuntimeError(
+                "hosted evidence verification receipt did not reconcile exactly"
+            )
+        row.update(
+            {
+                "hosted_evidence_verification_status": "verified",
+                "weave_hosted_evidence_receipt_object_verified": True,
+                "weave_hosted_evidence_receipt_terminal_verified": True,
+                "weave_hosted_evidence_receipt_bindings_digest": bindings_digest,
+                "terminal_hosted_visibility_verified": True,
+            }
+        )
+
+    def _verify_eager_evaluation_root(
+        self,
+        row: dict[str, Any],
+        *,
+        dataset: Any,
+        prediction: Any,
+    ) -> None:
+        """Verify only the eager Evaluation root before Agent execution.
+
+        With Weave's default calls-complete transport, prediction-and-score and
+        prediction Calls remain intentionally unpublished until they close.
+        A full client flush while those Calls are open can wait for the SDK's
+        unpaired-start timeout. The Evaluation root is eager, so Fugue can
+        verify that root and its immutable Dataset without flushing children.
+        """
+
+        evaluation_call = getattr(prediction, "evaluate_call", None)
+        evaluation_call_id = _live_call_value(evaluation_call, "id")
+        if not evaluation_call_id:
+            raise RuntimeError("EvaluationLogger returned no Evaluation root Call")
+        predict_and_score_call = getattr(prediction, "predict_and_score_call", None)
+        predict_call = getattr(prediction, "predict_call", None)
+        evaluation_trace = _live_call_value(evaluation_call, "trace_id")
+        predict_and_score_id = _live_call_value(predict_and_score_call, "id")
+        prediction_id = _live_call_value(predict_call, "id")
+        local_children_verified = bool(
+            evaluation_trace
+            and predict_and_score_id
+            and prediction_id
+            and _live_call_value(predict_and_score_call, "parent_id")
+            == evaluation_call_id
+            and _live_call_value(predict_and_score_call, "project_id") == self.project
+            and _live_call_value(predict_and_score_call, "trace_id")
+            == evaluation_trace
+            and _live_call_value(predict_call, "parent_id") == predict_and_score_id
+            and _live_call_value(predict_call, "project_id") == self.project
+            and _live_call_value(predict_call, "trace_id") == evaluation_trace
+        )
+        row["evaluation_children_local_identity_verified"] = local_children_verified
+        row["evaluation_children_publication_status"] = (
+            "pending_terminal_reconciliation"
+        )
+        if not local_children_verified:
+            raise RuntimeError(
+                "local Evaluation prediction Calls did not preserve parent, project, "
+                "or trace identity"
+            )
+        with EVIDENCE_ROUTING_LOCK:
+            client = self._activate_evidence_client()
+            if client is None:
+                raise RuntimeError("Weave Evaluation root has no active public client")
+            get_call = getattr(client, "get_call", None)
+            get_object = getattr(client, "get", None)
+            if not callable(get_call) or not callable(get_object):
+                raise RuntimeError(
+                    "Weave Evaluation root cannot be verified through public APIs"
+                )
+            deadline = time.monotonic() + max(self.trace_timeout_sec, 0.0)
+            latest_error = "Evaluation root was not returned"
+            while True:
+                try:
+                    remote_call = get_call(evaluation_call_id)
+                except Exception as exc:
+                    latest_error = f"{type(exc).__name__}: {exc}"
+                else:
+                    remote_call_id = _live_call_value(remote_call, "id")
+                    remote_project = _live_call_value(remote_call, "project_id")
+                    remote_parent = _live_call_value(remote_call, "parent_id")
+                    remote_trace = _live_call_value(remote_call, "trace_id")
+                    if (
+                        remote_call_id != evaluation_call_id
+                        or remote_project != self.project
+                        or remote_parent
+                        or not evaluation_trace
+                        or remote_trace != evaluation_trace
+                    ):
+                        raise RuntimeError(
+                            "live Evaluation root identity, project, parent, or trace "
+                            "did not reconcile"
+                        )
+                    _apply_evaluation_evidence(
+                        row,
+                        evaluation_call=remote_call,
+                        dataset=dataset,
+                        project=self.project,
+                        object_resolver=get_object,
+                    )
+                    if (
+                        row.get("evaluation_root_object_verified") is True
+                        and row.get("evaluation_root_dataset_relationship_verified")
+                        is True
+                    ):
+                        break
+                    latest_error = str(
+                        row.get("evaluation_root_resolution_error")
+                        or "Evaluation Dataset relationship was unresolved"
+                    )
+                if time.monotonic() >= deadline:
+                    raise RuntimeError(
+                        "eager Evaluation root was not durably available: "
+                        + latest_error
+                    )
+                wait_sec = min(0.1, max(deadline - time.monotonic(), 0.0))
+                if self._cancellation_event.wait(wait_sec):
+                    raise _TracePollingCancelled
+        remote_call_id = _live_call_value(remote_call, "id")
+        remote_project = _live_call_value(remote_call, "project_id")
+        remote_parent = _live_call_value(remote_call, "parent_id")
+        remote_trace = _live_call_value(remote_call, "trace_id")
+        local_trace = _live_call_value(evaluation_call, "trace_id")
+        root_verified = bool(
+            remote_call_id == evaluation_call_id
+            and remote_project == self.project
+            and not remote_parent
+            and local_trace
+            and remote_trace == local_trace
+            and row.get("evaluation_root_object_verified") is True
+            and row.get("evaluation_root_dataset_relationship_verified") is True
+        )
+        row["evaluation_root_call_authoritatively_verified"] = root_verified
+        row["evaluation_root_verification_source"] = "weave_public_client_v1"
+        row["evaluation_prediction_graph_status"] = "pending_terminal_reconciliation"
+        row.pop("evaluation_prediction_graph_verified", None)
+        if not root_verified:
+            raise RuntimeError(
+                "live Evaluation root identity, project, parent, trace, or Dataset "
+                "did not reconcile"
+            )
+
     @staticmethod
     def _flush_weave_client(client: Any) -> None:
         flush = getattr(client, "flush", None)
         if callable(flush):
             flush()
-
-    def _wait_for_authoritative_call_state(
-        self,
-        *,
-        row: Mapping[str, Any],
-        call_id: str,
-        terminal: bool,
-        phase: str,
-        honor_cancellation: bool = True,
-    ) -> None:
-        """Require the exact remote Call state before advancing the lifecycle."""
-
-        summary_fetcher = getattr(self, "_summary_fetcher", None)
-        if not callable(summary_fetcher):
-            # Lightweight unit doubles validate local ordering separately.
-            return
-        deadline = time.monotonic() + max(
-            float(getattr(self, "trace_timeout_sec", 0.0)),
-            0.0,
-        )
-        run_key = str(row.get("run_key") or "")
-        if not run_key:
-            raise RuntimeError(f"{phase} has no canonical run key")
-        latest_error = "Call was not returned"
-        while True:
-            try:
-                values = summary_fetcher(
-                    run_keys=[run_key],
-                    conversation_ids_by_run={run_key: []},
-                    call_ids_by_run={run_key: [call_id]},
-                    project=self.project,
-                    timeout_sec=min(
-                        max(
-                            float(getattr(self, "trace_timeout_sec", 1.0)),
-                            1.0,
-                        ),
-                        10.0,
-                    ),
-                    env=self.env,
-                )
-            except httpx.TimeoutException as exc:
-                latest_error = f"{type(exc).__name__}: {exc}"
-            else:
-                graph = values.get(run_key, {}).get("weave_authoritative_call_graph")
-                matches = [
-                    value
-                    for value in graph or ()
-                    if isinstance(value, Mapping)
-                    and str(value.get("call_id") or "") == call_id
-                ]
-                if len(matches) == 1:
-                    remote = matches[0]
-                    remote_project = str(remote.get("project_id") or "")
-                    if remote_project != self.project:
-                        raise RuntimeError(
-                            f"{phase} resolved in the wrong Weave project"
-                        )
-                    if remote.get("terminal") is terminal:
-                        return
-                    latest_error = (
-                        "terminal state was "
-                        f"{remote.get('terminal')!r}, expected {terminal!r}"
-                    )
-                elif len(matches) > 1:
-                    raise RuntimeError(f"{phase} returned duplicate Call identities")
-            if time.monotonic() >= deadline:
-                raise RuntimeError(f"{phase} was not durably published: {latest_error}")
-            wait_sec = min(0.5, max(deadline - time.monotonic(), 0.0))
-            cancellation_event = getattr(self, "_cancellation_event", None)
-            if honor_cancellation and cancellation_event is not None:
-                if cancellation_event.wait(wait_sec):
-                    raise _TracePollingCancelled
-            else:
-                time.sleep(wait_sec)
 
     def _finish_agent_bridge(
         self,
@@ -848,6 +1332,8 @@ class LiveEvaluationCoordinator:
                 "weave_agent_bridge_close_status",
                 "weave_agent_bridge_closed_verified",
                 "weave_agent_bridge_close_error",
+                "weave_agent_bridge_close_recorded",
+                "weave_agent_bridge_publication_status",
                 "weave_agent_root_call_otel_trace_id",
                 "weave_agent_root_call_otel_span_id",
             ):
@@ -863,7 +1349,6 @@ class LiveEvaluationCoordinator:
         ):
             sync_terminal_row()
             return
-        active.bridge_finished = True
         active.row["weave_agent_bridge_close_status"] = status
         output = {
             "agent_execution_status": {
@@ -881,32 +1366,27 @@ class LiveEvaluationCoordinator:
                 }
             )
         try:
-            client = self._activate_evidence_client(active.bridge_client)
-            if client is None:
-                raise RuntimeError("Weave Agent bridge client is unavailable")
             call_project = str(_live_call_value(active.bridge_call, "project_id") or "")
             if call_project != self.project:
                 raise RuntimeError(
                     "Weave Agent bridge Call changed evidence destination"
                 )
-            client.finish_call(
+            self._finish_evidence_call(
+                active.bridge_client,
                 active.bridge_call,
                 output=output,
             )
-            self._flush_weave_client(client)
-            self._wait_for_authoritative_call_state(
-                row=terminal_row or active.row,
-                call_id=str(_live_call_value(active.bridge_call, "id") or ""),
-                terminal=True,
-                phase="Agent ancestry bridge end",
-                honor_cancellation=False,
-            )
-        except Exception as exc:
+        except BaseException as exc:
             active.row["weave_agent_bridge_closed_verified"] = False
             active.row["weave_agent_bridge_close_error"] = type(exc).__name__
             sync_terminal_row()
             return
-        active.row["weave_agent_bridge_closed_verified"] = True
+        active.bridge_finished = True
+        active.row["weave_agent_bridge_close_recorded"] = True
+        active.row["weave_agent_bridge_closed_verified"] = False
+        active.row["weave_agent_bridge_publication_status"] = (
+            "pending_terminal_reconciliation"
+        )
         if native_root is not None:
             active.row["weave_agent_root_call_otel_trace_id"] = str(
                 native_root.get("trace_id") or ""
@@ -928,25 +1408,17 @@ class LiveEvaluationCoordinator:
 
         client = active.bridge_client
         bridge = active.bridge_call
-        if (
-            client is None
-            or bridge is None
-            or not callable(getattr(client, "create_call", None))
-            or not callable(getattr(client, "finish_call", None))
-        ):
+        if client is None or bridge is None:
             raise RuntimeError(
                 "installed Weave runtime cannot materialize the Agent evidence receipt"
             )
-        client = self._activate_evidence_client(client)
-        if client is None:
-            raise RuntimeError("Weave Agent evidence receipt client is unavailable")
         if str(_live_call_value(bridge, "project_id") or "") != self.project:
             raise RuntimeError("Weave Agent bridge changed evidence destination")
         call_id = _native_agent_call_id(row, root)
         attributes = {
             "gen_ai.conversation.id": str(root["conversation_id"]),
             "fugue.evidence.kind": "native_agent_root_cross_transport_receipt",
-            "fugue.evidence.cross_transport_edge_verified": True,
+            "fugue.evidence.cross_transport_edge_status": "local_recorded",
             "fugue.native_agent_root_receipt": True,
             "fugue.native_agent_root_receipt_version": 1,
             "fugue.run_id": str(row["run_id"]),
@@ -985,7 +1457,8 @@ class LiveEvaluationCoordinator:
             "fugue.native_otel_trace_id": str(root["trace_id"]),
             "fugue.native_otel_span_id": str(root["span_id"]),
         }
-        call = client.create_call(
+        call, client = self._create_owned_eager_call(
+            client,
             getattr(
                 self,
                 "_native_agent_root_op",
@@ -997,6 +1470,9 @@ class LiveEvaluationCoordinator:
                 "native_otel_trace_id": str(root["trace_id"]),
                 "native_otel_span_id": str(root["span_id"]),
             },
+            call_id=call_id,
+            expected_parent_id=str(_live_call_value(bridge, "id")),
+            failure_status="native_agent_receipt_create_interrupted",
             parent=bridge,
             attributes=attributes,
             display_name=(
@@ -1005,71 +1481,71 @@ class LiveEvaluationCoordinator:
                 f"{_positive_int(row.get('trial_index')) or 1}"
             ),
             use_stack=False,
-            _call_id_override=call_id,
         )
-        if (
-            _live_call_value(call, "id") != call_id
-            or _live_call_value(call, "parent_id") != _live_call_value(bridge, "id")
-            or _live_call_value(call, "project_id") != self.project
-            or not _same_nonempty_trace(
-                _live_call_value(call, "trace_id"),
-                _live_call_value(bridge, "trace_id"),
-            )
-        ):
-            try:
-                client.finish_call(
-                    call,
-                    output={"status": "invalid_native_root_receipt"},
+        try:
+            identity_valid = bool(
+                _live_call_value(call, "id") == call_id
+                and _live_call_value(call, "parent_id")
+                == _live_call_value(bridge, "id")
+                and _live_call_value(call, "project_id") == self.project
+                and _same_nonempty_trace(
+                    _live_call_value(call, "trace_id"),
+                    _live_call_value(bridge, "trace_id"),
                 )
-            finally:
+            )
+            if not identity_valid:
                 raise RuntimeError(
                     "Agent evidence receipt did not preserve the Evaluation ancestry"
                 )
-        row.update(
-            {
-                "weave_agent_root_call_id": call_id,
-                "weave_agent_root_evidence_kind": (
-                    "native_otel_cross_transport_receipt_v1"
-                ),
-                "weave_agent_root_is_native_call": False,
-                "agent_cross_transport_edge": {
-                    "schema_version": 1,
-                    "status": "verified",
-                    "source_system": "otel",
-                    "source_trace_id": str(root["trace_id"]),
-                    "source_span_id": str(root["span_id"]),
-                    "receipt_system": "weave",
-                    "receipt_call_id": call_id,
-                },
-                "weave_agent_root_call_start_verified": False,
-                "weave_agent_root_call_terminal_verified": False,
-            }
-        )
-        self._flush_weave_client(client)
-        self._wait_for_authoritative_call_state(
-            row=row,
-            call_id=call_id,
-            terminal=False,
-            phase="Agent evidence receipt start",
-        )
-        row["weave_agent_root_call_start_verified"] = True
-        client.finish_call(
-            call,
-            output={
-                "agent_execution_status": _agent_execution_status(row),
-                "response_sha256": row.get("agent_response_sha256"),
-                "native_otel_trace_id": str(root["trace_id"]),
-                "native_otel_span_id": str(root["span_id"]),
-            },
-        )
-        self._flush_weave_client(client)
-        self._wait_for_authoritative_call_state(
-            row=row,
-            call_id=call_id,
-            terminal=True,
-            phase="Agent evidence receipt end",
-            honor_cancellation=False,
-        )
+        except BaseException:
+            self._best_effort_finish_evidence_call(
+                client,
+                call,
+                output={"status": "invalid_native_root_receipt"},
+            )
+            raise
+        terminal_output = {
+            "agent_execution_status": _agent_execution_status(row),
+            "response_sha256": row.get("agent_response_sha256"),
+            "native_otel_trace_id": str(root["trace_id"]),
+            "native_otel_span_id": str(root["span_id"]),
+        }
+        try:
+            row.update(
+                {
+                    "weave_agent_root_call_id": call_id,
+                    "weave_agent_root_evidence_kind": (
+                        "native_otel_cross_transport_receipt_v1"
+                    ),
+                    "weave_agent_root_is_native_call": False,
+                    "agent_cross_transport_edge": {
+                        "schema_version": 1,
+                        "status": "local_recorded",
+                        "source_system": "otel",
+                        "source_trace_id": str(root["trace_id"]),
+                        "source_span_id": str(root["span_id"]),
+                        "receipt_system": "weave",
+                        "receipt_call_id": call_id,
+                    },
+                    "weave_agent_root_call_start_verified": False,
+                    "weave_agent_root_call_terminal_verified": False,
+                    "weave_agent_root_call_publication_status": (
+                        "pending_terminal_reconciliation"
+                    ),
+                }
+            )
+            self._finish_evidence_call(
+                client,
+                call,
+                output=terminal_output,
+            )
+        except BaseException:
+            self._best_effort_finish_evidence_call(
+                client,
+                call,
+                output={**terminal_output, "cleanup_after_failure": True},
+            )
+            raise
         row.update(
             {
                 "weave_agent_root_call_id": call_id,
@@ -1079,7 +1555,7 @@ class LiveEvaluationCoordinator:
                 "weave_agent_root_call_otel_trace_id": str(root["trace_id"]),
                 "weave_agent_root_call_otel_span_id": str(root["span_id"]),
                 "weave_agent_root_call_object_created": True,
-                "weave_agent_root_call_terminal_verified": True,
+                "weave_agent_root_call_terminal_recorded": True,
             }
         )
 
@@ -1124,8 +1600,8 @@ class LiveEvaluationCoordinator:
         cell: PlannedCell,
         row: dict[str, Any],
         predict_and_score_call_id: str,
-    ) -> None:
-        """Resolve final native trace evidence before persisting Evaluation output."""
+    ) -> Mapping[str, Any] | None:
+        """Prepare native evidence without flushing open Evaluation children."""
 
         if row.get("agent_execution_status") == "not_started":
             self._finish_agent_bridge(
@@ -1134,7 +1610,7 @@ class LiveEvaluationCoordinator:
                 terminal_row=row,
             )
             _mark_agent_execution_not_started(row)
-            return
+            return None
         # Some harnesses export only a native OTel root to the Agents endpoint,
         # while others can also publish a native Weave Call. Verify the native
         # root first and materialize exactly one durable receipt only when the
@@ -1172,10 +1648,112 @@ class LiveEvaluationCoordinator:
             status="agent_completed",
             terminal_row=row,
         )
-        # Fugue initializes the host Weave client with separate start/end
-        # publication, so the still-open Evaluation Calls become queryable
-        # without persisting a provisional prediction output first.
-        _apply_trace_summary(row, self._wait_for_trace(row))
+        row["trace_link_status"] = "pending_terminal_reconciliation"
+        row["trace_link_error"] = None
+        return native_root
+
+    def _reconcile_terminal_hosted_evidence(
+        self,
+        *,
+        active: _LivePrediction,
+        cell: PlannedCell,
+        row: dict[str, Any],
+        predict_and_score_call_id: str,
+        native_root: Mapping[str, Any] | None,
+    ) -> None:
+        """Poll closed Calls, then verify the complete hosted evidence graph."""
+
+        local_evaluation_call = getattr(active.prediction, "evaluate_call", None)
+        evaluation_call_id = _live_call_value(local_evaluation_call, "id")
+        local_prediction_call = getattr(active.prediction, "predict_call", None)
+        prediction_call_id = _live_call_value(local_prediction_call, "id")
+        if not evaluation_call_id or not prediction_call_id:
+            raise RuntimeError("closed Evaluation prediction has incomplete Call IDs")
+        with EVIDENCE_ROUTING_LOCK:
+            client = self._activate_evidence_client(active.bridge_client)
+            if client is None:
+                raise RuntimeError("terminal Weave evidence has no active public client")
+            get_call = getattr(client, "get_call", None)
+            get_object = getattr(client, "get", None)
+            if not callable(get_call) or not callable(get_object):
+                raise RuntimeError(
+                    "terminal Weave evidence cannot use the required public APIs"
+                )
+            deadline = time.monotonic() + max(self.trace_timeout_sec, 0.0)
+            while True:
+                try:
+                    remote_evaluation = get_call(evaluation_call_id)
+                    remote_predict_and_score = get_call(predict_and_score_call_id)
+                    remote_prediction = get_call(prediction_call_id)
+                except Exception as exc:
+                    latest_error = f"{type(exc).__name__}: {exc}"
+                else:
+                    if (
+                        getattr(remote_predict_and_score, "ended_at", None) is not None
+                        and getattr(remote_prediction, "ended_at", None) is not None
+                    ):
+                        break
+                    latest_error = "Evaluation children were not terminal"
+                if time.monotonic() >= deadline:
+                    raise RuntimeError(
+                        "closed Evaluation Calls were not published: " + latest_error
+                    )
+                wait_sec = min(0.1, max(deadline - time.monotonic(), 0.0))
+                if self._cancellation_event.wait(wait_sec):
+                    raise _TracePollingCancelled
+            _verify_live_evaluation_graph(
+                row,
+                dataset=self._datasets[
+                    active.session.candidate["evaluation_scope_id"]
+                ],
+                prediction=SimpleNamespace(
+                    evaluate_call=remote_evaluation,
+                    predict_and_score_call=remote_predict_and_score,
+                    predict_call=remote_prediction,
+                ),
+                project=self.project,
+                object_resolver=get_object,
+            )
+        root_identity_verified = bool(
+            _live_call_value(remote_evaluation, "id") == evaluation_call_id
+            and _live_call_value(remote_evaluation, "project_id") == self.project
+            and not _live_call_value(remote_evaluation, "parent_id")
+            and _same_nonempty_trace(
+                _live_call_value(remote_evaluation, "trace_id"),
+                _live_call_value(local_evaluation_call, "trace_id"),
+            )
+        )
+        children_terminal = bool(
+            getattr(remote_predict_and_score, "ended_at", None) is not None
+            and getattr(remote_prediction, "ended_at", None) is not None
+        )
+        row["evaluation_root_call_authoritatively_verified"] = root_identity_verified
+        row["evaluation_children_terminal_verified"] = children_terminal
+        row["evaluation_prediction_graph_verified"] = bool(
+            row.get("evaluation_prediction_graph_verified") is True
+            and root_identity_verified
+            and children_terminal
+        )
+        row["evaluation_prediction_graph_status"] = (
+            "verified"
+            if row["evaluation_prediction_graph_verified"]
+            else "invalid"
+        )
+        row["terminal_hosted_visibility_verified"] = False
+        row["hosted_evidence_verification_status"] = (
+            "pending_post_close_verification"
+        )
+        if row["evaluation_prediction_graph_verified"] is not True:
+            raise RuntimeError(
+                "terminal Evaluation, prediction-and-score, and prediction Calls "
+                "did not reconcile"
+            )
+        if native_root is None:
+            if row.get("agent_execution_status") == "not_started":
+                return
+            raise RuntimeError("terminal Agent evidence is unavailable")
+        with EVIDENCE_ROUTING_LOCK:
+            _apply_trace_summary(row, self._wait_for_trace(row))
         _merge_error_events(row)
         _apply_observed_identity(row)
         _verify_authoritative_agent_graph(row)
@@ -1186,7 +1764,7 @@ class LiveEvaluationCoordinator:
         if verified_root is None:
             raise RuntimeError(
                 row.get("trace_link_error")
-                or "Agent evidence Weave Call did not reconcile"
+                or "terminal Agent evidence did not reconcile"
             )
         self._record_verified_agent_root(
             active=active,
@@ -1196,6 +1774,36 @@ class LiveEvaluationCoordinator:
             predict_and_score_call_id=predict_and_score_call_id,
             attach_span_ref=False,
         )
+        self._publish_hosted_evidence_verification_receipt(
+            active=active,
+            row=row,
+        )
+        self._append_event(
+            "hosted_evidence_verified",
+            cell_id=cell.id,
+            candidate_id=cell.candidate_id,
+            eval_predict_and_score_call_id=predict_and_score_call_id,
+            verification_receipt_call_id=row.get(
+                "weave_hosted_evidence_receipt_call_id"
+            ),
+        )
+
+    @staticmethod
+    def _coordinated_terminal_row(
+        cell: PlannedCell,
+        outcome: CellOutcome,
+        active: _LivePrediction,
+        canonical_row: Mapping[str, Any] | None,
+    ) -> dict[str, Any]:
+        row = (
+            dict(canonical_row)
+            if canonical_row is not None
+            else _completed_evaluation_row(cell, outcome, active.row)
+        )
+        _verify_coordinated_row_identity(row, cell)
+        if canonical_row is not None:
+            _merge_hosted_dynamic_row_fields(row, active.row)
+        return row
 
     def finish_cell(
         self,
@@ -1208,12 +1816,12 @@ class LiveEvaluationCoordinator:
             active = self._predictions.get(cell.id)
         if active is None:
             return
-        row = (
-            dict(canonical_row)
-            if canonical_row is not None
-            else _completed_evaluation_row(cell, outcome, active.row)
+        row = self._coordinated_terminal_row(
+            cell,
+            outcome,
+            active,
+            canonical_row,
         )
-        _verify_coordinated_row_identity(row, cell)
         _merge_error_events(row)
         row["evaluation_publication_mode"] = "live"
         row["evaluation_prediction_latency_sec"] = max(
@@ -1233,7 +1841,7 @@ class LiveEvaluationCoordinator:
         prediction_closed = False
         session_row_appended = False
         try:
-            self._prepare_terminal_agent_trace(
+            native_root = self._prepare_terminal_agent_trace(
                 active=active,
                 cell=cell,
                 row=row,
@@ -1242,22 +1850,6 @@ class LiveEvaluationCoordinator:
             self._raise_if_cancelled()
             _merge_error_events(row)
             _apply_observed_identity(row)
-            if row.get("trace_link_status") != "linked":
-                _verify_authoritative_agent_graph(row)
-                root = (
-                    None
-                    if row.get("trace_link_status") in {"not_applicable", "not_started"}
-                    else _verified_evaluation_root(row, call_id)
-                )
-                if root is not None:
-                    self._record_verified_agent_root(
-                        active=active,
-                        cell=cell,
-                        row=row,
-                        root=root,
-                        predict_and_score_call_id=call_id,
-                        attach_span_ref=True,
-                    )
             if canonical_row is None and cell.evaluation_case is not None:
                 try:
                     apply_generated_evaluation(
@@ -1283,29 +1875,38 @@ class LiveEvaluationCoordinator:
             if canonical_row is None:
                 self._apply_host_evaluator(row)
             _set_adapter_outcome(row)
+            if native_root is not None:
+                row["trace_link_status"] = "pending_terminal_reconciliation"
+                row["trace_link_error"] = None
+                row["weave_prediction_output_evidence_status"] = (
+                    "pending_terminal_reconciliation"
+                )
+            _set_prediction_display_names(active.prediction, row, terminal=True)
+            active.prediction.output = _evaluation_output(row)
+            with EVIDENCE_ROUTING_LOCK:
+                self._activate_evidence_client()
+                with active.session.lock:
+                    for name, value in _evaluation_scores(row).items():
+                        active.prediction.log_score(name, value)
+                    active.prediction.__exit__(None, None, None)
+                    prediction_closed = True
+            self._reconcile_terminal_hosted_evidence(
+                active=active,
+                cell=cell,
+                row=row,
+                predict_and_score_call_id=call_id,
+                native_root=native_root,
+            )
             if not self._pop_prediction(cell.id, active):
                 return
             owns_prediction = True
-            _set_prediction_display_names(active.prediction, row, terminal=True)
-            active.prediction.output = _evaluation_output(row)
-            with active.session.lock:
-                for name, value in _evaluation_scores(row).items():
-                    active.prediction.log_score(name, value)
-                active.prediction.__exit__(None, None, None)
-                prediction_closed = True
             with active.session.lock:
                 active.session.rows.append(row)
                 session_row_appended = True
             self._terminal_cells.add(cell.id)
             self._apply_evidence_checkpoint(cell, row)
             self._append_result(row)
-            self._append_event(
-                "finalized",
-                cell_id=cell.id,
-                candidate_id=cell.candidate_id,
-                trace_link_status=row.get("trace_link_status"),
-                eval_predict_and_score_call_id=call_id,
-            )
+            self._append_event("finalized", **_finalized_event_values(cell, row, call_id))
         except _TracePollingCancelled:
             self._finish_agent_bridge(
                 active,
@@ -1339,15 +1940,17 @@ class LiveEvaluationCoordinator:
                         terminal=True,
                     )
                     active.prediction.output = _evaluation_output(row)
-                with active.session.lock:
-                    if not prediction_closed:
-                        for name, value in _evaluation_scores(row).items():
-                            active.prediction.log_score(name, value)
-                        active.prediction.__exit__(None, None, None)
-                        prediction_closed = True
-                    if not session_row_appended:
-                        active.session.rows.append(row)
-                        session_row_appended = True
+                with EVIDENCE_ROUTING_LOCK:
+                    self._activate_evidence_client()
+                    with active.session.lock:
+                        if not prediction_closed:
+                            for name, value in _evaluation_scores(row).items():
+                                active.prediction.log_score(name, value)
+                            active.prediction.__exit__(None, None, None)
+                            prediction_closed = True
+                        if not session_row_appended:
+                            active.session.rows.append(row)
+                            session_row_appended = True
                 self._terminal_cells.add(cell.id)
                 self._apply_evidence_checkpoint(cell, row)
                 self._append_result(row)
@@ -1355,10 +1958,130 @@ class LiveEvaluationCoordinator:
                 self._append_event(
                     "failed",
                     cell_id=cell.id,
+                    attempt_id=cell.attempt_id,
                     candidate_id=cell.candidate_id,
                     error=row["trace_link_error"],
                     eval_predict_and_score_call_id=call_id,
                 )
+        except BaseException as exc:
+            self._handle_terminal_persistence_interruption(
+                cell=cell,
+                active=active,
+                row=row,
+                call_id=call_id,
+                error=exc,
+                prediction_closed=prediction_closed,
+                session_row_appended=session_row_appended,
+            )
+            raise
+
+    def _handle_terminal_persistence_interruption(
+        self,
+        *,
+        cell: PlannedCell,
+        active: _LivePrediction,
+        row: dict[str, Any],
+        call_id: str,
+        error: BaseException,
+        prediction_closed: bool,
+        session_row_appended: bool,
+    ) -> None:
+        if self._recover_finalized_terminal_persistence(
+            cell=cell,
+            row=row,
+            call_id=call_id,
+        ):
+            return
+        self._record_interrupted_terminal_prediction(
+            cell=cell,
+            active=active,
+            row=row,
+            error=error,
+            call_id=call_id,
+            prediction_closed=prediction_closed,
+            session_row_appended=session_row_appended,
+        )
+
+    def _recover_finalized_terminal_persistence(
+        self,
+        *,
+        cell: PlannedCell,
+        row: Mapping[str, Any],
+        call_id: str,
+    ) -> bool:
+        """Complete an exact terminal write that raised after its side effect."""
+
+        if not self._terminal_result_is_persisted(row):
+            return False
+        values = _finalized_event_values(cell, row, call_id)
+        try:
+            self._append_event("finalized", **values)
+        except BaseException:
+            if not self._terminal_event_is_persisted("finalized", **values):
+                raise
+        return True
+
+    def _record_interrupted_terminal_prediction(
+        self,
+        *,
+        cell: PlannedCell,
+        active: _LivePrediction,
+        row: dict[str, Any],
+        error: BaseException,
+        call_id: str,
+        prediction_closed: bool,
+        session_row_appended: bool,
+    ) -> None:
+        """Close and audit one prediction after a non-Exception interruption."""
+
+        self._finish_agent_bridge(
+            active,
+            status="interrupted",
+            terminal_row=row,
+        )
+        self._pop_prediction(cell.id, active)
+        row["trace_link_status"] = "failed"
+        row["trace_link_error"] = f"{type(error).__name__}: {error}"
+        row["hosted_terminal_interruption"] = type(error).__name__
+        _set_adapter_outcome(row)
+        if not prediction_closed:
+            try:
+                _set_prediction_display_names(active.prediction, row, terminal=True)
+            except BaseException:
+                pass
+            try:
+                active.prediction.output = _evaluation_output(row)
+            except BaseException:
+                pass
+            close_succeeded = False
+            for _attempt in range(2):
+                try:
+                    with EVIDENCE_ROUTING_LOCK:
+                        self._activate_evidence_client()
+                        with active.session.lock:
+                            active.prediction.__exit__(
+                                type(error),
+                                error,
+                                error.__traceback__,
+                            )
+                    close_succeeded = True
+                    break
+                except BaseException:
+                    continue
+            row["hosted_prediction_interruption_close_recorded"] = close_succeeded
+        if not session_row_appended:
+            with active.session.lock:
+                active.session.rows.append(row)
+        self._terminal_cells.add(cell.id)
+        self._append_result(row)
+        self._append_event(
+            "interrupted",
+            cell_id=cell.id,
+            attempt_id=cell.attempt_id,
+            candidate_id=cell.candidate_id,
+            error=row["trace_link_error"],
+            eval_predict_and_score_call_id=call_id,
+        )
 
     def _apply_host_evaluator(self, row: dict[str, Any]) -> None:
         if self._host_evaluator is None:
@@ -1501,7 +2224,20 @@ class LiveEvaluationCoordinator:
             row["evaluation_prediction_latency_sec"] = max(
                 time.monotonic() - active.opened_monotonic, 0.0
             )
-            self._close_cancelled_prediction(active, row, reason=reason)
+            try:
+                self._close_cancelled_prediction(active, row, reason=reason)
+            except BaseException as exc:
+                failure = (
+                    f"{row.get('cell_id') or 'unknown cell'} cleanup: "
+                    f"{type(exc).__name__}: {exc}"
+                )
+                self._cleanup_failures.append(failure)
+                self._append_event(
+                    "cleanup_failed",
+                    cell_id=row.get("cell_id"),
+                    candidate_id=row.get("candidate_id"),
+                    error=failure,
+                )
 
     def _cancel_prediction(
         self,
@@ -1553,15 +2289,18 @@ class LiveEvaluationCoordinator:
         )
         _set_prediction_display_names(active.prediction, row, terminal=True)
         active.prediction.output = _evaluation_output(row)
-        with active.session.lock:
-            active.prediction.__exit__(None, None, None)
-            active.session.rows.append(row)
+        with EVIDENCE_ROUTING_LOCK:
+            self._activate_evidence_client()
+            with active.session.lock:
+                active.prediction.__exit__(None, None, None)
+                active.session.rows.append(row)
         if cell_id:
             self._terminal_cells.add(cell_id)
         self._append_result(row)
         self._append_event(
             "cancelled",
             cell_id=cell_id or None,
+            attempt_id=row.get("attempt_id"),
             candidate_id=row.get("candidate_id"),
             error=reason,
             eval_predict_and_score_call_id=str(
@@ -1569,30 +2308,122 @@ class LiveEvaluationCoordinator:
             ),
         )
 
+    def _flush_after_evaluation_roots_close(self) -> None:
+        """Flush once after every prediction and Evaluation root is closed."""
+
+        if self._predictions:
+            raise RuntimeError("cannot flush while live Evaluation predictions remain")
+        with EVIDENCE_ROUTING_LOCK:
+            client = self._activate_evidence_client()
+            if client is None or not callable(getattr(client, "flush", None)):
+                raise RuntimeError(
+                    "Weave cannot flush after all Evaluation roots close"
+                )
+            self._flush_weave_client(client)
+
+    def _verify_terminal_evaluation_root(
+        self,
+        session: _LiveCandidate,
+    ) -> None:
+        """Verify one exact Evaluation root after its summary is published."""
+
+        local_root = session.evaluation_call
+        call_id = str(_live_call_value(local_root, "id") or "")
+        if not call_id:
+            raise RuntimeError("Evaluation session has no exact root Call ID")
+        with EVIDENCE_ROUTING_LOCK:
+            client = self._activate_evidence_client()
+        if client is None:
+            raise RuntimeError("Evaluation root verification has no public client")
+        remote_root = self._wait_for_public_terminal_call(
+            client=client,
+            call_id=call_id,
+            phase="Evaluation root",
+        )
+        if (
+            _live_call_value(remote_root, "id") != call_id
+            or _live_call_value(remote_root, "project_id") != self.project
+            or _live_call_value(remote_root, "parent_id")
+            or not _same_nonempty_trace(
+                _live_call_value(remote_root, "trace_id"),
+                _live_call_value(local_root, "trace_id"),
+            )
+        ):
+            raise RuntimeError(
+                "terminal Evaluation root changed identity, destination, or ancestry"
+            )
+        for row in session.rows:
+            row["evaluation_root_terminal_verified"] = True
+            row["evaluation_root_publication_status"] = "terminal_verified"
+
+    def _release_destination_lease(self) -> None:
+        lease = getattr(self, "_destination_lease", None)
+        if lease is None:
+            return
+        release_weave_destination_lease(lease)
+        self._destination_lease = None
+
     def finalize(self, *, cancelled: bool = False) -> PublicationResult:
-        if cancelled:
-            self.cancel_open_predictions("Run cancelled by the operator.")
-            error = RuntimeError("Run cancelled by the operator.")
-            for session in self._unique_sessions:
-                try:
+        """Close all live evidence and always release the destination lease."""
+
+        try:
+            return self._finalize_without_lease_release(cancelled=cancelled)
+        finally:
+            self._release_destination_lease()
+
+    def _finalize_cancelled(self) -> PublicationResult:
+        """Close every live Call after operator cancellation."""
+
+        self.cancel_open_predictions("Run cancelled by the operator.")
+        error = RuntimeError("Run cancelled by the operator.")
+        failures = list(self._cleanup_failures)
+        for session in self._unique_sessions:
+            try:
+                with EVIDENCE_ROUTING_LOCK:
+                    self._activate_evidence_client()
                     with session.lock:
                         session.logger.fail(error)
-                except Exception:
-                    pass
-                for row in session.candidate["rows"]:
-                    cell_id = str(row.get("cell_id") or "")
-                    if not cell_id or cell_id in self._terminal_cells:
-                        continue
-                    self._terminal_cells.add(cell_id)
-                    self._append_event(
-                        "cancelled",
-                        cell_id=cell_id,
-                        candidate_id=row.get("candidate_id"),
-                        error=str(error),
-                    )
-            return PublicationResult(published=0, skipped=0)
+            except BaseException as exc:
+                failures.append(
+                    f"{session.candidate['candidate_id']} root cleanup: "
+                    f"{type(exc).__name__}: {exc}"
+                )
+            for row in session.candidate["rows"]:
+                cell_id = str(row.get("cell_id") or "")
+                if not cell_id or cell_id in self._terminal_cells:
+                    continue
+                self._terminal_cells.add(cell_id)
+                self._append_event(
+                    "cancelled",
+                    cell_id=cell_id,
+                    attempt_id=row.get("attempt_id"),
+                    candidate_id=row.get("candidate_id"),
+                    error=str(error),
+                )
+        if not failures:
+            try:
+                self._flush_after_evaluation_roots_close()
+            except BaseException as exc:
+                failures.append(f"final Weave flush: {type(exc).__name__}: {exc}")
+        return PublicationResult(
+            published=0,
+            skipped=0,
+            failures=tuple(failures),
+        )
+
+    def _finalize_without_lease_release(
+        self,
+        *,
+        cancelled: bool,
+    ) -> PublicationResult:
+        if cancelled:
+            return self._finalize_cancelled()
+        if self._predictions:
+            self.cancel_open_predictions(
+                "Run finalization found an open Evaluation prediction."
+            )
         evaluations: list[PublishedEvaluation] = []
-        failures: list[str] = []
+        failures: list[str] = list(self._cleanup_failures)
         ledger = (
             self.repo_root
             / ".fugue"
@@ -1602,17 +2433,50 @@ class LiveEvaluationCoordinator:
             / _safe_slug(self.project)
         )
         ledger.mkdir(parents=True, exist_ok=True)
+        failed_sessions: set[int] = set()
         for session in self._unique_sessions:
             candidate_id = session.candidate["candidate_id"]
             try:
-                with session.lock:
-                    session.logger.log_summary()
-            except Exception as exc:
+                with EVIDENCE_ROUTING_LOCK:
+                    self._activate_evidence_client()
+                    with session.lock:
+                        session.logger.log_summary()
+            except BaseException as exc:
                 try:
-                    session.logger.fail(exc)
-                except Exception:
-                    pass
+                    with EVIDENCE_ROUTING_LOCK:
+                        self._activate_evidence_client()
+                        with session.lock:
+                            session.logger.fail(exc)
+                except BaseException as cleanup_exc:
+                    failures.append(
+                        f"{candidate_id} root cleanup: "
+                        f"{type(cleanup_exc).__name__}: {cleanup_exc}"
+                    )
+                failed_sessions.add(id(session))
                 failures.append(f"{candidate_id}: {type(exc).__name__}: {exc}")
+        roots_flushed = False
+        if not failed_sessions and not self._cleanup_failures:
+            try:
+                self._flush_after_evaluation_roots_close()
+                roots_flushed = True
+            except BaseException as exc:
+                failures.append(
+                    f"final Weave flush: {type(exc).__name__}: {exc}"
+                )
+        if roots_flushed:
+            for session in self._unique_sessions:
+                candidate_id = session.candidate["candidate_id"]
+                try:
+                    self._verify_terminal_evaluation_root(session)
+                except BaseException as exc:
+                    failed_sessions.add(id(session))
+                    failures.append(
+                        f"{candidate_id} Evaluation root verification: "
+                        f"{type(exc).__name__}: {exc}"
+                    )
+        for session in self._unique_sessions:
+            candidate_id = session.candidate["candidate_id"]
+            if id(session) in failed_sessions:
                 continue
             completed_rows = [
                 {
@@ -1663,14 +2527,15 @@ class LiveEvaluationCoordinator:
                     if len(roots) == 1:
                         _apply_agent_graph_verification(row, roots[0])
                 else:
-                    _apply_evaluation_evidence(
-                        row,
-                        evaluation_call=session.evaluation_call,
-                        dataset=self._datasets[
-                            session.candidate["evaluation_scope_id"]
-                        ],
-                        project=self.project,
-                    )
+                    if row.get("evaluation_prediction_graph_verified") is not True:
+                        _apply_evaluation_evidence(
+                            row,
+                            evaluation_call=session.evaluation_call,
+                            dataset=self._datasets[
+                                session.candidate["evaluation_scope_id"]
+                            ],
+                            project=self.project,
+                        )
             agent_rows = [
                 row
                 for row in session.rows
@@ -1806,15 +2671,125 @@ class LiveEvaluationCoordinator:
             }
         )
         with self._event_lock:
+            if status in _TERMINAL_EVENT_STATUSES:
+                matches = [
+                    value
+                    for value in _terminal_jsonl_records(
+                        self.events_path,
+                        run_id=self.run_id,
+                        cell_id=str(values.get("cell_id") or ""),
+                        attempt_id=str(values.get("attempt_id") or ""),
+                    )
+                    if value.get("status") in _TERMINAL_EVENT_STATUSES
+                ]
+                if len(matches) > 1:
+                    raise RuntimeError(
+                        "terminal event ledger contains duplicate logical attempts"
+                    )
+                if matches:
+                    existing = {
+                        key: value
+                        for key, value in matches[0].items()
+                        if key != "recorded_at"
+                    }
+                    incoming = {
+                        key: value
+                        for key, value in record.items()
+                        if key != "recorded_at"
+                    }
+                    if existing != incoming:
+                        raise RuntimeError(
+                            "terminal event conflicts with the persisted logical attempt"
+                        )
+                    return
             with self.events_path.open("a") as handle:
                 handle.write(json.dumps(record, sort_keys=True, default=str) + "\n")
 
     def _append_result(self, row: dict[str, Any]) -> None:
+        record = redact_value(row)
+        if not isinstance(record, dict):  # pragma: no cover - fixed mapping
+            raise TypeError("terminal result must be an object")
         with self._event_lock:
-            with self.results_path.open("a") as handle:
-                handle.write(
-                    json.dumps(redact_value(row), sort_keys=True, default=str) + "\n"
+            matches = _terminal_jsonl_records(
+                self.results_path,
+                run_id=str(row.get("run_id") or self.run_id),
+                cell_id=str(row.get("cell_id") or ""),
+                attempt_id=str(row.get("attempt_id") or ""),
+            )
+            if len(matches) > 1:
+                raise RuntimeError(
+                    "terminal result ledger contains duplicate logical attempts"
                 )
+            if matches:
+                if stable_digest(matches[0]) != stable_digest(record):
+                    raise RuntimeError(
+                        "terminal result conflicts with the persisted logical attempt"
+                    )
+                return
+            with self.results_path.open("a") as handle:
+                handle.write(json.dumps(record, sort_keys=True, default=str) + "\n")
+
+    def _terminal_result_is_persisted(self, row: Mapping[str, Any]) -> bool:
+        record = redact_value(dict(row))
+        if not isinstance(record, dict):  # pragma: no cover - fixed mapping
+            return False
+        with self._event_lock:
+            matches = _terminal_jsonl_records(
+                self.results_path,
+                run_id=str(row.get("run_id") or self.run_id),
+                cell_id=str(row.get("cell_id") or ""),
+                attempt_id=str(row.get("attempt_id") or ""),
+            )
+        if len(matches) > 1:
+            raise RuntimeError(
+                "terminal result ledger contains duplicate logical attempts"
+            )
+        if not matches:
+            return False
+        if stable_digest(matches[0]) != stable_digest(record):
+            raise RuntimeError(
+                "terminal result conflicts with the persisted logical attempt"
+            )
+        return True
+
+    def _terminal_event_is_persisted(
+        self,
+        status: str,
+        **values: Any,
+    ) -> bool:
+        expected = redact_value(
+            {
+                "schema_version": 1,
+                "run_id": self.run_id,
+                "status": status,
+                **values,
+            }
+        )
+        with self._event_lock:
+            matches = [
+                value
+                for value in _terminal_jsonl_records(
+                    self.events_path,
+                    run_id=self.run_id,
+                    cell_id=str(values.get("cell_id") or ""),
+                    attempt_id=str(values.get("attempt_id") or ""),
+                )
+                if value.get("status") in _TERMINAL_EVENT_STATUSES
+            ]
+        if len(matches) > 1:
+            raise RuntimeError(
+                "terminal event ledger contains duplicate logical attempts"
+            )
+        if not matches:
+            return False
+        existing = {
+            key: value for key, value in matches[0].items() if key != "recorded_at"
+        }
+        if existing != expected:
+            raise RuntimeError(
+                "terminal event conflicts with the persisted logical attempt"
+            )
+        return True
 
     def _rewrite_results(self) -> None:
         if not self.results_path.is_file():
@@ -1856,6 +2831,43 @@ class LiveEvaluationCoordinator:
                     + "\n"
                 )
         os.replace(temporary, self.results_path)
+
+
+def _terminal_jsonl_records(
+    path: Path,
+    *,
+    run_id: str,
+    cell_id: str,
+    attempt_id: str,
+) -> list[dict[str, Any]]:
+    """Read records for one stable logical attempt from a durable ledger."""
+
+    if not cell_id or not path.is_file():
+        return []
+    matches: list[dict[str, Any]] = []
+    for line_number, line in enumerate(
+        path.read_text(encoding="utf-8", errors="strict").splitlines(),
+        start=1,
+    ):
+        if not line.strip():
+            continue
+        try:
+            value = json.loads(line)
+        except json.JSONDecodeError as exc:
+            raise RuntimeError(
+                f"terminal ledger has malformed JSON at line {line_number}"
+            ) from exc
+        if not isinstance(value, dict):
+            continue
+        if str(value.get("run_id") or "") != run_id:
+            continue
+        if str(value.get("cell_id") or "") != cell_id:
+            continue
+        existing_attempt = str(value.get("attempt_id") or "")
+        if attempt_id and existing_attempt and existing_attempt != attempt_id:
+            continue
+        matches.append(value)
+    return matches
 
 
 class GeneratedEvaluationCoordinator:
@@ -2210,6 +3222,10 @@ class GeneratedEvaluationCoordinator:
                         and value.get("attempt_id") == cell.attempt_id
                     ):
                         existing.append(value)
+            if len(existing) > 1:
+                raise RuntimeError(
+                    "local export contains duplicate logical attempts"
+                )
             if existing:
                 if any(
                     stable_digest(value) != stable_digest(redacted)
@@ -2641,6 +3657,49 @@ def _verify_coordinated_row_identity(
             raise RuntimeError(
                 f"hosted and local evidence disagree on {key} for cell {cell.id}"
             )
+
+
+def _finalized_event_values(
+    cell: PlannedCell,
+    row: Mapping[str, Any],
+    call_id: str,
+) -> dict[str, Any]:
+    return {
+        "cell_id": cell.id,
+        "attempt_id": cell.attempt_id,
+        "candidate_id": cell.candidate_id,
+        "trace_link_status": row.get("trace_link_status"),
+        "eval_predict_and_score_call_id": call_id,
+    }
+
+
+def _has_evidence_value(value: Any) -> bool:
+    if value is None or value == "":
+        return False
+    if isinstance(value, (Mapping, list, tuple, set)):
+        return bool(value)
+    return True
+
+
+def _merge_hosted_dynamic_row_fields(
+    canonical_row: dict[str, Any],
+    hosted_row: Mapping[str, Any],
+) -> None:
+    """Merge only approved hosted lifecycle fields into the canonical row."""
+
+    for key in _HOSTED_DYNAMIC_ROW_FIELDS:
+        if key not in hosted_row or not _has_evidence_value(hosted_row[key]):
+            continue
+        hosted_value = hosted_row[key]
+        canonical_value = canonical_row.get(key)
+        if (
+            _has_evidence_value(canonical_value)
+            and canonical_value != hosted_value
+        ):
+            raise RuntimeError(
+                f"hosted and local evidence disagree on hosted lifecycle field {key}"
+            )
+        canonical_row[key] = copy.deepcopy(hosted_value)
 
 
 def _run_candidate_definition(
@@ -3084,6 +4143,18 @@ def _reconcile_authoritative_bridge_close(
     )
 
 
+def _mark_cross_transport_edges_verified(row: dict[str, Any]) -> None:
+    """Promote locally recorded edges after exact hosted graph verification."""
+
+    for key in (
+        "agent_cross_transport_edge",
+        "weave_agent_bridge_cross_transport_edge",
+    ):
+        edge = row.get(key)
+        if isinstance(edge, Mapping):
+            row[key] = {**dict(edge), "status": "verified"}
+
+
 def _verify_authoritative_agent_graph(row: dict[str, Any]) -> None:
     """Verify the Agent's complete Evaluation ancestry from fetched Weave Calls."""
 
@@ -3169,11 +4240,11 @@ def _verify_authoritative_agent_graph(row: dict[str, Any]) -> None:
             failures.append(f"{name} project")
         if not expected_trace or str(call.get("trace_id") or "") != expected_trace:
             failures.append(f"{name} trace")
+    terminal_names = ("predict_and_score", "prediction", "bridge", "agent")
+    for name in terminal_names:
+        if calls[expected[name]].get("terminal") is not True:
+            failures.append(f"{name} terminal state")
     bridge_terminal = calls[expected["bridge"]].get("terminal") is True
-    if not bridge_terminal:
-        failures.append("bridge terminal state")
-    if calls[expected["agent"]].get("terminal") is not True:
-        failures.append("agent terminal state")
     _reconcile_authoritative_bridge_close(
         row,
         bridge_terminal=bridge_terminal,
@@ -3191,12 +4262,20 @@ def _verify_authoritative_agent_graph(row: dict[str, Any]) -> None:
             }
         )
         return
+    _mark_cross_transport_edges_verified(row)
     row.update(
         {
             "weave_authoritative_call_graph_verified": True,
             "weave_authoritative_call_graph_status": "verified",
             "weave_authoritative_call_graph_error": None,
             "weave_authoritative_call_graph_source": ("weave_calls_exact_id_query_v1"),
+            "weave_agent_bridge_object_verified": True,
+            "weave_agent_bridge_start_verified": True,
+            "weave_agent_bridge_closed_verified": True,
+            "weave_agent_bridge_publication_status": "verified",
+            "weave_agent_root_call_start_verified": True,
+            "weave_agent_root_call_terminal_verified": True,
+            "weave_agent_root_call_publication_status": "verified",
         }
     )
 
@@ -3422,6 +4501,22 @@ def _native_agent_call_id(
     return str(uuid.uuid5(uuid.NAMESPACE_URL, canonical))
 
 
+def _hosted_evidence_verification_call_id(row: Mapping[str, Any]) -> str:
+    identity = {
+        "schema_version": 1,
+        "kind": "post_close_hosted_evidence_verification",
+        "project": row.get("trace_project"),
+        "run_id": row.get("run_id"),
+        "cell_id": row.get("cell_id"),
+        "attempt_id": row.get("attempt_id"),
+        "evaluation_root_call_id": row.get("weave_evaluation_root_call_id"),
+        "predict_and_score_call_id": row.get("eval_predict_and_score_call_id"),
+        "prediction_call_id": row.get("weave_prediction_call_id"),
+    }
+    canonical = json.dumps(identity, sort_keys=True, separators=(",", ":"))
+    return str(uuid.uuid5(uuid.NAMESPACE_URL, canonical))
+
+
 def _live_evidence_checkpoint_failures(
     row: Mapping[str, Any],
     *,
@@ -3442,6 +4537,9 @@ def _live_evidence_checkpoint_failures(
         "Evaluation graph": row.get("evaluation_prediction_graph_verified"),
         "Agent graph": row.get("agent_graph_verified"),
         "conversation correlation": row.get("conversation_correlation_verified"),
+        "post-close hosted evidence receipt": row.get(
+            "weave_hosted_evidence_receipt_terminal_verified"
+        ),
     }
     failures.extend(
         f"{label} was not authoritatively verified"
@@ -4978,6 +6076,32 @@ def _evaluation_output(
             "arm_label": _arm_label(row),
             "treatment_summary": _treatment_summary(row),
             "task_result": _task_result(row),
+            "task_verdict_owner": row.get("task_verdict_owner")
+            or "predict_and_score",
+            "hosted_evidence_verification": (
+                _drop_none(
+                    {
+                        "status": row.get("hosted_evidence_verification_status"),
+                        "owner": row.get("hosted_evidence_verification_owner"),
+                        "receipt_call_id": row.get(
+                            "weave_hosted_evidence_receipt_call_id"
+                        ),
+                        "receipt_ref": row.get(
+                            "weave_hosted_evidence_receipt_ref"
+                        ),
+                        "receipt_url": row.get(
+                            "weave_hosted_evidence_receipt_url"
+                        ),
+                        "meaning": (
+                            "The scored attempt owns the task verdict. This separate "
+                            "receipt verifies the hosted evidence chain after the "
+                            "scored attempt closes."
+                        ),
+                    }
+                )
+                if row.get("weave_hosted_evidence_receipt_call_id")
+                else None
+            ),
             "score_details": _weave_score_descriptors(row) or None,
             "judge_evidence": _evaluation_judge_evidence(row) or None,
             "status": _outcome_status(row),
@@ -5885,6 +7009,7 @@ def _apply_evaluation_evidence(
     evaluation_call: Any,
     dataset: Any,
     project: str,
+    object_resolver: Callable[[Any], Any] | None = None,
 ) -> None:
     evaluation_inputs = getattr(evaluation_call, "inputs", None)
     evaluation_input = (
@@ -5896,7 +7021,13 @@ def _apply_evaluation_evidence(
     evaluation = evaluation_input
     evaluation_get = getattr(evaluation_input, "get", None)
     row.pop("evaluation_root_resolution_error", None)
-    if callable(evaluation_get):
+    if callable(object_resolver) and evaluation_input is not None:
+        try:
+            evaluation = object_resolver(evaluation_input)
+        except Exception as exc:
+            evaluation = None
+            row["evaluation_root_resolution_error"] = type(exc).__name__
+    elif callable(evaluation_get):
         try:
             evaluation = evaluation_get()
         except Exception as exc:
@@ -5982,6 +7113,7 @@ def _verify_live_evaluation_graph(
     dataset: Any,
     prediction: Any,
     project: str,
+    object_resolver: Callable[[Any], Any] | None = None,
 ) -> None:
     """Verify the exact live Evaluation → prediction Call ancestry.
 
@@ -5996,6 +7128,7 @@ def _verify_live_evaluation_graph(
         evaluation_call=prediction.evaluate_call,
         dataset=dataset,
         project=project,
+        object_resolver=object_resolver,
     )
     evaluation_call = getattr(prediction, "evaluate_call", None)
     prediction_evaluation_call = getattr(prediction, "evaluate_call", None)
@@ -6660,9 +7793,14 @@ def _matched_agent_call(
 
 def _is_native_agent_evidence_receipt(call: Mapping[str, Any]) -> bool:
     attrs = _span_attributes(dict(call))
+    edge_recorded = bool(
+        attrs.get("fugue.evidence.cross_transport_edge_status")
+        == "local_recorded"
+        or attrs.get("fugue.evidence.cross_transport_edge_verified") is True
+    )
     return bool(
         attrs.get("fugue.evidence.kind") == "native_agent_root_cross_transport_receipt"
-        and attrs.get("fugue.evidence.cross_transport_edge_verified") is True
+        and edge_recorded
         and attrs.get("fugue.native_agent_root_receipt") is True
     )
 

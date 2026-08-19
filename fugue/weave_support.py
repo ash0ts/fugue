@@ -17,6 +17,8 @@ from fugue.model_plane import (
 )
 
 _ACTIVE_DESTINATION_DIGEST: str | None = None
+_ACTIVE_DESTINATION_LEASE_DIGEST: str | None = None
+_ACTIVE_DESTINATION_LEASE_COUNT = 0
 # W&B and Weave SDKs route through process-global environment and client state.
 # Every adapter that changes that state must hold this lock through readback.
 EVIDENCE_ROUTING_LOCK = RLock()
@@ -52,7 +54,6 @@ _WEAVE_CONTEXT_ONLY_ENV_KEYS = frozenset(
     }
 )
 
-
 def _apply_weave_environment(env: Mapping[str, str] | None) -> None:
     for key in _WEAVE_ENV_KEYS:
         os.environ.pop(key, None)
@@ -69,14 +70,13 @@ def _apply_weave_environment(env: Mapping[str, str] | None) -> None:
         os.environ["WANDB_API_KEY"] = trace_key
 
 
-def _active_weave_project_slug() -> str | None | object:
-    """Return the active SDK project, or a sentinel when context introspection is absent."""
+def _active_weave_project_slug(weave: Any) -> str | None | object:
+    """Return the active SDK project through Weave's public client API."""
 
-    try:
-        from weave.trace.context.weave_client_context import get_weave_client
-    except (ImportError, ModuleNotFoundError):
+    get_client = getattr(weave, "get_client", None)
+    if not callable(get_client):
         return _WEAVE_CLIENT_CONTEXT_UNAVAILABLE
-    client = get_weave_client()
+    client = get_client()
     if client is None:
         return None
     project = str(getattr(client, "project", "") or "")
@@ -109,8 +109,15 @@ def _activate_weave_locked(
         bound_env = trace_project_environment(project, env)
         destination = resolve_evidence_destination(bound_env)
     global _ACTIVE_DESTINATION_DIGEST
+    if (
+        _ACTIVE_DESTINATION_LEASE_DIGEST is not None
+        and destination.destination_digest != _ACTIVE_DESTINATION_LEASE_DIGEST
+    ):
+        raise RuntimeError(
+            "cannot switch Weave destination while a live Evaluation lease is active"
+        )
     _apply_weave_environment(bound_env)
-    active_project = _active_weave_project_slug()
+    active_project = _active_weave_project_slug(weave)
     destination_changed = destination.destination_digest != _ACTIVE_DESTINATION_DIGEST
     client_missing_or_wrong = (
         active_project is not _WEAVE_CLIENT_CONTEXT_UNAVAILABLE
@@ -161,6 +168,49 @@ def initialize_weave(project: str, env: Mapping[str, str] | None = None) -> Any:
     with EVIDENCE_ROUTING_LOCK:
         _activate_weave_locked(weave, project, env)
     return weave
+
+
+def acquire_weave_destination_lease(
+    project: str,
+    env: Mapping[str, str] | None = None,
+) -> str:
+    """Hold one destination while live Evaluation roots remain open."""
+
+    try:
+        import weave
+    except ImportError as exc:
+        raise RuntimeError("weave is not installed") from exc
+    with EVIDENCE_ROUTING_LOCK:
+        bound_env = trace_project_environment(project, env)
+        destination = resolve_evidence_destination(bound_env)
+        global _ACTIVE_DESTINATION_LEASE_DIGEST, _ACTIVE_DESTINATION_LEASE_COUNT
+        if (
+            _ACTIVE_DESTINATION_LEASE_DIGEST is not None
+            and _ACTIVE_DESTINATION_LEASE_DIGEST != destination.destination_digest
+        ):
+            raise RuntimeError(
+                "another live Evaluation owns the process-global Weave destination"
+            )
+        _activate_weave_locked(weave, project, env)
+        _ACTIVE_DESTINATION_LEASE_DIGEST = destination.destination_digest
+        _ACTIVE_DESTINATION_LEASE_COUNT += 1
+        return destination.destination_digest
+
+
+def release_weave_destination_lease(lease_digest: str) -> None:
+    """Release a live Evaluation destination lease after roots close."""
+
+    with EVIDENCE_ROUTING_LOCK:
+        global _ACTIVE_DESTINATION_LEASE_DIGEST, _ACTIVE_DESTINATION_LEASE_COUNT
+        if (
+            not lease_digest
+            or _ACTIVE_DESTINATION_LEASE_DIGEST != lease_digest
+            or _ACTIVE_DESTINATION_LEASE_COUNT <= 0
+        ):
+            raise RuntimeError("live Weave destination lease identity disagrees")
+        _ACTIVE_DESTINATION_LEASE_COUNT -= 1
+        if _ACTIVE_DESTINATION_LEASE_COUNT == 0:
+            _ACTIVE_DESTINATION_LEASE_DIGEST = None
 
 
 def weave_agents_otel_headers(project: str, api_key: str) -> str:
