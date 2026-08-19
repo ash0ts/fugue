@@ -599,10 +599,32 @@ class LiveEvaluationCoordinator:
                 )
                 self._finish_agent_bridge(failed_active, status="start_failed")
             if prediction is not None:
+                for name in (
+                    "comparison_deterministic_scores",
+                    "comparison_score_details",
+                    "comparison_deterministic_criticality",
+                    "comparison_dimension_roles",
+                    "comparison_mechanism",
+                    "comparison_judges",
+                    "comparison_judge_scores",
+                    "comparison_judge_status",
+                    "task_result",
+                ):
+                    row.pop(name, None)
                 row.update(
                     {
                         "status": "failed",
-                        "pass": False,
+                        "pass": None,
+                        "benchmark_outcome": "unscored",
+                        "runtime_outcome": "not_started",
+                        "terminal_kind": "evidence_failure",
+                        "evidence_integrity_status": "invalid",
+                        "comparison_evaluation_status": "unavailable",
+                        "comparison_evaluation_reason": (
+                            "live evidence initialization failed before Agent "
+                            f"execution: {type(exc).__name__}"
+                        ),
+                        "comparison_required_evaluation_complete": False,
                         "trace_link_status": "failed",
                         "trace_link_error": f"{type(exc).__name__}: {exc}",
                     }
@@ -4058,6 +4080,11 @@ def _completed_evaluation_row(
     for key, value in planned.items():
         row.setdefault(key, value)
     row["status"] = outcome.status
+    row["benchmark_outcome"] = outcome.benchmark_outcome
+    row["runtime_outcome"] = outcome.runtime_outcome
+    row["terminal_kind"] = outcome.terminal_kind
+    if outcome.terminal_kind == "evidence_failure":
+        row["evidence_integrity_status"] = "invalid"
     for key in (
         "attempt_id",
         "attempt_identity",
@@ -4104,13 +4131,23 @@ def _completed_evaluation_row(
     if outcome.error and not row.get("exception_class"):
         row["exception_class"] = "HarborCellError"
         row["exception_message"] = outcome.error
-    if outcome.status == "failed" and row.get("pass") is None:
-        row["pass"] = False
-    _apply_host_evidence_scores(
-        row,
-        cell.expected_evidence_paths,
-        cell.evaluation_asset_lock_sha256,
+    behavioral_attempt_reached_terminal = (
+        outcome.runtime_outcome in {"completed", "timed_out"}
+        or outcome.benchmark_outcome in {"passed", "failed"}
     )
+    if behavioral_attempt_reached_terminal:
+        if outcome.status == "failed" and row.get("pass") is None:
+            row["pass"] = False
+        _apply_host_evidence_scores(
+            row,
+            cell.expected_evidence_paths,
+            cell.evaluation_asset_lock_sha256,
+        )
+    else:
+        # A setup, routing, or evidence failure before Agent execution has no
+        # task output. Do not turn the missing output into a failed task.
+        row["pass"] = None
+        row.pop("task_result", None)
     return row
 
 
@@ -6070,12 +6107,21 @@ def _evaluation_output(
         for value in (row.get("otel_trace_ids") or row.get("weave_trace_ids") or [])
         if value
     ]
+    runtime_outcome = str(row.get("runtime_outcome") or "")
+    task_result = (
+        None
+        if runtime_outcome
+        in {"not_started", "cancelled", "interrupted", "not_applicable"}
+        else _task_result(row)
+    )
     return _drop_none(
         {
             "task_title": _task_title(row),
             "arm_label": _arm_label(row),
             "treatment_summary": _treatment_summary(row),
-            "task_result": _task_result(row),
+            "task_result": task_result,
+            "agent_execution_status": _agent_execution_status(row),
+            "evidence_integrity_status": _evidence_integrity_status(row),
             "task_verdict_owner": row.get("task_verdict_owner")
             or "predict_and_score",
             "hosted_evidence_verification": (
@@ -6707,6 +6753,16 @@ def _failed_required_checks(row: Mapping[str, Any]) -> list[dict[str, Any]]:
 
 
 def _agent_execution_status(row: Mapping[str, Any]) -> str:
+    runtime_outcome = str(row.get("runtime_outcome") or "").lower()
+    if runtime_outcome in {
+        "completed",
+        "timed_out",
+        "cancelled",
+        "interrupted",
+        "not_started",
+        "not_applicable",
+    }:
+        return runtime_outcome
     if row.get("agent_runtime_completed") is True:
         return "completed"
     terminal_kind = str(row.get("terminal_kind") or "")
@@ -8474,6 +8530,15 @@ def _set_adapter_outcome(
         execution_state = status
     elif terminal:
         execution_state = "failed"
+    elif str(row.get("runtime_outcome") or "") in {
+        "completed",
+        "timed_out",
+        "cancelled",
+        "interrupted",
+        "not_started",
+        "not_applicable",
+    }:
+        execution_state = str(row["runtime_outcome"])
     elif row.get("record_type") == "trial" or row.get("reward") is not None:
         execution_state = "completed"
     else:

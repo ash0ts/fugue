@@ -536,6 +536,84 @@ def test_comparison_keeps_public_tasks_and_private_labels_separate(
         check_comparison(spec, repo_root=tmp_path)
 
 
+def test_pre_agent_evidence_failure_has_no_behavioral_or_judge_scores() -> None:
+    root = Path.cwd()
+    spec = load_comparison(EXAMPLE / "comparison.yaml", repo_root=root)
+    judge = ComparisonEvaluatorV1(
+        id="advisory-review",
+        type="llm_judge",
+        required=False,
+        profile="wandb/anthropic/claude-opus-4-8",
+        rubric="Assess the response.",
+        dimensions=("usefulness",),
+    )
+
+    def unexpected_judge_request(**_kwargs: object):
+        raise AssertionError("a pre-Agent failure must not call the judge")
+
+    scored = score_comparison_rows(
+        replace(spec, evaluators=(*spec.evaluators, judge)),
+        [
+            {
+                "task_id": "expense-limit",
+                "trial_index": 1,
+                "variant_id": "baseline",
+                "harness": "codex",
+                "status": "failed",
+                "runtime_outcome": "not_started",
+                "benchmark_outcome": "unscored",
+                "terminal_kind": "evidence_failure",
+                "evidence_integrity_status": "invalid",
+                # Reproduce the stale false verdict emitted by the failed live run.
+                "pass": False,
+                "comparison_deterministic_scores": {
+                    "fact-and-source.answer_present": False,
+                },
+                "comparison_dimension_roles": {
+                    "fact-and-source.answer_present": "outcome",
+                },
+                "comparison_score_details": {
+                    "fact-and-source.answer_present": {"observed": "missing"},
+                },
+                "comparison_judge_scores": {"advisory-review.usefulness": 0.0},
+                "task_result": {
+                    "schema_version": 1,
+                    "task_passed": False,
+                    "outcome_summary": "The task did not pass.",
+                    "failed_required_checks": [
+                        {
+                            "id": "fact-and-source.answer_present",
+                            "label": "Answer Present",
+                            "critical": True,
+                        }
+                    ],
+                    "answer_digest": None,
+                    "agent_execution_status": "failed",
+                    "evidence_integrity_status": "incomplete",
+                },
+            }
+        ],
+        repo_root=root,
+        env={"ANTHROPIC_API_KEY": "unused-test-value"},
+        judge_request=unexpected_judge_request,
+    )[0]
+
+    assert scored["pass"] is None
+    assert scored["benchmark_pass"] is None
+    assert scored["comparison_evaluation_status"] == "unavailable"
+    assert scored["comparison_required_evaluation_complete"] is False
+    assert scored["comparison_evaluation_reason"] == (
+        "Agent execution did not start; no behavioral output is available to score"
+    )
+    assert scored["evidence_integrity_status"] == "invalid"
+    assert "comparison_deterministic_scores" not in scored
+    assert "comparison_dimension_roles" not in scored
+    assert "comparison_score_details" not in scored
+    assert "comparison_judge_scores" not in scored
+    assert "comparison_judges" not in scored
+    assert "task_result" not in scored
+
+
 def test_replay_scores_aligned_improvements_and_regressions() -> None:
     root = Path.cwd()
     spec = load_comparison(EXAMPLE / "comparison.yaml", repo_root=root)

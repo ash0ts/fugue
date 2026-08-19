@@ -11015,6 +11015,62 @@ def scaffold_comparison(
     )
 
 
+def _unscorable_agent_execution_reason(row: Mapping[str, Any]) -> str | None:
+    """Explain why one terminal row has no behavioral output to score."""
+
+    runtime_outcome = str(row.get("runtime_outcome") or "")
+    if runtime_outcome == "not_started":
+        return (
+            "Agent execution did not start; no behavioral output is available "
+            "to score"
+        )
+    if runtime_outcome in {"cancelled", "interrupted", "not_applicable"}:
+        return (
+            f"Agent execution was {runtime_outcome.replace('_', ' ')}; no "
+            "behavioral output is available to score"
+        )
+    if not runtime_outcome and str(row.get("status") or "") in {
+        "cancelled",
+        "interrupted",
+        "not_applicable",
+    }:
+        return (
+            "Agent execution did not produce a behavioral output that Fugue can "
+            "score"
+        )
+    return None
+
+
+def _withhold_comparison_behavioral_scores(
+    row: dict[str, Any],
+    *,
+    reason: str,
+) -> None:
+    """Remove task and judge verdicts when the Agent produced no output."""
+
+    for name in (
+        "comparison_deterministic_scores",
+        "comparison_score_details",
+        "comparison_deterministic_criticality",
+        "comparison_dimension_roles",
+        "comparison_mechanism",
+        "comparison_judges",
+        "comparison_judge_scores",
+        "comparison_judge_status",
+        "task_result",
+    ):
+        row.pop(name, None)
+    row.update(
+        {
+            "pass": None,
+            "benchmark_pass": None,
+            "comparison_evaluation_status": "unavailable",
+            "comparison_evaluation_reason": reason,
+            "comparison_required_evaluation_complete": False,
+        }
+    )
+
+
 def score_comparison_rows(
     spec: ComparisonSpecV1,
     rows: Sequence[Mapping[str, Any]],
@@ -11066,6 +11122,14 @@ def score_comparison_rows(
         )
         label = labels.get(task_id)
         row.setdefault("benchmark_pass", row.get("pass"))
+        unscorable_reason = _unscorable_agent_execution_reason(row)
+        if unscorable_reason is not None:
+            _withhold_comparison_behavioral_scores(
+                row,
+                reason=unscorable_reason,
+            )
+            scored.append(row)
+            continue
         if label is None:
             row["pass"] = None
             row["comparison_evaluation_status"] = "unavailable"

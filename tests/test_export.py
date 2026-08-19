@@ -3742,6 +3742,148 @@ def test_claude_begin_failure_closes_entered_prediction(
     assert statuses == ["pending", "prediction_start_failed"]
 
 
+def test_live_eager_root_failure_withholds_task_verdict_and_scores(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    class FakeDataset:
+        def __init__(self, **kwargs) -> None:
+            self.__dict__.update(kwargs)
+
+    class Prediction:
+        def __init__(self) -> None:
+            self.predict_and_score_call = SimpleNamespace(
+                id="predict-and-score",
+                project_id="entity/project",
+                summary=None,
+            )
+            self.output = None
+            self.scores: dict[str, object] = {}
+            self.exit_args: list[tuple[object, object, object]] = []
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, exc_type, exc, traceback) -> None:
+            self.exit_args.append((exc_type, exc, traceback))
+
+    prediction = _attach_public_call_handles(Prediction())
+
+    class FakeLogger:
+        def __init__(self, **_kwargs) -> None:
+            pass
+
+        @staticmethod
+        def log_prediction(inputs, **_metadata):
+            del inputs
+            return prediction
+
+    original_planned_row = export._planned_evaluation_row
+
+    def planned_row_with_stale_scores(cell: PlannedCell) -> dict[str, object]:
+        row = original_planned_row(cell)
+        row.update(
+            {
+                "pass": False,
+                "comparison_deterministic_scores": {"tool.answer_correct": False},
+                "comparison_dimension_roles": {"tool.answer_correct": "outcome"},
+                "comparison_score_details": {
+                    "tool.answer_correct": {"observed": "missing"}
+                },
+            }
+        )
+        return row
+
+    monkeypatch.setattr(export, "_planned_evaluation_row", planned_row_with_stale_scores)
+    captured_row: dict[str, object] = {}
+    original_output = export._evaluation_output
+
+    def capture_output(row, **kwargs):
+        captured_row.update(row)
+        return original_output(row, **kwargs)
+
+    monkeypatch.setattr(export, "_evaluation_output", capture_output)
+    cell = _live_test_cell(
+        cell_id="cell-eager-root-failure",
+        run_id="run-eager-root-failure",
+    )
+    coordinator = LiveEvaluationCoordinator(
+        [cell],
+        repo_root=tmp_path,
+        project="entity/project",
+        env=cell.env,
+        weave_module=SimpleNamespace(
+            Dataset=FakeDataset,
+            EvaluationLogger=FakeLogger,
+        ),
+    )
+    coordinator._verify_eager_evaluation_root = (
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(
+            RuntimeError("eager Evaluation root is unavailable")
+        )
+    )
+
+    with pytest.raises(RuntimeError, match="eager Evaluation root is unavailable"):
+        coordinator.begin_cell(cell)
+
+    assert captured_row["pass"] is None
+    assert captured_row["benchmark_outcome"] == "unscored"
+    assert captured_row["runtime_outcome"] == "not_started"
+    assert captured_row["terminal_kind"] == "evidence_failure"
+    assert captured_row["evidence_integrity_status"] == "invalid"
+    assert captured_row["comparison_evaluation_status"] == "unavailable"
+    assert captured_row["comparison_required_evaluation_complete"] is False
+    assert "comparison_deterministic_scores" not in captured_row
+    assert "comparison_dimension_roles" not in captured_row
+    assert "comparison_score_details" not in captured_row
+    assert prediction.scores == {}
+    assert prediction.output["status"] == "unscored"
+    assert prediction.output["agent_execution_status"] == "not_started"
+    assert prediction.output["evidence_integrity_status"] == "invalid"
+    assert "task_result" not in prediction.output
+    assert "score_details" not in prediction.output
+    assert len(prediction.exit_args) == 1
+    assert prediction.exit_args[0][0] is RuntimeError
+    assert coordinator._predictions == {}
+
+
+@pytest.mark.parametrize(
+    ("runtime_outcome", "passed"),
+    (("completed", True), ("timed_out", False)),
+)
+def test_evaluation_output_keeps_task_verdict_for_behavioral_terminal_states(
+    runtime_outcome: str,
+    passed: bool,
+) -> None:
+    output = export._evaluation_output(
+        {
+            "record_type": "trial",
+            "execution_kind": "agent",
+            "task_id": "task-a",
+            "status": "passed" if passed else "failed",
+            "runtime_outcome": runtime_outcome,
+            "pass": passed,
+            "evidence_integrity_status": "verified",
+        }
+    )
+
+    assert output["task_result"]["task_passed"] is passed
+    assert output["task_result"]["agent_execution_status"] == runtime_outcome
+    assert output["agent_execution_status"] == runtime_outcome
+
+    legacy = export._evaluation_output(
+        {
+            "record_type": "trial",
+            "execution_kind": "agent",
+            "task_id": "legacy-task",
+            "status": "failed",
+            "pass": False,
+            "evidence_integrity_status": "verified",
+        }
+    )
+    assert legacy["task_result"]["task_passed"] is False
+
+
 def test_live_begin_closes_prediction_when_enter_is_interrupted(tmp_path: Path) -> None:
     class InterruptedPrediction:
         def __init__(self) -> None:
@@ -6514,6 +6656,52 @@ def test_completed_evaluation_preserves_planned_dataset_identity(
         export._publication_candidates([row])[0]["evaluation_scope_id"]
         == export._publication_candidates([planned])[0]["evaluation_scope_id"]
     )
+
+
+def test_pre_agent_evidence_failure_stays_invalid_and_unscored(
+    tmp_path: Path,
+) -> None:
+    cell = replace(
+        _live_test_cell(cell_id="cell-pre-agent", run_id="run-pre-agent"),
+        result_path=tmp_path / "missing" / "result.json",
+        expected_evidence_paths=("src/expected.py",),
+    )
+    row = export._completed_evaluation_row(
+        cell,
+        CellOutcome(
+            cell.id,
+            "failed",
+            error="required live-evidence initialization failed",
+            benchmark_outcome="unscored",
+            runtime_outcome="not_started",
+            terminal_kind="evidence_failure",
+        ),
+        export._planned_evaluation_row(cell),
+    )
+    export._set_adapter_outcome(row)
+
+    assert row["runtime_outcome"] == "not_started"
+    assert row["benchmark_outcome"] == "unscored"
+    assert row["terminal_kind"] == "evidence_failure"
+    assert row["pass"] is None
+    assert row["evidence_integrity_status"] == "invalid"
+    assert row["adapter_outcome"]["execution"]["state"] == "not_started"
+    assert "evidence_recall" not in row
+    assert "citation_correctness" not in row
+    assert "task_passed" not in export._evaluation_scores(row)
+
+    task_result = export._task_result(row)
+    assert task_result == {
+        "schema_version": 1,
+        "task_passed": None,
+        "outcome_summary": (
+            "Fugue withheld the task verdict because its evidence is invalid."
+        ),
+        "failed_required_checks": [],
+        "answer_digest": None,
+        "agent_execution_status": "not_started",
+        "evidence_integrity_status": "invalid",
+    }
 
 
 def test_generated_evaluation_scope_is_shared_and_rubric_sensitive() -> None:
