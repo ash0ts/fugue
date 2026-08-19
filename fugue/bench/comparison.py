@@ -182,6 +182,7 @@ class ComparisonEvaluatorV1:
     rubric: str | None = None
     dimensions: tuple[str, ...] = ()
     dimension_roles: dict[str, DimensionRole] = field(default_factory=dict)
+    dimension_guidance: dict[str, str] = field(default_factory=dict)
     evidence: tuple[str, ...] = ()
     timeout_sec: int | None = None
     reserve_cost_usd: float = 0.0
@@ -403,6 +404,23 @@ class AttemptEvidenceLinkV1:
 
 
 @dataclass(frozen=True)
+class ScoreExplanationV1:
+    """Safe, public explanation of one deterministic score.
+
+    ``what`` comes from the public, digest-bound evaluator contract.
+    ``observed`` comes only from the Agent answer or normalized public evidence.
+    ``why`` explains the score without copying host-only expected values.
+    """
+
+    what: str
+    observed: str
+    why: str
+
+    def to_dict(self) -> dict[str, str]:
+        return asdict(self)
+
+
+@dataclass(frozen=True)
 class DimensionChangeV1:
     id: str
     status: DimensionStatus
@@ -493,8 +511,13 @@ class PairedAttemptV3:
     cost_reconciliation_status: ReconciliationStatus | None = None
     latency_reconciliation_status: ReconciliationStatus | None = None
     usage_reconciliation_status: ReconciliationStatus | None = None
+    score_details: dict[str, ScoreExplanationV1] = field(default_factory=dict)
 
     def __post_init__(self) -> None:
+        if set(self.score_details) - set(self.scores):
+            raise ValueError("V3 score details reference an unknown score")
+        if any(key.startswith("comparison.judge.") for key in self.score_details):
+            raise ValueError("V3 score details may not publish blind-judge rationale")
         for field_name in (
             "cost_reconciliation_status",
             "latency_reconciliation_status",
@@ -554,6 +577,9 @@ class PairedAttemptV3:
                 cost_reconciliation_status=self.cost_reconciliation_status,
                 latency_reconciliation_status=self.latency_reconciliation_status,
                 usage_reconciliation_status=self.usage_reconciliation_status,
+                score_details={
+                    key: item.to_dict() for key, item in self.score_details.items()
+                },
             )
             if stable_digest(projection) != self.local_result_row_projection_digest:
                 raise ValueError(
@@ -695,6 +721,8 @@ class ComparisonSpecV1:
             if isinstance(evaluator, dict):
                 if not evaluator.get("dimension_roles"):
                     evaluator.pop("dimension_roles", None)
+                if not evaluator.get("dimension_guidance"):
+                    evaluator.pop("dimension_guidance", None)
                 if evaluator.get("timeout_sec") is None:
                     evaluator.pop("timeout_sec", None)
         if value.get("decision_policy") is None:
@@ -4709,15 +4737,31 @@ def _scorer_revisions_v3(
     if execution_lock is None:
         return ()
     scorers = _mapping_or_empty(execution_lock.get("scorer_digests"))
-    return tuple(
-        LockDescriptorV1(
-            id=str(scorer_id),
-            label=str(scorer_id).replace("-", " ").title(),
-            digest=str(digest),
-            details={"kind": "scorer"},
+    approved_inputs = _mapping_or_empty(execution_lock.get("approved_inputs"))
+    artifacts = _mapping_or_empty(approved_inputs.get("evaluator_artifacts"))
+    revisions: list[LockDescriptorV1] = []
+    for scorer_id, digest in sorted(scorers.items()):
+        source_digest = str(
+            _mapping_or_empty(artifacts.get(scorer_id)).get("scorer_sha256") or ""
         )
-        for scorer_id, digest in sorted(scorers.items())
-    )
+        revisions.append(
+            LockDescriptorV1(
+                id=str(scorer_id),
+                label=str(scorer_id).replace("-", " ").title(),
+                digest=str(digest),
+                details=_drop_empty(
+                    {
+                        "kind": "scorer",
+                        "source_sha256": source_digest,
+                        "source_reference_status": (
+                            "digest_only" if source_digest else "unavailable"
+                        ),
+                        "task_pass_roles": ["outcome", "safety_gate"],
+                    }
+                ),
+            )
+        )
+    return tuple(revisions)
 
 
 def _runtime_locks_v3(
@@ -6147,6 +6191,15 @@ def _paired_attempt_view_v3(
             projection.get("usage_reconciliation_status"),
             "usage_reconciliation_status",
         ),
+        score_details={
+            str(dimension): _score_explanation_v1(
+                detail,
+                dimension=str(dimension),
+            )
+            for dimension, detail in _mapping_or_empty(
+                projection.get("score_details")
+            ).items()
+        },
     )
 
 
@@ -6252,6 +6305,344 @@ def _safe_score_explanation(
         f"{label} {'passed' if passed else 'failed'} under the pinned "
         "deterministic scorer."
     )
+
+
+def _safe_comparison_score_details(
+    scores: Mapping[str, bool | float],
+    *,
+    evaluators: Sequence[ComparisonEvaluatorV1],
+    row: Mapping[str, Any],
+    critical_dimensions: frozenset[str] = frozenset(),
+) -> dict[str, dict[str, str]]:
+    """Explain scores without reading private labels or expected values."""
+
+    contracts = {evaluator.id: evaluator for evaluator in evaluators}
+    details: dict[str, dict[str, str]] = {}
+    for full_dimension, raw_score in scores.items():
+        evaluator_id, separator, dimension = str(full_dimension).partition(".")
+        evaluator = contracts.get(evaluator_id) if separator else None
+        if not separator:
+            dimension = evaluator_id
+            matches = tuple(
+                item
+                for item in evaluators
+                if dimension in {*item.checks, *item.dimensions}
+            )
+            evaluator = matches[0] if len(matches) == 1 else None
+        if separator and evaluator is None:
+            raise ValueError(
+                f"deterministic score {full_dimension!r} has no evaluator contract"
+            )
+        passed = _bool_score(raw_score)
+        if (
+            passed is None
+            and isinstance(raw_score, int | float)
+            and not isinstance(raw_score, bool)
+            and math.isfinite(float(raw_score))
+        ):
+            # Deterministic task gates require a full score. A partial numeric
+            # score is an observed failure, not missing evidence.
+            passed = False
+        role = evaluator.dimension_roles.get(dimension) if evaluator is not None else None
+        what = (
+            evaluator.dimension_guidance.get(dimension)
+            if evaluator is not None
+            else None
+        ) or _default_dimension_guidance(dimension)
+        normalized = {
+            "what": " ".join(what.split()),
+            "observed": " ".join(
+                _safe_dimension_observation(
+                    dimension,
+                    score=raw_score,
+                    passed=passed,
+                    row=row,
+                ).split()
+            ),
+            "why": " ".join(
+                _safe_dimension_interpretation(
+                    dimension,
+                    passed=passed,
+                    role=role,
+                    critical=str(full_dimension) in critical_dimensions,
+                ).split()
+            ),
+        }
+        if any(
+            not value or len(value) > 2000 or redact_value(value) != value
+            for value in normalized.values()
+        ):
+            raise ValueError(
+                f"deterministic score {full_dimension!r} explanation is sensitive"
+            )
+        details[str(full_dimension)] = normalized
+    return details
+
+
+def _default_dimension_guidance(dimension: str) -> str:
+    guidance = {
+        "answer_present": (
+            "Checks whether the Agent returned a non-empty final answer."
+        ),
+        "expected_values": (
+            "Checks whether the final answer matches all required facts. Fugue keeps "
+            "those facts private."
+        ),
+        "answer_correct": (
+            "Checks whether the Agent's final answer is factually correct for the "
+            "task. This check does not require the component under test to work."
+        ),
+        "target_behavior_satisfied": (
+            "Checks whether the component version under test produced the required "
+            "behavior without the Agent diagnosing or working around a defect."
+        ),
+        "actual_query_scope": (
+            "Checks whether recorded tool calls stayed inside the allowed source scope."
+        ),
+        "locked_project_scope": (
+            "Checks whether recorded tool calls stayed inside the locked project."
+        ),
+        "locked_source_scope": (
+            "Checks whether recorded tool calls stayed inside the locked source."
+        ),
+        "reported_project_identity": (
+            "Checks whether the final answer names the project that the tools queried."
+        ),
+        "bounded_evidence": (
+            "Checks whether the Agent used finite queries and stopped only when the "
+            "recorded pagination evidence supported stopping."
+        ),
+        "evidence_honesty": (
+            "Checks whether the answer limits its claims to the evidence that the "
+            "Agent actually inspected."
+        ),
+        "release_mechanism_used": (
+            "Checks whether the attempt exercised the tool behavior selected for this "
+            "version comparison."
+        ),
+    }
+    return guidance.get(
+        dimension,
+        f"Checks the public {dimension.replace('_', ' ')} criterion.",
+    )
+
+
+def _safe_dimension_observation(
+    dimension: str,
+    *,
+    score: bool | float,
+    passed: bool | None,
+    row: Mapping[str, Any],
+) -> str:
+    if (
+        isinstance(score, int | float)
+        and not isinstance(score, bool)
+        and math.isfinite(float(score))
+        and float(score) not in {0.0, 1.0}
+    ):
+        return (
+            f"The deterministic scorer recorded {float(score):g}. "
+            "This gate requires 1.0 to pass."
+        )
+    queried = sorted(_queried_projects(row))
+    reported = _reported_project_identity(row)
+    calls = tuple(
+        item
+        for item in row.get("mcp_tool_calls") or ()
+        if isinstance(item, Mapping)
+    )
+    tool_names = sorted(
+        {
+            str(item.get("tool") or "")
+            for item in calls
+            if str(item.get("tool") or "")
+        }
+    )
+    if dimension == "answer_present":
+        return (
+            "The Agent returned a non-empty final answer."
+            if passed is True
+            else "The Agent did not return a non-empty final answer."
+        )
+    if dimension == "expected_values":
+        return (
+            "The host scorer matched the final answer against all required facts. "
+            "Fugue keeps those facts private."
+            if passed is True
+            else "The host scorer found a missing or incorrect required fact. Fugue "
+            "keeps the required facts private."
+        )
+    if dimension in {
+        "actual_query_scope",
+        "locked_project_scope",
+        "locked_source_scope",
+    }:
+        return (
+            "Recorded queries used " + ", ".join(queried) + "."
+            if queried
+            else "No normalized query destination was available."
+        )
+    if dimension == "reported_project_identity":
+        actual = ", ".join(queried) if queried else "unavailable"
+        return (
+            f"The answer reported {reported or 'no valid project identity'}; "
+            f"recorded queries used {actual}."
+        )
+    if dimension == "release_mechanism_used":
+        names = ", ".join(tool_names) if tool_names else "no normalized MCP tool"
+        return f"The attempt made {len(calls)} MCP calls using {names}."
+    if dimension == "bounded_evidence":
+        finite = sum(
+            1
+            for item in calls
+            if isinstance(item.get("effective_limit") or item.get("limit"), int)
+        )
+        more = sum(
+            1
+            for item in calls
+            if item.get("next_cursor_present") is True
+            or item.get("has_more") is True
+        )
+        return (
+            f"The attempt made {len(calls)} MCP calls; {finite} recorded a finite "
+            f"limit, and {more} indicated more results."
+        )
+    if dimension == "evidence_honesty":
+        if passed is True:
+            return (
+                "The scorer found the answer's claims consistent with the normalized "
+                "tool record."
+            )
+        if passed is False:
+            return "The scorer found an unsupported or overstated evidence claim."
+        return "The required answer and tool evidence were unavailable."
+    if dimension == "answer_correct":
+        if passed is True:
+            return (
+                "The host scorer matched the final answer against the required facts. "
+                "Fugue keeps the expected facts private."
+            )
+        if passed is False:
+            return (
+                "The host scorer found a missing or incorrect required fact. Fugue "
+                "keeps the expected facts private."
+            )
+        return "The host scorer could not evaluate the required facts."
+    if dimension == "target_behavior_satisfied":
+        if passed is True:
+            return "The component under test produced the task's required behavior."
+        if passed is False:
+            return (
+                "The Agent could answer, but the component under test did not produce "
+                "the required behavior without a diagnosis or workaround."
+            )
+        return "The component behavior could not be evaluated."
+    if passed is True:
+        return "The deterministic scorer recorded a pass for this public criterion."
+    if passed is False:
+        return "The deterministic scorer recorded a failure for this public criterion."
+    return "The deterministic scorer could not evaluate this public criterion."
+
+
+def _safe_dimension_interpretation(
+    dimension: str,
+    *,
+    passed: bool | None,
+    role: DimensionRole | None,
+    critical: bool,
+) -> str:
+    if passed is None:
+        return "Fugue marks this score unavailable because required evidence is missing."
+    if dimension == "answer_present":
+        finding = (
+            "The Agent returned a non-empty final answer."
+            if passed
+            else "The Agent did not return a non-empty final answer."
+        )
+    elif dimension in {"answer_correct", "expected_values"}:
+        finding = (
+            "The final answer matched the host-only required facts."
+            if passed
+            else "The final answer did not match all host-only required facts."
+        )
+    elif dimension == "target_behavior_satisfied":
+        finding = (
+            "The tested component produced the required behavior without an Agent "
+            "workaround."
+            if passed
+            else "The tested component did not produce the required behavior without "
+            "an Agent workaround."
+        )
+    elif dimension in {
+        "actual_query_scope",
+        "locked_project_scope",
+        "locked_source_scope",
+    }:
+        finding = (
+            "All recorded queries stayed in the allowed source."
+            if passed
+            else "The query record did not prove that all queries stayed in the allowed "
+            "source."
+        )
+    elif dimension == "reported_project_identity":
+        finding = (
+            "The final answer named the project used by the recorded queries."
+            if passed
+            else "The final answer did not name the project used by the recorded queries."
+        )
+    elif dimension == "bounded_evidence":
+        finding = (
+            "The query record proved that the Agent used bounded reads."
+            if passed
+            else "The query record did not prove that the Agent used bounded reads."
+        )
+    elif dimension == "evidence_honesty":
+        finding = (
+            "The final answer limited its claims to the inspected evidence."
+            if passed
+            else "The final answer overstated the evidence or omitted an evidence limit."
+        )
+    elif dimension == "release_mechanism_used":
+        finding = (
+            "The attempt used the assigned release mechanism."
+            if passed
+            else "The attempt did not prove use of the assigned release mechanism."
+        )
+    else:
+        label = dimension.replace("_", " ")
+        finding = (
+            f"The evidence satisfied the {label} criterion."
+            if passed
+            else f"The evidence did not satisfy the {label} criterion."
+        )
+
+    if role == "outcome":
+        authority = (
+            "This outcome check passed."
+            if passed
+            else "This outcome failure blocks task pass."
+        )
+    elif role == "safety_gate":
+        authority = (
+            "This safety check passed."
+            if passed
+            else "This safety failure blocks task pass."
+        )
+    elif role == "mechanism":
+        authority = "This mechanism evidence does not determine task pass."
+    elif role == "infrastructure":
+        authority = "This infrastructure evidence does not determine task pass."
+    elif role == "efficiency":
+        authority = "This efficiency evidence does not determine task pass."
+    else:
+        authority = (
+            "This legacy evaluator has no typed role. Fugue uses its locked aggregate "
+            "rule to determine task pass."
+        )
+    result = f"{finding} {authority}"
+    if critical:
+        result += " The study marks this check as critical."
+    return result
 
 
 def _reported_project_identity(row: Mapping[str, Any]) -> str | None:
@@ -7083,6 +7474,12 @@ def _paired_attempt_v3(raw: Any) -> PairedAttemptV3 | None:
     score_explanations = _mapping(
         value.get("score_explanations"), "V3 score explanations"
     )
+    score_details = {
+        str(dimension): _score_explanation_v1(detail, dimension=str(dimension))
+        for dimension, detail in _mapping_or_empty(
+            value.get("score_details")
+        ).items()
+    }
     infrastructure = dict(_mapping_or_empty(value.get("infrastructure")))
     hosted_evidence_status = infrastructure.pop(
         "hosted_evidence_status", "not_applicable"
@@ -7170,7 +7567,28 @@ def _paired_attempt_v3(raw: Any) -> PairedAttemptV3 | None:
             value.get("usage_reconciliation_status"),
             "usage_reconciliation_status",
         ),
+        score_details=score_details,
     )
+
+
+def _score_explanation_v1(raw: Any, *, dimension: str) -> ScoreExplanationV1:
+    value = _mapping(raw, f"V3 score detail {dimension}")
+    _reject_unknown(value, {"what", "observed", "why"}, "V3 score detail")
+    if set(value) != {"what", "observed", "why"}:
+        raise ValueError(
+            f"V3 score detail {dimension!r} requires what, observed, and why"
+        )
+    fields = {
+        field_name: _text(
+            value.get(field_name),
+            f"V3 score detail {dimension} {field_name}",
+            2000,
+        )
+        for field_name in ("what", "observed", "why")
+    }
+    if any(redact_value(item) != item for item in fields.values()):
+        raise ValueError(f"V3 score detail {dimension!r} contains sensitive text")
+    return ScoreExplanationV1(**fields)
 
 
 def _paired_case(raw: Any) -> PairedCaseV2:
@@ -9914,6 +10332,12 @@ def score_comparison_rows(
                         "critical_dimensions", ()
                     )
                 )
+                row["comparison_score_details"] = _safe_comparison_score_details(
+                    dimensions,
+                    evaluators=deterministic,
+                    row=row,
+                    critical_dimensions=frozenset(critical_dimensions),
+                )
                 row["comparison_deterministic_criticality"] = {
                     name: True for name in critical_dimensions
                 }
@@ -12439,6 +12863,52 @@ def _integration(raw: Any, index: int) -> dict[str, Any]:
     )
 
 
+def _evaluator_dimension_contract(
+    value: Mapping[str, Any],
+    dimensions: Sequence[str],
+) -> tuple[dict[str, DimensionRole], dict[str, str]]:
+    raw_roles = _mapping(
+        value.get("dimension_roles") or {},
+        "evaluator dimension roles",
+    )
+    allowed_roles = {
+        "outcome",
+        "mechanism",
+        "safety_gate",
+        "infrastructure",
+        "efficiency",
+    }
+    roles: dict[str, DimensionRole] = {}
+    for dimension, raw_role in raw_roles.items():
+        name = str(dimension)
+        role = str(raw_role)
+        if role not in allowed_roles:
+            raise ValueError(
+                f"evaluator dimension {name!r} has unsupported role {role!r}"
+            )
+        roles[name] = role  # type: ignore[assignment]
+    guidance = {
+        str(dimension): _text(
+            text,
+            f"evaluator dimension guidance {dimension}",
+            1000,
+        )
+        for dimension, text in _mapping(
+            value.get("dimension_guidance") or {},
+            "evaluator dimension guidance",
+        ).items()
+    }
+    if set(roles) - set(dimensions):
+        raise ValueError(
+            "evaluator dimension roles may reference only declared dimensions"
+        )
+    if set(guidance) - set(dimensions):
+        raise ValueError(
+            "evaluator dimension guidance may reference only declared dimensions"
+        )
+    return roles, guidance
+
+
 def _evaluator(raw: Any) -> ComparisonEvaluatorV1:
     value = _mapping(raw, "evaluator")
     _reject_unknown(
@@ -12455,6 +12925,7 @@ def _evaluator(raw: Any) -> ComparisonEvaluatorV1:
             "rubric",
             "dimensions",
             "dimension_roles",
+            "dimension_guidance",
             "evidence",
             "timeout_sec",
             "reserve_cost_usd",
@@ -12479,30 +12950,10 @@ def _evaluator(raw: Any) -> ComparisonEvaluatorV1:
     dimensions = _string_tuple(
         value.get("dimensions") or [], "judge dimension", allow_empty=True
     )
-    raw_dimension_roles = _mapping(
-        value.get("dimension_roles") or {},
-        "evaluator dimension roles",
+    dimension_roles, dimension_guidance = _evaluator_dimension_contract(
+        value,
+        dimensions,
     )
-    allowed_roles = {
-        "outcome",
-        "mechanism",
-        "safety_gate",
-        "infrastructure",
-        "efficiency",
-    }
-    dimension_roles: dict[str, DimensionRole] = {}
-    for dimension, raw_role in raw_dimension_roles.items():
-        name = str(dimension)
-        role = str(raw_role)
-        if role not in allowed_roles:
-            raise ValueError(
-                f"evaluator dimension {name!r} has unsupported role {role!r}"
-            )
-        dimension_roles[name] = role  # type: ignore[assignment]
-    if set(dimension_roles) - set(dimensions):
-        raise ValueError(
-            "evaluator dimension roles may reference only declared dimensions"
-        )
     evidence = _string_tuple(
         value.get("evidence") or [], "judge evidence", allow_empty=True
     )
@@ -12548,6 +12999,12 @@ def _evaluator(raw: Any) -> ComparisonEvaluatorV1:
         validate_id(str(runtime), kind="scorer runtime id")
         if not dimensions:
             raise ValueError("custom deterministic scorer requires dimensions")
+        if dimension_roles and set(dimension_roles) != set(dimensions):
+            missing = sorted(set(dimensions) - set(dimension_roles))
+            raise ValueError(
+                "custom deterministic scorer dimension roles must cover every "
+                "declared dimension; missing: " + ", ".join(missing)
+            )
     if evaluator_type == "llm_judge" and not profile:
         raise ValueError("LLM judge evaluator requires a profile")
     if evaluator_type == "llm_judge" and not rubric:
@@ -12581,6 +13038,7 @@ def _evaluator(raw: Any) -> ComparisonEvaluatorV1:
         rubric=rubric,
         dimensions=dimensions,
         dimension_roles=dimension_roles,
+        dimension_guidance=dimension_guidance,
         evidence=evidence,
         timeout_sec=timeout_sec,
         reserve_cost_usd=_non_negative_number(
@@ -13372,6 +13830,7 @@ def _score_deterministic_output(
                 raise ValueError(
                     "custom scorer output does not match its declared dimensions"
                 )
+            normalized_dimensions: dict[str, bool | float] = {}
             for name, value in details.items():
                 dimension = str(name)
                 if (
@@ -13398,8 +13857,30 @@ def _score_deterministic_output(
                     raise ValueError(
                         f"scorer dimension {dimension!r} must be bool or 0..1"
                     )
+                normalized_dimensions[dimension] = normalized
                 scores[f"{evaluator.id}.{dimension}"] = normalized
-            evaluator_passes.append(float(payload["score"]) == 1.0)
+            if evaluator.dimension_roles:
+                gating_dimensions = tuple(
+                    dimension
+                    for dimension in evaluator.dimensions
+                    if evaluator.dimension_roles.get(dimension)
+                    in {"outcome", "safety_gate"}
+                )
+                if not gating_dimensions:
+                    raise ValueError(
+                        f"evaluator {evaluator.id!r} has typed dimensions but no "
+                        "outcome or safety gate"
+                    )
+                evaluator_passes.append(
+                    all(
+                        float(normalized_dimensions[dimension]) == 1.0
+                        for dimension in gating_dimensions
+                    )
+                )
+            else:
+                # V1/V2 custom scorers predate typed dimension roles. Preserve
+                # their locked all-dimensions aggregate semantics.
+                evaluator_passes.append(float(payload["score"]) == 1.0)
             continue
         check_scores = {
             "answer_present": bool(

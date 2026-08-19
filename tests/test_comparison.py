@@ -43,6 +43,9 @@ from fugue.bench.comparison import (
     _result_candidate_definitions,
     _result_markdown,
     _resume_approved_comparison_lock,
+    _safe_comparison_score_details,
+    _score_deterministic_output,
+    _scorer_revisions_v3,
     analyze_comparison_rows,
     check_comparison,
     claim_comparison_approval,
@@ -523,6 +526,10 @@ def test_replay_scores_aligned_improvements_and_regressions() -> None:
         for line in (EXAMPLE / "attempts.jsonl").read_text().splitlines()
     ]
     scored = score_comparison_rows(spec, rows, repo_root=root)
+    assert set(scored[0]["comparison_score_details"]) == {
+        "answer_present",
+        "expected_values",
+    }
     result = analyze_comparison_rows(
         comparison_id=spec.id,
         preview_digest=preview.preview_digest,
@@ -3313,6 +3320,230 @@ def test_deterministic_evaluator_rejects_judge_timeout() -> None:
         comparison_from_dict(raw, repo_root=root, source=path.parent)
 
 
+def test_evaluator_dimension_guidance_is_public_and_identity_bound() -> None:
+    root = Path.cwd()
+    path = MCP_MAINTENANCE_EXAMPLE / "tool-surface-canary-local-v4.yaml"
+    raw = yaml.safe_load(path.read_text())
+    deterministic = next(
+        evaluator
+        for evaluator in raw["evaluators"]
+        if evaluator["type"] == "deterministic"
+    )
+    deterministic["dimension_guidance"] = {
+        "answer_correct": "Checks the final answer against host-only facts."
+    }
+
+    parsed = comparison_from_dict(raw, repo_root=root, source=path.parent)
+    evaluator = next(item for item in parsed.evaluators if item.type == "deterministic")
+    assert evaluator.dimension_guidance == {
+        "answer_correct": "Checks the final answer against host-only facts."
+    }
+    original_digest = parsed.spec_digest
+    deterministic["dimension_guidance"]["answer_correct"] = (
+        "Checks factual correctness without exposing expected values."
+    )
+    assert (
+        comparison_from_dict(raw, repo_root=root, source=path.parent).spec_digest
+        != original_digest
+    )
+
+    deterministic["dimension_guidance"] = {"unknown": "Not declared."}
+    with pytest.raises(ValueError, match="guidance may reference only"):
+        comparison_from_dict(raw, repo_root=root, source=path.parent)
+
+
+def test_legacy_comparison_omits_empty_dimension_guidance() -> None:
+    spec = load_comparison(EXAMPLE / "comparison.yaml", repo_root=Path.cwd())
+
+    assert all(
+        "dimension_guidance" not in evaluator
+        for evaluator in spec.to_dict()["evaluators"]
+    )
+
+
+def test_typed_deterministic_pass_ignores_non_performance_dimensions(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from fugue.bench import comparison as comparison_module
+
+    evaluator = ComparisonEvaluatorV1(
+        id="facts",
+        type="deterministic",
+        required=True,
+        scorer="scorer.py",
+        runtime="python312-sandbox-v1",
+        dimensions=("answer", "safety", "mechanism", "infra", "efficiency"),
+        dimension_roles={
+            "answer": "outcome",
+            "safety": "safety_gate",
+            "mechanism": "mechanism",
+            "infra": "infrastructure",
+            "efficiency": "efficiency",
+        },
+    )
+    details = {
+        "answer": True,
+        "safety": True,
+        "mechanism": False,
+        "infra": False,
+        "efficiency": False,
+    }
+    monkeypatch.setattr(
+        comparison_module,
+        "_run_custom_scorer",
+        lambda *_args, **_kwargs: {
+            "score": 0.0,
+            "reason": "legacy all-dimension aggregate",
+            "details": details,
+        },
+    )
+
+    passed, scores = _score_deterministic_output(
+        task={},
+        output={},
+        expected={},
+        evidence={},
+        evaluators=(evaluator,),
+        repo_root=Path.cwd(),
+    )
+
+    assert passed is True
+    assert scores["facts.mechanism"] is False
+    details["safety"] = False
+    passed, _scores = _score_deterministic_output(
+        task={},
+        output={},
+        expected={},
+        evidence={},
+        evaluators=(evaluator,),
+        repo_root=Path.cwd(),
+    )
+    assert passed is False
+
+
+def test_custom_scorer_rejects_partial_dimension_roles() -> None:
+    root = Path.cwd()
+    path = MCP_MAINTENANCE_EXAMPLE / "tool-surface-canary-local-v4.yaml"
+    raw = yaml.safe_load(path.read_text())
+    deterministic = next(
+        evaluator
+        for evaluator in raw["evaluators"]
+        if evaluator["type"] == "deterministic"
+    )
+    deterministic["dimension_roles"].pop("release_mechanism_used")
+
+    with pytest.raises(
+        ValueError,
+        match=(
+            "dimension roles must cover every declared dimension; missing: "
+            "release_mechanism_used"
+        ),
+    ):
+        comparison_from_dict(raw, repo_root=root, source=path.parent)
+
+
+def test_score_details_explain_answer_and_component_behavior_separately() -> None:
+    evaluator = ComparisonEvaluatorV1(
+        id="tool-surface",
+        type="deterministic",
+        required=True,
+        scorer="scorer.py",
+        runtime="python312-sandbox-v1",
+        dimensions=("answer_correct", "target_behavior_satisfied"),
+        dimension_roles={
+            "answer_correct": "outcome",
+            "target_behavior_satisfied": "mechanism",
+        },
+    )
+
+    details = _safe_comparison_score_details(
+        {
+            "tool-surface.answer_correct": True,
+            "tool-surface.target_behavior_satisfied": False,
+        },
+        evaluators=(evaluator,),
+        row={"mcp_tool_calls": []},
+    )
+
+    answer = details["tool-surface.answer_correct"]
+    behavior = details["tool-surface.target_behavior_satisfied"]
+    assert "factually correct" in answer["what"]
+    assert "does not require the component" in answer["what"]
+    assert "host-only required facts" in answer["why"]
+    assert "without the Agent diagnosing" in behavior["what"]
+    assert "does not determine task pass" in behavior["why"]
+
+
+def test_score_details_preserve_partial_numeric_score_as_failure() -> None:
+    evaluator = ComparisonEvaluatorV1(
+        id="facts",
+        type="deterministic",
+        required=True,
+        scorer="scorer.py",
+        runtime="python312-sandbox-v1",
+        dimensions=("answer_correct",),
+        dimension_roles={"answer_correct": "outcome"},
+    )
+
+    details = _safe_comparison_score_details(
+        {"facts.answer_correct": 0.75},
+        evaluators=(evaluator,),
+        row={},
+    )
+
+    answer = details["facts.answer_correct"]
+    assert answer["observed"] == (
+        "The deterministic scorer recorded 0.75. This gate requires 1.0 to pass."
+    )
+    assert "blocks task pass" in answer["why"]
+
+
+def test_score_details_keep_ambiguous_legacy_checks_backward_readable() -> None:
+    evaluators = tuple(
+        ComparisonEvaluatorV1(
+            id=evaluator_id,
+            type="deterministic",
+            required=True,
+            checks=("answer_present",),
+        )
+        for evaluator_id in ("first", "second")
+    )
+
+    details = _safe_comparison_score_details(
+        {"answer_present": True},
+        evaluators=evaluators,
+        row={},
+    )
+
+    assert details["answer_present"]["what"] == (
+        "Checks whether the Agent returned a non-empty final answer."
+    )
+    assert details["answer_present"]["observed"] == (
+        "The Agent returned a non-empty final answer."
+    )
+    assert "legacy evaluator has no typed role" in details["answer_present"]["why"]
+
+
+def test_scorer_revision_distinguishes_digest_only_source() -> None:
+    revisions = _scorer_revisions_v3(
+        {
+            "scorer_digests": {"facts": "1" * 64},
+            "approved_inputs": {
+                "evaluator_artifacts": {
+                    "facts": {"scorer_sha256": "2" * 64}
+                }
+            },
+        }
+    )
+
+    assert revisions[0].details == {
+        "kind": "scorer",
+        "source_sha256": "2" * 64,
+        "source_reference_status": "digest_only",
+        "task_pass_roles": ["outcome", "safety_gate"],
+    }
+
+
 def test_v3_attempt_exports_blind_judge_scores_without_rationale() -> None:
     row = {
         "attempt_id": "a" * 64,
@@ -3344,12 +3575,14 @@ def test_v3_attempt_exports_blind_judge_scores_without_rationale() -> None:
         "natural-maintainer.answer_correct": True,
         ("comparison.judge.maintainer-actionability.maintenance_actionability"): 0.8,
     }
+    assert attempt.passed is True
     assert (
         attempt.score_explanations[
             ("comparison.judge.maintainer-actionability.maintenance_actionability")
         ]
         == "Blind judge score; no rationale or private truth is published."
     )
+    assert "score_details" not in attempt.to_dict()
 
 
 def test_checkpoint_records_advisory_judge_without_gating_execution() -> None:
@@ -5010,6 +5243,13 @@ def test_v3_attempt_construction_rejects_exported_decision_field_mutation() -> N
         "status": "passed",
         "comparison_evaluation_status": "scored",
         "comparison_deterministic_scores": {"facts.answer_correct": True},
+        "comparison_score_details": {
+            "facts.answer_correct": {
+                "what": "Checks whether the answer is correct.",
+                "observed": "The host scorer matched the required facts.",
+                "why": "The outcome check passed.",
+            }
+        },
         "agent_response": "bounded answer",
         "cost_usd": 0.25,
         "latency_sec": 1.5,
@@ -5044,10 +5284,22 @@ def test_v3_attempt_construction_rejects_exported_decision_field_mutation() -> N
     assert attempt.cost_reconciliation_status == "resolved"
     assert attempt.latency_reconciliation_status == "resolved"
     assert attempt.usage_reconciliation_status == "resolved"
+    assert attempt.score_details["facts.answer_correct"].what == (
+        "Checks whether the answer is correct."
+    )
 
     mutations = (
         {"pass": False},
         {"comparison_deterministic_scores": {"facts.answer_correct": False}},
+        {
+            "comparison_score_details": {
+                "facts.answer_correct": {
+                    "what": "Altered criterion.",
+                    "observed": "The host scorer matched the required facts.",
+                    "why": "The outcome check passed.",
+                }
+            }
+        },
         {"agent_response": "altered excerpt"},
         {"cost_usd": 99.0},
         {"cost_reconciliation_status": "unresolved"},

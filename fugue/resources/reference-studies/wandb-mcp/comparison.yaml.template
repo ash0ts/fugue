@@ -36,6 +36,28 @@ evaluators:
       bounded_evidence: safety_gate
       evidence_honesty: safety_gate
       release_mechanism_used: mechanism
+    dimension_guidance:
+      answer_correct: >-
+        Checks whether the Agent's final answer is factually correct. The Agent
+        can pass this check when it correctly diagnoses a defect in the MCP.
+      target_behavior_satisfied: >-
+        Checks whether the MCP version under test produced the required result
+        without the Agent diagnosing or working around an MCP defect.
+      actual_query_scope: >-
+        Checks whether every recorded MCP query stayed in the locked source
+        project.
+      reported_project_identity: >-
+        Checks whether the final answer names the same project that the MCP
+        queried.
+      bounded_evidence: >-
+        Checks whether the Agent used finite queries and honored recorded
+        pagination before it stopped.
+      evidence_honesty: >-
+        Checks whether the final answer limits each claim to the evidence that
+        the Agent inspected.
+      release_mechanism_used: >-
+        Checks whether the attempt exercised the MCP behavior selected for this
+        version comparison. This mechanism check does not determine task pass.
 execution:
   reference_study:
     id: wandb-mcp-release

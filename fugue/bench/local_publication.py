@@ -66,6 +66,26 @@ class MissingWeaveExtraError(LocalResultPublicationError):
     """The user requested optional publication without Fugue's Weave extra."""
 
 
+def _attempt_score_details(attempt: Any) -> dict[str, dict[str, str]]:
+    """Serialize optional score detail contracts, including legacy test doubles."""
+
+    raw = getattr(attempt, "score_details", {})
+    if not isinstance(raw, Mapping):
+        raise LocalResultPublicationError("comparison score details must be an object")
+    details: dict[str, dict[str, str]] = {}
+    for dimension, item in raw.items():
+        if callable(getattr(item, "to_dict", None)):
+            value = item.to_dict()
+        elif isinstance(item, Mapping):
+            value = dict(item)
+        else:
+            raise LocalResultPublicationError(
+                f"comparison score detail {dimension!r} is invalid"
+            )
+        details[str(dimension)] = value
+    return details
+
+
 @dataclass(frozen=True)
 class StudyPublicationScopeV1:
     research_id: str
@@ -762,6 +782,7 @@ def _publish_with_active_weave_sdk(
             "passed": attempt.passed,
             "scores": dict(attempt.scores),
             "score_explanations": dict(attempt.score_explanations),
+            "score_details": _attempt_score_details(attempt),
             "sanitized_answer_excerpt": attempt.sanitized_answer_excerpt,
         }
         agent_inputs = {
@@ -1401,6 +1422,7 @@ def _validate_result_local_evidence_binding(
                 cost_reconciliation_status=attempt.cost_reconciliation_status,
                 latency_reconciliation_status=attempt.latency_reconciliation_status,
                 usage_reconciliation_status=attempt.usage_reconciliation_status,
+                score_details=_attempt_score_details(attempt),
             )
             if stable_digest(projection) != record.result_row_projection_digest:
                 raise LocalResultPublicationError(

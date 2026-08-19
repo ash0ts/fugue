@@ -16,6 +16,7 @@ from fugue.bench.analysis_contracts import (
 from fugue.bench.candidates import attempt_id as canonical_attempt_id
 from fugue.bench.candidates import stable_digest
 from fugue.bench.local_evidence import LocalEvidenceDestinationV1
+from fugue.redaction import redact_text
 from fugue.research.display_labels import humanize_display_id
 
 # Existing design/progress builders and V2 result projections keep writing the
@@ -2411,6 +2412,7 @@ def _optional_canonical_attempt_v3(raw: Any) -> dict[str, Any] | None:
     value = _mapping(raw, "V3 paired_attempt")
     extras = {
         "score_explanations",
+        "score_details",
         "sanitized_answer_excerpt",
         "actual_query_scope",
         "reported_project_identity",
@@ -2459,6 +2461,10 @@ def _optional_canonical_attempt_v3(raw: Any) -> dict[str, Any] | None:
         raise ValueError(
             "V3 judge score explanations must not publish rationale or private truth"
         )
+    score_details = _optional_score_details_v1(
+        value.get("score_details"),
+        scores=base["scores"],
+    )
     actual_query_scope = tuple(
         _text(item, "V3 paired_attempt.actual_query_scope", 500)
         for item in _sequence(
@@ -2469,6 +2475,8 @@ def _optional_canonical_attempt_v3(raw: Any) -> dict[str, Any] | None:
     if actual_query_scope != tuple(base["queried_projects"]):
         raise ValueError("V3 actual query scope must equal normalized queried projects")
     base["score_explanations"] = explanations
+    if score_details:
+        base["score_details"] = score_details
     base["actual_query_scope"] = actual_query_scope
     excerpt = _optional_text(
         value.get("sanitized_answer_excerpt"),
@@ -2518,6 +2526,41 @@ def _optional_canonical_attempt_v3(raw: Any) -> dict[str, Any] | None:
             "resolved usage reconciliation requires input and output tokens"
         )
     return base
+
+
+def _score_detail_v1(raw: Any, *, dimension: str) -> dict[str, str]:
+    value = _mapping(raw, f"V3 score detail {dimension}")
+    if set(value) != {"what", "observed", "why"}:
+        raise ValueError(
+            f"V3 score detail {dimension!r} requires what, observed, and why"
+        )
+    detail = {
+        field_name: _text(
+            value.get(field_name),
+            f"V3 score detail {dimension} {field_name}",
+            2000,
+        )
+        for field_name in ("what", "observed", "why")
+    }
+    if any(redact_text(text) != text for text in detail.values()):
+        raise ValueError(f"V3 score detail {dimension!r} is sensitive")
+    return detail
+
+
+def _optional_score_details_v1(
+    raw: Any,
+    *,
+    scores: Mapping[str, Any],
+) -> dict[str, dict[str, str]]:
+    details = {
+        str(key): _score_detail_v1(item, dimension=str(key))
+        for key, item in _mapping_or_empty(raw).items()
+    }
+    if set(details) - set(scores):
+        raise ValueError("V3 score details reference an unknown score")
+    if any(key.startswith("comparison.judge.") for key in details):
+        raise ValueError("V3 score details may not publish blind-judge rationale")
+    return details
 
 
 def _canonical_attempt_identity(raw: Any) -> dict[str, Any]:

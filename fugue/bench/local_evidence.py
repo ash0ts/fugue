@@ -164,6 +164,9 @@ def local_result_row_projection_v1(row: Mapping[str, Any]) -> dict[str, Any]:
         )
         or None,
     }
+    score_details = _projection_score_details(row, scores=scores)
+    if score_details:
+        projection["score_details"] = score_details
     for field_name in (
         "cost_reconciliation_status",
         "latency_reconciliation_status",
@@ -199,6 +202,7 @@ def local_result_attempt_projection_v1(
     cost_reconciliation_status: ReconciliationStatus | None = None,
     latency_reconciliation_status: ReconciliationStatus | None = None,
     usage_reconciliation_status: ReconciliationStatus | None = None,
+    score_details: Mapping[str, Mapping[str, str]] | None = None,
 ) -> dict[str, Any]:
     """Project an already-normalized V3 attempt using the canonical shape."""
 
@@ -231,7 +235,54 @@ def local_result_attempt_projection_v1(
     ):
         if value is not None:
             projection[field_name] = _reconciliation_status(value, field_name)
+    if score_details:
+        projection["score_details"] = {
+            str(dimension): _projection_score_detail(detail, dimension=str(dimension))
+            for dimension, detail in score_details.items()
+        }
     return projection
+
+
+def _projection_score_details(
+    row: Mapping[str, Any],
+    *,
+    scores: Mapping[str, Any],
+) -> dict[str, dict[str, str]]:
+    raw = row.get("comparison_score_details")
+    if raw is None:
+        return {}
+    values = _projection_mapping(raw)
+    if set(values) - set(scores):
+        raise ValueError("comparison score details reference an unknown score")
+    return {
+        str(dimension): _projection_score_detail(detail, dimension=str(dimension))
+        for dimension, detail in values.items()
+    }
+
+
+def _projection_score_detail(
+    raw: Any,
+    *,
+    dimension: str,
+) -> dict[str, str]:
+    value = _projection_mapping(raw)
+    if set(value) != {"what", "observed", "why"}:
+        raise ValueError(
+            f"comparison score detail {dimension!r} requires what, observed, and why"
+        )
+    detail: dict[str, str] = {}
+    for field_name in ("what", "observed", "why"):
+        text = " ".join(str(value.get(field_name) or "").split())
+        if not text or len(text) > 2000:
+            raise ValueError(
+                f"comparison score detail {dimension!r} {field_name} is invalid"
+            )
+        if redact_text(text) != text:
+            raise ValueError(
+                f"comparison score detail {dimension!r} {field_name} is sensitive"
+            )
+        detail[field_name] = text
+    return detail
 
 
 def _reconciliation_status(value: Any, field_name: str) -> ReconciliationStatus:

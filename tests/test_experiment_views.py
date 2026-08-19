@@ -248,6 +248,40 @@ def test_v3_view_rejects_published_judge_rationale() -> None:
         experiment_view_from_dict(payload)
 
 
+def test_v3_view_accepts_safe_structured_score_details() -> None:
+    payload = json.loads(_V3_STUDY_CONSOLE_GOLDEN.read_text(encoding="utf-8"))
+    dimension = "bounded_answer"
+    candidate = payload["paired_cases"][0]["candidate"]
+    candidate["score_details"] = {
+        dimension: {
+            "what": "Checks whether the final answer is factually correct.",
+            "observed": "The host scorer matched the required facts.",
+            "why": "The outcome check passed.",
+        }
+    }
+
+    view = experiment_view_from_dict(payload)
+
+    assert view.paired_cases[0]["candidate"]["score_details"][dimension]["what"] == (
+        "Checks whether the final answer is factually correct."
+    )
+
+
+def test_v3_view_rejects_sensitive_structured_score_details() -> None:
+    payload = json.loads(_V3_STUDY_CONSOLE_GOLDEN.read_text(encoding="utf-8"))
+    dimension = "bounded_answer"
+    payload["paired_cases"][0]["candidate"]["score_details"] = {
+        dimension: {
+            "what": "Checks whether the final answer is bounded.",
+            "observed": "The tool used a finite limit.",
+            "why": "api_key=sk-example-secret-value",
+        }
+    }
+
+    with pytest.raises(ValueError, match="score detail .* is sensitive"):
+        experiment_view_from_dict(payload)
+
+
 def test_v3_view_rejects_attempt_identity_mismatch() -> None:
     payload = json.loads(_V3_STUDY_CONSOLE_GOLDEN.read_text(encoding="utf-8"))
     payload["paired_cases"][0]["candidate"]["identity"]["candidate"] = (
