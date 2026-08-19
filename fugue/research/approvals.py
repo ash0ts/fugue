@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
+from typing import Any
 
 from fugue.bench.candidates import stable_digest
 from fugue.bench.library import validate_id
@@ -59,6 +60,7 @@ class ApprovalLedger:
         approved_by: str,
         operation_id: str,
         expires_in_seconds: int = 3600,
+        candidate_definitions: dict[str, dict[str, Any]] | None = None,
     ) -> ExecutionApprovalV1:
         operation_id = validate_id(operation_id, kind="approval operation id")
         if expires_in_seconds < 60 or expires_in_seconds > 86_400:
@@ -81,6 +83,7 @@ class ApprovalLedger:
             expires_at=(created + timedelta(seconds=expires_in_seconds))
             .isoformat()
             .replace("+00:00", "Z"),
+            candidate_definitions=dict(candidate_definitions or {}),
         )
         approval = execution_approval_from_dict(
             sign_execution_approval(unsigned).to_dict()
@@ -94,6 +97,7 @@ class ApprovalLedger:
                 "maximum_cells": maximum_cells,
                 "approved_by": approved_by,
                 "expires_in_seconds": expires_in_seconds,
+                "candidate_definitions": dict(candidate_definitions or {}),
             }
         )
         with connect_database(self.path) as conn:
@@ -190,6 +194,7 @@ class ApprovalLedger:
         subject_id: str,
         estimated_cells: int = 0,
         estimated_cost_usd: float = 0.0,
+        expected_candidate_definitions: dict[str, dict[str, Any]] | None = None,
     ) -> ExecutionApprovalV1:
         subject_id = validate_id(subject_id, kind="approved subject id")
         with connect_database(self.path) as conn:
@@ -216,6 +221,16 @@ class ApprovalLedger:
                 raise ResearchError(
                     "approval_preview_mismatch",
                     "execution approval does not match the accepted preview",
+                    category="policy",
+                )
+            if (
+                expected_candidate_definitions is not None
+                and approval.candidate_definitions
+                != dict(sorted(expected_candidate_definitions.items()))
+            ):
+                raise ResearchError(
+                    "approval_candidate_mismatch",
+                    "execution approval does not bind the accepted candidates",
                     category="policy",
                 )
             if _parse_time(approval.expires_at) <= datetime.now(UTC):

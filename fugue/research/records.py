@@ -187,6 +187,204 @@ class ResearchLogEventV1:
         }
 
 
+@dataclass(frozen=True)
+class ExperimentViewPageV1:
+    """One bounded page of canonical terminal V3 attempt evidence."""
+
+    schema_version: Literal[1]
+    page_set_id: str
+    projection_digest: str
+    page_index: int
+    page_count: int
+    attempt_count: int
+    paired_case_count: int
+    attempts: tuple[dict[str, Any], ...]
+    paired_cases: tuple[dict[str, Any], ...]
+    page_digest: str
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            **asdict(self),
+            "attempts": [dict(item) for item in self.attempts],
+            "paired_cases": [dict(item) for item in self.paired_cases],
+        }
+
+
+@dataclass(frozen=True)
+class ExperimentViewManifestV1:
+    """Digest-bound terminal header for a paged V3 evaluation projection."""
+
+    schema_version: Literal[1]
+    page_set_id: str
+    projection_digest: str
+    page_count: int
+    attempt_count: int
+    paired_case_count: int
+    projection: dict[str, Any]
+    manifest_digest: str
+
+    def to_dict(self) -> dict[str, Any]:
+        return asdict(self)
+
+
+def experiment_view_page_set_id(
+    *,
+    projection_digest: str,
+    page_count: int,
+    attempt_count: int,
+    paired_case_count: int,
+) -> str:
+    return stable_digest(
+        {
+            "schema_version": 1,
+            "projection_digest": projection_digest,
+            "page_count": page_count,
+            "attempt_count": attempt_count,
+            "paired_case_count": paired_case_count,
+        }
+    )
+
+
+def experiment_view_page_from_dict(raw: Mapping[str, Any]) -> ExperimentViewPageV1:
+    fields = {item.name for item in ExperimentViewPageV1.__dataclass_fields__.values()}
+    unknown = set(raw) - fields
+    if unknown:
+        raise ValueError("experiment view page has unknown fields")
+    if raw.get("schema_version") != RESEARCH_SCHEMA_VERSION:
+        raise ValueError("unsupported experiment view page schema")
+    page_count = _positive_int(raw.get("page_count"), "page_count")
+    page_index = _non_negative_int(raw.get("page_index"), "page_index")
+    if page_index >= page_count:
+        raise ValueError("experiment page index must be smaller than page count")
+    attempt_count = _non_negative_int(raw.get("attempt_count"), "attempt_count")
+    paired_case_count = _non_negative_int(
+        raw.get("paired_case_count"), "paired_case_count"
+    )
+    from fugue.research.experiment_views import (
+        _canonical_paired_case_v3,
+        _optional_canonical_attempt_v3,
+    )
+
+    attempts: list[dict[str, Any]] = []
+    for item in _sequence(raw.get("attempts"), "attempts"):
+        attempt = _optional_canonical_attempt_v3(item)
+        if attempt is None:
+            raise ValueError("experiment page attempt must be an object")
+        attempts.append(attempt)
+    paired_cases = tuple(
+        _canonical_paired_case_v3(item)
+        for item in _sequence(raw.get("paired_cases"), "paired_cases")
+    )
+    if not attempts and not paired_cases:
+        raise ValueError("experiment page must contain attempts or paired cases")
+    if len(attempts) > attempt_count or len(paired_cases) > paired_case_count:
+        raise ValueError("experiment page exceeds its declared result census")
+    attempt_by_id = {str(item.get("attempt_id") or ""): item for item in attempts}
+    if len(attempt_by_id) != len(attempts) or "" in attempt_by_id:
+        raise ValueError("experiment page attempt identities must be unique")
+    nested = {
+        str(attempt.get("attempt_id") or ""): attempt
+        for pair in paired_cases
+        for arm in ("baseline", "candidate")
+        if isinstance((attempt := pair.get(arm)), Mapping)
+    }
+    if set(nested) != set(attempt_by_id) or any(
+        nested[attempt_id] != attempt for attempt_id, attempt in attempt_by_id.items()
+    ):
+        raise ValueError(
+            "experiment page attempts must match its paired-case attempt evidence"
+        )
+    projection_digest = _sha256_digest(
+        raw.get("projection_digest"), "projection_digest"
+    )
+    page_set_id = _sha256_digest(raw.get("page_set_id"), "page_set_id")
+    expected_set = experiment_view_page_set_id(
+        projection_digest=projection_digest,
+        page_count=page_count,
+        attempt_count=attempt_count,
+        paired_case_count=paired_case_count,
+    )
+    if page_set_id != expected_set:
+        raise ValueError("experiment page-set identity does not recompute")
+    unsigned = {
+        "schema_version": RESEARCH_SCHEMA_VERSION,
+        "page_set_id": page_set_id,
+        "projection_digest": projection_digest,
+        "page_index": page_index,
+        "page_count": page_count,
+        "attempt_count": attempt_count,
+        "paired_case_count": paired_case_count,
+        "attempts": attempts,
+        "paired_cases": list(paired_cases),
+    }
+    page_digest = _sha256_digest(raw.get("page_digest"), "page_digest")
+    if page_digest != stable_digest(unsigned):
+        raise ValueError("experiment page digest does not recompute")
+    return ExperimentViewPageV1(
+        schema_version=RESEARCH_SCHEMA_VERSION,
+        page_set_id=page_set_id,
+        projection_digest=projection_digest,
+        page_index=page_index,
+        page_count=page_count,
+        attempt_count=attempt_count,
+        paired_case_count=paired_case_count,
+        attempts=tuple(attempts),
+        paired_cases=paired_cases,
+        page_digest=page_digest,
+    )
+
+
+def experiment_view_manifest_from_dict(
+    raw: Mapping[str, Any],
+) -> ExperimentViewManifestV1:
+    fields = {
+        item.name for item in ExperimentViewManifestV1.__dataclass_fields__.values()
+    }
+    unknown = set(raw) - fields
+    if unknown:
+        raise ValueError("experiment view manifest has unknown fields")
+    if raw.get("schema_version") != RESEARCH_SCHEMA_VERSION:
+        raise ValueError("unsupported experiment view manifest schema")
+    page_count = _positive_int(raw.get("page_count"), "page_count")
+    attempt_count = _non_negative_int(raw.get("attempt_count"), "attempt_count")
+    paired_case_count = _non_negative_int(
+        raw.get("paired_case_count"), "paired_case_count"
+    )
+    projection_digest = _sha256_digest(
+        raw.get("projection_digest"), "projection_digest"
+    )
+    page_set_id = _sha256_digest(raw.get("page_set_id"), "page_set_id")
+    expected_set = experiment_view_page_set_id(
+        projection_digest=projection_digest,
+        page_count=page_count,
+        attempt_count=attempt_count,
+        paired_case_count=paired_case_count,
+    )
+    if page_set_id != expected_set:
+        raise ValueError("experiment page-set identity does not recompute")
+    projection = _json_mapping(raw.get("projection"), "manifest projection")
+    if projection.get("schema_version") != 3 or projection.get("kind") != "evaluation":
+        raise ValueError("paged experiment manifest requires a V3 evaluation")
+    paged_fields = {"attempts", "paired_cases", "canonical_attempts", "aligned_rows"}
+    if paged_fields & projection.keys():
+        raise ValueError(
+            "paged experiment manifest must not repeat materialized attempt fields"
+        )
+    unsigned = {
+        "schema_version": RESEARCH_SCHEMA_VERSION,
+        "page_set_id": page_set_id,
+        "projection_digest": projection_digest,
+        "page_count": page_count,
+        "attempt_count": attempt_count,
+        "paired_case_count": paired_case_count,
+        "projection": projection,
+    }
+    manifest_digest = _sha256_digest(raw.get("manifest_digest"), "manifest_digest")
+    if manifest_digest != stable_digest(unsigned):
+        raise ValueError("experiment manifest digest does not recompute")
+    return ExperimentViewManifestV1(**unsigned, manifest_digest=manifest_digest)
+
+
 def research_log_event_from_dict(
     raw: Mapping[str, Any], *, require_digest: bool = True
 ) -> ResearchLogEventV1:
@@ -236,12 +434,34 @@ def research_log_event_from_dict(
         event_digest=str(raw.get("event_digest") or ""),
     )
     experiment_view = event.summary.get("experiment_view")
+    experiment_view_page = event.summary.get("experiment_view_page")
+    experiment_view_manifest = event.summary.get("experiment_view_manifest")
+    experiment_payloads = sum(
+        item is not None
+        for item in (experiment_view, experiment_view_page, experiment_view_manifest)
+    )
+    if experiment_payloads > 1:
+        raise ValueError("one event cannot contain multiple experiment payloads")
+    if experiment_payloads and event.study_id is None:
+        raise ValueError("experiment projections require a Study ID")
     if experiment_view is not None:
         if not isinstance(experiment_view, Mapping):
             raise ValueError("summary.experiment_view must be an object")
         from fugue.research.experiment_views import experiment_view_from_dict
 
         experiment_view_from_dict(experiment_view)
+    if experiment_view_page is not None:
+        if not isinstance(experiment_view_page, Mapping):
+            raise ValueError("summary.experiment_view_page must be an object")
+        experiment_view_page_from_dict(experiment_view_page)
+        if event.state in {"completed", "failed", "cancelled"}:
+            raise ValueError("experiment pages cannot close a Study")
+    if experiment_view_manifest is not None:
+        if not isinstance(experiment_view_manifest, Mapping):
+            raise ValueError("summary.experiment_view_manifest must be an object")
+        experiment_view_manifest_from_dict(experiment_view_manifest)
+        if event.state not in {"completed", "failed", "cancelled"}:
+            raise ValueError("experiment manifests must declare a terminal Study state")
     unsigned = event.to_dict()
     unsigned.pop("event_digest", None)
     if (
@@ -670,6 +890,24 @@ def _positive_int(value: Any, label: str) -> int:
     if integer < 1:
         raise ValueError(f"{label} must be a positive integer")
     return integer
+
+
+def _non_negative_int(value: Any, label: str) -> int:
+    if isinstance(value, bool):
+        raise ValueError(f"{label} must be a non-negative integer")
+    integer = int(value)
+    if integer < 0:
+        raise ValueError(f"{label} must be a non-negative integer")
+    return integer
+
+
+def _sha256_digest(value: Any, label: str) -> str:
+    digest = str(value or "")
+    if len(digest) != 64 or any(
+        character not in "0123456789abcdef" for character in digest
+    ):
+        raise ValueError(f"{label} must be sha256")
+    return digest
 
 
 def _cost(value: Any, label: str) -> float | None:

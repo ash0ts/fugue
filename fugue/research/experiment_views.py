@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import math
+import urllib.parse
 from collections import Counter, defaultdict
 from collections.abc import Mapping, Sequence
 from dataclasses import asdict, dataclass, field
@@ -15,6 +16,8 @@ from fugue.bench.analysis_contracts import (
 )
 from fugue.bench.candidates import attempt_id as canonical_attempt_id
 from fugue.bench.candidates import stable_digest
+from fugue.bench.local_evidence import LocalEvidenceDestinationV1
+from fugue.redaction import redact_text
 from fugue.research.display_labels import humanize_display_id
 
 # Existing design/progress builders and V2 result projections keep writing the
@@ -54,6 +57,7 @@ _EXECUTION_STATES = {
 _OUTCOME_STATES = {"pending", "passed", "failed", "unavailable", "not_applicable"}
 _EVIDENCE_STATES = {"pending", "reconciled", "missing", "not_applicable"}
 _VIEW_KINDS = {"design", "progress", "evaluation"}
+_RECONCILIATION_STATUSES = {"resolved", "unresolved", "unavailable"}
 _PROVISIONAL_V2_EVALUATION_FIELDS = frozenset(
     {
         "aligned_comparisons",
@@ -423,6 +427,9 @@ class ExperimentViewV3:
     task_validity: tuple[dict[str, Any], ...]
     scorer_revisions: tuple[dict[str, Any], ...]
     runtime_locks: tuple[dict[str, Any], ...]
+    result_digest: str | None = None
+    qualification_digest: str | None = None
+    runtime_lock_digest: str | None = None
     preview_digest: str | None = None
     approval_state: str | None = None
     phase: str | None = None
@@ -511,7 +518,10 @@ def _experiment_view_v3_from_dict(
         for item in _sequence(raw.get("supersedes"), "supersedes")
     )
     scope = _optional_evidence_scope(raw.get("evidence_scope"))
-    if scope is None or f"{scope.entity}/{scope.project}" != (
+    if isinstance(topology.result_destination, LocalEvidenceDestinationV1):
+        if scope is not None:
+            raise ValueError("local V3 evidence cannot declare a W&B evidence scope")
+    elif scope is None or f"{scope.entity}/{scope.project}" != (
         topology.result_destination.project_slug
     ):
         raise ValueError("V3 evidence scope must equal the result evidence destination")
@@ -636,6 +646,13 @@ def _experiment_view_v3_from_dict(
         task_validity=task_validity,
         scorer_revisions=scorer_revisions,
         runtime_locks=runtime_locks,
+        result_digest=_optional_digest(raw.get("result_digest"), "result_digest"),
+        qualification_digest=_optional_digest(
+            raw.get("qualification_digest"), "qualification_digest"
+        ),
+        runtime_lock_digest=_optional_digest(
+            raw.get("runtime_lock_digest"), "runtime_lock_digest"
+        ),
         supersedes=supersedes,
         judge_summary=_safe_judge_summary(
             raw.get("judge_summary"),
@@ -645,20 +662,34 @@ def _experiment_view_v3_from_dict(
         ),
     )
     _validate_view_shape(view)
+    if (
+        view.runtime_lock_digest is not None
+        and view.runtime_lock_digest != stable_digest(list(view.runtime_locks))
+    ):
+        raise ValueError("V3 runtime lock digest does not recompute")
     _validate_v3_evidence_routes(view)
     return view
 
 
 def _validate_v3_evidence_routes(view: ExperimentViewV3) -> None:
     topology = evidence_topology_from_dict(view.evidence_topology)
-    source_project = topology.source_destination.project_slug
-    result_project = topology.result_destination.project_slug
+    source_project = (
+        None
+        if isinstance(topology.source_destination, LocalEvidenceDestinationV1)
+        else topology.source_destination.project_slug
+    )
+    local_result = isinstance(topology.result_destination, LocalEvidenceDestinationV1)
+    result_project = None if local_result else topology.result_destination.project_slug
     call_prefix = (
-        f"{topology.result_destination.app_base_url.rstrip('/')}/"
+        ""
+        if local_result
+        else f"{topology.result_destination.app_base_url.rstrip('/')}/"
         f"{result_project}/weave/calls/"
     )
     object_prefix = (
-        f"{topology.result_destination.app_base_url.rstrip('/')}/"
+        ""
+        if local_result
+        else f"{topology.result_destination.app_base_url.rstrip('/')}/"
         f"{result_project}/weave/objects/"
     )
     for pair in view.paired_cases:
@@ -667,7 +698,13 @@ def _validate_v3_evidence_routes(view: ExperimentViewV3) -> None:
             if not isinstance(attempt, Mapping):
                 continue
             scope = tuple(str(item) for item in attempt.get("actual_query_scope") or ())
-            if any(item != source_project for item in scope):
+            if source_project is None and scope:
+                raise ValueError(
+                    "V3 attempt query scope requires a hosted source destination"
+                )
+            if source_project is not None and any(
+                item != source_project for item in scope
+            ):
                 raise ValueError(
                     "V3 attempt query scope escaped the source destination"
                 )
@@ -677,7 +714,21 @@ def _validate_v3_evidence_routes(view: ExperimentViewV3) -> None:
                 if str(link.get("status") or "") != "resolved":
                     continue
                 kind = str(link.get("kind") or "")
+                system = str(link.get("system") or "")
+                ref = str(link.get("ref") or "")
                 url = str(link.get("url") or "")
+                if local_result:
+                    if (
+                        system != "local_artifact"
+                        or not ref.startswith("fugue://local-evidence/")
+                        or url
+                    ):
+                        raise ValueError(
+                            "local V3 evidence must use canonical local-artifact refs"
+                        )
+                    continue
+                if system != "weave":
+                    raise ValueError("hosted V3 evidence must use Weave links")
                 if kind == "dataset":
                     if not url.startswith(object_prefix) or "/versions/" not in url:
                         raise ValueError(
@@ -1598,16 +1649,20 @@ def _build_comparison_evaluation_view_v3(
         and not invalid_tasks
         and decision_value.get("evidence_grade") == "A"
     )
-    scope = ExperimentEvidenceScopeV1(
-        entity=topology.result_destination.entity,
-        project=topology.result_destination.project,
-        evidence_types=(
-            "agent_conversation",
-            "dataset",
-            "evaluation_root",
-            "prediction",
-            "prediction_and_score",
-        ),
+    scope = (
+        None
+        if isinstance(topology.result_destination, LocalEvidenceDestinationV1)
+        else ExperimentEvidenceScopeV1(
+            entity=topology.result_destination.entity,
+            project=topology.result_destination.project,
+            evidence_types=(
+                "agent_conversation",
+                "dataset",
+                "evaluation_root",
+                "prediction",
+                "prediction_and_score",
+            ),
+        )
     )
     view = ExperimentViewV3(
         schema_version=EXPERIMENT_VIEW_V3_SCHEMA_VERSION,
@@ -1677,6 +1732,16 @@ def _build_comparison_evaluation_view_v3(
         runtime_locks=tuple(
             lock_descriptor_from_dict(_mapping(item, "runtime_lock")).to_dict()
             for item in _sequence(result.get("runtime_locks"), "runtime_locks")
+        ),
+        result_digest=_required_digest(result.get("result_digest"), "result_digest"),
+        qualification_digest=_required_digest(
+            result.get("qualification_digest"), "qualification_digest"
+        ),
+        runtime_lock_digest=stable_digest(
+            [
+                lock_descriptor_from_dict(_mapping(item, "runtime_lock")).to_dict()
+                for item in _sequence(result.get("runtime_locks"), "runtime_locks")
+            ]
         ),
         supersedes=tuple(
             superseded_result_from_dict(_mapping(item, "superseded_result")).to_dict()
@@ -2249,6 +2314,7 @@ def _optional_canonical_attempt(raw: Any) -> dict[str, Any] | None:
         "scores",
         "evidence_links",
         "weave_agent_root_call_id",
+        "weave_agent_evidence_call_id",
         "otel_root_span_id",
         "execution_fingerprint",
         "runtime_lock_digest",
@@ -2265,10 +2331,15 @@ def _optional_canonical_attempt(raw: Any) -> dict[str, Any] | None:
         "evaluation_root",
         "prediction_and_score",
         "prediction",
-        "agent_root",
         "dataset",
     }
-    if len(links) != 5 or {str(item["kind"]) for item in links} != expected_kinds:
+    agent_kinds = {"agent_root", "agent_evidence_receipt", "agent_evidence"}
+    observed_kinds = {str(item["kind"]) for item in links}
+    if (
+        len(links) != 5
+        or observed_kinds - agent_kinds != expected_kinds
+        or len(observed_kinds & agent_kinds) != 1
+    ):
         raise ValueError(
             "paired_attempt.evidence_links must contain exactly five unique slots"
         )
@@ -2330,6 +2401,7 @@ def _optional_canonical_attempt(raw: Any) -> dict[str, Any] | None:
     for field_name in (
         "prediction_id",
         "weave_agent_root_call_id",
+        "weave_agent_evidence_call_id",
         "otel_root_span_id",
         "execution_fingerprint",
         "runtime_lock_digest",
@@ -2348,9 +2420,17 @@ def _optional_canonical_attempt_v3(raw: Any) -> dict[str, Any] | None:
     value = _mapping(raw, "V3 paired_attempt")
     extras = {
         "score_explanations",
+        "score_details",
         "sanitized_answer_excerpt",
         "actual_query_scope",
         "reported_project_identity",
+        "local_evidence_record_digest",
+        "local_prediction_row_sha256",
+        "local_result_row_projection_digest",
+        "cost_reconciliation_status",
+        "latency_reconciliation_status",
+        "usage_reconciliation_status",
+        "judge_reviews",
     }
     base_allowed = {item for item in value if item not in extras}
     base = _optional_canonical_attempt({key: value[key] for key in base_allowed})
@@ -2390,6 +2470,11 @@ def _optional_canonical_attempt_v3(raw: Any) -> dict[str, Any] | None:
         raise ValueError(
             "V3 judge score explanations must not publish rationale or private truth"
         )
+    score_details = _optional_score_details_v1(
+        value.get("score_details"),
+        scores=base["scores"],
+    )
+    judge_reviews = _optional_judge_reviews_v1(value.get("judge_reviews"))
     actual_query_scope = tuple(
         _text(item, "V3 paired_attempt.actual_query_scope", 500)
         for item in _sequence(
@@ -2400,6 +2485,10 @@ def _optional_canonical_attempt_v3(raw: Any) -> dict[str, Any] | None:
     if actual_query_scope != tuple(base["queried_projects"]):
         raise ValueError("V3 actual query scope must equal normalized queried projects")
     base["score_explanations"] = explanations
+    if score_details:
+        base["score_details"] = score_details
+    if judge_reviews:
+        base["judge_reviews"] = judge_reviews
     base["actual_query_scope"] = actual_query_scope
     excerpt = _optional_text(
         value.get("sanitized_answer_excerpt"),
@@ -2415,7 +2504,138 @@ def _optional_canonical_attempt_v3(raw: Any) -> dict[str, Any] | None:
     )
     if reported:
         base["reported_project_identity"] = reported
+    for field_name in (
+        "local_evidence_record_digest",
+        "local_prediction_row_sha256",
+        "local_result_row_projection_digest",
+    ):
+        digest = _optional_digest(value.get(field_name), f"V3 {field_name}")
+        if digest:
+            base[field_name] = digest
+    for field_name in (
+        "cost_reconciliation_status",
+        "latency_reconciliation_status",
+        "usage_reconciliation_status",
+    ):
+        if field_name not in value or value[field_name] is None:
+            continue
+        status = _text(value[field_name], f"V3 {field_name}", 40)
+        if status not in _RECONCILIATION_STATUSES:
+            supported = ", ".join(sorted(_RECONCILIATION_STATUSES))
+            raise ValueError(f"V3 {field_name} must be one of: {supported}")
+        base[field_name] = status
+    if base.get("cost_reconciliation_status") == "resolved" and "cost_usd" not in base:
+        raise ValueError("resolved cost reconciliation requires cost_usd")
+    if (
+        base.get("latency_reconciliation_status") == "resolved"
+        and "latency_sec" not in base
+    ):
+        raise ValueError("resolved latency reconciliation requires latency_sec")
+    if base.get("usage_reconciliation_status") == "resolved" and (
+        "input_tokens" not in base or "output_tokens" not in base
+    ):
+        raise ValueError(
+            "resolved usage reconciliation requires input and output tokens"
+        )
     return base
+
+
+def _score_detail_v1(raw: Any, *, dimension: str) -> dict[str, str]:
+    value = _mapping(raw, f"V3 score detail {dimension}")
+    if set(value) != {"what", "observed", "why"}:
+        raise ValueError(
+            f"V3 score detail {dimension!r} requires what, observed, and why"
+        )
+    detail = {
+        field_name: _text(
+            value.get(field_name),
+            f"V3 score detail {dimension} {field_name}",
+            2000,
+        )
+        for field_name in ("what", "observed", "why")
+    }
+    if any(redact_text(text) != text for text in detail.values()):
+        raise ValueError(f"V3 score detail {dimension!r} is sensitive")
+    return detail
+
+
+def _optional_score_details_v1(
+    raw: Any,
+    *,
+    scores: Mapping[str, Any],
+) -> dict[str, dict[str, str]]:
+    details = {
+        str(key): _score_detail_v1(item, dimension=str(key))
+        for key, item in _mapping_or_empty(raw).items()
+    }
+    if set(details) - set(scores):
+        raise ValueError("V3 score details reference an unknown score")
+    if any(key.startswith("comparison.judge.") for key in details):
+        raise ValueError("V3 score details may not publish blind-judge rationale")
+    return details
+
+
+def _optional_judge_reviews_v1(raw: Any) -> dict[str, dict[str, Any]]:
+    reviews: dict[str, dict[str, Any]] = {}
+    for raw_judge_id, raw_review in _mapping_or_empty(raw).items():
+        judge_id = _text(raw_judge_id, "V3 judge review ID", 300)
+        review = _mapping(raw_review, f"V3 judge review {judge_id}")
+        _reject_unknown(
+            review,
+            {
+                "label",
+                "reason",
+                "missing_evidence",
+                "observed_cost_usd",
+                "cost_status",
+            },
+            f"V3 judge review {judge_id}",
+        )
+        label = str(review.get("label") or "")
+        if label not in {
+            "unusable",
+            "weak",
+            "adequate",
+            "strong",
+            "exceptional",
+        }:
+            raise ValueError(f"V3 judge review {judge_id!r} label is unsupported")
+        reason = _text(review.get("reason"), "V3 judge review reason", 500)
+        if redact_text(reason) != reason:
+            raise ValueError(f"V3 judge review {judge_id!r} reason is sensitive")
+        missing_evidence = _required_bool(
+            review.get("missing_evidence"),
+            "V3 judge review missing_evidence",
+        )
+        cost_status = review.get("cost_status")
+        if cost_status not in {None, "observed", "unavailable"}:
+            raise ValueError(
+                f"V3 judge review {judge_id!r} cost status is unsupported"
+            )
+        cost = _optional_float(review.get("observed_cost_usd"))
+        if cost is not None and cost < 0:
+            raise ValueError(
+                f"V3 judge review {judge_id!r} observed cost is invalid"
+            )
+        if cost_status == "observed" and cost is None:
+            raise ValueError(
+                f"V3 judge review {judge_id!r} observed cost is missing"
+            )
+        if cost_status == "unavailable" and cost is not None:
+            raise ValueError(
+                f"V3 judge review {judge_id!r} unavailable cost has a value"
+            )
+        normalized: dict[str, Any] = {
+            "label": label,
+            "reason": reason,
+            "missing_evidence": missing_evidence,
+        }
+        if cost is not None:
+            normalized["observed_cost_usd"] = cost
+        if cost_status is not None:
+            normalized["cost_status"] = cost_status
+        reviews[judge_id] = normalized
+    return reviews
 
 
 def _canonical_attempt_identity(raw: Any) -> dict[str, Any]:
@@ -2432,11 +2652,21 @@ def _canonical_attempt_identity(raw: Any) -> dict[str, Any]:
     }
 
 
-def _canonical_attempt_evidence_link(raw: Any) -> dict[str, Any]:
+def _canonical_attempt_evidence_link(raw: Any) -> dict[str, Any]:  # noqa: C901
     value = _mapping(raw, "paired_attempt.evidence_link")
     _reject_unknown(
         value,
-        {"kind", "status", "system", "ref", "url", "reason"},
+        {
+            "kind",
+            "status",
+            "system",
+            "ref",
+            "url",
+            "reason",
+            "evidence_kind",
+            "native_trajectory_status",
+            "conversation_correlation_status",
+        },
         "paired_attempt.evidence_link",
     )
     kind = _text(value.get("kind"), "attempt evidence kind", 100)
@@ -2445,6 +2675,8 @@ def _canonical_attempt_evidence_link(raw: Any) -> dict[str, Any]:
         "prediction_and_score",
         "prediction",
         "agent_root",
+        "agent_evidence_receipt",
+        "agent_evidence",
         "dataset",
     }:
         raise ValueError("attempt evidence kind is unsupported")
@@ -2452,15 +2684,71 @@ def _canonical_attempt_evidence_link(raw: Any) -> dict[str, Any]:
     if status not in {"resolved", "missing", "invalid"}:
         raise ValueError("attempt evidence status is unsupported")
     system = _text(value.get("system") or "weave", "attempt evidence system", 100)
-    if system != "weave":
-        raise ValueError("attempt evidence system must be weave")
+    if system not in {"weave", "local_artifact"}:
+        raise ValueError("attempt evidence system must be weave or local_artifact")
     result: dict[str, Any] = {"kind": kind, "status": status, "system": system}
     ref = _optional_text(value.get("ref"), "attempt evidence ref", 2000)
     url = _optional_text(value.get("url"), "attempt evidence url", 2000)
     reason = _optional_text(value.get("reason"), "attempt evidence reason", 1000)
+    evidence_kind = _optional_text(
+        value.get("evidence_kind"), "attempt Agent evidence kind", 100
+    )
+    native_status = _optional_text(
+        value.get("native_trajectory_status"), "attempt native trajectory status", 100
+    )
+    correlation_status = _optional_text(
+        value.get("conversation_correlation_status"),
+        "attempt conversation correlation status",
+        100,
+    )
+    if evidence_kind not in {
+        None,
+        "native_weave_call_v1",
+        "native_otel_cross_transport_receipt_v1",
+        "unclassified_legacy_agent_evidence_v1",
+    }:
+        raise ValueError("attempt Agent evidence kind is unsupported")
+    if native_status not in {
+        None,
+        "native_weave_call",
+        "otel_correlated",
+        "unresolved",
+    }:
+        raise ValueError("attempt native trajectory status is unsupported")
+    if correlation_status not in {
+        None,
+        "verified",
+        "unverified",
+        "not_recorded",
+    }:
+        raise ValueError("attempt conversation correlation status is unsupported")
+    agent_kinds = {"agent_root", "agent_evidence_receipt", "agent_evidence"}
+    typed = (evidence_kind, native_status, correlation_status)
+    if kind not in agent_kinds and any(item is not None for item in typed):
+        raise ValueError("non-Agent evidence cannot carry Agent evidence typing")
+    if system == "local_artifact" and any(item is not None for item in typed):
+        raise ValueError("local Agent evidence cannot claim hosted evidence typing")
     if status == "resolved":
-        if not ref or not url or not url.startswith("https://"):
-            raise ValueError("resolved attempt evidence requires ref and HTTPS url")
+        if system == "weave" and (not ref or not url or not url.startswith("https://")):
+            raise ValueError("resolved Weave evidence requires ref and HTTPS url")
+        if system == "local_artifact" and (
+            not ref or not ref.startswith("fugue://local-evidence/") or url
+        ):
+            raise ValueError(
+                "resolved local evidence requires a canonical local-artifact ref"
+            )
+        if evidence_kind == "native_weave_call_v1" and (
+            kind != "agent_root" or native_status != "native_weave_call"
+        ):
+            raise ValueError("native Weave Agent evidence requires a native Agent root")
+        if evidence_kind == "native_otel_cross_transport_receipt_v1" and (
+            kind not in {"agent_evidence_receipt", "agent_evidence"}
+            or native_status != "otel_correlated"
+            or correlation_status != "verified"
+        ):
+            raise ValueError(
+                "cross-transport Agent evidence requires a verified receipt"
+            )
     elif not reason:
         raise ValueError("unresolved attempt evidence requires a reason")
     if ref:
@@ -2471,6 +2759,12 @@ def _canonical_attempt_evidence_link(raw: Any) -> dict[str, Any]:
         result["url"] = url
     if reason:
         result["reason"] = reason
+    if evidence_kind:
+        result["evidence_kind"] = evidence_kind
+    if native_status:
+        result["native_trajectory_status"] = native_status
+    if correlation_status:
+        result["conversation_correlation_status"] = correlation_status
     return result
 
 
@@ -2579,7 +2873,8 @@ def _comparison_evidence_links(
     result_digest: str,
 ) -> tuple[dict[str, str], ...]:
     links: list[dict[str, str]] = []
-    for item in _sequence(raw, "comparison evidence links"):
+    raw_links = _sequence(raw, "comparison evidence links")
+    for item in raw_links:
         if not isinstance(item, Mapping):
             continue
         label = str(item.get("label") or "Evidence")
@@ -2596,12 +2891,13 @@ def _comparison_evidence_links(
             link["uri"] = url
         links.append(link)
     digest = result_digest if len(result_digest) == 64 else ""
-    if result_source and len(result_source) <= 1000:
+    comparison_rows_ref = result_source
+    if comparison_rows_ref and len(comparison_rows_ref) <= 1000:
         links.append(
             {
-                "system": "wandb",
+                "system": "fugue",
                 "kind": "comparison_rows",
-                "ref": result_source,
+                "ref": comparison_rows_ref,
             }
         )
     if result_ref and len(result_ref) <= 1000:
@@ -2614,6 +2910,19 @@ def _comparison_evidence_links(
             }
         )
     return _evidence_links(links)
+
+
+def _wandb_run_id_from_url(value: str) -> str | None:
+    if not value.startswith("https://") or len(value) > 2000:
+        return None
+    parsed = urllib.parse.urlsplit(value)
+    if not parsed.netloc or parsed.username or parsed.password:
+        return None
+    path_parts = tuple(part for part in parsed.path.split("/") if part)
+    for index, part in enumerate(path_parts):
+        if part == "runs" and index + 1 < len(path_parts):
+            return path_parts[index + 1]
+    return None
 
 
 def _comparison_behavioral_measures(
@@ -2888,9 +3197,7 @@ def _safe_judge_summary(
     judges = _safe_judge_provenance(value.get("judges"))
     by_variant = _safe_judge_variants(
         value.get("by_variant"),
-        judge_dimensions={
-            item["judge_id"]: set(item["dimensions"]) for item in judges
-        },
+        judge_dimensions={item["judge_id"]: set(item["dimensions"]) for item in judges},
         arm_attempts=arm_attempts,
     )
     unavailable = _non_negative_int(
@@ -3095,9 +3402,7 @@ def _safe_judge_variants(
                     "judge summary mean must be null exactly when no rows were evaluated"
                 )
             if arm_attempts is not None and evaluated > arm_attempts[variant]:
-                raise ValueError(
-                    "judge evaluated count exceeds canonical arm attempts"
-                )
+                raise ValueError("judge evaluated count exceeds canonical arm attempts")
             dimensions[dimension] = {
                 "evaluated": evaluated,
                 "mean": mean,
@@ -3112,15 +3417,8 @@ def _safe_judge_variants(
             "judge summary dimensions do not match locked judge provenance"
         )
     for variant in ("baseline", "candidate"):
-        if len(
-            {
-                summary["evaluated"]
-                for summary in result[variant].values()
-            }
-        ) > 1:
-            raise ValueError(
-                "judge dimensions disagree on evaluated attempt counts"
-            )
+        if len({summary["evaluated"] for summary in result[variant].values()}) > 1:
+            raise ValueError("judge dimensions disagree on evaluated attempt counts")
     return result
 
 
@@ -3134,9 +3432,7 @@ def _unique_judge_dimensions(
         for item in _sequence(raw, f"judge {judge_id} dimensions")
     ]
     if not dimensions or len(dimensions) != len(set(dimensions)):
-        raise ValueError(
-            "judge provenance dimensions must be non-empty and unique"
-        )
+        raise ValueError("judge provenance dimensions must be non-empty and unique")
     return dimensions
 
 
@@ -3144,10 +3440,7 @@ def _judge_arm_attempt_counts(
     paired_cases: Sequence[Mapping[str, Any]],
 ) -> dict[str, int]:
     return {
-        arm: sum(
-            isinstance(pair.get(arm), Mapping)
-            for pair in paired_cases
-        )
+        arm: sum(isinstance(pair.get(arm), Mapping) for pair in paired_cases)
         for arm in ("baseline", "candidate")
     }
 
@@ -5494,15 +5787,41 @@ def _evidence_links(raw: Any) -> tuple[dict[str, str], ...]:
         _reject_unknown(
             link, {"system", "kind", "ref", "uri", "digest"}, "evidence_link"
         )
-        projected = {
-            "system": _text(link.get("system"), "evidence_link.system", 100),
-            "kind": _text(link.get("kind"), "evidence_link.kind", 100),
-            "ref": _text(link.get("ref"), "evidence_link.ref", 1000),
-        }
+        system = _text(link.get("system"), "evidence_link.system", 100)
+        kind = _text(link.get("kind"), "evidence_link.kind", 100)
+        ref = _text(link.get("ref"), "evidence_link.ref", 1000)
         uri = _optional_text(link.get("uri"), "evidence_link.uri", 2000)
         if uri:
             if not uri.startswith("https://"):
                 raise ValueError("evidence link URIs must use https")
+        if kind == "comparison_rows":
+            if system == "wandb" and uri is None:
+                # Historical local projections mislabeled a Fugue run ID as a
+                # W&B Run. Keep those records readable without manufacturing a
+                # hosted link.
+                system = "fugue"
+            elif system == "wandb":
+                run_id = _wandb_run_id_from_url(uri or "")
+                if run_id is None:
+                    raise ValueError(
+                        "hosted comparison rows require a canonical W&B Run URL"
+                    )
+                if ref != run_id:
+                    raise ValueError(
+                        "hosted comparison rows Run ID must match its URL"
+                    )
+            elif system in {"fugue", "local_artifact"}:
+                if uri is not None:
+                    raise ValueError(
+                        "local comparison rows cannot declare a hosted URI"
+                    )
+                system = "fugue"
+            elif system != "wandb":
+                raise ValueError(
+                    "comparison rows evidence must use fugue or wandb"
+                )
+        projected = {"system": system, "kind": kind, "ref": ref}
+        if uri:
             projected["uri"] = uri
         digest = _optional_digest(link.get("digest"), "evidence_link.digest")
         if digest:

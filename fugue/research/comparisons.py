@@ -687,6 +687,12 @@ class ComparisonControlService:
             subject_id=f"comparison-{preview.preview_digest[:20]}",
             estimated_cells=int(readiness["estimated_cells"]),
             estimated_cost_usd=float(readiness["estimated_cost_usd"]),
+            expected_candidate_definitions={
+                str(candidate_id): dict(definition)
+                for candidate_id, definition in dict(
+                    preview.matrix.get("candidate_definitions") or {}
+                ).items()
+            },
         )
         directory = self._run_dir(preview.preview_digest)
         directory.mkdir(parents=True, exist_ok=True)

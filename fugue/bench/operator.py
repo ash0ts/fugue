@@ -6,6 +6,7 @@ import json
 import os
 import shutil
 import signal
+import stat
 import sys
 import threading
 import time
@@ -132,7 +133,8 @@ from fugue.bench.run_conformance import (
 from fugue.bench.runtime_manager import prepare_runtime, runtime_ready, runtime_spec
 from fugue.bench.runtime_provenance import (
     resolve_fugue_distribution_provenance,
-    resolve_fugue_source_provenance,
+    resolve_study_workspace_provenance,
+    study_workspace_provenance,
 )
 from fugue.bench.scoring import (
     read_intervention_selection_lock,
@@ -270,9 +272,7 @@ class _EvidenceCoordinators:
         hosted = self.hosted.begin_cell(cell) if self.hosted is not None else None
         if hosted:
             overlap = {
-                key
-                for key in overlay
-                if key in hosted and overlay[key] != hosted[key]
+                key for key in overlay if key in hosted and overlay[key] != hosted[key]
             }
             if overlap:
                 raise RuntimeError(
@@ -330,9 +330,7 @@ class _EvidenceCoordinators:
                 ("execution_fingerprint", cell.execution_fingerprint),
             ):
                 if row.get(key) != expected:
-                    raise RuntimeError(
-                        f"restored hosted evidence disagrees on {key}"
-                    )
+                    raise RuntimeError(f"restored hosted evidence disagrees on {key}")
 
     def invalidate_cell(self, cell: PlannedCell, outcome: Any) -> None:
         """Retain one logical hosted prediction across physical retries."""
@@ -438,8 +436,6 @@ class ResultSummary:
     context_registered: int = 0
     runtime_mismatched: int = 0
     attributed_errors: int = 0
-    linked_traces: int = 0
-    unlinked_traces: int = 0
     usage_unavailable: int = 0
     rows: tuple[dict[str, Any], ...] = ()
     agent_traces: tuple[AgentTraceRef, ...] = ()
@@ -1057,9 +1053,7 @@ class OperatorService:
         ):
             raise ValueError("resume experiment snapshot changed")
         try:
-            stored_snapshot = json.loads(
-                input_lock_path.read_text(encoding="utf-8")
-            )
+            stored_snapshot = json.loads(input_lock_path.read_text(encoding="utf-8"))
         except json.JSONDecodeError as exc:
             raise ValueError("resume run input lock is invalid JSON") from exc
         if not isinstance(stored_snapshot, dict) or not verify_snapshot(
@@ -1074,20 +1068,14 @@ class OperatorService:
         ):
             raise ValueError("resume run input lock has no planned matrix")
         stored_by_attempt = {
-            str(item.get("attempt_id") or ""): dict(item)
-            for item in planned_rows
+            str(item.get("attempt_id") or ""): dict(item) for item in planned_rows
         }
-        if (
-            len(stored_by_attempt) != len(planned_rows)
-            or "" in stored_by_attempt
-        ):
+        if len(stored_by_attempt) != len(planned_rows) or "" in stored_by_attempt:
             raise ValueError("resume planned matrix has duplicate attempts")
         preview_cells = {cell.attempt_id: cell for cell in plan.cells}
         if set(preview_cells) != set(stored_by_attempt):
             raise ValueError("resume plan does not match the immutable attempt set")
-        jobs_by_config = {
-            job.config_path.resolve(): job for job in plan.jobs
-        }
+        jobs_by_config = {job.config_path.resolve(): job for job in plan.jobs}
         hydrated_jobs: list[RenderedJob] = []
         for attempt, preview_cell in preview_cells.items():
             stored = stored_by_attempt[attempt]
@@ -1124,9 +1112,7 @@ class OperatorService:
                 approved_comparison=plan.request.approved_comparison,
             )
         )
-        _validate_approved_comparison_plan(
-            plan.request.approved_comparison, cells
-        )
+        _validate_approved_comparison_plan(plan.request.approved_comparison, cells)
         evaluation_assets = read_evaluation_asset_lock(evaluation_lock_path)
         if evaluation_assets.run_id != run_id:
             raise ValueError("resume evaluation asset lock belongs to another run")
@@ -1176,7 +1162,7 @@ class OperatorService:
         )
         if recomputed.to_dict() != stored_snapshot:
             raise ValueError("resume run snapshot no longer matches exact inputs")
-        source = recomputed.runtime.get("fugue_source") or {}
+        source = study_workspace_provenance(recomputed.runtime) or {}
         cells = tuple(
             replace(
                 cell,
@@ -1799,9 +1785,7 @@ class OperatorService:
                 for job in jobs
             ),
             environment=dict(plan.experiment.environment),
-            source_evidence_project=(
-                plan.experiment.source_evidence_project or ""
-            ),
+            source_evidence_project=(plan.experiment.source_evidence_project or ""),
             source_evidence_destination=(
                 plan.experiment.source_evidence_destination.to_dict()
                 if plan.experiment.source_evidence_destination is not None
@@ -1876,7 +1860,7 @@ class OperatorService:
         requested_systems = list(request.systems) or (
             _request_variant_system_ids(selected, request) if request.variants else None
         )
-        source_provenance = resolve_fugue_source_provenance(self.repo_root)
+        study_workspace = resolve_study_workspace_provenance(self.repo_root)
         for workload in workloads:
             if workload.runner == "harbor":
                 manifest_path = _resolve(
@@ -1951,7 +1935,7 @@ class OperatorService:
                             scorer_reference(item) for item in workload.scorers
                         ],
                         asset_overlay=asset_overlay,
-                        source_provenance=source_provenance,
+                        study_workspace_provenance=study_workspace,
                         scheduling_seed=preset.scheduling_seed,
                     )
                 )
@@ -1965,7 +1949,7 @@ class OperatorService:
                         run_name=run_name,
                         request=request,
                         run_id=run_id,
-                        source_provenance=source_provenance,
+                        study_workspace_provenance=study_workspace,
                     )
                 )
         _validate_selection_lock_jobs(
@@ -1994,7 +1978,7 @@ class OperatorService:
         run_name: str,
         request: ExperimentRequest,
         run_id: str,
-        source_provenance: dict[str, Any],
+        study_workspace_provenance: dict[str, Any],
     ) -> list[RenderedJob]:
         if not workload.dataset:
             raise ValueError(f"workload {workload.id} requires dataset")
@@ -2198,7 +2182,7 @@ class OperatorService:
                         else {}
                     ),
                     "scheduling_seed": preset.scheduling_seed,
-                    "fugue_source": source_provenance,
+                    "study_workspace": study_workspace_provenance,
                     "fugue_distribution": resolve_fugue_distribution_provenance(),
                 },
             )
@@ -2402,9 +2386,7 @@ class OperatorService:
                 temporary = snapshot_path.with_name(
                     f".{snapshot_path.name}.{os.getpid()}.tmp"
                 )
-                temporary.write_text(
-                    experiment_to_yaml(resolved), encoding="utf-8"
-                )
+                temporary.write_text(experiment_to_yaml(resolved), encoding="utf-8")
                 os.replace(temporary, snapshot_path)
                 plan = self._materialize_run_plan(plan, run_id=run_id)
                 initial_cells = list(plan.cells)
@@ -2415,23 +2397,17 @@ class OperatorService:
                     repo_root=self.repo_root,
                     env=execution_env,
                 )
-                evaluation_assets = build_evaluation_asset_lock(
-                    run_id, initial_cells
-                )
+                evaluation_assets = build_evaluation_asset_lock(run_id, initial_cells)
                 write_evaluation_asset_lock(self.repo_root, evaluation_assets)
                 initial_cells = [
                     replace(
                         cell,
-                        evaluation_asset_lock_sha256=(
-                            evaluation_assets.lock_sha256
-                        ),
+                        evaluation_asset_lock_sha256=(evaluation_assets.lock_sha256),
                     )
                     for cell in initial_cells
                 ]
-                selection_lock_kind, selection_lock_sha256 = (
-                    _selection_lock_identity(
-                        request.selection_lock, self.repo_root
-                    )
+                selection_lock_kind, selection_lock_sha256 = _selection_lock_identity(
+                    request.selection_lock, self.repo_root
                 )
                 run_snapshot = build_run_snapshot(
                     repo_root=self.repo_root,
@@ -2442,9 +2418,7 @@ class OperatorService:
                     cells=initial_cells,
                     env=execution_env,
                     bridge_runtime=bridge_runtime,
-                    evaluation_asset_lock_sha256=(
-                        evaluation_assets.lock_sha256
-                    ),
+                    evaluation_asset_lock_sha256=(evaluation_assets.lock_sha256),
                     selection_lock_sha256=selection_lock_sha256,
                     treatment_selection_sha256=(
                         selection_lock_sha256
@@ -2457,16 +2431,14 @@ class OperatorService:
                         else ""
                     ),
                 )
-                source_state = run_snapshot.runtime.get("fugue_source") or {}
+                source_state = study_workspace_provenance(run_snapshot.runtime) or {}
                 initial_cells = [
                     replace(
                         cell,
                         run_snapshot_sha256=run_snapshot.snapshot_sha256,
                         source_commit=str(source_state.get("commit") or ""),
                         source_tree=str(source_state.get("tree") or ""),
-                        source_dirty_digest=str(
-                            source_state.get("dirty_digest") or ""
-                        ),
+                        source_dirty_digest=str(source_state.get("dirty_digest") or ""),
                     )
                     for cell in initial_cells
                 ]
@@ -2540,8 +2512,7 @@ class OperatorService:
                 != _evidence_destination_for_mode(resolved, run_env)
             ):
                 raise RuntimeError(
-                    "approved comparison evidence destination changed before "
-                    "execution"
+                    "approved comparison evidence destination changed before execution"
                 )
             evidence_checkpoint_cells = int(
                 request.approved_comparison.get(
@@ -2564,8 +2535,7 @@ class OperatorService:
                     "evidence-checkpoint comparisons require cell concurrency 1"
                 )
             conformance_enforced = (
-                cell_runner is None
-                and execute_cells is _DEFAULT_EXECUTE_CELLS
+                cell_runner is None and execute_cells is _DEFAULT_EXECUTE_CELLS
             )
             pre_execution_inventory = (
                 capture_local_docker_inventory(rendered)
@@ -2576,9 +2546,7 @@ class OperatorService:
                 Path(job.config_path).resolve(): job for job in rendered
             }
             rendered_by_attempt = {
-                cell.attempt_id: rendered_by_config[
-                    Path(cell.config_path).resolve()
-                ]
+                cell.attempt_id: rendered_by_config[Path(cell.config_path).resolve()]
                 for cell in cells
                 if Path(cell.config_path).resolve() in rendered_by_config
             }
@@ -2609,16 +2577,16 @@ class OperatorService:
 
             observability_error = None
             evidence_mode = getattr(resolved, "evidence_mode", "weave_required")
-            live_required = evidence_mode == "weave_required" and bool(
-                request.approved_comparison or resolved.require_live_evidence
-            ) and any(
-                cell.applicable and cell.execution_kind == "agent"
-                for cell in cells
+            live_required = (
+                evidence_mode == "weave_required"
+                and bool(request.approved_comparison or resolved.require_live_evidence)
+                and any(
+                    cell.applicable and cell.execution_kind == "agent" for cell in cells
+                )
             )
-            live_disabled = (
-                run_env.get("FUGUE_DISABLE_LIVE_EVALUATIONS", "").lower()
-                in {"1", "true", "yes"}
-            )
+            live_disabled = run_env.get(
+                "FUGUE_DISABLE_LIVE_EVALUATIONS", ""
+            ).lower() in {"1", "true", "yes"}
             if live_required and not trace_api_key(run_env):
                 raise RuntimeError(
                     "this experiment requires live Weave evidence before "
@@ -2630,8 +2598,7 @@ class OperatorService:
                 )
             if (
                 evidence_mode == "weave_required"
-                and
-                cells
+                and cells
                 and trace_api_key(run_env)
                 and not live_disabled
             ):
@@ -2647,8 +2614,7 @@ class OperatorService:
                         evidence_checkpoint_cells=evidence_checkpoint_cells,
                         checkpoint_conformance=(
                             checkpoint_conformance
-                            if evidence_checkpoint_cells
-                            and conformance_enforced
+                            if evidence_checkpoint_cells and conformance_enforced
                             else None
                         ),
                         # The provider-neutral local row is canonical. Hosted
@@ -2663,9 +2629,7 @@ class OperatorService:
                             "required live-evidence initialization failed"
                         ) from exc
             if live_required and live is None:
-                raise RuntimeError(
-                    "required live-evidence coordinator is unavailable"
-                )
+                raise RuntimeError("required live-evidence coordinator is unavailable")
             local = GeneratedEvaluationCoordinator(
                 cells,
                 repo_root=self.repo_root,
@@ -2682,9 +2646,7 @@ class OperatorService:
             )
             evidence = _EvidenceCoordinators(local=local, hosted=live)
 
-            def durable_finish_cell(
-                cell: PlannedCell, outcome: CellOutcome
-            ) -> None:
+            def durable_finish_cell(cell: PlannedCell, outcome: CellOutcome) -> None:
                 try:
                     LocalEvidenceStore(self.repo_root, run_id).read_attempt(
                         cell.attempt_id
@@ -2739,21 +2701,19 @@ class OperatorService:
                     if pending_not_applicable
                     else []
                 )
-                durable_outcomes, recovery_summary = (
-                    execute_durable_comparison_cells(
-                        repo_root=self.repo_root,
-                        run_id=run_id,
-                        cells=cells,
-                        approved_comparison=request.approved_comparison,
-                        runner=cell_runner,
-                        begin_cell=evidence.begin_cell,
-                        finish_cell=durable_finish_cell,
-                        finalize_wave=comparison_wave_finalizer,
-                        invalidate_cell=evidence.invalidate_cell,
-                        cell_conformance=checkpoint_conformance,
-                        cancellation_event=cancel_event,
-                        secret_values=secrets_from_env(run_env),
-                    )
+                durable_outcomes, recovery_summary = execute_durable_comparison_cells(
+                    repo_root=self.repo_root,
+                    run_id=run_id,
+                    cells=cells,
+                    approved_comparison=request.approved_comparison,
+                    runner=cell_runner,
+                    begin_cell=evidence.begin_cell,
+                    finish_cell=durable_finish_cell,
+                    finalize_wave=comparison_wave_finalizer,
+                    invalidate_cell=evidence.invalidate_cell,
+                    cell_conformance=checkpoint_conformance,
+                    cancellation_event=cancel_event,
+                    secret_values=secrets_from_env(run_env),
                 )
                 outcomes.extend(durable_outcomes)
             else:
@@ -2811,23 +2771,24 @@ class OperatorService:
                 enforce=conformance_enforced,
                 execution_scope=conformance_scope,
             )
+            if harbor_conformance.enforced and harbor_conformance.status == "unavailable":
+                raise ExecutionFinalizationPending(
+                    _harbor_finalization_pending_reason(harbor_conformance.path)
+                )
             # The canonical manifest is closed only after the final run-scoped
             # privacy, execution-policy, and Harbor cleanup receipt exists.
             # This prevents a complete evidence chain from outliving a leaked
             # secret or orphaned run resource discovered in the final wave.
             local_manifest = local.finalize() if local is not None else None
             conformance_blocked = (
-                harbor_conformance.enforced
-                and harbor_conformance.status != "passed"
+                harbor_conformance.enforced and harbor_conformance.status != "passed"
             )
             # A governed comparison promises a reconciled live evidence graph,
             # so publication failure invalidates that run. Ordinary experiments
             # may opt into best-effort observability; preserve their task result
             # while recording the publication failure explicitly.
             publication_blocked = bool(
-                live_required
-                and publication is not None
-                and publication.failures
+                live_required and publication is not None and publication.failures
             )
             _finalize_run(
                 self.repo_root,
@@ -2909,9 +2870,9 @@ class OperatorService:
                     "status": "finalizing",
                     "paused_at": _now(),
                     "error": f"{type(exc).__name__}: {exc}",
-                    "recovery_journal": recovery_journal_path(
-                        self.repo_root, run_id
-                    ).relative_to(self.repo_root).as_posix(),
+                    "recovery_journal": recovery_journal_path(self.repo_root, run_id)
+                    .relative_to(self.repo_root)
+                    .as_posix(),
                 },
             )
             raise
@@ -2923,9 +2884,9 @@ class OperatorService:
                     "status": "paused",
                     "paused_at": _now(),
                     "error": f"{type(exc).__name__}: {exc}",
-                    "recovery_journal": recovery_journal_path(
-                        self.repo_root, run_id
-                    ).relative_to(self.repo_root).as_posix(),
+                    "recovery_journal": recovery_journal_path(self.repo_root, run_id)
+                    .relative_to(self.repo_root)
+                    .as_posix(),
                 },
             )
             raise
@@ -3254,12 +3215,6 @@ class OperatorService:
                     "fugue",
                 )
             ),
-            linked_traces=sum(
-                row.get("trace_link_status") == "linked" for row in trials
-            ),
-            unlinked_traces=sum(
-                row.get("trace_link_status") not in {None, "linked"} for row in trials
-            ),
             usage_unavailable=sum(
                 row.get("weave_usage_status") == "unavailable" for row in trials
             ),
@@ -3354,11 +3309,7 @@ class OperatorService:
                 name=str(item.get("name") or "evaluation"),
                 examples=int(item.get("examples") or 0),
                 project=(
-                    str(
-                        item.get("project")
-                        or run.metadata.get("trace_project")
-                        or ""
-                    )
+                    str(item.get("project") or run.metadata.get("trace_project") or "")
                     or None
                 ),
                 url=str(item["url"]) if item.get("url") else None,
@@ -3735,20 +3686,23 @@ def _experiment_evidence_environment(
     if getattr(experiment, "evidence_mode", "weave_required") == "local":
         result = dict(env)
         for key in tuple(result):
-            if key.startswith("FUGUE_WEAVE_") or key.startswith(
-                "OTEL_EXPORTER_OTLP_"
-            ) or key in {
-                "OTEL_RESOURCE_ATTRIBUTES",
-                "WEAVE_PROJECT",
-                "WEAVE_TRACE_SERVER_URL",
-                "WANDB_ENTITY",
-                "WANDB_PROJECT",
-                "FUGUE_RESULT_EVIDENCE_PROJECT",
-                "FUGUE_WANDB_RESEARCH_ID",
-                "FUGUE_WANDB_STUDY_ID",
-                "FUGUE_RESEARCH_EXPERIMENT_ID",
-                "FUGUE_STUDY_CONSOLE_BACKLINK",
-            }:
+            if (
+                key.startswith("FUGUE_WEAVE_")
+                or key.startswith("OTEL_EXPORTER_OTLP_")
+                or key
+                in {
+                    "OTEL_RESOURCE_ATTRIBUTES",
+                    "WEAVE_PROJECT",
+                    "WEAVE_TRACE_SERVER_URL",
+                    "WANDB_ENTITY",
+                    "WANDB_PROJECT",
+                    "FUGUE_RESULT_EVIDENCE_PROJECT",
+                    "FUGUE_WANDB_RESEARCH_ID",
+                    "FUGUE_WANDB_STUDY_ID",
+                    "FUGUE_RESEARCH_EXPERIMENT_ID",
+                    "FUGUE_STUDY_CONSOLE_BACKLINK",
+                }
+            ):
                 result.pop(key, None)
         result["FUGUE_EVIDENCE_MODE"] = "local"
         result["FUGUE_LOCAL_EVIDENCE_FORMAT"] = "fugue-evidence"
@@ -3825,9 +3779,7 @@ def _validate_local_evidence_jobs(jobs: list[RenderedJob]) -> None:
         for job in jobs
         if job.resolved_candidate.execution_definition.get("instrumentation")
         != "local_evidence"
-        or job.resolved_candidate.execution_definition.get(
-            "evidence_destination"
-        )
+        or job.resolved_candidate.execution_definition.get("evidence_destination")
         != expected
         or job.env.get("FUGUE_EVIDENCE_MODE") != "local"
     )
@@ -4034,8 +3986,18 @@ def _experiment_with_request_overrides(
 
 def load_env(path: Path) -> dict[str, str]:
     env = os.environ.copy()
+    if path.is_symlink():
+        raise ValueError(f"credential environment path cannot be a symlink: {path}")
     if not path.exists():
         return env
+    metadata = path.stat()
+    if not stat.S_ISREG(metadata.st_mode):
+        raise ValueError(f"credential environment path is not a regular file: {path}")
+    if os.name != "nt" and metadata.st_mode & 0o077:
+        raise PermissionError(
+            "credential environment file must not be accessible by group or "
+            f"other users (run `chmod 600 {path}`)"
+        )
     for line in path.read_text().splitlines():
         stripped = line.strip()
         if not stripped or stripped.startswith("#") or "=" not in stripped:
@@ -4213,7 +4175,7 @@ def _physical_rendered_job(
     config = json.loads(config_path.read_text(encoding="utf-8"))
     if not isinstance(config, dict):
         raise ValueError("physical Harbor config must be an object")
-    namespace = ((config.get("fugue") or {}).get("physical_execution") or {})
+    namespace = (config.get("fugue") or {}).get("physical_execution") or {}
     if (
         not isinstance(namespace, Mapping)
         or namespace.get("physical_execution_id") != cell.physical_execution_id
@@ -4266,9 +4228,7 @@ def _durable_physical_conformance_jobs(
     )
     for state in ordered:
         logical_cell = by_attempt.get(state.identity.logical_attempt_id)
-        logical_job = logical_jobs_by_attempt.get(
-            state.identity.logical_attempt_id
-        )
+        logical_job = logical_jobs_by_attempt.get(state.identity.logical_attempt_id)
         if logical_cell is None or logical_job is None:
             raise ValueError("journaled physical execution has no logical input")
         physical_cell = _physical_harbor_cell_from_journal(
@@ -4282,9 +4242,7 @@ def _durable_physical_conformance_jobs(
                 "terminal_kind": state.terminal_kind,
                 "cleanup_verified": state.cleanup_verified,
                 "cleanup_scope_verified": state.cleanup_scope_verified,
-                "cleanup_post_run_inventory": (
-                    state.cleanup_post_run_inventory
-                ),
+                "cleanup_post_run_inventory": (state.cleanup_post_run_inventory),
                 "cleanup_receipt_reference": state.cleanup_receipt_reference,
             }
         )
@@ -4300,9 +4258,7 @@ def _durable_physical_conformance_jobs(
                 logical_job=logical_job,
             )
         )
-    expected_ids = {
-        state.identity.physical_execution_id for state in ordered
-    }
+    expected_ids = {state.identity.physical_execution_id for state in ordered}
     physical_root = repo_root / ".fugue" / "runtime" / run_id / "physical-executions"
     observed_ids = (
         {path.name for path in physical_root.iterdir() if path.is_dir()}
@@ -4321,6 +4277,29 @@ def _durable_physical_conformance_jobs(
         "journal_complete": snapshot.complete,
     }
     return jobs, {**scope, "scope_digest": stable_digest(scope)}
+
+
+def _harbor_finalization_pending_reason(path: Path) -> str:
+    """Return a concise, public reason for a retryable cleanup audit."""
+
+    try:
+        value = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return "Harbor conformance is unavailable; retry finalization."
+    cleanup = value.get("docker_cleanup") if isinstance(value, Mapping) else None
+    if not isinstance(cleanup, Mapping):
+        return "Harbor conformance is unavailable; retry finalization."
+    reason = str(cleanup.get("reason") or "").strip()
+    if reason:
+        return f"Harbor cleanup evidence is unavailable: {reason}"
+    unattributed = cleanup.get("unattributed_new_containers")
+    if isinstance(unattributed, list) and unattributed:
+        return (
+            "Harbor cleanup evidence is unavailable because "
+            f"{len(unattributed)} new Docker container(s) were not attributable "
+            "to this run. Retry finalization after the host inventory stabilizes."
+        )
+    return "Harbor cleanup evidence is unavailable; retry finalization."
 
 
 def _validate_approved_comparison_plan(
@@ -4371,10 +4350,10 @@ def _validate_approved_comparison_plan(
     )
     if int(approved.get("expected_cell_count") or 0) != len(expected):
         raise ValueError("approved comparison expected cell count does not match")
-    if str(approved.get("expected_cells_digest") or "") != stable_digest(
-        expected_raw
-    ):
-        raise ValueError("approved comparison expected cell manifest digest does not match")
+    if str(approved.get("expected_cells_digest") or "") != stable_digest(expected_raw):
+        raise ValueError(
+            "approved comparison expected cell manifest digest does not match"
+        )
     if actual != expected:
         raise ValueError("resolved run coordinates differ from the approved comparison")
 
@@ -4555,9 +4534,7 @@ def _resolve(root: Path, path: Path) -> Path:
     return path if path.is_absolute() else root / path
 
 
-def _selection_lock_identity(
-    path: Path | None, repo_root: Path
-) -> tuple[str, str]:
+def _selection_lock_identity(path: Path | None, repo_root: Path) -> tuple[str, str]:
     if path is None:
         return "", ""
     resolved = _resolve(repo_root, path)
@@ -4586,7 +4563,7 @@ def _request_with_selection_lock(
             raise ValueError(
                 "intervention selection lock belongs to a different experiment"
             )
-        current_source = resolve_fugue_source_provenance(repo_root)
+        current_source = resolve_study_workspace_provenance(repo_root)
         if (
             str(current_source.get("commit") or "") != intervention.source_commit
             or str(current_source.get("tree") or "") != intervention.source_tree
@@ -4595,7 +4572,8 @@ def _request_with_selection_lock(
             != intervention.source_dirty_digest
         ):
             raise ValueError(
-                "intervention selection lock source tree differs from this clean checkout"
+                "intervention selection lock study workspace differs from this "
+                "clean checkout"
             )
         task_suite_digests = {
             value.removeprefix("task-suite:")
@@ -4649,7 +4627,9 @@ def _validate_selection_lock_jobs(
     for job in jobs:
         observed.setdefault(job.variant_id, set()).add(job.candidate_id)
     if set(observed) != set(expected):
-        raise ValueError("holdout variants do not match the intervention selection lock")
+        raise ValueError(
+            "holdout variants do not match the intervention selection lock"
+        )
     mismatched = [
         variant_id
         for variant_id, candidate_ids in observed.items()
@@ -4686,9 +4666,7 @@ def _agent_trace_refs(rows: list[dict[str, Any]]) -> tuple[AgentTraceRef, ...]:
             agent,
             {"conversations": set(), "traces": set(), "roots": set()},
         )
-        for key, target in (
-            ("weave_conversation_ids", "conversations"),
-        ):
+        for key, target in (("weave_conversation_ids", "conversations"),):
             raw = row.get(key) or []
             if isinstance(raw, str):
                 raw = [raw]

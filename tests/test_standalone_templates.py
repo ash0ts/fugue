@@ -92,6 +92,18 @@ def test_packaged_template_is_a_complete_local_eight_cell_study(
     assert (root / ".env.example").read_text().splitlines()[-1] == (
         "ANTHROPIC_API_KEY="
     )
+    readme = (root / "README.md").read_text(encoding="utf-8")
+    create_env = "install -m 600 .env.example .env"
+    set_key = "Set `ANTHROPIC_API_KEY` in `.env`."
+    doctor = (
+        "fugue doctor --require local-runner "
+        "--model anthropic/claude-sonnet-5 --env-file .env"
+    )
+    assert readme.index(create_env) < readme.index(set_key) < readme.index(doctor)
+    assert doctor in readme
+    assert readme.index(doctor) < readme.index(
+        "fugue compare comparison.yaml --run"
+    )
 
     raw = yaml.safe_load(comparison_path.read_text())
     assert raw["execution"] == {

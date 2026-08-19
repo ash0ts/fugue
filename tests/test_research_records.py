@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import copy
 import hashlib
 import json
 from concurrent.futures import ThreadPoolExecutor
@@ -9,6 +10,9 @@ from pathlib import Path
 import httpx
 import pytest
 
+from fugue.bench.analysis_contracts import aligned_analysis_from_dict
+from fugue.bench.candidates import attempt_id as canonical_attempt_id
+from fugue.bench.candidates import stable_digest
 from fugue.research.contracts import (
     RESEARCH_SCHEMA_VERSION,
     ExperimentPreviewV1,
@@ -20,17 +24,23 @@ from fugue.research.contracts import (
     sign_record,
     study_update_from_dict,
 )
+from fugue.research.experiment_views import (
+    ExperimentViewV3,
+    experiment_view_from_dict,
+)
 from fugue.research.records import (
     RESEARCH_LOG_MAX_BYTES,
     HttpResearchRecordSink,
     JsonlResearchRecordSink,
     ResearchLogEventV1,
     ResearchRecordPublisher,
+    experiment_view_manifest_from_dict,
+    experiment_view_page_from_dict,
     public_evidence_selector,
     research_log_event_from_dict,
     sign_research_log_event,
 )
-from fugue.research.store import StudyStore
+from fugue.research.store import StudyStore, _paged_terminal_experiment_view
 
 _A = "a" * 64
 _B = "b" * 64
@@ -111,6 +121,125 @@ def _preview(*, proposal_id: str = "proposal-1") -> ExperimentPreviewV1:
             blockers=(),
         )
     )
+
+
+def _large_terminal_v3_view(*, pair_count: int = 96) -> ExperimentViewV3:
+    fixture = (
+        Path(__file__).parent
+        / "fixtures"
+        / "experiment-view-v3-study-console-golden.json"
+    )
+    raw = json.loads(fixture.read_text(encoding="utf-8"))
+    template_pair = raw["paired_cases"][0]
+    pairs: list[dict[str, object]] = []
+    aligned_attempts: list[dict[str, object]] = []
+    task_pair_counts: dict[str, int] = {}
+    for index in range(1, pair_count + 1):
+        task_number = ((index - 1) // 2) + 1
+        attempt_number = ((index - 1) % 2) + 1
+        task_id = f"task-{task_number:03d}"
+        task_label = f"Maintenance task {task_number:03d}"
+        pair = copy.deepcopy(template_pair)
+        pair["task_id"] = task_id
+        pair["task_label"] = task_label
+        pair["attempt"] = attempt_number
+        pair["pair_id"] = stable_digest(
+            {
+                "task_id": task_id,
+                "harness": "claude-code",
+                "attempt": attempt_number,
+            }
+        )
+        attempt_ids: dict[str, str] = {}
+        for arm in ("baseline", "candidate"):
+            attempt = pair[arm]
+            identity = attempt["identity"]
+            identity["task_id"] = task_id
+            identity["attempt"] = attempt_number
+            attempt_id = canonical_attempt_id(**identity)
+            attempt["attempt_id"] = attempt_id
+            attempt["prediction_id"] = f"{arm}-prediction-{index:03d}"
+            attempt["weave_agent_root_call_id"] = f"{arm}-agent-root-{index:03d}"
+            attempt["otel_root_span_id"] = f"{arm}-otel-root-{index:03d}"
+            for link in attempt["evidence_links"]:
+                kind = link["kind"]
+                if kind == "dataset":
+                    continue
+                ref = (
+                    f"{arm}-agent-root-{index:03d}"
+                    if kind == "agent_root"
+                    else f"{arm}-{kind}-{index:03d}"
+                )
+                link["ref"] = ref
+                link["url"] = (
+                    "https://wandb.ai/wandb/"
+                    "fugue-mcp-release-qualification-v1/weave/calls/"
+                    + ref
+                )
+            attempt_ids[arm] = attempt_id
+        pairs.append(pair)
+        aligned_attempts.append(
+            {
+                "alignment_id": stable_digest(
+                    {
+                        "task_id": task_id,
+                        "harness": "claude-code",
+                        "attempt": attempt_number,
+                    }
+                ),
+                "task_id": task_id,
+                "task_label": task_label,
+                "harness": "claude-code",
+                "attempt": attempt_number,
+                "attempt_ids_by_arm": attempt_ids,
+            }
+        )
+        task_pair_counts[task_id] = task_pair_counts.get(task_id, 0) + 1
+
+    task_summaries: list[dict[str, object]] = []
+    task_validity: list[dict[str, object]] = []
+    for task_id, task_pair_count in task_pair_counts.items():
+        task_summaries.append(
+            {
+                "task_id": task_id,
+                "validity": "valid",
+                "pair_counts": {"improved": task_pair_count},
+            }
+        )
+        task_validity.append(
+            {
+                "task_id": task_id,
+                "status": "valid",
+                "discriminating_dimensions": ["bounded_answer"],
+            }
+        )
+
+    analysis = raw["aligned_analysis"]
+    analysis["aligned_attempts"] = aligned_attempts
+    analysis["task_summaries"] = task_summaries
+    analysis.pop("analysis_digest", None)
+    raw["aligned_analysis"] = aligned_analysis_from_dict(analysis).to_dict()
+    raw["paired_cases"] = pairs
+    raw["task_validity"] = task_validity
+    raw["matrix_size"] = pair_count * 2
+    raw["completed_cells"] = pair_count * 2
+    raw["state_counts"] = {"completed": pair_count * 2}
+    raw["behavioral_summary"].update(
+        {
+            "improved_pairs": pair_count,
+            "supported_claim": f"Candidate improved {pair_count} aligned pairs.",
+        }
+    )
+    raw["judge_summary"] = {
+        "status": "not_used",
+        "claim_status": "not_applicable",
+        "judges": [],
+        "by_variant": {"baseline": {}, "candidate": {}},
+        "unavailable_attempts": 0,
+    }
+    view = experiment_view_from_dict(raw)
+    assert isinstance(view, ExperimentViewV3)
+    return view
 
 
 def test_research_log_contract_is_strict_and_content_addressed() -> None:
@@ -194,6 +323,199 @@ def test_research_log_contract_accepts_512_kib_and_rejects_the_next_byte(
     assert sign_research_log_event(accepted).event_digest
     with pytest.raises(ValueError, match="publication size limit"):
         sign_research_log_event(rejected)
+
+
+def test_paged_experiment_contract_validates_digests_and_terminal_state() -> None:
+    [page], manifest = _paged_terminal_experiment_view(
+        _large_terminal_v3_view(pair_count=1)
+    )
+    assert experiment_view_page_from_dict(page.to_dict()) == page
+    assert experiment_view_manifest_from_dict(manifest.to_dict()) == manifest
+
+    with pytest.raises(ValueError, match="page digest"):
+        experiment_view_page_from_dict({**page.to_dict(), "page_digest": _A})
+    with pytest.raises(ValueError, match="manifest digest"):
+        experiment_view_manifest_from_dict(
+            {**manifest.to_dict(), "manifest_digest": _A}
+        )
+
+    common = {
+        "schema_version": 1,
+        "producer_event_id": "projection-1",
+        "sequence": 1,
+        "timestamp": "2026-08-19T12:00:00Z",
+        "source": "fixture",
+        "actor": {"actor_type": "service", "name": "fixture"},
+        "research_id": "research-1",
+        "study_id": "study-1",
+        "classification": "evidence",
+        "message": "Published bounded experiment evidence.",
+    }
+    page_event = research_log_event_from_dict(
+        {
+            **common,
+            "state": "evaluating",
+            "summary": {"experiment_view_page": page.to_dict()},
+        },
+        require_digest=False,
+    )
+    assert page_event.state == "evaluating"
+    with pytest.raises(ValueError, match="pages cannot close"):
+        research_log_event_from_dict(
+            {
+                **common,
+                "state": "completed",
+                "summary": {"experiment_view_page": page.to_dict()},
+            },
+            require_digest=False,
+        )
+    with pytest.raises(ValueError, match="manifests must declare a terminal"):
+        research_log_event_from_dict(
+            {
+                **common,
+                "state": "evaluating",
+                "summary": {"experiment_view_manifest": manifest.to_dict()},
+            },
+            require_digest=False,
+        )
+
+
+def test_small_v3_view_remains_one_inline_event(tmp_path: Path) -> None:
+    store = _store(tmp_path)
+    view = _large_terminal_v3_view(pair_count=1)
+
+    event = store.record_experiment_view_event(
+        research_id="research-1",
+        experiment_id="small-v3",
+        producer_event_id="small-v3-result",
+        classification="result",
+        state="completed",
+        message="Published one terminal experiment result.",
+        view=view,
+    )
+
+    assert stable_digest(event.summary["experiment_view"]) == stable_digest(
+        view.to_dict()
+    )
+    projected = [
+        item for item in store.research_log_events() if item.study_id == "small-v3"
+    ]
+    assert projected == [event]
+
+
+def test_192_attempt_v3_view_pages_recovers_and_replays_idempotently(
+    tmp_path: Path,
+) -> None:
+    store = _store(tmp_path)
+    view = _large_terminal_v3_view()
+    pages, expected_manifest = _paged_terminal_experiment_view(view)
+    assert len(pages) > 1
+    producer_event_id = "large-v3-result"
+
+    first_page = pages[0]
+    first_page_event_id = "fugue:experiment-view-page:" + stable_digest(
+        {"producer_event_id": producer_event_id, "page_index": 0}
+    )
+    with store._connect() as conn:
+        conn.execute("BEGIN IMMEDIATE")
+        store._append_research_log_event(
+            conn,
+            producer_event_id=first_page_event_id,
+            research_id="research-1",
+            study_id="large-v3",
+            classification="evidence",
+            state="evaluating",
+            message=f"Published terminal experiment evidence page 1 of {len(pages)}.",
+            progress={"page_index": 0, "page_count": len(pages)},
+            summary={"experiment_view_page": first_page.to_dict()},
+        )
+        conn.commit()
+
+    manifest_event = store.record_experiment_view_event(
+        research_id="research-1",
+        experiment_id="large-v3",
+        producer_event_id=producer_event_id,
+        classification="result",
+        state="completed",
+        message="Published one terminal experiment result.",
+        progress={"completed": 192, "total": 192},
+        view=view,
+    )
+    assert manifest_event.summary == {
+        "experiment_view_manifest": expected_manifest.to_dict()
+    }
+    projected = [
+        item for item in store.research_log_events() if item.study_id == "large-v3"
+    ]
+    assert len(projected) == len(pages) + 1
+    assert all(
+        len(
+            json.dumps(
+                {
+                    key: value
+                    for key, value in event.to_dict().items()
+                    if key != "event_digest"
+                },
+                separators=(",", ":"),
+            ).encode()
+        )
+        <= RESEARCH_LOG_MAX_BYTES
+        for event in projected
+    )
+    page_values = sorted(
+        (
+            experiment_view_page_from_dict(event.summary["experiment_view_page"])
+            for event in projected
+            if "experiment_view_page" in event.summary
+        ),
+        key=lambda item: item.page_index,
+    )
+    manifest = experiment_view_manifest_from_dict(
+        manifest_event.summary["experiment_view_manifest"]
+    )
+    attempts = [attempt for page in page_values for attempt in page.attempts]
+    pairs = [pair for page in page_values for pair in page.paired_cases]
+    assert len(attempts) == manifest.attempt_count == 192
+    assert len(pairs) == manifest.paired_case_count == 96
+    assert len({str(item["attempt_id"]) for item in attempts}) == 192
+    assert stable_digest(
+        {**manifest.projection, "attempts": attempts, "paired_cases": pairs}
+    ) == manifest.projection_digest
+    reassembled = experiment_view_from_dict(
+        {**manifest.projection, "paired_cases": pairs}
+    )
+    assert reassembled == view
+
+    before = tuple(store.research_log_events())
+    repeated = store.record_experiment_view_event(
+        research_id="research-1",
+        experiment_id="large-v3",
+        producer_event_id=producer_event_id,
+        classification="result",
+        state="completed",
+        message="Published one terminal experiment result.",
+        progress={"completed": 192, "total": 192},
+        view=view,
+    )
+    assert repeated == manifest_event
+    assert tuple(store.research_log_events()) == before
+
+
+def test_nonterminal_oversized_v3_view_fails_closed(tmp_path: Path) -> None:
+    store = _store(tmp_path)
+    with pytest.raises(ValueError, match="only terminal V3"):
+        store.record_experiment_view_event(
+            research_id="research-1",
+            experiment_id="large-v3-running",
+            producer_event_id="large-v3-running",
+            classification="evidence",
+            state="evaluating",
+            message="Experiment is still evaluating.",
+            view=_large_terminal_v3_view(),
+        )
+    assert all(
+        item.study_id != "large-v3-running" for item in store.research_log_events()
+    )
 
 
 def test_public_evidence_selectors_keep_identities_not_private_material() -> None:

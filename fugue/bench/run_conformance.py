@@ -13,8 +13,9 @@ from typing import TYPE_CHECKING, Any, Literal
 import httpx
 
 from fugue.bench.files import atomic_write_json
+from fugue.bench.reproducibility import verify_snapshot
 from fugue.model_plane import trace_api_key
-from fugue.redaction import redact_value, secrets_from_env
+from fugue.redaction import redact_text, redact_value, secrets_from_env
 from fugue.weave_support import WEAVE_AGENTS_BASE_URL
 
 if TYPE_CHECKING:
@@ -308,14 +309,32 @@ def write_harbor_run_conformance_receipt(
         jobs=local_jobs,
         host_scorer_names=host_scorer_names,
     )
-    cleanup = _docker_cleanup_audit(
-        repo_root=root,
-        run_dir=run_dir,
-        run_id=run_id,
-        jobs=local_jobs,
-        pre_execution_inventory=pre_execution_inventory,
-        exact_compose_scope=False,
+    exact_cleanup_scope, scope_error = _verified_durable_cleanup_scope(
+        execution_scope
     )
+    if execution_scope is not None and scope_error is not None:
+        cleanup = {
+            "status": "unavailable",
+            "reason": scope_error,
+            "matched_containers": [],
+            "matched_networks": [],
+            "mutations_performed": False,
+            "errors": [],
+            "scope": {
+                "kind": "durable_execution_scope",
+                "run_id": run_id,
+                "excluded": ["unverified physical execution cleanup"],
+            },
+        }
+    else:
+        cleanup = _docker_cleanup_audit(
+            repo_root=root,
+            run_dir=run_dir,
+            run_id=run_id,
+            jobs=local_jobs,
+            pre_execution_inventory=pre_execution_inventory,
+            exact_compose_scope=exact_cleanup_scope,
+        )
     statuses = (
         str(identity["status"]),
         str(secret_scan["status"]),
@@ -353,10 +372,10 @@ def write_harbor_run_conformance_receipt(
                 "it does not infer unknown private values from output text."
             ),
             (
-                "The secret-value scan covers only the exact local run directory "
-                "and rendered Harbor job artifact directories. It does not inspect "
-                "hosted Weave objects, external services, or removed container "
-                "filesystems."
+                "The privacy scan checks configured secret values and token-shaped "
+                "text only in the exact local run directory and rendered Harbor "
+                "job artifact directories. It does not inspect hosted Weave "
+                "objects, external services, or removed container filesystems."
             ),
             (
                 "The cleanup audit covers only Docker Compose projects derived "
@@ -376,6 +395,56 @@ def write_harbor_run_conformance_receipt(
         payload,
         secrets=configured_secrets,
     )
+
+
+def _verified_durable_cleanup_scope(
+    execution_scope: Mapping[str, Any] | None,
+) -> tuple[bool, str | None]:
+    """Verify that durable physical cleanup can replace a host-wide delta."""
+
+    if execution_scope is None:
+        return False, None
+    if execution_scope.get("schema_version") != 1:
+        return False, "durable execution scope has an unsupported schema"
+    if execution_scope.get("journal_complete") is not True:
+        return False, "durable execution journal is incomplete"
+    rows = execution_scope.get("physical_executions")
+    identifiers = execution_scope.get("physical_execution_ids")
+    if not isinstance(rows, list) or not rows:
+        return False, "durable execution scope has no physical executions"
+    if not isinstance(identifiers, list) or any(
+        not isinstance(value, str) or not value for value in identifiers
+    ):
+        return False, "durable execution scope has invalid physical identities"
+    observed = [
+        str(row.get("physical_execution_id") or "")
+        for row in rows
+        if isinstance(row, Mapping)
+    ]
+    if len(observed) != len(rows) or sorted(observed) != sorted(identifiers):
+        return False, "durable execution scope disagrees with its physical identities"
+    if len(set(observed)) != len(observed):
+        return False, "durable execution scope repeats a physical identity"
+    if execution_scope.get("physical_execution_set_digest") != _stable_digest(
+        sorted(observed)
+    ):
+        return False, "durable physical execution set digest does not match"
+    unsigned = {
+        key: value for key, value in execution_scope.items() if key != "scope_digest"
+    }
+    if execution_scope.get("scope_digest") != _stable_digest(unsigned):
+        return False, "durable execution scope digest does not match"
+    for row in rows:
+        assert isinstance(row, Mapping)
+        if not (
+            row.get("cleanup_verified") is True
+            and row.get("cleanup_scope_verified") is True
+            and row.get("cleanup_post_run_inventory") is True
+            and isinstance(row.get("cleanup_receipt_reference"), str)
+            and str(row.get("cleanup_receipt_reference")).strip()
+        ):
+            return False, "a physical execution lacks verified scoped cleanup"
+    return True, None
 
 
 def _configured_secrets(
@@ -1246,24 +1315,6 @@ def _scan_run_artifacts(  # noqa: C901 - one bounded audit reports every gap
     jobs: Sequence[RenderedJob],
     secrets: Sequence[str],
 ) -> dict[str, Any]:
-    if not secrets:
-        return {
-            "status": "unavailable",
-            "reason": "no configured secret values were available to verify",
-            "scope": {
-                "kind": "exact_local_run_artifacts",
-                "included": [],
-                "excluded": [
-                    "hosted Weave objects",
-                    "external services",
-                    "removed container filesystems",
-                ],
-            },
-            "configured_sensitive_value_count": 0,
-            "files_scanned": 0,
-            "bytes_scanned": 0,
-            "files_with_matches": [],
-        }
     roots: set[Path] = {run_dir}
     errors: list[str] = []
     runtime_root = (repo_root / ".fugue" / "runtime").resolve()
@@ -1320,13 +1371,22 @@ def _scan_run_artifacts(  # noqa: C901 - one bounded audit reports every gap
         except OSError:
             errors.append(f"could not read {_safe_path(path, repo_root)}")
             continue
-        count = sum(content.count(secret) for secret in secret_bytes)
+        configured_count = sum(content.count(secret) for secret in secret_bytes)
+        text = content.decode("utf-8", errors="ignore")
+        redacted = redact_text(text)
+        token_shape_count = max(
+            redacted.count("[redacted]") - text.count("[redacted]"),
+            0,
+        )
+        count = configured_count + token_shape_count
         scanned += 1
         if count:
             matched.append(
                 {
                     "path": _safe_path(path, repo_root),
                     "match_count": count,
+                    "configured_value_match_count": configured_count,
+                    "token_shape_match_count": token_shape_count,
                 }
             )
     status: ReceiptStatus
@@ -1348,6 +1408,7 @@ def _scan_run_artifacts(  # noqa: C901 - one bounded audit reports every gap
             ],
         },
         "configured_sensitive_value_count": len(secrets),
+        "redaction_pattern_detector": "fugue.redaction.redact_text",
         "files_scanned": scanned,
         "bytes_scanned": total_bytes,
         "files_with_matches": matched,
@@ -1429,6 +1490,134 @@ def _private_label_boundary(  # noqa: C901 - one fail-closed taint boundary
                 digests.update(private_label_digests(item))
         return digests
 
+    def candidate_tools(candidate: Mapping[str, Any]) -> dict[str, set[str]]:
+        allowed_tools_by_server: dict[str, set[str]] = {}
+        integrations = candidate.get("integrations")
+        if not isinstance(integrations, list):
+            return allowed_tools_by_server
+        for integration in integrations:
+            if not isinstance(integration, Mapping):
+                continue
+            allowed_tools = integration.get("allowed_tools")
+            if not isinstance(allowed_tools, Mapping):
+                continue
+            for raw_server, raw_tools in allowed_tools.items():
+                if not isinstance(raw_tools, list):
+                    continue
+                allowed_tools_by_server[str(raw_server)] = {
+                    str(tool)
+                    for tool in raw_tools
+                    if isinstance(tool, str) and tool
+                }
+        return allowed_tools_by_server
+
+    def declared_agent_paths(
+        agents: Any,
+        *,
+        source_project: Any,
+        allowed_tools_by_server: Mapping[str, set[str]],
+    ) -> set[str]:
+        paths: set[str] = set()
+        if not isinstance(agents, list):
+            return paths
+        for agent_index, agent in enumerate(agents):
+            if not isinstance(agent, Mapping):
+                continue
+            env = agent.get("env")
+            if (
+                isinstance(env, Mapping)
+                and isinstance(source_project, str)
+                and env.get("FUGUE_SOURCE_EVIDENCE_PROJECT") == source_project
+            ):
+                paths.add(
+                    f"$.agents[{agent_index}].env.FUGUE_SOURCE_EVIDENCE_PROJECT"
+                )
+            servers = agent.get("mcp_servers")
+            if not isinstance(servers, list):
+                continue
+            for server_index, server in enumerate(servers):
+                if not isinstance(server, Mapping):
+                    continue
+                server_name = str(server.get("name") or "")
+                allowed_tools = allowed_tools_by_server.get(server_name, set())
+                args = server.get("args")
+                if not isinstance(args, list):
+                    continue
+                for arg_index, arg in enumerate(args):
+                    if arg_index == 0 or not isinstance(arg, str):
+                        continue
+                    previous = args[arg_index - 1]
+                    approved_tool = previous == "--allow-tool" and arg in allowed_tools
+                    approved_source = (
+                        previous == "--source-project"
+                        and isinstance(source_project, str)
+                        and arg == source_project
+                    )
+                    if approved_tool or approved_source:
+                        paths.add(
+                            f"$.agents[{agent_index}].mcp_servers"
+                            f"[{server_index}].args[{arg_index}]"
+                        )
+        return paths
+
+    def declared_structural_paths(job_config: Mapping[str, Any]) -> set[str]:
+        paths: set[str] = set()
+        datasets = job_config.get("datasets")
+        if isinstance(datasets, list):
+            for dataset_index, dataset in enumerate(datasets):
+                if (
+                    isinstance(dataset, Mapping)
+                    and isinstance(dataset.get("n_tasks"), int)
+                    and not isinstance(dataset.get("n_tasks"), bool)
+                    and int(dataset["n_tasks"]) >= 0
+                ):
+                    paths.add(f"$.datasets[{dataset_index}].n_tasks")
+        environment = job_config.get("environment")
+        if isinstance(environment, Mapping):
+            mounts = environment.get("mounts")
+            if isinstance(mounts, list):
+                for mount_index, mount in enumerate(mounts):
+                    if not isinstance(mount, Mapping):
+                        continue
+                    if isinstance(mount.get("read_only"), bool):
+                        paths.add(
+                            f"$.environment.mounts[{mount_index}].read_only"
+                        )
+                    bind = mount.get("bind")
+                    if isinstance(bind, Mapping) and isinstance(
+                        bind.get("create_host_path"), bool
+                    ):
+                        paths.add(
+                            f"$.environment.mounts[{mount_index}].bind."
+                            "create_host_path"
+                        )
+        return paths
+
+    def declared_public_scalar_paths(
+        job_config: Mapping[str, Any],
+        input_payload: Mapping[str, Any] | None,
+    ) -> set[str]:
+        if input_payload is None:
+            return set()
+        experiment = input_payload.get("experiment")
+        candidates = input_payload.get("candidates")
+        fugue = job_config.get("fugue")
+        if not (
+            isinstance(experiment, Mapping)
+            and isinstance(candidates, Mapping)
+            and isinstance(fugue, Mapping)
+        ):
+            return set()
+        candidate = candidates.get(str(fugue.get("candidate_id") or ""))
+        if not isinstance(candidate, Mapping):
+            return set()
+        paths = declared_agent_paths(
+            job_config.get("agents"),
+            source_project=experiment.get("source_evidence_project"),
+            allowed_tools_by_server=candidate_tools(candidate),
+        )
+        return paths | declared_structural_paths(job_config)
+
     def scan_agent_input(
         value: Any,
         *,
@@ -1436,6 +1625,7 @@ def _private_label_boundary(  # noqa: C901 - one fail-closed taint boundary
         taints: set[str],
         private_paths: set[Path],
         repo_root: Path,
+        declared_public_paths: set[str],
         scalar_match_allowed: bool = True,
         depth: int = 0,
     ) -> list[str]:
@@ -1472,6 +1662,7 @@ def _private_label_boundary(  # noqa: C901 - one fail-closed taint boundary
                         taints=taints,
                         private_paths=private_paths,
                         repo_root=repo_root,
+                        declared_public_paths=declared_public_paths,
                         scalar_match_allowed=child_scalar_allowed,
                         depth=depth + 1,
                     )
@@ -1487,13 +1678,19 @@ def _private_label_boundary(  # noqa: C901 - one fail-closed taint boundary
                         taints=taints,
                         private_paths=private_paths,
                         repo_root=repo_root,
+                        declared_public_paths=declared_public_paths,
                         scalar_match_allowed=scalar_match_allowed,
                         depth=depth + 1,
                     )
                 )
         else:
             token = taint_token(value)
-            if scalar_match_allowed and token is not None and token in taints:
+            if (
+                scalar_match_allowed
+                and token is not None
+                and token in taints
+                and prefix not in declared_public_paths
+            ):
                 matches.append(prefix)
         if isinstance(value, str):
             rendered = value.strip()
@@ -1579,6 +1776,7 @@ def _private_label_boundary(  # noqa: C901 - one fail-closed taint boundary
             "rendered_private_fields": sorted(findings),
         }
     declared_private_missing: list[str] = []
+    verified_input_payload: Mapping[str, Any] | None = None
     input_lock = run_dir / "input-lock.json"
     if input_lock.is_file():
         try:
@@ -1590,6 +1788,14 @@ def _private_label_boundary(  # noqa: C901 - one fail-closed taint boundary
                 "scope": "rendered Harbor Agent-input structures only",
                 "rendered_private_fields": sorted(findings),
             }
+        if not isinstance(input_payload, Mapping) or not verify_snapshot(input_payload):
+            return {
+                "status": "unavailable",
+                "reason": "the run input lock failed snapshot verification",
+                "scope": "rendered Harbor Agent-input structures only",
+                "rendered_private_fields": sorted(findings),
+            }
+        verified_input_payload = input_payload
         for digest in sorted(private_label_digests(input_payload)):
             path = (
                 repo_root
@@ -1648,6 +1854,10 @@ def _private_label_boundary(  # noqa: C901 - one fail-closed taint boundary
                     taints=taints,
                     private_paths=private_paths,
                     repo_root=repo_root,
+                    declared_public_paths=declared_public_scalar_paths(
+                        job.config,
+                        verified_input_payload,
+                    ),
                 )
             )
     except ValueError:

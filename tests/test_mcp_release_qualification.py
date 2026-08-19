@@ -43,6 +43,9 @@ from fugue.bench.mcp_release_qualification import (
     validate_release_notes_lock,
 )
 from fugue.model_plane import EvidenceDestinationV1
+from fugue.reference_studies.wandb_mcp_qualification import (
+    validate_release_candidate_binding,
+)
 from fugue.research.comparisons import ComparisonRegistry
 
 EXAMPLE = Path("examples/comparisons/wandb-mcp-maintenance")
@@ -110,7 +113,7 @@ def test_release_decision_candidate_sha_binds_release_notes_and_mcp_lock(
         encoding="utf-8",
     )
 
-    comparison_module._validate_release_candidate_binding(
+    validate_release_candidate_binding(
         spec,
         release_notes={"commit": candidate_sha},
         repo_root=tmp_path,
@@ -124,13 +127,13 @@ def test_release_decision_candidate_sha_binds_release_notes_and_mcp_lock(
         ),
     )
     with pytest.raises(ValueError, match="release-notes lock"):
-        comparison_module._validate_release_candidate_binding(
+        validate_release_candidate_binding(
             drifted,
             release_notes={"commit": candidate_sha},
             repo_root=tmp_path,
         )
     with pytest.raises(ValueError, match="candidate MCP lock"):
-        comparison_module._validate_release_candidate_binding(
+        validate_release_candidate_binding(
             drifted,
             release_notes={"commit": "0" * 40},
             repo_root=tmp_path,
@@ -653,6 +656,7 @@ def test_evidence_lock_rejects_wrong_weave_object_version_name() -> None:
 def _preparation_env(tmp_path: Path) -> Path:
     path = tmp_path / ".env"
     path.write_text("WANDB_API_KEY=unit-test-key\n", encoding="utf-8")
+    path.chmod(0o600)
     return path
 
 
@@ -835,6 +839,7 @@ def test_zero_model_verifier_reads_only_source_and_redacts_key(
     evidence_lock.write_text(json.dumps(lock), encoding="utf-8")
     env_file = tmp_path / ".env"
     env_file.write_text("WANDB_API_KEY=secret-verifier-key\n", encoding="utf-8")
+    env_file.chmod(0o600)
     output = tmp_path / "source-conformance.json"
     roots, children = _source_call_snapshot(lock)
     captured = {}
@@ -891,6 +896,7 @@ def test_mechanism_receipt_keeps_public_endpoint_but_redacts_api_key(
     env_file = tmp_path / ".env"
     api_key = "secret-mechanism-key"
     env_file.write_text(f"WANDB_API_KEY={api_key}\n", encoding="utf-8")
+    env_file.chmod(0o600)
     output = tmp_path / "mechanism.json"
     captured = {}
 
@@ -1773,6 +1779,8 @@ def _prerequisite_v3_result(
                         "evaluation_prediction_graph_verified": True,
                         "native_agent_root_call_id": f"{call_prefix}-agent",
                         "weave_agent_root_ref": f"{call_ref_prefix}-agent",
+                        "weave_agent_root_evidence_kind": "native_weave_call_v1",
+                        "weave_agent_root_is_native_call": True,
                         "trace_link_status": "linked",
                         "agent_graph_verified": True,
                         "infrastructure_conformance_complete": True,
@@ -2300,7 +2308,13 @@ def test_v3_natural_maintainer_spec_requires_a_locked_role_per_dimension() -> No
     raw = yaml.safe_load(path.read_text(encoding="utf-8"))
     del raw["evaluators"][0]["dimension_roles"]["answer_correct"]
 
-    with pytest.raises(ValueError, match="typed role for every dimension"):
+    with pytest.raises(
+        ValueError,
+        match=(
+            "dimension roles must cover every declared dimension; "
+            "missing: answer_correct"
+        ),
+    ):
         comparison_from_dict(raw, repo_root=Path.cwd(), source=path)
 
 

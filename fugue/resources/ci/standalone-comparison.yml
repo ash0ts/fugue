@@ -73,6 +73,9 @@ jobs:
           cd "$STUDY_ROOT"
           mkdir -p .fugue/ci
           fugue doctor --workspace . --json > .fugue/ci/doctor.json
+          fugue demo source-use \
+            --out .fugue/ci/source-use-replay \
+            --json > .fugue/ci/source-use-replay.json
           set +e
           fugue check "$COMPARISON_PATH" --json \
             > .fugue/ci/readiness.json

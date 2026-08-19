@@ -6,12 +6,12 @@ from collections import Counter
 from collections.abc import Iterable, Mapping
 from pathlib import Path
 from typing import Any
+from urllib.parse import urlparse
 
 from fugue.bench.campaign_evidence import verified_trace_link_set
 from fugue.bench.files import atomic_write_json
 from fugue.bench.intervention_provenance import (
     InterventionComponentLockV1,
-    is_release_tracked_mcp_repository,
     verify_intervention_component_checkout,
 )
 from fugue.bench.loop_failure import read_comparison_failure_lock
@@ -489,7 +489,7 @@ def verify(  # noqa: C901 - one bounded receipt reports every qualification gate
         item
         for item in selection.selected_components
         if item.kind == "mcp"
-        and is_release_tracked_mcp_repository(item.repository)
+        and _is_release_tracked_mcp_repository(item.repository)
     ]
     if any(
         not item.release_requalification_required
@@ -543,6 +543,16 @@ def verify(  # noqa: C901 - one bounded receipt reports every qualification gate
             "or W&B Serverless evidence."
         ),
     }
+
+
+def _is_release_tracked_mcp_repository(repository: str) -> bool:
+    """Apply this W&B-specific release policy inside its owning workflow."""
+
+    parsed = urlparse(str(repository))
+    return (
+        parsed.hostname == "github.com"
+        and Path(parsed.path).name == "wandb-mcp-server"
+    )
 
 
 def main() -> int:

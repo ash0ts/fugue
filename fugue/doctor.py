@@ -24,9 +24,17 @@ from fugue.model_plane import (
     provider_api_key_env,
     resolve_model_route,
 )
+from fugue.resource_integrity import verify_packaged_assets
 
 DOCTOR_SCHEMA_VERSION = 1
-_RUNTIME_ASSET_GROUPS = ("claude-code", "codex", "gitnexus", "hermes", "openclaw")
+_RUNTIME_ASSET_GROUPS = (
+    "claude-code",
+    "codex",
+    "fugue-context",
+    "gitnexus",
+    "hermes",
+    "openclaw",
+)
 _SUPPORTED_REQUIRED_CAPABILITIES = frozenset({"local-runner"})
 _MINIMUM_LOCAL_RUNNER_DISK_BYTES = 10 * 1024**3
 
@@ -65,13 +73,23 @@ def doctor_report(
     )
     schema_root = files("fugue").joinpath("resources", "schemas")
     schema_count = _resource_file_count(schema_root)
-    assets_ok = (
-        all(item["available"] for item in runtime_groups.values())
-        and len(runtime_groups) == len(_RUNTIME_ASSET_GROUPS)
-        and vendor_available
-        and "none" in context_ids
-        and schema_count > 0
+    asset_integrity = verify_packaged_assets()
+    missing_runtime_groups = sorted(
+        set(_RUNTIME_ASSET_GROUPS) - set(runtime_groups)
     )
+    unavailable_runtime_groups = sorted(
+        component_id
+        for component_id, item in runtime_groups.items()
+        if not item["available"]
+    )
+    required_asset_failures = [
+        *(f"missing runtime group {item}" for item in missing_runtime_groups),
+        *(f"empty runtime group {item}" for item in unavailable_runtime_groups),
+        *(() if vendor_available else ("missing vendor archive",)),
+        *(() if "none" in context_ids else ("missing none context system",)),
+        *(() if schema_count > 0 else ("missing provider schemas",)),
+    ]
+    assets_ok = asset_integrity["ready"] and not required_asset_failures
     optional = {
         "weave": _optional_package("weave"),
         "local_runner": _optional_package("harbor"),
@@ -101,11 +119,15 @@ def doctor_report(
     free_disk = shutil.disk_usage(root).free
     python_version_info = _python_version_info()
     python_version = ".".join(str(part) for part in python_version_info)
-    python_supported = python_version_info >= (3, 12)
+    python_supported = (3, 12) <= python_version_info < (3, 14)
+    local_runner_supported = (3, 13) <= python_version_info < (3, 14)
     readiness_requirements = {
         "packaged_assets": {
             "ready": assets_ok,
-            "detail": "required packaged runtime, vendor, context, and schema assets",
+            "detail": _asset_integrity_detail(
+                asset_integrity,
+                required_asset_failures=required_asset_failures,
+            ),
         }
     }
     if "local-runner" in requested:
@@ -113,8 +135,11 @@ def doctor_report(
         readiness_requirements.update(
             {
                 "python_local_runner": {
-                    "ready": python_version_info >= (3, 13),
-                    "detail": f"Python {python_version}; local execution requires >=3.13",
+                    "ready": local_runner_supported,
+                    "detail": (
+                        f"Python {python_version}; local execution requires "
+                        ">=3.13,<3.14"
+                    ),
                 },
                 "host_architecture": {
                     "ready": architecture in {"amd64", "arm64"},
@@ -187,7 +212,7 @@ def doctor_report(
         "python": {
             "version": python_version,
             "supported": python_supported,
-            "local_runner_supported": python_version_info >= (3, 13),
+            "local_runner_supported": local_runner_supported,
         },
         "host": {
             "architecture": architecture,
@@ -211,6 +236,8 @@ def doctor_report(
         "distribution": resolve_fugue_distribution_provenance(),
         "workspace": resolve_workspace_source_provenance(root),
         "assets": {
+            "integrity": asset_integrity,
+            "required_asset_failures": required_asset_failures,
             "runtime_groups": runtime_groups,
             "vendor_archive": vendor_available,
             "context_systems": context_ids,
@@ -219,6 +246,30 @@ def doctor_report(
         "optional_features": optional,
         "credentials_present": credentials,
     }
+
+
+def _asset_integrity_detail(
+    integrity: Mapping[str, Any],
+    *,
+    required_asset_failures: Iterable[str] = (),
+) -> str:
+    verified = int(integrity["verified_files"])
+    expected = int(integrity["expected_files"])
+    required_failures = tuple(required_asset_failures)
+    if integrity["ready"] and not required_failures:
+        return f"verified {verified}/{expected} exact packaged static files"
+    failures = []
+    for key, label in (
+        ("manifest_errors", "manifest errors"),
+        ("missing_files", "missing"),
+        ("tampered_files", "changed"),
+        ("unexpected_files", "unexpected"),
+        ("unsafe_files", "unsafe"),
+    ):
+        if count := len(integrity[key]):
+            failures.append(f"{count} {label}")
+    failures.extend(required_failures)
+    return f"verified {verified}/{expected}; " + ", ".join(failures)
 
 
 def _normalize_required_capabilities(values: Iterable[str]) -> tuple[str, ...]:
@@ -308,7 +359,7 @@ def _docker_status(*, probe_network: bool = False) -> dict[str, Any]:
 
 
 def _probe_docker_network(executable: str) -> tuple[bool, str]:
-    """Create and remove one labeled network to prove Harbor can start."""
+    """Verify the Docker network operations that Harbor requires."""
 
     name = f"fugue-doctor-probe-{uuid.uuid4().hex[:12]}"
     try:

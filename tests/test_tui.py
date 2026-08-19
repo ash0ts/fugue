@@ -7,18 +7,75 @@ from types import SimpleNamespace
 
 import pytest
 from test_operator import make_operator_repo
-from textual.widgets import Button, Collapsible, ContentSwitcher
+from textual.widgets import (
+    Button,
+    Collapsible,
+    ContentSwitcher,
+    DataTable,
+    Input,
+    Static,
+)
 
 from fugue.bench.ai import AssetDraft, ExperimentDraft
 from fugue.bench.evaluations import build_evaluation_draft, source_catalog
-from fugue.bench.library import experiment_from_data
+from fugue.bench.library import (
+    ExperimentSpec,
+    experiment_from_data,
+    experiment_to_yaml,
+)
 from fugue.bench.operator import OperatorService
+from fugue.model_plane import EvidenceDestinationV1
 from fugue.tui import (
     CUSTOM_SIZE,
     ConfirmRunScreen,
     FugueApp,
     SaveExperimentScreen,
+    _evidence_destination_summary,
 )
+
+
+def test_tui_uses_the_locked_hosted_destination_in_evidence_summary() -> None:
+    destination = EvidenceDestinationV1(
+        entity="wandb",
+        project="locked-study",
+        api_base_url="https://api.wandb.example",
+        trace_base_url="https://trace.wandb.example",
+        app_base_url="https://app.wandb.example",
+    )
+    experiment = ExperimentSpec(
+        id="hosted-study",
+        title="Hosted study",
+        evidence_mode="weave_required",
+        evidence_destination=destination,
+    )
+
+    assert _evidence_destination_summary(experiment) == (
+        "Canonical local artifact ledger + required W&B/Weave: "
+        "wandb/locked-study (https://app.wandb.example/wandb/locked-study)"
+    )
+
+
+def test_tui_reads_selected_run_evidence_mode_from_immutable_snapshot(
+    tmp_path: Path,
+) -> None:
+    service = make_operator_repo(tmp_path)
+    app = FugueApp(service=service, experiment_id="demo")
+    run_id = "historical-local-run"
+    snapshot = tmp_path / ".fugue" / "runtime" / run_id / "experiment.yaml"
+    snapshot.parent.mkdir(parents=True)
+    snapshot.write_text(
+        experiment_to_yaml(
+            ExperimentSpec(
+                id="historical-local",
+                title="Historical local study",
+                evidence_mode="local",
+            )
+        ),
+        encoding="utf-8",
+    )
+    app.selected_run_id = run_id
+
+    assert app._selected_run_evidence_mode() == "local"
 
 
 def test_tui_uses_three_step_plan_and_automatic_preview(
@@ -35,6 +92,10 @@ def test_tui_uses_three_step_plan_and_automatic_preview(
             assert app.plan_step == "define-step"
             assert app.plan.preview is not None
             assert app.plan.preview.cells == 1
+            preview_status = str(app.query_one("#preview-status").render())
+            assert "1 logical cell" in preview_status
+            assert "1 runnable attempt" in preview_status
+            assert "1 runnable cell now" in preview_status
             assert app.query_one("#setup-table").row_count == 4
             assert app.query_one("#plan-advanced", Collapsible).collapsed
             assert not app.query("#preview")
@@ -53,10 +114,49 @@ def test_tui_uses_three_step_plan_and_automatic_preview(
             assert app.query_one("#workspace").active == "runs"
             app.action_show_results()
             assert app.query_one("#workspace").active == "results"
+            assert app.query_one("#analysis-question", Input).placeholder == (
+                "What outcome differences are supported, what remains "
+                "inconclusive, and which evidence should I inspect?"
+            )
             app.action_show_setup()
             assert app.query_one("#workspace").active == "setup"
 
     asyncio.run(exercise())
+
+
+def test_tui_requires_weave_key_only_for_weave_required_experiments(
+    tmp_path: Path,
+) -> None:
+    service = make_operator_repo(tmp_path)
+    app = FugueApp(service=service, experiment_id="demo")
+    preview = service.preview_experiment(app.plan.experiment)
+
+    status = SimpleNamespace(
+        model_key_present=True,
+        model_key_env="OPENAI_API_KEY",
+        trace_key_present=False,
+        routes=(),
+        docker_present=True,
+        harbor_present=True,
+        model_provider="openai",
+        bridge_ready=True,
+    )
+
+    hosted_blockers = app._blockers(preview, status)
+    assert "Weave tracing requires FUGUE_WEAVE_API_KEY" in hosted_blockers
+
+    local_experiment = replace(
+        app.plan.experiment,
+        schema_version=2,
+        evidence_mode="local",
+        evidence_project=None,
+        evidence_destination=None,
+        require_live_evidence=False,
+    )
+    app.plan = replace(app.plan, experiment=local_experiment)
+
+    local_blockers = app._blockers(preview, status)
+    assert "Weave tracing requires FUGUE_WEAVE_API_KEY" not in local_blockers
 
 
 def test_tui_variants_stay_in_memory_until_explicit_save(
@@ -74,9 +174,7 @@ def test_tui_variants_stay_in_memory_until_explicit_save(
 
             assert len(app.plan.experiment.variants) == 2
             assert app.plan.dirty
-            assert not (
-                tmp_path / "configs/fugue/experiments/demo-copy.yaml"
-            ).exists()
+            assert not (tmp_path / "configs/fugue/experiments/demo-copy.yaml").exists()
 
             await pilot.click("#edit-variant")
             await pilot.pause()
@@ -92,9 +190,7 @@ def test_tui_variants_stay_in_memory_until_explicit_save(
             await pilot.click("#confirm-save-experiment")
             await pilot.pause()
 
-            assert (
-                tmp_path / "configs/fugue/experiments/demo-copy.yaml"
-            ).is_file()
+            assert (tmp_path / "configs/fugue/experiments/demo-copy.yaml").is_file()
             assert app.experiment_id == "demo-copy"
             assert not app.plan.dirty
 
@@ -171,9 +267,7 @@ def test_tui_initial_ai_draft_opens_compare_without_writing(
             )
             app._show_analysis_preview(preview)
             assert app.analysis_preview is preview
-            assert "1 experiments" in str(
-                app.query_one("#analysis-scope").render()
-            )
+            assert "1 experiments" in str(app.query_one("#analysis-scope").render())
             assert not app.query_one("#generate-analysis", Button).disabled
 
             app._show_analysis(
@@ -183,9 +277,7 @@ def test_tui_initial_ai_draft_opens_compare_without_writing(
                     report_dir=tmp_path / "reports/analyses/demo-analysis/run-1",
                 )
             )
-            assert "1 experiments" in str(
-                app.query_one("#analysis-scope").render()
-            )
+            assert "1 experiments" in str(app.query_one("#analysis-scope").render())
 
     asyncio.run(exercise())
 
@@ -226,8 +318,7 @@ def test_tui_applies_recommended_agent_preset_locally(
             assert app.plan.request.harnesses == ("codex",)
             assert app.plan.request.variants == ("maintainer-recommended",)
             assert not (
-                tmp_path
-                / "configs/fugue/experiments/maintainer-recommended.yaml"
+                tmp_path / "configs/fugue/experiments/maintainer-recommended.yaml"
             ).exists()
 
     asyncio.run(exercise())
@@ -319,10 +410,10 @@ def test_tui_generate_evaluation_reviews_and_saves_all_assets(
         {
             "judge_model": "openai/gpt-5-mini",
             "workloads": [{"id": "capabilities", "runner": "harbor"}],
-                "evaluation_generation": {
-                    "suite_id": "tui-suite",
-                    "workload_id": "capabilities",
-                    "size": 8,
+            "evaluation_generation": {
+                "suite_id": "tui-suite",
+                "workload_id": "capabilities",
+                "size": 8,
                 "sources": [
                     {
                         "kind": "seed",
@@ -355,14 +446,14 @@ def test_tui_generate_evaluation_reviews_and_saves_all_assets(
                         "id": "task_completion",
                         "criterion": "Complete the requested task.",
                     },
-                        {
-                            "id": "correctness",
-                            "criterion": "Include the grounded fact.",
-                        },
-                        {
-                            "id": "groundedness",
-                            "criterion": "Ground the answer in the source.",
-                        },
+                    {
+                        "id": "correctness",
+                        "criterion": "Include the grounded fact.",
+                    },
+                    {
+                        "id": "groundedness",
+                        "criterion": "Ground the answer in the source.",
+                    },
                 ]
             },
         },
@@ -461,6 +552,74 @@ def test_full_trace_launch_requires_confirmation(
             app._request_launch()
             await pilot.pause()
             assert isinstance(app.screen, ConfirmRunScreen)
+            copy = str(
+                app.screen.query_one("#trace-confirmation-copy", Static).render()
+            )
+            assert "configured Weave project" in copy
+
+    asyncio.run(exercise())
+
+
+def test_local_full_trace_confirmation_and_summaries_do_not_claim_publication(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv("FUGUE_NO_ANIMATION", "1")
+    app = FugueApp(service=make_operator_repo(tmp_path), experiment_id="demo")
+    local_experiment = replace(
+        app.plan.experiment,
+        schema_version=2,
+        evidence_mode="local",
+        evidence_project=None,
+        evidence_destination=None,
+        require_live_evidence=False,
+    )
+    app.plan = replace(app.plan, experiment=local_experiment)
+    opened_urls: list[str] = []
+    monkeypatch.setattr(
+        "fugue.tui.webbrowser.open",
+        lambda url: opened_urls.append(str(url)),
+    )
+
+    async def exercise() -> None:
+        async with app.run_test(size=(100, 32)) as pilot:
+            await pilot.pause(1)
+            assert "Canonical local artifact ledger" in str(
+                app.query_one("#define-summary").render()
+            )
+            assert "canonical local ledger" in str(
+                app.query_one("#setup-details").render()
+            )
+            evidence_row = tuple(
+                str(item)
+                for item in app.query_one("#setup-table", DataTable).get_row_at(1)
+            )
+            assert evidence_row == (
+                "Evidence backend",
+                "selected",
+                "Local backend selected; the ledger is created during the run "
+                "and hosted publication is optional",
+            )
+
+            app._show_plan_step("review-step")
+            app._review_blockers = ()
+            app._request_launch()
+            await pilot.pause()
+
+            assert isinstance(app.screen, ConfirmRunScreen)
+            copy = str(
+                app.screen.query_one("#trace-confirmation-copy", Static).render()
+            )
+            assert "run's local artifacts" in copy
+            assert "digest-bound by the canonical local evidence ledger" in copy
+            assert "will not publish" in copy
+            assert "configured Weave project" not in copy
+
+            app.action_show_results()
+            result_summary = str(app.query_one("#result-summary", Static).render())
+            assert "no attempts loaded" in result_summary
+            app.action_open_agents()
+            app.action_open_trace()
+            assert opened_urls == []
 
     asyncio.run(exercise())
 

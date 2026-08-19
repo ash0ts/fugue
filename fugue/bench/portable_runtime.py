@@ -4,34 +4,99 @@ import hashlib
 import json
 import shutil
 import subprocess
-from pathlib import Path
+import uuid
+from importlib.resources import files
+from importlib.resources.abc import Traversable
+from pathlib import Path, PurePosixPath
 from typing import Any
 
 from filelock import FileLock
 
 from fugue.bench.files import atomic_write_json, docker_build_command
 from fugue.bench.files import inspect_docker_image as _inspect_image
+from fugue.bench.runtime_provenance import resolve_fugue_distribution_provenance
 
 RUNTIME_ROOT = Path(".fugue/runtime/portable-context-runtime")
+_BUILD_RESOURCE_ROOT = ("resources", "runtime", "fugue-context")
 
 
-def recipe_sha256(repo_root: Path) -> str:
-    paths = [
-        repo_root / "Dockerfile.context",
-        repo_root / "pyproject.toml",
-        repo_root / "uv.lock",
-        *sorted((repo_root / "fugue").rglob("*.py")),
-        *sorted((repo_root / "configs/fugue/context-systems").glob("*.yaml")),
-    ]
+def recipe_sha256(_repo_root: Path | None = None) -> str:
+    """Hash the immutable context runtime bundled with this distribution.
+
+    ``_repo_root`` remains accepted for persisted callers, but it is deliberately
+    not read. The user's study workspace is not a Fugue runtime build input.
+    """
+
     digest = hashlib.sha256()
-    for path in paths:
-        relative = path.relative_to(repo_root).as_posix().encode()
-        digest.update(len(relative).to_bytes(8, "big"))
-        digest.update(relative)
-        body = path.read_bytes()
+    for relative, body in _build_context_entries():
+        encoded = relative.encode()
+        digest.update(len(encoded).to_bytes(8, "big"))
+        digest.update(encoded)
         digest.update(len(body).to_bytes(8, "big"))
         digest.update(body)
     return digest.hexdigest()
+
+
+def materialize_build_context(destination: Path) -> None:
+    """Materialize only installed-distribution assets into a Docker context."""
+
+    if destination.is_symlink():
+        raise ValueError("portable context runtime build directory cannot be a symlink")
+    destination.mkdir(parents=True, exist_ok=False)
+    for relative, body in _build_context_entries():
+        path = PurePosixPath(relative)
+        if path.is_absolute() or not path.parts or ".." in path.parts:
+            raise ValueError(f"unsafe portable context runtime asset: {relative}")
+        output = destination.joinpath(*path.parts)
+        output.parent.mkdir(parents=True, exist_ok=True)
+        output.write_bytes(body)
+
+
+def _build_context_entries() -> tuple[tuple[str, bytes], ...]:
+    package_root = files("fugue")
+    build_root = package_root.joinpath(*_BUILD_RESOURCE_ROOT)
+    required = ("Dockerfile", "requirements.lock")
+    if not build_root.is_dir():
+        raise FileNotFoundError("packaged Fugue context runtime build assets are missing")
+    entries: list[tuple[str, bytes]] = []
+    for name in required:
+        asset = build_root.joinpath(name)
+        if not asset.is_file():
+            raise FileNotFoundError(
+                f"packaged Fugue context runtime asset is missing: {name}"
+            )
+        entries.append((name, asset.read_bytes()))
+    entries.extend(
+        (f"fugue/{relative}", item.read_bytes())
+        for relative, item in _runtime_python_files(package_root)
+    )
+    return tuple(sorted(entries))
+
+
+def _runtime_python_files(
+    root: Traversable,
+    prefix: str = "",
+) -> tuple[tuple[str, Traversable], ...]:
+    """Select executable sources without bundled authoring/private evidence.
+
+    The installed distribution contains scaffold labels, reference-study
+    inputs, and replay fixtures. Those are trusted-preparation assets and must
+    not enter an active context sidecar image. The selected context config and
+    prepared corpus arrive through separate, read-only mounts.
+    """
+
+    selected: list[tuple[str, Traversable]] = []
+    for item in sorted(root.iterdir(), key=lambda candidate: candidate.name):
+        if item.name == "__pycache__" or item.name.endswith((".pyc", ".pyo")):
+            continue
+        relative = f"{prefix}/{item.name}" if prefix else item.name
+        if item.is_dir():
+            if relative == "resources" or relative.startswith("resources/"):
+                continue
+            selected.extend(_runtime_python_files(item, relative))
+        elif item.is_file() and item.name.endswith(".py"):
+            selected.append((relative, item))
+    return tuple(selected)
 
 
 def prepare_runtime(repo_root: Path, *, rebuild: bool = False) -> dict[str, Any]:
@@ -49,21 +114,26 @@ def prepare_runtime(repo_root: Path, *, rebuild: bool = False) -> dict[str, Any]
             else:
                 if inspected.get("Id") == existing.get("image_id"):
                     return existing
-        recipe = recipe_sha256(repo_root)
+        recipe = recipe_sha256()
         image = f"fugue-context-runtime:{recipe[:12]}"
-        subprocess.run(
-            docker_build_command(
-                "--pull",
-                "-f",
-                "Dockerfile.context",
-                "-t",
-                image,
-                ".",
-            ),
-            cwd=repo_root,
-            check=True,
-            timeout=1800,
-        )
+        build = root / f"build-{uuid.uuid4().hex}"
+        try:
+            materialize_build_context(build)
+            subprocess.run(
+                docker_build_command(
+                    "--pull",
+                    "-f",
+                    "Dockerfile",
+                    "-t",
+                    image,
+                    build.as_posix(),
+                ),
+                cwd=root,
+                check=True,
+                timeout=1800,
+            )
+        finally:
+            shutil.rmtree(build, ignore_errors=True)
         inspected = _inspect_image(image)
         lock = {
             "schema_version": 1,
@@ -73,6 +143,7 @@ def prepare_runtime(repo_root: Path, *, rebuild: bool = False) -> dict[str, Any]
             "image_id": inspected["Id"],
             "architecture": inspected.get("Architecture"),
             "os": inspected.get("Os"),
+            "fugue_distribution": resolve_fugue_distribution_provenance(),
         }
         atomic_write_json(root / "runtime-lock.json", lock)
         return lock
@@ -88,7 +159,7 @@ def read_runtime_lock(repo_root: Path) -> dict[str, Any] | None:
     expected = {
         "schema_version": 1,
         "kind": "portable_context",
-        "recipe_sha256": recipe_sha256(repo_root),
+        "recipe_sha256": recipe_sha256(),
     }
     if any(value.get(key) != item for key, item in expected.items()):
         return None

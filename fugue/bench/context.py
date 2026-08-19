@@ -118,6 +118,7 @@ class ContextBinding:
     env: dict[str, str] = field(default_factory=dict)
     mounts: tuple[dict[str, Any], ...] = ()
     compose_files: tuple[Path, ...] = ()
+    runtime_files: tuple[Path, ...] = ()
     artifacts: tuple[Any, ...] = ()
     runtime_descriptor: dict[str, Any] | None = None
 

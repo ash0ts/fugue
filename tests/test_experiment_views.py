@@ -21,21 +21,190 @@ from fugue.research.experiment_views import (
 _A = "a" * 64
 _FIXTURE = Path(__file__).parent / "fixtures/experiment-view-v1-design.json"
 _V3_STUDY_CONSOLE_GOLDEN = (
-    Path(__file__).parent
-    / "fixtures/experiment-view-v3-study-console-golden.json"
+    Path(__file__).parent / "fixtures/experiment-view-v3-study-console-golden.json"
 )
 _REPO_ROOT = Path(__file__).parents[1]
 
 
-def test_v3_study_console_wire_golden_is_byte_structure_stable() -> None:
-    payload = json.loads(
-        _V3_STUDY_CONSOLE_GOLDEN.read_text(encoding="utf-8")
+def test_local_comparison_rows_use_a_non_clickable_fugue_identity() -> None:
+    links = experiment_views_module._comparison_evidence_links(
+        (),
+        result_ref=None,
+        result_source="local-fugue-run-1",
+        result_digest="a" * 64,
     )
+
+    assert links == (
+        {
+            "system": "fugue",
+            "kind": "comparison_rows",
+            "ref": "local-fugue-run-1",
+        },
+    )
+    assert "uri" not in links[0]
+
+
+def test_reader_preserves_a_declared_hosted_comparison_rows_link() -> None:
+    run_url = "https://wandb.ai/wandb/fugue-results/runs/hosted-run-1"
+    links = experiment_views_module._evidence_links(
+        (
+            {
+                "system": "wandb",
+                "kind": "comparison_rows",
+                "ref": "hosted-run-1",
+                "uri": run_url,
+            },
+        ),
+    )
+
+    assert links == (
+        {
+            "system": "wandb",
+            "kind": "comparison_rows",
+            "ref": "hosted-run-1",
+            "uri": run_url,
+        },
+    )
+
+
+def test_wandb_run_label_does_not_promote_local_rows_to_hosted_evidence() -> None:
+    run_url = "https://wandb.ai/wandb/fugue-results/runs/unverified-run-1"
+    links = experiment_views_module._comparison_evidence_links(
+        ({"label": "W&B Run", "url": run_url},),
+        result_ref=None,
+        result_source="local-fugue-run-1",
+        result_digest="a" * 64,
+    )
+
+    assert links == (
+        {
+            "system": "wandb",
+            "kind": "w&b_run",
+            "ref": run_url,
+            "uri": run_url,
+        },
+        {
+            "system": "fugue",
+            "kind": "comparison_rows",
+            "ref": "local-fugue-run-1",
+        },
+    )
+
+
+def test_legacy_local_rows_link_remains_readable_without_a_fake_deep_link() -> None:
+    links = experiment_views_module._evidence_links(
+        (
+            {
+                "system": "wandb",
+                "kind": "comparison_rows",
+                "ref": "legacy-local-run-1",
+            },
+        )
+    )
+
+    assert links == (
+        {
+            "system": "fugue",
+            "kind": "comparison_rows",
+            "ref": "legacy-local-run-1",
+        },
+    )
+
+
+def test_comparison_rows_reject_a_non_run_wandb_deep_link() -> None:
+    with pytest.raises(ValueError, match="canonical W&B Run URL"):
+        experiment_views_module._evidence_links(
+            (
+                {
+                    "system": "wandb",
+                    "kind": "comparison_rows",
+                    "ref": "not-a-run",
+                    "uri": (
+                        "https://wandb.ai/wandb/fugue-results/weave/calls/not-a-run"
+                    ),
+                },
+            )
+        )
+
+
+def test_comparison_rows_reject_a_wandb_run_id_that_disagrees_with_its_url() -> None:
+    with pytest.raises(ValueError, match="Run ID must match"):
+        experiment_views_module._evidence_links(
+            (
+                {
+                    "system": "wandb",
+                    "kind": "comparison_rows",
+                    "ref": "different-run",
+                    "uri": "https://wandb.ai/wandb/project/runs/declared-run",
+                },
+            ),
+        )
+
+
+def test_v3_study_console_wire_golden_is_byte_structure_stable() -> None:
+    payload = json.loads(_V3_STUDY_CONSOLE_GOLDEN.read_text(encoding="utf-8"))
 
     parsed = experiment_view_from_dict(payload)
     normalized = json.loads(json.dumps(parsed.to_dict()))
 
     assert normalized == payload
+
+
+def test_v3_study_console_wire_keeps_pre_status_results_readable() -> None:
+    payload = json.loads(_V3_STUDY_CONSOLE_GOLDEN.read_text(encoding="utf-8"))
+    for arm in ("baseline", "candidate"):
+        attempt = payload["paired_cases"][0][arm]
+        attempt.pop("cost_reconciliation_status")
+        attempt.pop("latency_reconciliation_status")
+        attempt.pop("usage_reconciliation_status")
+
+    parsed = experiment_view_from_dict(payload)
+    normalized = json.loads(json.dumps(parsed.to_dict()))
+
+    assert normalized == payload
+
+
+def test_v3_study_console_wire_rejects_unknown_reconciliation_status() -> None:
+    payload = json.loads(_V3_STUDY_CONSOLE_GOLDEN.read_text(encoding="utf-8"))
+    payload["paired_cases"][0]["baseline"]["cost_reconciliation_status"] = "available"
+
+    with pytest.raises(ValueError, match="must be one of"):
+        experiment_view_from_dict(payload)
+
+
+@pytest.mark.parametrize(
+    ("status_field", "measurement_fields", "message"),
+    [
+        (
+            "cost_reconciliation_status",
+            ("cost_usd",),
+            "resolved cost reconciliation requires cost_usd",
+        ),
+        (
+            "latency_reconciliation_status",
+            ("latency_sec",),
+            "resolved latency reconciliation requires latency_sec",
+        ),
+        (
+            "usage_reconciliation_status",
+            ("input_tokens", "output_tokens"),
+            "resolved usage reconciliation requires input and output tokens",
+        ),
+    ],
+)
+def test_v3_study_console_wire_requires_measurements_for_resolved_status(
+    status_field: str,
+    measurement_fields: tuple[str, ...],
+    message: str,
+) -> None:
+    payload = json.loads(_V3_STUDY_CONSOLE_GOLDEN.read_text(encoding="utf-8"))
+    attempt = payload["paired_cases"][0]["candidate"]
+    attempt[status_field] = "resolved"
+    for field_name in measurement_fields:
+        attempt.pop(field_name)
+
+    with pytest.raises(ValueError, match=message):
+        experiment_view_from_dict(payload)
 
 
 def test_v3_judge_summary_is_safe_and_invalid_integrity_suppresses_it() -> None:
@@ -194,10 +363,93 @@ def test_v3_view_rejects_published_judge_rationale() -> None:
         experiment_view_from_dict(payload)
 
 
-def test_v3_view_rejects_attempt_identity_mismatch() -> None:
-    payload = json.loads(
-        _V3_STUDY_CONSOLE_GOLDEN.read_text(encoding="utf-8")
+def test_v3_view_accepts_safe_structured_score_details() -> None:
+    payload = json.loads(_V3_STUDY_CONSOLE_GOLDEN.read_text(encoding="utf-8"))
+    dimension = "bounded_answer"
+    candidate = payload["paired_cases"][0]["candidate"]
+    candidate["score_details"] = {
+        dimension: {
+            "what": "Checks whether the final answer is factually correct.",
+            "observed": "The host scorer matched the required facts.",
+            "why": "The outcome check passed.",
+        }
+    }
+
+    view = experiment_view_from_dict(payload)
+
+    assert view.paired_cases[0]["candidate"]["score_details"][dimension]["what"] == (
+        "Checks whether the final answer is factually correct."
     )
+
+
+def test_v3_view_rejects_sensitive_structured_score_details() -> None:
+    payload = json.loads(_V3_STUDY_CONSOLE_GOLDEN.read_text(encoding="utf-8"))
+    dimension = "bounded_answer"
+    payload["paired_cases"][0]["candidate"]["score_details"] = {
+        dimension: {
+            "what": "Checks whether the final answer is bounded.",
+            "observed": "The tool used a finite limit.",
+            "why": "api_key=sk-example-secret-value",
+        }
+    }
+
+    with pytest.raises(ValueError, match="score detail .* is sensitive"):
+        experiment_view_from_dict(payload)
+
+
+def test_v3_view_accepts_safe_anchored_judge_review() -> None:
+    payload = json.loads(_V3_STUDY_CONSOLE_GOLDEN.read_text(encoding="utf-8"))
+    candidate = payload["paired_cases"][0]["candidate"]
+    candidate["judge_reviews"] = {
+        "maintainer-actionability": {
+            "label": "strong",
+            "reason": (
+                "The answer gives a concrete next action and states its evidence "
+                "limit."
+            ),
+            "missing_evidence": False,
+            "observed_cost_usd": 0.04,
+            "cost_status": "observed",
+        }
+    }
+
+    view = experiment_view_from_dict(payload)
+
+    assert view.paired_cases[0]["candidate"]["judge_reviews"] == {
+        "maintainer-actionability": {
+            "label": "strong",
+            "reason": (
+                "The answer gives a concrete next action and states its evidence "
+                "limit."
+            ),
+            "missing_evidence": False,
+            "observed_cost_usd": 0.04,
+            "cost_status": "observed",
+        }
+    }
+
+
+def test_v3_view_rejects_unanchored_or_sensitive_judge_review() -> None:
+    payload = json.loads(_V3_STUDY_CONSOLE_GOLDEN.read_text(encoding="utf-8"))
+    candidate = payload["paired_cases"][0]["candidate"]
+    candidate["judge_reviews"] = {
+        "maintainer-actionability": {
+            "label": "0.83",
+            "reason": "api_key=sk-example-secret-value",
+            "missing_evidence": False,
+        }
+    }
+
+    with pytest.raises(ValueError, match="label is unsupported"):
+        experiment_view_from_dict(payload)
+
+    candidate["judge_reviews"]["maintainer-actionability"]["label"] = "strong"
+    with pytest.raises(ValueError, match="reason is sensitive"):
+        experiment_view_from_dict(payload)
+
+
+def test_v3_view_rejects_attempt_identity_mismatch() -> None:
+    payload = json.loads(_V3_STUDY_CONSOLE_GOLDEN.read_text(encoding="utf-8"))
     payload["paired_cases"][0]["candidate"]["identity"]["candidate"] = (
         "forged-candidate"
     )
@@ -207,9 +459,7 @@ def test_v3_view_rejects_attempt_identity_mismatch() -> None:
 
 
 def test_v3_pair_coordinates_match_attempt_identity() -> None:
-    payload = json.loads(
-        _V3_STUDY_CONSOLE_GOLDEN.read_text(encoding="utf-8")
-    )
+    payload = json.loads(_V3_STUDY_CONSOLE_GOLDEN.read_text(encoding="utf-8"))
     candidate = payload["paired_cases"][0]["candidate"]
     candidate["identity"]["arm"] = "baseline"
     candidate["attempt_id"] = attempt_id(**candidate["identity"])
@@ -219,9 +469,7 @@ def test_v3_pair_coordinates_match_attempt_identity() -> None:
 
 
 def test_v3_evidence_eligible_requires_five_resolved_links() -> None:
-    payload = json.loads(
-        _V3_STUDY_CONSOLE_GOLDEN.read_text(encoding="utf-8")
-    )
+    payload = json.loads(_V3_STUDY_CONSOLE_GOLDEN.read_text(encoding="utf-8"))
     link = payload["paired_cases"][0]["candidate"]["evidence_links"][0]
     link["status"] = "missing"
     link["reason"] = "The object could not be resolved."

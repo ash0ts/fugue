@@ -297,3 +297,91 @@ def test_compare_preview_uses_generated_root_and_root_env_file(
         "env_file": study.resolve() / ".env",
     }
     assert json.loads(capsys.readouterr().out)["approval_eligible"] is True
+
+
+def test_human_comparison_preview_maps_labels_to_full_candidate_ids(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    from fugue.bench import comparison as comparison_module
+
+    study = tmp_path / "my-study"
+    study.mkdir()
+    comparison = study / "comparison.yaml"
+    comparison.write_text("schema_version: 1\n", encoding="utf-8")
+    _write_study_marker(study)
+    spec = SimpleNamespace(execution=SimpleNamespace(evidence_mode="local"))
+    baseline_id = "a" * 64
+    candidate_id = "b" * 64
+    readiness = {
+        "status": "ready",
+        "question": "Does the treatment help?",
+        "evidence_project": None,
+        "task_count": 1,
+        "actual_changes": ["prompt"],
+        "base_failures": 1,
+        "gold_passes": 1,
+        "judge_evaluators": [],
+        "estimated_cells": 2,
+        "estimated_cost_usd": 1.0,
+        "blockers": [],
+        "warnings": [],
+    }
+    matrix_cells = [
+        {
+            "variant_id": "baseline",
+            "variant_label": "Current prompt",
+            "harness": "claude-code",
+            "candidate_id": baseline_id,
+        },
+        {
+            "variant_id": "candidate",
+            "variant_label": "Proposed prompt",
+            "harness": "claude-code",
+            "candidate_id": candidate_id,
+        },
+        # Multiple tasks with the same treatment identity render once.
+        {
+            "variant_id": "candidate",
+            "variant_label": "Proposed prompt",
+            "harness": "claude-code",
+            "candidate_id": candidate_id,
+        },
+    ]
+
+    monkeypatch.setattr(
+        comparison_module,
+        "load_comparison",
+        lambda *_args, **_kwargs: spec,
+    )
+    monkeypatch.setattr(
+        comparison_module,
+        "check_comparison",
+        lambda *_args, **_kwargs: SimpleNamespace(status="ready"),
+    )
+    monkeypatch.setattr(
+        comparison_module,
+        "preview_comparison",
+        lambda *_args, **_kwargs: SimpleNamespace(
+            preview_digest="c" * 64,
+            matrix={
+                "applicable_cells": 2,
+                "estimated_trials": 2,
+                "matrix_cells": matrix_cells,
+            },
+            readiness=readiness,
+        ),
+    )
+    monkeypatch.chdir(tmp_path)
+
+    assert main(["compare", "my-study/comparison.yaml", "--preview"]) == 0
+
+    output = capsys.readouterr().out
+    compact = "".join(output.split())
+    assert "Treatment identities" in output
+    assert "Current prompt (baseline; claude-code)" in output
+    assert "Proposed prompt (candidate; claude-code)" in output
+    assert baseline_id in compact
+    assert candidate_id in compact
+    assert compact.count(candidate_id) == 1

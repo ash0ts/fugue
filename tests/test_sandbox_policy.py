@@ -6,6 +6,7 @@ from pathlib import Path
 import pytest
 import yaml
 
+from fugue.bench import sandbox_policy
 from fugue.bench.sandbox_policy import (
     attest_harbor_job,
     verify_harbor_job_attestation,
@@ -65,6 +66,16 @@ def _main_service() -> dict[str, object]:
                 }
             }
         },
+    }
+
+
+def _package_mount(source: Path, target: str) -> dict[str, object]:
+    return {
+        "type": "bind",
+        "source": source.as_posix(),
+        "target": target,
+        "read_only": True,
+        "bind": {"create_host_path": False},
     }
 
 
@@ -143,6 +154,75 @@ def test_harbor_policy_rejects_docker_socket_and_external_writable_bind(
         attest_harbor_job(
             _config(tmp_path, service),
             repo_root=tmp_path,
+            bridge_required=False,
+            require_files=True,
+            strict_images=True,
+        )
+
+
+@pytest.mark.parametrize(
+    ("relative", "target"),
+    [
+        ("__init__.py", "/fugue-src/fugue/__init__.py"),
+        ("mcp_proxy.py", "/fugue-src/fugue/mcp_proxy.py"),
+        ("mcp_evidence.py", "/fugue-src/fugue/mcp_evidence.py"),
+        ("redaction.py", "/fugue-src/fugue/redaction.py"),
+        ("context_client.py", "/usr/local/bin/fugue-context"),
+    ],
+)
+def test_harbor_policy_accepts_only_explicit_imported_fugue_runtime_files(
+    tmp_path: Path,
+    relative: str,
+    target: str,
+) -> None:
+    source = sandbox_policy._IMPORTED_FUGUE_PACKAGE_ROOT / relative
+
+    attestation = attest_harbor_job(
+        {
+            "environment": {"mounts": [_package_mount(source, target)]},
+            "fugue": {},
+        },
+        repo_root=tmp_path,
+        bridge_required=False,
+        require_files=True,
+        strict_images=True,
+    )
+
+    assert attestation.services == ()
+
+
+def test_harbor_policy_rejects_sibling_site_package_as_fugue_runtime(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    site_packages = tmp_path / "venv/lib/python3.13/site-packages"
+    fugue_package = site_packages / "fugue"
+    sibling_file = site_packages / "sibling_distribution/mcp_proxy.py"
+    fugue_package.mkdir(parents=True)
+    sibling_file.parent.mkdir(parents=True)
+    sibling_file.write_text("raise RuntimeError('not Fugue')\n", encoding="utf-8")
+    study_root = tmp_path / "study"
+    study_root.mkdir()
+    monkeypatch.setattr(
+        sandbox_policy,
+        "_IMPORTED_FUGUE_PACKAGE_ROOT",
+        fugue_package,
+    )
+
+    with pytest.raises(ValueError, match="within the Fugue checkout"):
+        attest_harbor_job(
+            {
+                "environment": {
+                    "mounts": [
+                        _package_mount(
+                            sibling_file,
+                            "/fugue-src/fugue/mcp_proxy.py",
+                        )
+                    ]
+                },
+                "fugue": {},
+            },
+            repo_root=study_root,
             bridge_required=False,
             require_files=True,
             strict_images=True,

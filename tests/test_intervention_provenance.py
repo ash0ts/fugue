@@ -92,7 +92,7 @@ def test_component_checkout_rejects_dirty_or_different_tree(
     assert "component worktree is not clean" in receipt["blockers"]
 
 
-def test_component_lock_fails_closed_on_schema_and_release_impact(
+def test_component_lock_fails_closed_on_schema_and_explicit_release_impact(
     tmp_path: Path,
 ) -> None:
     root, commit, tree = _repo(tmp_path)
@@ -108,23 +108,28 @@ def test_component_lock_fails_closed_on_schema_and_release_impact(
             superseded_release_candidate_sha="5" * 40,
             release_requalification_required=True,
         )
-    with pytest.raises(ValueError, match="must invalidate"):
+    repository_only = build_intervention_component_lock(
+        kind="mcp",
+        component_id="repository-name-does-not-declare-release-impact",
+        lock_digest="8" * 64,
+        repository="https://github.com/wandb/wandb-mcp-server",
+        source_commit=commit,
+        source_tree=tree,
+    )
+    assert repository_only.release_requalification_required is False
+    assert repository_only.release_target == ""
+    assert repository_only.superseded_release_candidate_sha == ""
+
+    with pytest.raises(ValueError, match="require release requalification"):
         build_intervention_component_lock(
             kind="mcp",
-            component_id="unreviewed-release-impact",
-            lock_digest="8" * 64,
+            component_id="undeclared-release-impact",
+            lock_digest="9" * 64,
             repository="https://github.com/wandb/wandb-mcp-server",
             source_commit=commit,
             source_tree=tree,
-        )
-    with pytest.raises(ValueError, match="must invalidate"):
-        build_intervention_component_lock(
-            kind="mcp",
-            component_id="forked-release-impact",
-            lock_digest="9" * 64,
-            repository="https://github.com/ash0ts/wandb-mcp-server",
-            source_commit=commit,
-            source_tree=tree,
+            release_target="wandb-mcp-server Python package 0.4",
+            superseded_release_candidate_sha="5" * 40,
         )
 
     valid = build_intervention_component_lock(

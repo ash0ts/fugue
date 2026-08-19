@@ -31,6 +31,8 @@ from fugue.bench.comparison import (
     _comparison_trial_output,
     _evaluate_decision,
     _evaluator_digest,
+    _mechanism_summary,
+    _normalized_reported_project_identity,
     _paired_attempt_v3,
     _paired_attempt_view_v3,
     _prepare_comparison_scorer_runtimes,
@@ -39,7 +41,15 @@ from fugue.bench.comparison import (
     _require_checkpoint_judges,
     _restore_or_verify_checkpoint_receipt,
     _result_candidate_definitions,
+    _result_markdown,
+    _result_scorer_review_markdown,
     _resume_approved_comparison_lock,
+    _safe_comparison_score_details,
+    _sanitized_scorer_review,
+    _score_deterministic_output,
+    _scorer_revisions_v3,
+    _v3_canonical_attempt_rows,
+    _weave_attempt_evidence_links,
     analyze_comparison_rows,
     check_comparison,
     claim_comparison_approval,
@@ -49,6 +59,7 @@ from fugue.bench.comparison import (
     load_comparison,
     materialize_comparison,
     prepare_comparison,
+    prepared_candidate_definitions,
     preview_comparison,
     read_comparison_result,
     scaffold_comparison,
@@ -58,9 +69,12 @@ from fugue.bench.comparison import (
 from fugue.bench.comparison import _decision_policy as parse_decision_policy
 from fugue.bench.evaluations import JudgeResponseError
 from fugue.bench.execution_recovery import ExecutionFinalizationPending
-from fugue.bench.local_evidence import local_result_row_projection_digest
+from fugue.bench.local_evidence import (
+    local_result_row_projection_digest,
+    local_result_row_projection_v1,
+)
 from fugue.bench.operator import OperatorService
-from fugue.model_plane import trace_destination_identity
+from fugue.model_plane import EvidenceMode, trace_destination_identity
 from fugue.research.approvals import ApprovalLedger
 from fugue.research.contracts import ResearchError
 from fugue.research.database import connect_database
@@ -93,6 +107,37 @@ def test_new_programmatic_comparison_policy_defaults_to_local_evidence() -> None
 
     assert policy.evidence_mode == "local"
     assert policy.evidence_destination.kind == "local"
+
+
+def test_judge_response_contract_is_explicit_and_legacy_default_is_omitted() -> None:
+    legacy = ComparisonEvaluatorV1(
+        id="legacy-review",
+        type="llm_judge",
+        required=False,
+        profile="wandb/anthropic/claude-opus-4-8",
+        rubric="Assess usefulness.",
+        dimensions=("usefulness",),
+    )
+    anchored = replace(legacy, response_contract="anchored_review_v1")
+
+    assert "response_contract" not in legacy.to_dict()
+    assert anchored.to_dict()["response_contract"] == "anchored_review_v1"
+
+
+def test_explicit_local_comparison_policy_cannot_silently_switch_to_weave() -> None:
+    with pytest.raises(ValueError, match="W&B result destination"):
+        ComparisonExecutionPolicyV1(
+            model="anthropic/claude-sonnet-5",
+            harnesses=("claude-code",),
+            attempts=1,
+            concurrency=1,
+            max_cost_usd=1.0,
+            reserve_per_attempt_usd=1.0,
+            approval_required=True,
+            trace_content="full",
+            evidence_mode="local",
+            evidence_project="wandb/should-not-activate",
+        )
 
 
 def test_source_use_comparison_is_ready_and_exact() -> None:
@@ -192,13 +237,76 @@ def test_exact_approval_may_acknowledge_reviewable_canary(
         maximum_cells=8,
         approved_by="test-reviewer",
         operation_id="approve-reviewable-canary",
+        candidate_definitions=preview.matrix["candidate_definitions"],
     )
+
+    assert approval.candidate_definitions == preview.matrix["candidate_definitions"]
 
     claim_comparison_approval(
         preview,
         approval_digest=approval.approval_digest,
         repo_root=tmp_path,
     )
+
+
+def test_exact_approval_rejects_a_different_candidate_map(tmp_path: Path) -> None:
+    root = Path.cwd()
+    spec = load_comparison(EXAMPLE / "comparison.yaml", repo_root=root)
+    preview = preview_comparison(
+        replace(spec, execution=replace(spec.execution, attempts=1)),
+        repo_root=root,
+    )
+    definitions = dict(preview.matrix["candidate_definitions"])
+    one_candidate_id = next(iter(definitions))
+    wrong_definition = {**definitions[one_candidate_id], "label": "other candidate"}
+    definitions.pop(one_candidate_id)
+    definitions[stable_digest(wrong_definition)] = wrong_definition
+    ledger = ApprovalLedger(StudyStore(tmp_path).path)
+    approval = ledger.approve(
+        subject_kind="experiment",
+        preview_digest=preview.preview_digest,
+        maximum_cost_usd=1,
+        maximum_cells=8,
+        approved_by="test-reviewer",
+        operation_id="approve-wrong-candidate-map",
+        candidate_definitions=definitions,
+    )
+
+    with pytest.raises(ResearchError, match="accepted candidates"):
+        claim_comparison_approval(
+            preview,
+            approval_digest=approval.approval_digest,
+            repo_root=tmp_path,
+        )
+
+
+def test_prepared_preview_exposes_exact_candidate_map_for_approval(
+    tmp_path: Path,
+) -> None:
+    comparison_path = scaffold_comparison(tmp_path)
+    spec = load_comparison(comparison_path, repo_root=tmp_path)
+    preview = preview_comparison(spec, repo_root=tmp_path)
+    retained = (
+        tmp_path
+        / COMPARISON_RUNTIME_ROOT
+        / spec.spec_digest
+        / "prepared"
+        / "prepared-preview.json"
+    )
+    retained.parent.mkdir(parents=True)
+    retained.write_text(json.dumps(preview.to_dict()), encoding="utf-8")
+
+    definitions = prepared_candidate_definitions(
+        preview.preview_digest,
+        repo_root=tmp_path,
+    )
+
+    assert definitions == preview.matrix["candidate_definitions"]
+    assert all(stable_digest(value) == key for key, value in definitions.items())
+
+    retained.unlink()
+    with pytest.raises(ValueError, match="exact prepared preview is unavailable"):
+        prepared_candidate_definitions(preview.preview_digest, repo_root=tmp_path)
 
 
 def test_approval_ledger_supports_exact_preview_renewal_and_migration(
@@ -437,6 +545,10 @@ def test_replay_scores_aligned_improvements_and_regressions() -> None:
         for line in (EXAMPLE / "attempts.jsonl").read_text().splitlines()
     ]
     scored = score_comparison_rows(spec, rows, repo_root=root)
+    assert set(scored[0]["comparison_score_details"]) == {
+        "answer_present",
+        "expected_values",
+    }
     result = analyze_comparison_rows(
         comparison_id=spec.id,
         preview_digest=preview.preview_digest,
@@ -533,6 +645,7 @@ def test_comparison_declared_destination_overrides_legacy_test_endpoint(
         )
         + "\n"
     )
+    env_file.chmod(0o600)
     spec = comparison_from_dict(raw, repo_root=root, source=EXAMPLE)
 
     preview = preview_comparison(
@@ -560,6 +673,8 @@ def test_comparison_declared_destination_overrides_legacy_test_endpoint(
 def test_comparison_defaults_to_canonical_local_evidence(tmp_path: Path) -> None:
     comparison_path = scaffold_comparison(tmp_path)
     raw = yaml.safe_load(comparison_path.read_text())
+    assert raw["schema_version"] == 2
+    raw["execution"].pop("evidence_mode")
     spec = comparison_from_dict(raw, repo_root=tmp_path, source=tmp_path)
 
     assert spec.execution.evidence_mode == "local"
@@ -608,6 +723,21 @@ def test_comparison_defaults_to_canonical_local_evidence(tmp_path: Path) -> None
     raw["execution"]["evidence_project"] = "wandb/not-local"
     with pytest.raises(ValueError, match="does not accept W&B"):
         comparison_from_dict(raw, repo_root=tmp_path, source=tmp_path)
+
+
+def test_v1_comparison_without_evidence_mode_retains_weave_default(
+    tmp_path: Path,
+) -> None:
+    comparison_path = scaffold_comparison(tmp_path)
+    raw = yaml.safe_load(comparison_path.read_text())
+    raw["schema_version"] = 1
+    raw["execution"].pop("evidence_mode")
+    raw["execution"]["evidence_project"] = "wandb/legacy-results"
+
+    spec = comparison_from_dict(raw, repo_root=tmp_path, source=tmp_path)
+
+    assert spec.execution.evidence_mode == "weave_required"
+    assert spec.execution.evidence_project == "wandb/legacy-results"
 
 
 def test_comparison_evaluation_projects_aligned_attempts_and_weave_links() -> None:
@@ -897,6 +1027,90 @@ def _release_note_gate_decision(
             },
         ),
     )
+
+
+def _local_harbor_decision_rows() -> list[dict[str, object]]:
+    rows = [
+        _decision_row(variant="baseline", passed=True),
+        _decision_row(variant="candidate", passed=True),
+    ]
+    for row in rows:
+        row.pop("infrastructure_conformance_complete")
+        row["trace_project"] = None
+        row["local_evidence_links"] = [{"system": "local_artifact"}]
+        row["hosted_evidence_privacy_scan_status"] = "not_applicable"
+    return rows
+
+
+def _evaluate_local_harbor_decision(
+    rows: list[dict[str, object]],
+    *,
+    evidence_mode: EvidenceMode,
+):
+    return _evaluate_decision(
+        policy=parse_decision_policy(_decision_policy()),
+        rows=rows,
+        deterministic={"candidate": {"passed": 1, "evaluated": 1}},
+        operational={"infrastructure_failures": 0},
+        improved=0,
+        regressed=0,
+        incomplete=0,
+        required_incomplete=0,
+        integrity={
+            "status": "reconciled",
+            "duplicate_attempt_ids": [],
+            "unresolved_evidence_attempts": 0,
+            "cross_project_attempts": 0,
+        },
+        attestation=None,
+        evidence_mode=evidence_mode,
+    )
+
+
+def test_local_decision_uses_one_shared_harbor_receipt_without_hosted_gate() -> None:
+    rows = _local_harbor_decision_rows()
+
+    decision = _evaluate_local_harbor_decision(rows, evidence_mode="local")
+
+    gates = {gate.id: gate for gate in decision.gates}
+    assert decision.status == "ready_for_signoff"
+    assert "hosted-evidence-privacy" not in gates
+    assert gates["infrastructure"].status == "passed"
+    assert gates["sandbox-cleanup"].status == "passed"
+
+    hosted = _evaluate_local_harbor_decision(rows, evidence_mode="weave_required")
+    hosted_gates = {gate.id: gate for gate in hosted.gates}
+    assert hosted.status == "blocked"
+    assert hosted_gates["hosted-evidence-privacy"].status == "unavailable"
+
+
+def test_local_harbor_conformance_rejects_mixed_or_empty_run_receipts() -> None:
+    mismatched = _local_harbor_decision_rows()
+    mismatched[1]["harbor_conformance_receipt_digest"] = "e" * 64
+    for row in mismatched:
+        # A generic receipt flag cannot bypass the stricter run-wide Harbor
+        # receipt contract.
+        row["infrastructure_conformance_complete"] = True
+
+    mismatch_decision = _evaluate_local_harbor_decision(
+        mismatched,
+        evidence_mode="local",
+    )
+    mismatch_gates = {gate.id: gate for gate in mismatch_decision.gates}
+    assert mismatch_decision.status == "blocked"
+    assert mismatch_gates["infrastructure"].status == "unavailable"
+    assert mismatch_gates["sandbox-cleanup"].status == "unavailable"
+
+    missing = _local_harbor_decision_rows()
+    for row in missing:
+        row["harbor_conformance_receipt_digest"] = ""
+    missing_decision = _evaluate_local_harbor_decision(
+        missing,
+        evidence_mode="local",
+    )
+    missing_gates = {gate.id: gate for gate in missing_decision.gates}
+    assert missing_gates["infrastructure"].status == "unavailable"
+    assert missing_gates["sandbox-cleanup"].status == "unavailable"
 
 
 def test_release_note_infrastructure_gate_is_implicit_and_fail_closed() -> None:
@@ -1194,6 +1408,10 @@ def test_v3_result_round_trips_source_topology_and_canonical_view(
             "project": source_project,
             "answer": "safe maintainer summary",
         }
+        row["usage"] = {"input_tokens": 100, "output_tokens": 25}
+        row["cost_reconciliation_status"] = "resolved"
+        row["latency_reconciliation_status"] = "resolved"
+        row["usage_reconciliation_status"] = "resolved"
         call_prefix = f"{variant}-{cell['trial_index']}"
         row["evaluation_url"] = f"{result_base}/calls/{call_prefix}-evaluation"
         row["weave_evaluation_root_call_id"] = f"{call_prefix}-evaluation"
@@ -1219,6 +1437,8 @@ def test_v3_result_round_trips_source_topology_and_canonical_view(
         row["weave_agent_root_ref"] = (
             f"weave:///wandb/result-project/call/{call_prefix}-agent"
         )
+        row["weave_agent_root_evidence_kind"] = "native_weave_call_v1"
+        row["weave_agent_root_is_native_call"] = True
         rows.append(row)
 
     result = analyze_comparison_rows(
@@ -1243,10 +1463,42 @@ def test_v3_result_round_trips_source_topology_and_canonical_view(
     assert result.task_validity[0].status == "valid"
     assert result.paired_cases[0].dimension_changes[0].role == "outcome"
     assert result.paired_cases[0].candidate.actual_query_scope == (source_project,)
+    assert result.paired_cases[0].candidate.cost_reconciliation_status == "resolved"
+    assert result.paired_cases[0].candidate.latency_reconciliation_status == "resolved"
+    assert result.paired_cases[0].candidate.usage_reconciliation_status == "resolved"
+    projected_view = build_comparison_evaluation_view(result.to_dict())
+    projected_candidate = projected_view.paired_cases[0]["candidate"]
+    [comparison_rows_link] = [
+        link
+        for link in projected_view.evidence_links
+        if link["kind"] == "comparison_rows"
+    ]
+    assert comparison_rows_link == {
+        "system": "fugue",
+        "kind": "comparison_rows",
+        "ref": "v3-run",
+    }
+    assert any(link["system"] == "weave" for link in projected_view.evidence_links)
+    assert projected_candidate["cost_reconciliation_status"] == "resolved"
+    assert projected_candidate["latency_reconciliation_status"] == "resolved"
+    assert projected_candidate["usage_reconciliation_status"] == "resolved"
 
     dual_chain_rows = json.loads(json.dumps(rows))
-    for row in dual_chain_rows:
+    local_binding = {
+        "local_evidence_manifest_digest": "1" * 64,
+        "local_evidence_manifest_file_sha256": "2" * 64,
+        "local_evidence_plan_digest": "3" * 64,
+        "local_evidence_attempt_record_set_digest": "4" * 64,
+        "local_evidence_prediction_row_set_digest": "5" * 64,
+        "local_evidence_run_receipt_digest": "6" * 64,
+        "local_evidence_run_receipt_file_sha256": "7" * 64,
+    }
+    for index, row in enumerate(dual_chain_rows, start=1):
         attempt = str(row["attempt_id"])
+        row["run_id"] = "v3-run"
+        row["local_evidence_record_digest"] = f"{index:x}" * 64
+        row["local_evidence_prediction_row_sha256"] = f"{index + 4:x}" * 64
+        row.update(local_binding)
         row["local_evidence_links"] = [
             {
                 "kind": kind,
@@ -1276,6 +1528,8 @@ def test_v3_result_round_trips_source_topology_and_canonical_view(
     )
     assert isinstance(dual_chain, ComparisonResultV3)
     assert dual_chain.evidence_backend == "weave"
+    assert dual_chain.local_evidence is not None
+    assert dual_chain.local_evidence["run_id"] == "v3-run"
     assert dual_chain.local_chain_integrity == "reconciled"
     assert dual_chain.hosted_chain_integrity == "reconciled"
     assert {
@@ -1285,6 +1539,33 @@ def test_v3_result_round_trips_source_topology_and_canonical_view(
         item.system
         for item in dual_chain.paired_cases[0].candidate.hosted_evidence_links
     } == {"weave"}
+    local_markdown = _result_markdown(dual_chain)
+    assert "Evaluation record:" in local_markdown
+    assert "Prediction-and-score record:" in local_markdown
+    assert "Prediction record:" in local_markdown
+    assert "Provider-neutral Agent receipt:" in local_markdown
+    assert "Dataset manifest:" in local_markdown
+    assert "## Treatment identities" in local_markdown
+    for candidate_id, definition in dual_chain.candidate_definitions.items():
+        assert f"`{candidate_id}`" in local_markdown
+        assert f"harness `{definition['harness']}`" in local_markdown
+        assert f"model `{definition['model_route']['display_model']}`" in local_markdown
+        assert f"context `{definition['context']['id']}`" in local_markdown
+        for skill in definition["skills"]:
+            assert f"`{skill['id']}`" in local_markdown
+        for integration in definition["integrations"]:
+            assert f"`{integration['id']}`" in local_markdown
+        if definition.get("prompt_digest"):
+            assert f"prompt `{definition['prompt_digest']}`" in local_markdown
+
+    dual_chain_destination = tmp_path / "v3-dual-chain-result"
+    dual_chain_destination.mkdir()
+    (dual_chain_destination / "attempts.jsonl").write_text(
+        "\n".join(json.dumps(row, sort_keys=True) for row in dual_chain_rows) + "\n",
+        encoding="utf-8",
+    )
+    write_comparison_result(dual_chain, destination=dual_chain_destination)
+    assert read_comparison_result(dual_chain_destination / "result.json") == dual_chain
 
     role_drift = json.loads(json.dumps(rows))
     candidate_row = next(row for row in role_drift if row["variant_id"] == "candidate")
@@ -1324,6 +1605,28 @@ def test_v3_result_round_trips_source_topology_and_canonical_view(
         path = destination / filename
         path.write_text(json.dumps(raw_result), encoding="utf-8")
         return path
+
+    missing_local_binding = dual_chain.to_dict()
+    missing_local_binding.pop("local_evidence")
+    with pytest.raises(ValueError, match="local evidence requires its ledger binding"):
+        read_comparison_result(
+            write_rehashed_result(
+                missing_local_binding,
+                "missing-dual-chain-local-binding.json",
+            )
+        )
+
+    missing_attempt_binding = dual_chain.to_dict()
+    missing_attempt_binding["paired_cases"][0]["candidate"].pop(
+        "local_evidence_record_digest"
+    )
+    with pytest.raises(ValueError, match="requires record and prediction digests"):
+        read_comparison_result(
+            write_rehashed_result(
+                missing_attempt_binding,
+                "missing-dual-chain-attempt-binding.json",
+            )
+        )
 
     expected_candidate_ids = {
         str(attempt.identity["candidate"])
@@ -1647,6 +1950,11 @@ def test_v3_result_round_trips_source_topology_and_canonical_view(
     assert non_discriminating.task_validity[0].blockers == ()
     assert non_discriminating.behavioral_summary.status == "unchanged"
     assert non_discriminating.behavioral_summary.improved_pairs == 0
+    assert "release" not in non_discriminating.behavioral_summary.recommendation.lower()
+    assert non_discriminating.behavioral_summary.supported_claim is not None
+    assert (
+        "release" not in non_discriminating.behavioral_summary.supported_claim.lower()
+    )
 
 
 def test_v2_read_binds_go_attestation_and_all_attestation_metadata(
@@ -1862,6 +2170,47 @@ def test_unverified_agent_relationship_invalidates_behavioral_evidence() -> None
     assert isinstance(view, ExperimentViewV2)
     assert view.paired_cases == ()
     assert "cells" not in view.to_dict()
+
+
+def test_v3_unverified_cross_transport_receipt_does_not_claim_correlation() -> None:
+    row = _decision_row(variant="candidate", passed=True)
+    row.update(
+        {
+            "weave_agent_root_evidence_kind": (
+                "native_otel_cross_transport_receipt_v1"
+            ),
+            "weave_agent_root_is_native_call": False,
+            "otel_trace_id": "trace-1",
+            "otel_root_span_id": "span-1",
+            "agent_cross_transport_edge": {
+                "status": "unverified",
+                "source_system": "otel",
+                "source_trace_id": "trace-1",
+                "source_span_id": "span-1",
+                "receipt_system": "weave",
+                "receipt_call_id": row["native_agent_root_call_id"],
+            },
+        }
+    )
+
+    links = _weave_attempt_evidence_links(row, require_agent_typing=True)
+    agent = next(link for link in links if link.kind == "agent_evidence_receipt")
+
+    assert agent.status == "invalid"
+    assert agent.native_trajectory_status == "unresolved"
+    assert agent.conversation_correlation_status == "unverified"
+
+    row["agent_cross_transport_edge"]["status"] = "verified"
+    verified_links = _weave_attempt_evidence_links(
+        row,
+        require_agent_typing=True,
+    )
+    verified = next(
+        link for link in verified_links if link.kind == "agent_evidence_receipt"
+    )
+    assert verified.status == "resolved"
+    assert verified.native_trajectory_status == "otel_correlated"
+    assert verified.conversation_correlation_status == "verified"
 
 
 @pytest.mark.parametrize(
@@ -2478,6 +2827,38 @@ def test_v3_candidate_definition_recompute_requires_exact_coverage() -> None:
         )
 
 
+def test_v3_treatment_identity_markdown_uses_stored_definition_fields(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from fugue.bench import comparison as comparison_module
+
+    candidate_id = "d" * 64
+
+    class StoredV3:
+        candidate_definitions = {
+            candidate_id: {
+                "harness": "claude-code",
+                "model_route": {"display_model": "anthropic/claude-sonnet-5"},
+                "context": {"id": "repo-context-v1"},
+                "skills": [{"id": "review-plan"}],
+                "integrations": [{"id": "wandb-mcp-0-4"}],
+                "prompt_digest": "e" * 64,
+            }
+        }
+
+    monkeypatch.setattr(comparison_module, "ComparisonResultV3", StoredV3)
+
+    markdown = comparison_module._result_treatment_identities_markdown(StoredV3())
+
+    assert markdown == (
+        "## Treatment identities\n\n"
+        f"- `{candidate_id}` — harness `claude-code`; "
+        "model `anthropic/claude-sonnet-5`; context `repo-context-v1`; "
+        "skills `review-plan`; integrations `wandb-mcp-0-4`; "
+        f"prompt `{'e' * 64}`\n\n"
+    )
+
+
 def test_v1_result_remains_readable(tmp_path: Path) -> None:
     raw = {
         "schema_version": 1,
@@ -2591,6 +2972,41 @@ def test_comparison_scoring_prefers_locked_answer_artifact(
     assert _comparison_trial_output({"agent_response": "terminal answer"}) == (
         "terminal answer"
     )
+
+
+def test_exact_answer_artifact_populates_safe_reported_project_projection() -> None:
+    exact_output = (
+        '```json\n{"source_project":"wandb/fugue-mcp-release-source-v2"}\n```'
+    )
+    reported = _normalized_reported_project_identity(exact_output)
+    assert reported == "wandb/fugue-mcp-release-source-v2"
+
+    scored_row = {
+        "attempt_id": "a" * 64,
+        "reported_project_identity": reported,
+        # The normalized artifact value must win after final_output is removed.
+        "agent_response": "I wrote the structured answer to fugue-answer.md.",
+    }
+    projection = local_result_row_projection_v1(scored_row)
+    assert projection["reported_project_identity"] == reported
+
+    assert _normalized_reported_project_identity(
+        '{"source_project":"wandb/other-project"}'
+    ) == ("wandb/other-project")
+    assert (
+        _normalized_reported_project_identity(
+            '{"source_project":"https://wandb.ai/wandb/project?token=secret"}'
+        )
+        is None
+    )
+    malformed_projection = local_result_row_projection_v1(
+        {
+            "attempt_id": "b" * 64,
+            "reported_project_identity": "not a project slug",
+            "agent_response": "The answer artifact contained an invalid project.",
+        }
+    )
+    assert malformed_projection["reported_project_identity"] is None
 
 
 def test_source_use_demo_uses_packaged_assets_outside_checkout(
@@ -2730,6 +3146,173 @@ def test_mechanism_summary_keeps_assignment_registration_and_use_distinct() -> N
     assert (
         result.mechanism_summary["relevant_source_used"]["candidate"]["observed"] == 1
     )
+    assert "task_passed" not in result.mechanism_summary
+
+    historical = _mechanism_summary(
+        [
+            {
+                "variant_id": "candidate",
+                "comparison_mechanism": {
+                    "skill_invoked": "observed",
+                    "task_passed": "observed",
+                },
+            }
+        ]
+    )
+    assert historical["skill_invoked"]["candidate"]["observed"] == 1
+    assert "task_passed" not in historical
+
+
+def test_mechanism_summary_publishes_generic_treatment_use_only_from_evidence() -> None:
+    summary = _mechanism_summary(
+        [
+            {
+                "variant_id": "candidate",
+                "comparison_mechanism": {
+                    "skill_registered": "observed",
+                    "skill_invoked": "unavailable",
+                },
+                "comparison_deterministic_scores": {
+                    "skill.assigned_skill_opened": True,
+                    "skill.relevant_rule_opened": False,
+                    "skill.requested_constraints_present": True,
+                },
+                "comparison_dimension_roles": {
+                    "skill.assigned_skill_opened": "mechanism",
+                    "skill.relevant_rule_opened": "mechanism",
+                    "skill.requested_constraints_present": "outcome",
+                },
+            },
+            {"variant_id": "baseline"},
+        ]
+    )
+
+    assert summary["treatment_registered"]["candidate"] == {
+        "observed": 1,
+        "not_observed": 0,
+        "applicable": 1,
+        "unavailable": 0,
+    }
+    assert summary["treatment_opened"]["candidate"]["observed"] == 1
+    assert (
+        summary["treatment_relevant_content_opened"]["candidate"]["not_observed"]
+        == 1
+    )
+    assert summary["treatment_invoked"]["candidate"] == {
+        "observed": 0,
+        "not_observed": 0,
+        "applicable": 1,
+        "unavailable": 1,
+    }
+    assert "treatment_requested_constraints_present" not in summary
+
+
+def test_mechanism_summary_normalizes_typed_treatment_use_evidence() -> None:
+    summary = _mechanism_summary(
+        [
+            {
+                "variant_id": "candidate",
+                "treatment_use_evidence": {
+                    "registered": True,
+                    "opened": 1,
+                    "relevant_content_opened": False,
+                    "invoked": "observed",
+                },
+            },
+            {
+                "variant_id": "candidate",
+                "treatment_use_evidence": {
+                    "registered": 0,
+                    "opened": "not_observed",
+                    "relevant_content_opened": "unknown",
+                    "invoked": "not_observed",
+                },
+                "comparison_mechanism": {"skill_invoked": True},
+            },
+        ]
+    )
+
+    assert summary["treatment_registered"]["candidate"] == {
+        "observed": 1,
+        "not_observed": 1,
+        "applicable": 2,
+        "unavailable": 0,
+    }
+    assert summary["treatment_opened"]["candidate"] == {
+        "observed": 1,
+        "not_observed": 1,
+        "applicable": 2,
+        "unavailable": 0,
+    }
+    assert summary["treatment_relevant_content_opened"]["candidate"] == {
+        "observed": 0,
+        "not_observed": 1,
+        "applicable": 1,
+        "unavailable": 0,
+    }
+    assert summary["treatment_invoked"]["candidate"] == {
+        "observed": 1,
+        "not_observed": 0,
+        "applicable": 2,
+        "unavailable": 1,
+    }
+
+
+def test_eight_row_report_uses_real_pair_counts_and_neutral_study_language() -> None:
+    rows = [
+        _decision_row(variant=variant, task_id=f"task-{task}", passed=True)
+        for task in range(1, 5)
+        for variant in ("baseline", "candidate")
+    ]
+    result = analyze_comparison_rows(
+        comparison_id="eight-row-behavior-study",
+        preview_digest="a" * 64,
+        rows=rows,
+        source="test",
+        expected_evidence_project="wandb/release-project",
+    )
+    historical_wording = replace(
+        result.behavioral_summary,
+        recommendation=(
+            "HOLD — no release-qualifying behavioral improvement was established."
+        ),
+    )
+    historical_mechanism = {
+        **result.mechanism_summary,
+        "task_passed": {
+            "baseline": {"observed": 4, "applicable": 4, "unavailable": 0},
+            "candidate": {"observed": 4, "applicable": 4, "unavailable": 0},
+        },
+    }
+
+    markdown = _result_markdown(
+        replace(
+            result,
+            behavioral_summary=historical_wording,
+            mechanism_summary=historical_mechanism,
+        )
+    )
+
+    assert "- Rows: 8" in markdown
+    assert (
+        "Baseline tasks that passed all required gates: 4/4 aligned task attempts"
+        in markdown
+    )
+    assert (
+        "Candidate tasks that passed all required gates: 4/4 aligned task attempts"
+        in markdown
+    )
+    assert "Baseline full result" in markdown
+    assert "Candidate full result" in markdown
+    assert "Paired outcome change" in markdown
+    assert "0/0" not in markdown
+    assert "Task Passed" not in markdown
+    assert (
+        "Behavioral recommendation: HOLD — no release-qualifying behavioral "
+        "improvement was established."
+    ) in markdown
+    assert "recommendation is preserved from the canonical result" in markdown
+    assert "Package release: **NOT EVALUATED**" in markdown
 
 
 def test_zero_row_comparison_cannot_succeed() -> None:
@@ -2905,6 +3488,395 @@ def test_deterministic_evaluator_rejects_judge_timeout() -> None:
         comparison_from_dict(raw, repo_root=root, source=path.parent)
 
 
+def test_evaluator_dimension_guidance_is_public_and_identity_bound() -> None:
+    root = Path.cwd()
+    path = MCP_MAINTENANCE_EXAMPLE / "tool-surface-canary-local-v4.yaml"
+    raw = yaml.safe_load(path.read_text())
+    deterministic = next(
+        evaluator
+        for evaluator in raw["evaluators"]
+        if evaluator["type"] == "deterministic"
+    )
+    deterministic["dimension_guidance"] = {
+        "answer_correct": "Checks the final answer against host-only facts."
+    }
+
+    parsed = comparison_from_dict(raw, repo_root=root, source=path.parent)
+    evaluator = next(item for item in parsed.evaluators if item.type == "deterministic")
+    assert evaluator.dimension_guidance == {
+        "answer_correct": "Checks the final answer against host-only facts."
+    }
+    original_digest = parsed.spec_digest
+    deterministic["dimension_guidance"]["answer_correct"] = (
+        "Checks factual correctness without exposing expected values."
+    )
+    assert (
+        comparison_from_dict(raw, repo_root=root, source=path.parent).spec_digest
+        != original_digest
+    )
+
+    deterministic["dimension_guidance"] = {"unknown": "Not declared."}
+    with pytest.raises(ValueError, match="guidance may reference only"):
+        comparison_from_dict(raw, repo_root=root, source=path.parent)
+
+
+def test_legacy_comparison_omits_empty_dimension_guidance() -> None:
+    spec = load_comparison(EXAMPLE / "comparison.yaml", repo_root=Path.cwd())
+
+    assert all(
+        "dimension_guidance" not in evaluator
+        for evaluator in spec.to_dict()["evaluators"]
+    )
+
+
+def test_typed_deterministic_pass_ignores_non_performance_dimensions(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from fugue.bench import comparison as comparison_module
+
+    evaluator = ComparisonEvaluatorV1(
+        id="facts",
+        type="deterministic",
+        required=True,
+        scorer="scorer.py",
+        runtime="python312-sandbox-v1",
+        dimensions=("answer", "safety", "mechanism", "infra", "efficiency"),
+        dimension_roles={
+            "answer": "outcome",
+            "safety": "safety_gate",
+            "mechanism": "mechanism",
+            "infra": "infrastructure",
+            "efficiency": "efficiency",
+        },
+    )
+    details = {
+        "answer": True,
+        "safety": True,
+        "mechanism": False,
+        "infra": False,
+        "efficiency": False,
+    }
+    monkeypatch.setattr(
+        comparison_module,
+        "_run_custom_scorer",
+        lambda *_args, **_kwargs: {
+            "score": 0.0,
+            "reason": "legacy all-dimension aggregate",
+            "details": details,
+        },
+    )
+
+    passed, scores = _score_deterministic_output(
+        task={},
+        output={},
+        expected={},
+        evidence={},
+        evaluators=(evaluator,),
+        repo_root=Path.cwd(),
+    )
+
+    assert passed is True
+    assert scores["facts.mechanism"] is False
+    details["safety"] = False
+    passed, _scores = _score_deterministic_output(
+        task={},
+        output={},
+        expected={},
+        evidence={},
+        evaluators=(evaluator,),
+        repo_root=Path.cwd(),
+    )
+    assert passed is False
+
+
+def test_custom_scorer_rejects_partial_dimension_roles() -> None:
+    root = Path.cwd()
+    path = MCP_MAINTENANCE_EXAMPLE / "tool-surface-canary-local-v4.yaml"
+    raw = yaml.safe_load(path.read_text())
+    deterministic = next(
+        evaluator
+        for evaluator in raw["evaluators"]
+        if evaluator["type"] == "deterministic"
+    )
+    deterministic["dimension_roles"].pop("release_mechanism_used")
+
+    with pytest.raises(
+        ValueError,
+        match=(
+            "dimension roles must cover every declared dimension; missing: "
+            "release_mechanism_used"
+        ),
+    ):
+        comparison_from_dict(raw, repo_root=root, source=path.parent)
+
+
+def test_score_details_explain_answer_and_component_behavior_separately() -> None:
+    evaluator = ComparisonEvaluatorV1(
+        id="tool-surface",
+        type="deterministic",
+        required=True,
+        scorer="scorer.py",
+        runtime="python312-sandbox-v1",
+        dimensions=("answer_correct", "target_behavior_satisfied"),
+        dimension_roles={
+            "answer_correct": "outcome",
+            "target_behavior_satisfied": "mechanism",
+        },
+    )
+
+    details = _safe_comparison_score_details(
+        {
+            "tool-surface.answer_correct": True,
+            "tool-surface.target_behavior_satisfied": False,
+        },
+        evaluators=(evaluator,),
+        row={"mcp_tool_calls": []},
+    )
+
+    answer = details["tool-surface.answer_correct"]
+    behavior = details["tool-surface.target_behavior_satisfied"]
+    assert "factually correct" in answer["what"]
+    assert "does not require the component" in answer["what"]
+    assert "host-only required facts" in answer["why"]
+    assert "without the Agent diagnosing" in behavior["what"]
+    assert "does not determine task pass" in behavior["why"]
+
+
+def test_score_details_preserve_partial_numeric_score_as_failure() -> None:
+    evaluator = ComparisonEvaluatorV1(
+        id="facts",
+        type="deterministic",
+        required=True,
+        scorer="scorer.py",
+        runtime="python312-sandbox-v1",
+        dimensions=("answer_correct",),
+        dimension_roles={"answer_correct": "outcome"},
+    )
+
+    details = _safe_comparison_score_details(
+        {"facts.answer_correct": 0.75},
+        evaluators=(evaluator,),
+        row={},
+    )
+
+    answer = details["facts.answer_correct"]
+    assert answer["observed"] == (
+        "The deterministic scorer recorded 0.75. This gate requires 1.0 to pass."
+    )
+    assert "blocks task pass" in answer["why"]
+
+
+def test_score_details_explain_skill_outcomes_safety_and_use() -> None:
+    evaluator = ComparisonEvaluatorV1(
+        id="skill-package",
+        type="deterministic",
+        required=True,
+        scorer="scorer.py",
+        runtime="python312-sandbox-v1",
+        dimensions=(
+            "requested_constraints_present",
+            "package_contract_valid",
+            "assigned_skill_opened",
+        ),
+        dimension_roles={
+            "requested_constraints_present": "outcome",
+            "package_contract_valid": "safety_gate",
+            "assigned_skill_opened": "mechanism",
+        },
+    )
+
+    details = _safe_comparison_score_details(
+        {
+            "skill-package.requested_constraints_present": False,
+            "skill-package.package_contract_valid": False,
+            "skill-package.assigned_skill_opened": True,
+        },
+        evaluators=(evaluator,),
+        row={},
+        critical_dimensions=frozenset(
+            {
+                "skill-package.requested_constraints_present",
+                "skill-package.package_contract_valid",
+            }
+        ),
+    )
+
+    constraints = details["skill-package.requested_constraints_present"]
+    package = details["skill-package.package_contract_valid"]
+    opened = details["skill-package.assigned_skill_opened"]
+    assert "every public constraint" in constraints["what"]
+    assert "omits or contradicts" in constraints["observed"]
+    assert "blocks task pass" in constraints["why"]
+    assert "package and schema contract" in package["what"]
+    assert "failed at least one" in package["observed"]
+    assert "safety failure blocks task pass" in package["why"]
+    assert "exact Skill revision" in opened["what"]
+    assert "opened the assigned Skill revision" in opened["observed"]
+    assert "does not determine task pass" in opened["why"]
+
+
+def test_score_details_keep_ambiguous_legacy_checks_backward_readable() -> None:
+    evaluators = tuple(
+        ComparisonEvaluatorV1(
+            id=evaluator_id,
+            type="deterministic",
+            required=True,
+            checks=("answer_present",),
+        )
+        for evaluator_id in ("first", "second")
+    )
+
+    details = _safe_comparison_score_details(
+        {"answer_present": True},
+        evaluators=evaluators,
+        row={},
+    )
+
+    assert details["answer_present"]["what"] == (
+        "Checks whether the Agent returned a non-empty final answer."
+    )
+    assert details["answer_present"]["observed"] == (
+        "The Agent returned a non-empty final answer."
+    )
+    assert "legacy evaluator has no typed role" in details["answer_present"]["why"]
+
+
+def test_scorer_revision_distinguishes_digest_only_source() -> None:
+    revisions = _scorer_revisions_v3(
+        {
+            "scorer_digests": {"facts": "1" * 64},
+            "approved_inputs": {
+                "evaluator_artifacts": {
+                    "facts": {"scorer_sha256": "2" * 64}
+                }
+            },
+        }
+    )
+
+    assert revisions[0].details == {
+        "kind": "scorer",
+        "source_sha256": "2" * 64,
+        "source_reference_status": "digest_only",
+        "task_pass_roles": ["outcome", "safety_gate"],
+    }
+
+
+def test_scorer_review_uses_public_contract_without_private_truth(
+    tmp_path: Path,
+) -> None:
+    scorer = tmp_path / "scorers/skill_package.py"
+    scorer.parent.mkdir()
+    scorer.write_text("def score(payload):\n    return payload\n", encoding="utf-8")
+    evaluator = ComparisonEvaluatorV1(
+        id="skill-package",
+        type="deterministic",
+        required=True,
+        scorer="scorers/skill_package.py",
+        runtime="python312-sandbox-v1",
+        dimensions=("package_contract_valid", "assigned_skill_opened"),
+        dimension_roles={
+            "package_contract_valid": "safety_gate",
+            "assigned_skill_opened": "mechanism",
+        },
+        dimension_guidance={
+            "package_contract_valid": "Checks the public package schema.",
+        },
+    )
+
+    review = _sanitized_scorer_review(evaluator, repo_root=tmp_path)
+
+    assert review["source_reference"] == "scorers/skill_package.py"
+    assert review["declared_dimensions"] == [
+        {
+            "id": "package_contract_valid",
+            "role": "safety_gate",
+            "guidance": "Checks the public package schema.",
+        },
+        {
+            "id": "assigned_skill_opened",
+            "role": "mechanism",
+            "guidance": (
+                "Checks whether the Agent opened the exact Skill revision assigned "
+                "to this attempt."
+            ),
+        },
+    ]
+    serialized = json.dumps(review, sort_keys=True)
+    assert "gold_output" not in serialized
+    assert "answer_key" not in serialized
+    assert "private labels" in serialized
+
+
+def test_scorer_review_omits_private_or_absolute_source_reference(
+    tmp_path: Path,
+) -> None:
+    private_scorer = tmp_path / "private/answer_key/scorer.py"
+    private_scorer.parent.mkdir(parents=True)
+    private_scorer.write_text("def score(payload):\n    return payload\n", encoding="utf-8")
+    evaluator = ComparisonEvaluatorV1(
+        id="facts",
+        type="deterministic",
+        required=True,
+        scorer=str(private_scorer),
+        runtime="python312-sandbox-v1",
+        dimensions=("answer_correct",),
+        dimension_roles={"answer_correct": "outcome"},
+    )
+
+    review = _sanitized_scorer_review(evaluator, repo_root=tmp_path)
+
+    assert "source_reference" not in review
+
+
+def test_scorer_revision_and_report_publish_bound_review_artifact(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from fugue.bench import comparison as comparison_module
+
+    digest = "1" * 64
+    revisions = _scorer_revisions_v3(
+        {
+            "scorer_digests": {"skill-package": digest},
+            "approved_inputs": {
+                "evaluator_artifacts": {
+                    "skill-package": {"scorer_sha256": "2" * 64}
+                },
+                "scorer_reviews": {
+                    "skill-package": {
+                        "schema_version": 1,
+                        "kind": "deterministic_scorer_review",
+                        "declared_dimensions": [
+                            {
+                                "id": "package_contract_valid",
+                                "role": "safety_gate",
+                                "guidance": "Checks the public package schema.",
+                            }
+                        ],
+                        "source_reference": "scorers/skill_package.py",
+                    }
+                },
+            },
+        }
+    )
+    artifact = revisions[0].details["review_artifact"]
+    assert artifact["scorer_id"] == "skill-package"
+    assert artifact["immutable_digest"] == digest
+
+    class StoredV3:
+        scorer_revisions = revisions
+
+    monkeypatch.setattr(comparison_module, "ComparisonResultV3", StoredV3)
+    markdown = _result_scorer_review_markdown(StoredV3())
+
+    assert "## Deterministic scorer review" in markdown
+    assert "Skill Package" in markdown
+    assert digest in markdown
+    assert "Safety Gate" not in markdown
+    assert "safety_gate" in markdown
+    assert "Checks the public package schema." in markdown
+    assert "host-only expected values" in markdown
+
+
 def test_v3_attempt_exports_blind_judge_scores_without_rationale() -> None:
     row = {
         "attempt_id": "a" * 64,
@@ -2936,12 +3908,149 @@ def test_v3_attempt_exports_blind_judge_scores_without_rationale() -> None:
         "natural-maintainer.answer_correct": True,
         ("comparison.judge.maintainer-actionability.maintenance_actionability"): 0.8,
     }
+    assert attempt.passed is True
     assert (
         attempt.score_explanations[
             ("comparison.judge.maintainer-actionability.maintenance_actionability")
         ]
         == "Blind judge score; no rationale or private truth is published."
     )
+    assert "score_details" not in attempt.to_dict()
+    assert attempt.judge_reviews == {}
+
+
+def test_anchored_judge_projects_safe_advisory_review_per_attempt() -> None:
+    root = Path.cwd()
+    spec = load_comparison(EXAMPLE / "comparison.yaml", repo_root=root)
+    judge = ComparisonEvaluatorV1(
+        id="maintainer-review",
+        type="llm_judge",
+        required=False,
+        profile="wandb/anthropic/claude-opus-4-8",
+        rubric="Assess whether the response is useful and actionable.",
+        dimensions=("maintenance_actionability",),
+        evidence=("tool_names",),
+        reserve_cost_usd=0.1,
+        response_contract="anchored_review_v1",
+    )
+
+    def anchored_request(**_kwargs: object):
+        return (
+            {
+                "scores": {"maintenance_actionability": 0.8},
+                "label": "strong",
+                "reason": (
+                    "The answer names a concrete next action and states its "
+                    "evidence limit."
+                ),
+                "missing_evidence": False,
+            },
+            {"cost_usd": 0.04},
+            {"request_policy": {"automatic_retries": 0}},
+        )
+
+    rows = score_comparison_rows(
+        replace(spec, evaluators=(*spec.evaluators, judge)),
+        [
+            {
+                "answer": {"amount": 125, "source": "expense-policy-v4.md"},
+                "task_id": "expense-limit",
+                "trial_index": 1,
+                "variant_id": "candidate",
+                "harness": "claude-code",
+                "mcp_tool_names": ["query_wandb_tool"],
+            }
+        ],
+        repo_root=root,
+        env={
+            "ANTHROPIC_API_KEY": "secret-example-value",
+            "FUGUE_WANDB_INFERENCE_PROJECT": "wandb/test",
+        },
+        judge_request=anchored_request,
+    )
+
+    review = rows[0]["comparison_judges"]["maintainer-review"]["review"]
+    assert review == {
+        "schema_version": 1,
+        "label": "strong",
+        "reason": (
+            "The answer names a concrete next action and states its evidence limit."
+        ),
+        "missing_evidence": False,
+    }
+    assert rows[0]["comparison_judges"]["maintainer-review"]["route_receipt"][
+        "response_contract"
+    ] == "anchored_review_v1"
+    projection = local_result_row_projection_v1(rows[0])
+    assert projection["judge_reviews"] == {
+        "maintainer-review": {
+            "label": "strong",
+            "reason": (
+                "The answer names a concrete next action and states its evidence "
+                "limit."
+            ),
+            "missing_evidence": False,
+            "observed_cost_usd": 0.04,
+            "cost_status": "observed",
+        }
+    }
+    attempt = _paired_attempt_view_v3(rows[0])
+    assert attempt is not None
+    assert attempt.judge_reviews["maintainer-review"].label == "strong"
+    assert attempt.judge_reviews["maintainer-review"].missing_evidence is False
+    assert "concrete next action" not in json.dumps(attempt.score_explanations)
+
+
+def test_anchored_judge_fails_closed_without_an_anchored_review() -> None:
+    root = Path.cwd()
+    spec = load_comparison(EXAMPLE / "comparison.yaml", repo_root=root)
+    judge = ComparisonEvaluatorV1(
+        id="maintainer-review",
+        type="llm_judge",
+        required=False,
+        profile="wandb/anthropic/claude-opus-4-8",
+        rubric="Assess whether the response is useful and actionable.",
+        dimensions=("maintenance_actionability",),
+        reserve_cost_usd=0.1,
+        response_contract="anchored_review_v1",
+    )
+
+    def numeric_only_request(**_kwargs: object):
+        return (
+            {
+                "scores": {"maintenance_actionability": 0.8},
+                "overall_assessment": "strong",
+                "uncertainty": 0.1,
+                "rationale": "The response is useful.",
+            },
+            {"cost_usd": 0.04},
+            {},
+        )
+
+    rows = score_comparison_rows(
+        replace(spec, evaluators=(*spec.evaluators, judge)),
+        [
+            {
+                "answer": {"amount": 125, "source": "expense-policy-v4.md"},
+                "task_id": "expense-limit",
+                "trial_index": 1,
+                "variant_id": "candidate",
+                "harness": "claude-code",
+            }
+        ],
+        repo_root=root,
+        env={
+            "ANTHROPIC_API_KEY": "secret-example-value",
+            "FUGUE_WANDB_INFERENCE_PROJECT": "wandb/test",
+        },
+        judge_request=numeric_only_request,
+    )
+
+    result = rows[0]["comparison_judges"]["maintainer-review"]
+    assert result["status"] == "unavailable"
+    assert result["failure"]["stage"] == "rubric_validation"
+    assert "review" not in result
+    assert "judge_reviews" not in local_result_row_projection_v1(rows[0])
 
 
 def test_checkpoint_records_advisory_judge_without_gating_execution() -> None:
@@ -3939,6 +5048,13 @@ def test_scorer_preparation_pulls_and_locks_the_declared_platform(
         "platform": profile.platform,
         "profile_digest": profile.profile_digest,
     }
+    inspect_calls = [
+        command for command in calls if command[1:3] == ["image", "inspect"]
+    ]
+    assert len(inspect_calls) == 2
+    assert all(
+        command[3:5] == ["--platform", profile.platform] for command in inspect_calls
+    )
     assert calls[1][1:4] == ["pull", "--platform", profile.platform]
 
 
@@ -4109,7 +5225,10 @@ def test_execute_local_comparison_never_requires_or_fetches_weave(
                             "kind": kind,
                             "status": "resolved",
                             "system": "local_artifact",
-                            "ref": f"fugue://evidence/{attempt}/{kind}",
+                            "ref": (
+                                f"fugue://local-evidence/{run_id}/attempt/"
+                                f"{attempt}/{kind}"
+                            ),
                         }
                         for kind in (
                             "evaluation_root",
@@ -4214,11 +5333,87 @@ def test_execute_local_comparison_never_requires_or_fetches_weave(
     assert result.hosted_chain_integrity == "not_applicable"
     assert result.operational_summary["evidence_states"] == {"reconciled": 4}
     assert result.evidence_links == ()
+    view = build_comparison_evaluation_view(result.to_dict())
+    assert isinstance(view, ExperimentViewV3)
+    assert view.evidence_scope is None
+    assert view.evidence_topology["result_destination"]["kind"] == "local"
+    assert view.result_digest == result.result_digest
+    assert view.qualification_digest == result.qualification_digest
+    assert view.runtime_lock_digest == stable_digest(list(view.runtime_locks))
+    [comparison_rows_link] = [
+        link for link in view.evidence_links if link["kind"] == "comparison_rows"
+    ]
+    assert comparison_rows_link == {
+        "system": "fugue",
+        "kind": "comparison_rows",
+        "ref": result.source,
+    }
+    assert {
+        link["system"]
+        for pair in view.paired_cases
+        for arm in ("baseline", "candidate")
+        for link in pair[arm]["evidence_links"]
+    } == {"local_artifact"}
+    assert experiment_view_from_dict(view.to_dict()) == view
     assert captured["local_rows"] == 4
     assert result_path.is_file()
     markdown = markdown_path.read_text(encoding="utf-8")
     assert "]()" not in markdown
-    assert "No safe evidence links were available." in markdown
+    assert "Package release: **NOT EVALUATED**" in markdown
+    assert "Release-policy note: Package release was not evaluated" in markdown
+    assert "behavioral study is not release-complete" not in markdown
+    assert "Baseline tasks that passed all required gates:" in markdown
+    assert "Candidate tasks that passed all required gates:" in markdown
+    assert "| Baseline full result | Candidate full result |" in markdown
+    assert "Paired outcome change |" in markdown
+    assert (
+        "Evidence integrity grade: **A** (evidence-link reconciliation and privacy "
+        "integrity; not a behavioral-quality score)" in markdown
+    )
+    assert "Evidence backend: **local Fugue ledger**" in markdown
+    assert result.local_evidence is not None
+    assert f".fugue/runtime/{result.local_evidence['run_id']}/evidence/" in markdown
+    assert "Portable evidence destination: `fugue-evidence` layout v1" in markdown
+    assert "`fugue://local-evidence/" in markdown
+    assert "No safe evidence links were available." not in markdown
+
+    first_pair = result.paired_cases[0]
+    assert first_pair.candidate is not None
+    hosted_id_attempt = replace(
+        first_pair.candidate,
+        weave_agent_root_call_id="hosted-agent-call",
+    )
+    hosted_id_result = replace(
+        result,
+        paired_cases=(
+            replace(first_pair, candidate=hosted_id_attempt),
+            *result.paired_cases[1:],
+        ),
+    )
+    with pytest.raises(ValueError, match="cannot claim hosted Agent Call IDs"):
+        _v3_canonical_attempt_rows(hosted_id_result)
+
+    governed = replace(
+        result,
+        decision_policy=parse_decision_policy(_decision_policy()),
+        decision=replace(
+            result.decision,
+            status="blocked",
+            recommendation="Complete the missing package gates.",
+        ),
+    )
+    governed_markdown = _result_markdown(governed)
+    assert "Package release: **HOLD**" in governed_markdown
+    assert (
+        "This local Study does not evaluate every package-release gate."
+        in governed_markdown
+    )
+    assert "Governed gate status: **BLOCKED**" in governed_markdown
+    assert (
+        "Governed gate recommendation: Complete the missing package gates."
+        in governed_markdown
+    )
+    assert "Package release decision: **BLOCKED**" not in governed_markdown
     approved = dict(captured["approved"])  # type: ignore[arg-type]
     assert approved["approval_required"] is False
     assert approved["approval_digest"] == ""
@@ -4290,10 +5485,7 @@ def test_local_execution_binding_reconciles_manifest_and_run_receipt(
     for row, record in zip(rows, records, strict=True):
         record.result_row_projection_digest = local_result_row_projection_digest(row)
     manifest.result_row_projection_set_digest = stable_digest(
-        [
-            [record.attempt_id, record.result_row_projection_digest]
-            for record in records
-        ]
+        [[record.attempt_id, record.result_row_projection_digest] for record in records]
     )
 
     def apply_conformance(
@@ -4353,9 +5545,7 @@ def test_local_execution_binding_reconciles_manifest_and_run_receipt(
             repo_root=tmp_path,
             run_id="local-run",
         )
-    conflicting_backend_rows = [
-        dict(row, evidence_backend="weave") for row in rows
-    ]
+    conflicting_backend_rows = [dict(row, evidence_backend="weave") for row in rows]
     with pytest.raises(RuntimeError, match="evidence backend"):
         _bind_local_execution_evidence(
             conflicting_backend_rows,
@@ -4440,9 +5630,7 @@ def test_local_checkpoint_verifies_and_persists_source_lock(
         "observed_digest": "a" * 64,
     }
 
-    unsigned = {
-        key: value for key, value in receipt.items() if key != "receipt_digest"
-    }
+    unsigned = {key: value for key, value in receipt.items() if key != "receipt_digest"}
     unsigned["source_drift"] = None
     receipt_path.write_text(
         json.dumps(
@@ -4547,8 +5735,20 @@ def test_v3_attempt_construction_rejects_exported_decision_field_mutation() -> N
         "status": "passed",
         "comparison_evaluation_status": "scored",
         "comparison_deterministic_scores": {"facts.answer_correct": True},
+        "comparison_score_details": {
+            "facts.answer_correct": {
+                "what": "Checks whether the answer is correct.",
+                "observed": "The host scorer matched the required facts.",
+                "why": "The outcome check passed.",
+            }
+        },
         "agent_response": "bounded answer",
         "cost_usd": 0.25,
+        "latency_sec": 1.5,
+        "usage": {"input_tokens": 100, "output_tokens": 25},
+        "cost_reconciliation_status": "resolved",
+        "latency_reconciliation_status": "resolved",
+        "usage_reconciliation_status": "resolved",
         "local_evidence_links": [
             {
                 "kind": kind,
@@ -4573,12 +5773,30 @@ def test_v3_attempt_construction_rejects_exported_decision_field_mutation() -> N
     attempt = _paired_attempt_view_v3(row)
     assert attempt is not None
     assert attempt.passed is True
+    assert attempt.cost_reconciliation_status == "resolved"
+    assert attempt.latency_reconciliation_status == "resolved"
+    assert attempt.usage_reconciliation_status == "resolved"
+    assert attempt.score_details["facts.answer_correct"].what == (
+        "Checks whether the answer is correct."
+    )
 
     mutations = (
         {"pass": False},
         {"comparison_deterministic_scores": {"facts.answer_correct": False}},
+        {
+            "comparison_score_details": {
+                "facts.answer_correct": {
+                    "what": "Altered criterion.",
+                    "observed": "The host scorer matched the required facts.",
+                    "why": "The outcome check passed.",
+                }
+            }
+        },
         {"agent_response": "altered excerpt"},
         {"cost_usd": 99.0},
+        {"cost_reconciliation_status": "unresolved"},
+        {"latency_reconciliation_status": "unresolved"},
+        {"usage_reconciliation_status": "unresolved"},
     )
     for mutation in mutations:
         altered = {**row, **mutation}
@@ -4588,12 +5806,58 @@ def test_v3_attempt_construction_rejects_exported_decision_field_mutation() -> N
     with pytest.raises(ValueError, match="decision projection digest"):
         replace(
             attempt,
-            score_explanations={
-                "facts.answer_correct": "altered explanation"
-            },
+            score_explanations={"facts.answer_correct": "altered explanation"},
         )
 
     serialized = attempt.to_dict()
+    assert serialized["cost_reconciliation_status"] == "resolved"
+    assert serialized["latency_reconciliation_status"] == "resolved"
+    assert serialized["usage_reconciliation_status"] == "resolved"
     serialized["cost_usd"] = 88.0
     with pytest.raises(ValueError, match="decision projection digest"):
         _paired_attempt_v3(serialized)
+
+
+def test_v3_attempt_reconciliation_statuses_are_source_authoritative() -> None:
+    recorded_metrics: dict[str, object] = {
+        "attempt_id": "4" * 64,
+        "status": "passed",
+        "cost_usd": 0.25,
+        "latency_sec": 1.5,
+        "usage": {"input_tokens": 100, "output_tokens": 25},
+        "local_usage_status": "available",
+        "weave_usage_status": "available",
+    }
+
+    projection = local_result_row_projection_v1(recorded_metrics)
+    for field_name in (
+        "cost_reconciliation_status",
+        "latency_reconciliation_status",
+        "usage_reconciliation_status",
+    ):
+        assert field_name not in projection
+
+    explicit_nulls = {
+        **recorded_metrics,
+        "cost_reconciliation_status": None,
+        "latency_reconciliation_status": None,
+        "usage_reconciliation_status": None,
+    }
+    null_projection = local_result_row_projection_v1(explicit_nulls)
+    assert null_projection == projection
+
+    published = {
+        **recorded_metrics,
+        "cost_reconciliation_status": "resolved",
+        "latency_reconciliation_status": "unresolved",
+        "usage_reconciliation_status": "unavailable",
+    }
+    published_projection = local_result_row_projection_v1(published)
+    assert published_projection["cost_reconciliation_status"] == "resolved"
+    assert published_projection["latency_reconciliation_status"] == "unresolved"
+    assert published_projection["usage_reconciliation_status"] == "unavailable"
+
+    with pytest.raises(ValueError, match="cost_reconciliation_status must be one of"):
+        local_result_row_projection_v1(
+            {**recorded_metrics, "cost_reconciliation_status": "available"}
+        )

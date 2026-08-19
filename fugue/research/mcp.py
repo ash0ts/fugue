@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 from collections.abc import Callable
+from importlib.resources import files
 from pathlib import Path
 from typing import Any
 
@@ -640,15 +641,14 @@ def run(repo_root: str | Path, *, env_file: str | Path | None = None) -> None:
 
 
 def _skill_instructions() -> str:
-    path = (
-        Path(__file__).resolve().parents[1]
-        / "resources"
-        / "agent-skills"
-        / "optimize-agent-with-fugue"
-        / "SKILL.md"
+    resource = files("fugue").joinpath(
+        "resources",
+        "agent-skills",
+        "optimize-agent-with-fugue",
+        "SKILL.md",
     )
     try:
-        text = path.read_text(encoding="utf-8")
+        text = resource.read_text(encoding="utf-8")
     except OSError as exc:  # pragma: no cover - packaging validation covers this
         raise ResearchError(
             "skill_unavailable",

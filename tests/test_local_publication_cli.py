@@ -72,6 +72,12 @@ def test_publish_weave_cli_preserves_result_digest_and_bytes(
     assert payload["local_manifest_digest"] == manifest.manifest_digest
     assert payload["target"]["entity"] == "wandb"
     assert payload["target"]["project"] == "local-result"
+    assert payload["target"]["destination"]["project_slug"] == ("wandb/local-result")
+    assert payload["target"]["destination"]["api_base_url"] == ("https://api.wandb.ai")
+    assert payload["target"]["destination"]["trace_base_url"] == (
+        "https://trace.wandb.ai"
+    )
+    assert payload["target"]["destination"]["app_base_url"] == ("https://wandb.ai")
     assert payload["status"] == "published"
 
 
@@ -116,3 +122,118 @@ def test_publish_weave_cli_reports_missing_optional_extra(
     assert payload["status"] == "blocked"
     assert payload["error_type"] == "missing_weave_extra"
     assert 'pip install "fugue[weave]"' in payload["message"]
+
+
+def test_publish_weave_cli_warns_about_the_privacy_boundary(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    _manifest_path, manifest = _canonical_manifest(tmp_path)
+    result_path, result = _result_fixture(tmp_path, manifest)
+    _patch_result_readers(monkeypatch, result)
+
+    def factory(_env):
+        return lambda _result, _manifest, target: _outcome(manifest, target)
+
+    monkeypatch.setattr(publication, "weave_publisher_from_environment", factory)
+
+    assert (
+        main(
+            [
+                "publish",
+                "weave",
+                result_path.as_posix(),
+                "--project",
+                "wandb/local-result",
+                "--repo-root",
+                tmp_path.as_posix(),
+                "--env-file",
+                (tmp_path / "missing.env").as_posix(),
+            ]
+        )
+        == 0
+    )
+
+    output = " ".join(capsys.readouterr().out.split())
+    assert "Privacy boundary" in output
+    assert "Raw local transcript and tool-event artifact files remain local" in output
+    assert "Local evidence manifest digest" in output
+
+
+def test_publish_weave_cli_binds_explicit_research_and_study_scope(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    _manifest_path, manifest = _canonical_manifest(tmp_path)
+    result_path, result = _result_fixture(tmp_path, manifest)
+    _patch_result_readers(monkeypatch, result)
+    observed = []
+
+    def factory(_env):
+        def publisher(_result, _manifest, target):
+            observed.append(target)
+            return _outcome(manifest, target)
+
+        return publisher
+
+    monkeypatch.setattr(publication, "weave_publisher_from_environment", factory)
+    assert (
+        main(
+            [
+                "publish",
+                "weave",
+                result_path.as_posix(),
+                "--project",
+                "wandb/fugue-experiments",
+                "--research-id",
+                "fugue-standalone-lab-v1",
+                "--study-id",
+                "prompt-change-live-v1",
+                "--json",
+                "--repo-root",
+                tmp_path.as_posix(),
+                "--env-file",
+                (tmp_path / "missing.env").as_posix(),
+            ]
+        )
+        == 0
+    )
+    payload = json.loads(capsys.readouterr().out)
+    assert observed[0].study_scope.research_id == "fugue-standalone-lab-v1"
+    assert observed[0].study_scope.study_id == "prompt-change-live-v1"
+    assert payload["target"]["study_scope"] == {
+        "research_id": "fugue-standalone-lab-v1",
+        "schema_version": 1,
+        "study_id": "prompt-change-live-v1",
+    }
+
+
+def test_publish_weave_cli_rejects_study_without_research(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _manifest_path, manifest = _canonical_manifest(tmp_path)
+    result_path, result = _result_fixture(tmp_path, manifest)
+    _patch_result_readers(monkeypatch, result)
+
+    with pytest.raises(
+        publication.LocalResultPublicationError,
+        match="--study-id requires --research-id",
+    ):
+        main(
+            [
+                "publish",
+                "weave",
+                result_path.as_posix(),
+                "--project",
+                "wandb/fugue-experiments",
+                "--study-id",
+                "orphan-study",
+                "--repo-root",
+                tmp_path.as_posix(),
+                "--env-file",
+                (tmp_path / "missing.env").as_posix(),
+            ]
+        )

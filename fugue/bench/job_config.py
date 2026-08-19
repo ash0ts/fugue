@@ -66,7 +66,7 @@ from fugue.bench.portable_runtime import read_runtime_lock as read_portable_runt
 from fugue.bench.runtime_manager import read_runtime_lock, render_runtime_compose
 from fugue.bench.runtime_provenance import (
     resolve_fugue_distribution_provenance,
-    resolve_fugue_source_provenance,
+    resolve_study_workspace_provenance,
 )
 from fugue.bench.sandbox_policy import (
     SANDBOX_POLICY_VERSION,
@@ -87,6 +87,11 @@ from fugue.bench.wandb_sandbox import (
     wandb_harbor_command,
 )
 from fugue.model_plane import (
+    OPENAI_PROJECT_ENV,
+    OPENAI_PROJECT_ID_ENV,
+    WANDB_INFERENCE_API_KEY_ENV,
+    WANDB_INFERENCE_BASE_URL_ENV,
+    WANDB_INFERENCE_PROJECT_ENV,
     ModelRoute,
     model_route_identity,
     resolve_harness_model_route,
@@ -95,11 +100,55 @@ from fugue.model_plane import (
     trace_destination_identity,
 )
 from fugue.preflight import HARBOR_VERSION
+from fugue.redaction import sensitive_key
 
 CONTEXT_RUNTIME_IMAGE = "fugue-context-runtime:0.1.0"
 CONTEXT_RUNTIME_SERVICE = "fugue-context"
 CONTEXT_CLIENT_PATH = Path(__file__).resolve().parents[1] / "context_client.py"
 PORTABLE_CONTEXT_RUNTIME_SCHEMA_VERSION = 1
+
+_WANDB_MODEL_ROUTING_ENV = frozenset(
+    {
+        WANDB_INFERENCE_BASE_URL_ENV,
+        WANDB_INFERENCE_PROJECT_ENV,
+        # Retain the documented legacy endpoint alias only for a selected W&B
+        # model route. Evidence endpoints use WANDB_BASE_URL and are scrubbed.
+        "WANDB_INFERENCE_BASE_URL",
+    }
+)
+_OPENAI_MODEL_ROUTING_ENV = frozenset(
+    {"OPENAI_BASE_URL", OPENAI_PROJECT_ENV, OPENAI_PROJECT_ID_ENV}
+)
+_ANTHROPIC_MODEL_ROUTING_ENV = frozenset({"ANTHROPIC_BASE_URL"})
+_BUILTIN_MODEL_ROUTING_ENV = frozenset(
+    {
+        *_WANDB_MODEL_ROUTING_ENV,
+        *_OPENAI_MODEL_ROUTING_ENV,
+        *_ANTHROPIC_MODEL_ROUTING_ENV,
+    }
+)
+_BUILTIN_MODEL_CREDENTIAL_ENV = frozenset(
+    {
+        "ANTHROPIC_API_KEY",
+        "OPENAI_API_KEY",
+        "WANDB_API_KEY",
+        WANDB_INFERENCE_API_KEY_ENV,
+    }
+)
+_LOCAL_EVIDENCE_ROUTING_ENV = frozenset(
+    {
+        "FUGUE_EVIDENCE_DESTINATION_DIGEST",
+        "FUGUE_EVIDENCE_DESTINATION_JSON",
+        "FUGUE_RESEARCH_EXPERIMENT_ID",
+        "FUGUE_RESULT_EVIDENCE_PROJECT",
+        "FUGUE_SOURCE_EVIDENCE_PROJECT",
+        "FUGUE_STUDY_CONSOLE_BACKLINK",
+        "FUGUE_WANDB_RESEARCH_ID",
+        "FUGUE_WANDB_STUDY_ID",
+        "OTEL_RESOURCE_ATTRIBUTES",
+        "WF_TRACE_SERVER_URL",
+    }
+)
 
 
 @dataclass(frozen=True)
@@ -192,11 +241,14 @@ def _build_jobs(
     workload_artifacts: list[Any] | None = None,
     scorer_refs: list[str] | None = None,
     asset_overlay: dict[str, str] | None = None,
+    study_workspace_provenance: dict[str, Any] | None = None,
     source_provenance: dict[str, Any] | None = None,
     scheduling_seed: str | None = None,
 ) -> list[RenderedJob]:
-    selected_source_provenance = source_provenance or (
-        resolve_fugue_source_provenance(repo_root)
+    selected_workspace_provenance = _selected_study_workspace_provenance(
+        repo_root=repo_root,
+        study_workspace=study_workspace_provenance,
+        legacy_source=source_provenance,
     )
     distribution_provenance = resolve_fugue_distribution_provenance()
     runtime_root = repo_root / ".fugue" / "runtime" / run_id
@@ -456,7 +508,7 @@ def _build_jobs(
                     ),
                     "scheduling_seed": scheduling_seed,
                     "sandbox_policy_version": SANDBOX_POLICY_VERSION,
-                    "fugue_source": selected_source_provenance,
+                    "study_workspace": selected_workspace_provenance,
                     "fugue_distribution": distribution_provenance,
                     **(
                         {"execution_limits": experiment.execution_limits.to_dict()}
@@ -671,12 +723,34 @@ def _build_jobs(
                         integration_ids=integration_binding.ids,
                         integration_provenance=integration_binding.provenance,
                         generated_runtime_files=(
+                            *binding.runtime_files,
                             *binding.compose_files,
                             *integration_binding.compose_files,
                         ),
                     )
                 )
     return rendered
+
+
+def _selected_study_workspace_provenance(
+    *,
+    repo_root: Path,
+    study_workspace: dict[str, Any] | None,
+    legacy_source: dict[str, Any] | None,
+) -> dict[str, Any]:
+    if (
+        study_workspace is not None
+        and legacy_source is not None
+        and study_workspace != legacy_source
+    ):
+        raise ValueError(
+            "study_workspace_provenance and legacy source_provenance disagree"
+        )
+    return (
+        study_workspace
+        or legacy_source
+        or resolve_study_workspace_provenance(repo_root)
+    )
 
 
 def _job_config(
@@ -1099,6 +1173,13 @@ def _job_env(
     sandbox_attestation: Mapping[str, Any] | None,
     expected_artifact_paths: list[str],
 ) -> dict[str, str]:
+    base_env = _harbor_host_environment(
+        base_env,
+        experiment=experiment,
+        route=route,
+        integration_binding=integration_binding,
+        component_required_env=_required_env_references(context_binding.env),
+    )
     # Study lineage reaches both the host-side publisher and the in-container
     # Agent. Evidence projects are canonical ExperimentSpec topology; the
     # duplicated Agent environment values are only transport.
@@ -1264,7 +1345,94 @@ def _job_env(
             if str(value) != f"${{{key}}}"
         }
     )
-    return env
+    return _harbor_host_environment(
+        env,
+        experiment=experiment,
+        route=route,
+        integration_binding=integration_binding,
+        component_required_env=_required_env_references(context_binding.env),
+    )
+
+
+def _harbor_host_environment(
+    base_env: Mapping[str, str],
+    *,
+    experiment: ExperimentSpec,
+    route: ModelRoute,
+    integration_binding: IntegrationBinding,
+    component_required_env: set[str] | None = None,
+) -> dict[str, str]:
+    """Scope W&B credentials and routing before launching local Harbor.
+
+    A local-evidence trial must not inherit another built-in model provider's
+    credential or an ambient W&B/Weave identity. The selected route retains
+    only its model-plane credential and routing. An integration may retain
+    only variables that its reviewed ``required_env`` contract rendered as
+    ``${NAME}`` references. The selected reviewed context contract receives
+    the same treatment. Hosted evidence keeps the historical environment
+    unchanged.
+    """
+
+    values = dict(base_env)
+    if experiment.evidence_mode != "local":
+        return values
+
+    integration_required = _required_env_references(integration_binding.env)
+    allowed = {*integration_required, *(component_required_env or set())}
+    if (
+        experiment.source_evidence_project
+        and values.get("FUGUE_SOURCE_EVIDENCE_PROJECT")
+        == experiment.source_evidence_project
+    ):
+        # A declared source project scopes the integration's task data. It is
+        # not an ambient destination for Fugue result publication.
+        allowed.add("FUGUE_SOURCE_EVIDENCE_PROJECT")
+    if route.provider == "wandb":
+        allowed.update(_WANDB_MODEL_ROUTING_ENV)
+        if values.get(WANDB_INFERENCE_API_KEY_ENV, "").strip():
+            allowed.add(WANDB_INFERENCE_API_KEY_ENV)
+        elif (
+            values.get("WANDB_API_KEY", "").strip()
+            and not values.get("FUGUE_WEAVE_API_KEY", "").strip()
+        ):
+            # The general key is the documented legacy fallback for W&B
+            # Inference. A dedicated evidence key disables that promotion.
+            allowed.add("WANDB_API_KEY")
+    else:
+        allowed.add(route.api_key_env)
+        allowed.update(
+            _OPENAI_MODEL_ROUTING_ENV
+            if route.provider == "openai"
+            else _ANTHROPIC_MODEL_ROUTING_ENV
+        )
+
+    for name in tuple(values):
+        if name in allowed:
+            continue
+        if sensitive_key(name) or _is_wandb_or_weave_host_env(name):
+            values.pop(name, None)
+    return values
+
+
+def _required_env_references(values: Mapping[str, str]) -> set[str]:
+    return {
+        name
+        for name, reference in values.items()
+        if reference == f"${{{name}}}"
+    }
+
+
+def _is_wandb_or_weave_host_env(name: str) -> bool:
+    return (
+        name in _BUILTIN_MODEL_CREDENTIAL_ENV
+        or name in _BUILTIN_MODEL_ROUTING_ENV
+        or name in _LOCAL_EVIDENCE_ROUTING_ENV
+        or name.startswith("WANDB_")
+        or name.startswith("WEAVE_")
+        or name.startswith("FUGUE_WANDB_")
+        or name.startswith("FUGUE_WEAVE_")
+        or name.startswith("OTEL_EXPORTER_OTLP_")
+    )
 
 
 def env_group(env: dict[str, str], run_name: str) -> str:
@@ -1429,6 +1597,12 @@ def _bind_fugue_context_runtime(
     service_name = str(descriptor["service"])
     mcp_port = int(descriptor["mcp_port"])
     portable_port = int(descriptor["portable_port"])
+    config_path = _materialized_context_runtime_config(
+        spec,
+        runtime_root=runtime_root,
+        job_name=job_name,
+        write=write,
+    )
     compose_path = runtime_root / "context-runtime" / f"{job_name}.yaml"
     compose = {
         "services": {
@@ -1449,6 +1623,8 @@ def _bind_fugue_context_runtime(
                     "fugue.context_server",
                     "--system",
                     spec.id,
+                    "--config",
+                    "/context-config/context-system.yaml",
                     "--prepared",
                     "/context",
                     "--repo-root",
@@ -1474,6 +1650,13 @@ def _bind_fugue_context_runtime(
                         "type": "bind",
                         "source": prepared.path.resolve().as_posix(),
                         "target": "/context",
+                        "read_only": True,
+                        "bind": {"create_host_path": False},
+                    },
+                    {
+                        "type": "bind",
+                        "source": config_path.resolve().as_posix(),
+                        "target": "/context-config/context-system.yaml",
                         "read_only": True,
                         "bind": {"create_host_path": False},
                     }
@@ -1514,8 +1697,31 @@ def _bind_fugue_context_runtime(
             ),
         ),
         compose_files=(*binding.compose_files, compose_path),
+        runtime_files=(*binding.runtime_files, config_path),
         runtime_descriptor=descriptor,
     )
+
+
+def _materialized_context_runtime_config(
+    spec: ContextSystemSpec,
+    *,
+    runtime_root: Path,
+    job_name: str,
+    write: bool,
+) -> Path:
+    if spec.path is None or not spec.path.is_file():
+        raise ValueError(f"context system {spec.id} has no immutable source config")
+    body = spec.path.read_bytes()
+    digest = hashlib.sha256(body).hexdigest()
+    path = (
+        runtime_root
+        / "context-runtime-config"
+        / f"{job_name}-{digest[:12]}.yaml"
+    )
+    if write:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_bytes(body)
+    return path
 
 
 def _render_trial_policy_compose(

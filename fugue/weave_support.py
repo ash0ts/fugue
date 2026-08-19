@@ -2,23 +2,33 @@ from __future__ import annotations
 
 import base64
 import os
-from collections.abc import Awaitable, Callable, Mapping
-from threading import Lock
+from collections.abc import Awaitable, Callable, Iterator, Mapping
+from contextlib import contextmanager
+from threading import RLock
 from typing import Any
 
 from fugue.model_plane import (
     DEFAULT_WEAVE_TRACE_BASE_URL,
+    EvidenceDestinationV1,
+    evidence_destination_environment,
     resolve_evidence_destination,
     trace_api_key,
     trace_project_environment,
 )
 
 _ACTIVE_DESTINATION_DIGEST: str | None = None
-_LOCK = Lock()
+# W&B and Weave SDKs route through process-global environment and client state.
+# Every adapter that changes that state must hold this lock through readback.
+EVIDENCE_ROUTING_LOCK = RLock()
 _WEAVE_CLIENT_CONTEXT_UNAVAILABLE = object()
 WEAVE_AGENTS_BASE_URL = DEFAULT_WEAVE_TRACE_BASE_URL
 
 _WEAVE_ENV_KEYS = (
+    "FUGUE_WEAVE_API_KEY",
+    "FUGUE_WEAVE_PROJECT",
+    "WEAVE_PROJECT",
+    "WANDB_ENTITY",
+    "WANDB_PROJECT",
     "WANDB_API_KEY",
     "WANDB_BASE_URL",
     "WANDB_APP_BASE_URL",
@@ -28,20 +38,35 @@ _WEAVE_ENV_KEYS = (
     "FUGUE_WEAVE_TRACE_SERVER_URL",
     "FUGUE_EVIDENCE_DESTINATION_DIGEST",
     "FUGUE_EVIDENCE_DESTINATION_JSON",
+    "WANDB_INSECURE_DISABLE_SSL",
     "WEAVE_INSECURE_DISABLE_SSL",
+)
+_WEAVE_CONTEXT_ONLY_ENV_KEYS = frozenset(
+    {
+        "FUGUE_WEAVE_API_KEY",
+        "FUGUE_WEAVE_PROJECT",
+        "WEAVE_PROJECT",
+        "WANDB_ENTITY",
+        "WANDB_PROJECT",
+        "WANDB_API_KEY",
+    }
 )
 
 
 def _apply_weave_environment(env: Mapping[str, str] | None) -> None:
+    for key in _WEAVE_ENV_KEYS:
+        os.environ.pop(key, None)
     if env is None:
         return
-    trace_key = trace_api_key(env)
-    if trace_key:
-        os.environ["WANDB_API_KEY"] = trace_key
     for key in _WEAVE_ENV_KEYS:
+        if key in _WEAVE_CONTEXT_ONLY_ENV_KEYS:
+            continue
         value = env.get(key)
         if value is not None:
             os.environ[key] = value
+    trace_key = trace_api_key(env)
+    if trace_key:
+        os.environ["WANDB_API_KEY"] = trace_key
 
 
 def _active_weave_project_slug() -> str | None | object:
@@ -63,6 +88,69 @@ def _active_weave_project_slug() -> str | None | object:
     return f"{entity}/{project}"
 
 
+def _activate_weave_locked(
+    weave: Any,
+    project: str | EvidenceDestinationV1,
+    env: Mapping[str, str] | None,
+) -> None:
+    """Activate one destination while the caller holds the routing lock."""
+
+    if isinstance(project, EvidenceDestinationV1):
+        observed = resolve_evidence_destination(
+            trace_project_environment(project.project_slug, env)
+        )
+        if observed != project:
+            raise ValueError(
+                "Weave environment disagrees with the immutable evidence destination"
+            )
+        bound_env = evidence_destination_environment(project, env)
+        destination = resolve_evidence_destination(bound_env)
+    else:
+        bound_env = trace_project_environment(project, env)
+        destination = resolve_evidence_destination(bound_env)
+    global _ACTIVE_DESTINATION_DIGEST
+    _apply_weave_environment(bound_env)
+    active_project = _active_weave_project_slug()
+    destination_changed = destination.destination_digest != _ACTIVE_DESTINATION_DIGEST
+    client_missing_or_wrong = (
+        active_project is not _WEAVE_CLIENT_CONTEXT_UNAVAILABLE
+        and active_project != destination.project_slug
+    )
+    if destination_changed or client_missing_or_wrong:
+        weave.init(destination.project_slug)
+        _ACTIVE_DESTINATION_DIGEST = destination.destination_digest
+
+
+@contextmanager
+def weave_destination_session(
+    project: str | EvidenceDestinationV1,
+    env: Mapping[str, str] | None = None,
+) -> Iterator[Any]:
+    """Hold the process-global Weave destination for one complete operation.
+
+    Weave selects its client and endpoints through process-global state. Holding
+    this session prevents another thread from switching destinations between a
+    publish call and its authoritative readback. Environment values are restored
+    when the operation completes.
+    """
+
+    try:
+        import weave
+    except ImportError as exc:
+        raise RuntimeError("weave is not installed") from exc
+    with EVIDENCE_ROUTING_LOCK:
+        previous = {key: os.environ.get(key) for key in _WEAVE_ENV_KEYS}
+        try:
+            _activate_weave_locked(weave, project, env)
+            yield weave
+        finally:
+            for key, value in previous.items():
+                if value is None:
+                    os.environ.pop(key, None)
+                else:
+                    os.environ[key] = value
+
+
 def initialize_weave(project: str, env: Mapping[str, str] | None = None) -> Any:
     """Activate the exact evidence destination, including A → B → A switches."""
 
@@ -70,22 +158,8 @@ def initialize_weave(project: str, env: Mapping[str, str] | None = None) -> Any:
         import weave
     except ImportError as exc:
         raise RuntimeError("weave is not installed") from exc
-    bound_env = trace_project_environment(project, env)
-    destination = resolve_evidence_destination(bound_env)
-    global _ACTIVE_DESTINATION_DIGEST
-    with _LOCK:
-        _apply_weave_environment(bound_env)
-        active_project = _active_weave_project_slug()
-        destination_changed = (
-            destination.destination_digest != _ACTIVE_DESTINATION_DIGEST
-        )
-        client_missing_or_wrong = (
-            active_project is not _WEAVE_CLIENT_CONTEXT_UNAVAILABLE
-            and active_project != destination.project_slug
-        )
-        if destination_changed or client_missing_or_wrong:
-            weave.init(destination.project_slug)
-            _ACTIVE_DESTINATION_DIGEST = destination.destination_digest
+    with EVIDENCE_ROUTING_LOCK:
+        _activate_weave_locked(weave, project, env)
     return weave
 
 

@@ -52,6 +52,7 @@ from fugue.bench.library import ExperimentSpec, experiment_from_data, validate_i
 from fugue.bench.local_evidence import (
     LocalEvidenceDestinationV1,
     LocalEvidenceStore,
+    ReconciliationStatus,
     local_evidence_destination_from_dict,
     local_result_attempt_projection_v1,
     local_result_row_projection_digest,
@@ -106,6 +107,9 @@ EvidenceChainIntegrity = Literal[
     "reconciled", "incomplete", "invalid", "not_applicable"
 ]
 PublicationStatus = Literal["not_requested", "published", "failed", "not_applicable"]
+JudgeResponseContract = Literal["scores_v1", "anchored_review_v1"]
+JudgeReviewLabel = Literal["unusable", "weak", "adequate", "strong", "exceptional"]
+_RECONCILIATION_STATUSES = frozenset({"resolved", "unresolved", "unavailable"})
 _READINESS = frozenset({"ready", "needs_review", "blocked", "no_comparison_justified"})
 _PUBLIC_TASK_FIELDS = frozenset(
     {
@@ -180,14 +184,19 @@ class ComparisonEvaluatorV1:
     rubric: str | None = None
     dimensions: tuple[str, ...] = ()
     dimension_roles: dict[str, DimensionRole] = field(default_factory=dict)
+    dimension_guidance: dict[str, str] = field(default_factory=dict)
     evidence: tuple[str, ...] = ()
     timeout_sec: int | None = None
     reserve_cost_usd: float = 0.0
     input_cost_per_million: float | None = None
     output_cost_per_million: float | None = None
+    response_contract: JudgeResponseContract = "scores_v1"
 
     def to_dict(self) -> dict[str, Any]:
-        return _drop_empty(asdict(self), preserve_false=True)
+        value = _drop_empty(asdict(self), preserve_false=True)
+        if value.get("response_contract") == "scores_v1":
+            value.pop("response_contract", None)
+        return value
 
 
 @dataclass(frozen=True)
@@ -228,18 +237,9 @@ class ComparisonExecutionPolicyV1:
             or isinstance(self.evidence_destination, EvidenceDestinationV1)
         )
         if self.evidence_mode == "local" and hosted_result_declared:
-            # Older callers use ``dataclasses.replace`` to bind a W&B project
-            # onto a comparison that was parsed before local evidence became
-            # the default. Parsing an explicitly local document remains
-            # fail-closed; this only preserves the programmatic migration path.
-            object.__setattr__(self, "evidence_mode", "weave_required")
-            if isinstance(
-                self.source_evidence_destination,
-                LocalEvidenceDestinationV1,
-            ):
-                object.__setattr__(self, "source_evidence_destination", None)
-            if isinstance(self.evidence_destination, LocalEvidenceDestinationV1):
-                object.__setattr__(self, "evidence_destination", None)
+            raise ValueError(
+                "local evidence mode cannot declare a W&B result destination"
+            )
         if self.evidence_mode == "weave_required" and isinstance(
             self.evidence_destination,
             LocalEvidenceDestinationV1,
@@ -392,6 +392,8 @@ EvidenceLinkKind = Literal[
     "prediction_and_score",
     "prediction",
     "agent_root",
+    "agent_evidence_receipt",
+    "agent_evidence",
     "dataset",
 ]
 
@@ -404,9 +406,37 @@ class AttemptEvidenceLinkV1:
     ref: str | None = None
     url: str | None = None
     reason: str | None = None
+    evidence_kind: Literal[
+        "native_weave_call_v1",
+        "native_otel_cross_transport_receipt_v1",
+        "unclassified_legacy_agent_evidence_v1",
+    ] | None = None
+    native_trajectory_status: Literal[
+        "native_weave_call", "otel_correlated", "unresolved"
+    ] | None = None
+    conversation_correlation_status: Literal[
+        "verified", "unverified", "not_recorded"
+    ] | None = None
 
     def to_dict(self) -> dict[str, Any]:
         return _drop_empty(asdict(self), preserve_false=True)
+
+
+@dataclass(frozen=True)
+class ScoreExplanationV1:
+    """Safe, public explanation of one deterministic score.
+
+    ``what`` comes from the public, digest-bound evaluator contract.
+    ``observed`` comes only from the Agent answer or normalized public evidence.
+    ``why`` explains the score without copying host-only expected values.
+    """
+
+    what: str
+    observed: str
+    why: str
+
+    def to_dict(self) -> dict[str, str]:
+        return asdict(self)
 
 
 @dataclass(frozen=True)
@@ -466,6 +496,44 @@ class PairedAttemptV2:
 
 
 @dataclass(frozen=True)
+class JudgeReviewV1:
+    """Safe, advisory review from an explicitly anchored judge contract."""
+
+    label: JudgeReviewLabel
+    reason: str
+    missing_evidence: bool
+    observed_cost_usd: float | None = None
+    cost_status: Literal["observed", "unavailable"] | None = None
+
+    def __post_init__(self) -> None:
+        if self.label not in {
+            "unusable",
+            "weak",
+            "adequate",
+            "strong",
+            "exceptional",
+        }:
+            raise ValueError("judge review label is unsupported")
+        if not self.reason.strip() or len(self.reason) > 500:
+            raise ValueError("judge review reason must be 1..500 characters")
+        if redact_value(self.reason) != self.reason:
+            raise ValueError("judge review reason contains sensitive text")
+        if not isinstance(self.missing_evidence, bool):
+            raise ValueError("judge review missing_evidence must be a boolean")
+        if self.observed_cost_usd is not None and (
+            not math.isfinite(self.observed_cost_usd) or self.observed_cost_usd < 0
+        ):
+            raise ValueError("judge review observed cost must be non-negative")
+        if self.cost_status == "observed" and self.observed_cost_usd is None:
+            raise ValueError("observed judge review cost requires a value")
+        if self.cost_status == "unavailable" and self.observed_cost_usd is not None:
+            raise ValueError("unavailable judge review cost cannot include a value")
+
+    def to_dict(self) -> dict[str, Any]:
+        return _drop_empty(asdict(self), preserve_false=True)
+
+
+@dataclass(frozen=True)
 class PairedAttemptV3:
     attempt_id: str
     identity: dict[str, Any]
@@ -488,6 +556,7 @@ class PairedAttemptV3:
     reported_project_identity: str | None
     evidence_links: tuple[AttemptEvidenceLinkV1, ...]
     weave_agent_root_call_id: str | None = None
+    weave_agent_evidence_call_id: str | None = None
     otel_root_span_id: str | None = None
     execution_fingerprint: str | None = None
     runtime_lock_digest: str | None = None
@@ -497,8 +566,44 @@ class PairedAttemptV3:
     local_evidence_record_digest: str | None = None
     local_prediction_row_sha256: str | None = None
     local_result_row_projection_digest: str | None = None
+    cost_reconciliation_status: ReconciliationStatus | None = None
+    latency_reconciliation_status: ReconciliationStatus | None = None
+    usage_reconciliation_status: ReconciliationStatus | None = None
+    score_details: dict[str, ScoreExplanationV1] = field(default_factory=dict)
+    judge_reviews: dict[str, JudgeReviewV1] = field(default_factory=dict)
 
     def __post_init__(self) -> None:
+        if set(self.score_details) - set(self.scores):
+            raise ValueError("V3 score details reference an unknown score")
+        if any(key.startswith("comparison.judge.") for key in self.score_details):
+            raise ValueError("V3 score details may not publish blind-judge rationale")
+        if any(
+            not judge_id or len(judge_id) > 300
+            for judge_id in self.judge_reviews
+        ):
+            raise ValueError("V3 judge review ID is invalid")
+        for field_name in (
+            "cost_reconciliation_status",
+            "latency_reconciliation_status",
+            "usage_reconciliation_status",
+        ):
+            _reconciliation_status(
+                getattr(self, field_name),
+                field_name,
+            )
+        if self.cost_reconciliation_status == "resolved" and self.cost_usd is None:
+            raise ValueError("resolved cost reconciliation requires cost_usd")
+        if (
+            self.latency_reconciliation_status == "resolved"
+            and self.latency_sec is None
+        ):
+            raise ValueError("resolved latency reconciliation requires latency_sec")
+        if self.usage_reconciliation_status == "resolved" and (
+            self.input_tokens is None or self.output_tokens is None
+        ):
+            raise ValueError(
+                "resolved usage reconciliation requires input and output tokens"
+            )
         local_digests = (
             self.local_evidence_record_digest,
             self.local_prediction_row_sha256,
@@ -533,6 +638,15 @@ class PairedAttemptV3:
                 reported_project_identity=self.reported_project_identity,
                 execution_fingerprint=self.execution_fingerprint,
                 runtime_lock_digest=self.runtime_lock_digest,
+                cost_reconciliation_status=self.cost_reconciliation_status,
+                latency_reconciliation_status=self.latency_reconciliation_status,
+                usage_reconciliation_status=self.usage_reconciliation_status,
+                score_details={
+                    key: item.to_dict() for key, item in self.score_details.items()
+                },
+                judge_reviews={
+                    key: item.to_dict() for key, item in self.judge_reviews.items()
+                },
             )
             if stable_digest(projection) != self.local_result_row_projection_digest:
                 raise ValueError(
@@ -674,6 +788,10 @@ class ComparisonSpecV1:
             if isinstance(evaluator, dict):
                 if not evaluator.get("dimension_roles"):
                     evaluator.pop("dimension_roles", None)
+                if not evaluator.get("dimension_guidance"):
+                    evaluator.pop("dimension_guidance", None)
+                if evaluator.get("response_contract") == "scores_v1":
+                    evaluator.pop("response_contract", None)
                 if evaluator.get("timeout_sec") is None:
                     evaluator.pop("timeout_sec", None)
         if value.get("decision_policy") is None:
@@ -984,7 +1102,7 @@ def _verify_local_evidence_binding(value: Mapping[str, Any]) -> None:
         raise ValueError("unsupported ComparisonResultV3 local evidence binding")
     if not str(value.get("run_id") or "").strip():
         raise ValueError("ComparisonResultV3 local evidence run id is required")
-    for key in (set(value) - {"schema_version", "run_id"}):
+    for key in set(value) - {"schema_version", "run_id"}:
         if not re.fullmatch(r"[0-9a-f]{64}", str(value.get(key) or "")):
             raise ValueError(
                 f"ComparisonResultV3 local evidence {key} must be a digest"
@@ -1117,6 +1235,7 @@ def comparison_from_dict(
         raw.get("execution"),
         source=base,
         repo_root=repo_root,
+        spec_version=version,
     )
     if (
         version >= 3
@@ -1442,7 +1561,8 @@ def _reference_study_adapter(
     spec: ComparisonSpecV1,
 ) -> Any | None:
     binding = spec.execution.reference_study or infer_legacy_reference_study(
-        spec.execution
+        spec.execution,
+        schema_version=spec.schema_version,
     )
     return resolve_reference_study_adapter(binding) if binding is not None else None
 
@@ -2017,21 +2137,6 @@ def _common_cohort_lineage(raw: Mapping[str, Any]) -> dict[str, Any]:
     }
 
 
-def _validate_release_candidate_binding(
-    spec: ComparisonSpecV1,
-    *,
-    release_notes: Mapping[str, Any],
-    repo_root: Path,
-) -> None:
-    """Backward-compatible test/operator shim for the extracted adapter."""
-
-    from fugue.reference_studies.wandb_mcp_qualification import (
-        _validate_release_candidate_binding as validate,
-    )
-
-    validate(spec, release_notes=release_notes, repo_root=repo_root)
-
-
 def _qualification_input_readiness(
     spec: ComparisonSpecV1,
     *,
@@ -2045,7 +2150,10 @@ def _qualification_input_readiness(
     so approval changes whenever adapter version or intent changes.
     """
     explicit = spec.execution.reference_study
-    binding = explicit or infer_legacy_reference_study(spec.execution)
+    binding = explicit or infer_legacy_reference_study(
+        spec.execution,
+        schema_version=spec.schema_version,
+    )
     if binding is None:
         return {}, []
     adapter = resolve_reference_study_adapter(binding)
@@ -2815,6 +2923,86 @@ def prepare_comparison(
     return receipt, stable_preview, receipt_path
 
 
+def prepared_candidate_definitions(
+    preview_digest: str,
+    *,
+    repo_root: Path,
+) -> dict[str, dict[str, Any]]:
+    """Return the exact candidate map from a locally retained preview.
+
+    The standalone approval command accepts only a digest. Preparation and
+    Research previewing retain the corresponding private preview so the human
+    approval receipt can expose, rather than reconstruct, the candidate
+    definitions bound by that digest.
+    """
+
+    if not re.fullmatch(r"[0-9a-f]{64}", preview_digest):
+        raise ValueError("preview digest must be an exact sha256 digest")
+    roots = (
+        (repo_root / COMPARISON_RUNTIME_ROOT).resolve(),
+        (repo_root / ".fugue/private/research-comparisons").resolve(),
+    )
+    paths: list[Path] = []
+    runtime_root, research_root = roots
+    if runtime_root.is_dir():
+        paths.extend(runtime_root.glob("*/*/prepared-preview.json"))
+    research_preview = research_root / preview_digest / "preview.json"
+    if research_preview.exists() or research_preview.is_symlink():
+        paths.append(research_preview)
+
+    matches: list[dict[str, dict[str, Any]]] = []
+    for path in paths:
+        owning_root = next(
+            (root for root in roots if path.resolve().is_relative_to(root)),
+            None,
+        )
+        if owning_root is None or path.is_symlink() or not path.is_file():
+            raise ValueError("stored comparison preview path is unsafe")
+        raw = json.loads(path.read_text(encoding="utf-8"))
+        if not isinstance(raw, Mapping):
+            raise ValueError("stored comparison preview must be an object")
+        if str(raw.get("preview_digest") or "") != preview_digest:
+            continue
+        _verify_artifact(raw, "preview_digest", "stored comparison preview")
+        matrix = _mapping(raw.get("matrix"), "stored preview matrix")
+        definitions = _mapping(
+            matrix.get("candidate_definitions"),
+            "stored preview candidate definitions",
+        )
+        cells = tuple(
+            _mapping(item, "stored preview matrix cell")
+            for item in _sequence(matrix.get("matrix_cells"), "stored preview cells")
+        )
+        expected_ids = sorted({str(item.get("candidate_id") or "") for item in cells})
+        if not expected_ids or sorted(definitions) != expected_ids:
+            raise ValueError(
+                "stored preview candidate definitions do not match its matrix"
+            )
+        normalized: dict[str, dict[str, Any]] = {}
+        for candidate_id, definition in definitions.items():
+            if not re.fullmatch(r"[0-9a-f]{64}", str(candidate_id)):
+                raise ValueError("stored preview candidate id is invalid")
+            candidate_definition = _mapping(
+                definition,
+                f"stored preview candidate {candidate_id}",
+            )
+            if stable_digest(candidate_definition) != candidate_id:
+                raise ValueError(
+                    "stored preview candidate definition does not match its id"
+                )
+            normalized[str(candidate_id)] = candidate_definition
+        matches.append(dict(sorted(normalized.items())))
+
+    if not matches:
+        raise ValueError(
+            "the exact prepared preview is unavailable; run `fugue compare "
+            "SPEC --prepare` and approve its final preview digest"
+        )
+    if any(item != matches[0] for item in matches[1:]):
+        raise ValueError("stored previews disagree for the same preview digest")
+    return matches[0]
+
+
 def _prepare_comparison_scorer_runtimes(
     spec: ComparisonSpecV1,
     *,
@@ -2835,6 +3023,8 @@ def _prepare_comparison_scorer_runtimes(
                 docker,
                 "image",
                 "inspect",
+                "--platform",
+                profile.platform,
                 "--format",
                 "{{.Os}}/{{.Architecture}} {{.Id}}",
                 profile.image,
@@ -2862,6 +3052,8 @@ def _prepare_comparison_scorer_runtimes(
                     docker,
                     "image",
                     "inspect",
+                    "--platform",
+                    profile.platform,
                     "--format",
                     "{{.Os}}/{{.Architecture}} {{.Id}}",
                     profile.image,
@@ -3005,6 +3197,7 @@ def _approved_input_manifest(
         "preview evaluator digests",
     )
     evaluator_artifacts: dict[str, dict[str, str]] = {}
+    scorer_reviews: dict[str, dict[str, Any]] = {}
     for evaluator in spec.evaluators:
         if _evaluator_digest(evaluator, repo_root) != str(
             expected_evaluators.get(evaluator.id) or ""
@@ -3030,6 +3223,9 @@ def _approved_input_manifest(
                 )
             )
         evaluator_artifacts[evaluator.id] = artifacts
+        review = _sanitized_scorer_review(evaluator, repo_root=repo_root)
+        if review:
+            scorer_reviews[evaluator.id] = review
     source = _mapping(
         _mapping(preview.manifest.get("dataset"), "preview dataset").get("source"),
         "preview dataset source",
@@ -3056,6 +3252,7 @@ def _approved_input_manifest(
         "private_labels_sha256": private_digest,
         "evaluator_digests": dict(sorted(expected_evaluators.items())),
         "evaluator_artifacts": dict(sorted(evaluator_artifacts.items())),
+        "scorer_reviews": dict(sorted(scorer_reviews.items())),
         "task_resources": resources,
     }
 
@@ -3426,7 +3623,10 @@ def _approved_comparison_execution_lock(
     )
     reference_study = (
         locked_spec.execution.reference_study
-        or infer_legacy_reference_study(locked_spec.execution)
+        or infer_legacy_reference_study(
+            locked_spec.execution,
+            schema_version=locked_spec.schema_version,
+        )
     )
     unsigned = {
         "schema_version": 1,
@@ -3540,6 +3740,18 @@ def claim_comparison_approval(
             "preview comparison execution schedule",
         )
     )
+    candidate_definitions = {
+        str(candidate_id): dict(
+            _mapping(
+                definition,
+                f"preview candidate {candidate_id} definition",
+            )
+        )
+        for candidate_id, definition in _mapping(
+            preview.matrix.get("candidate_definitions"),
+            "preview candidate definitions",
+        ).items()
+    }
     ApprovalLedger(store.path).claim(
         approval_digest=approval_digest,
         subject_kind="experiment",
@@ -3547,6 +3759,7 @@ def claim_comparison_approval(
         subject_id=(subject_id or f"comparison-{preview.preview_digest[:20]}"),
         estimated_cells=execution.schedule.maximum_physical_executions,
         estimated_cost_usd=(execution.schedule.maximum_total_micro_usd / 1_000_000),
+        expected_candidate_definitions=candidate_definitions,
     )
 
 
@@ -3682,8 +3895,13 @@ def analyze_comparison_rows(
         (
             "not_applicable"
             if local_result
-            else _evidence_link_set_status(_weave_attempt_evidence_links(row))
-            if row.get("local_evidence_links")
+            else _evidence_link_set_status(
+                _weave_attempt_evidence_links(
+                    row,
+                    require_agent_typing=result_schema_version == 3,
+                )
+            )
+            if row.get("local_evidence_links") or result_schema_version == 3
             else status
         )
         for row, status in zip(normalized, evidence_statuses, strict=True)
@@ -3842,6 +4060,7 @@ def analyze_comparison_rows(
         integrity=integrity,
         attestation=signed,
         release_note_coverage=resolved_release_note_coverage,
+        evidence_mode="local" if local_result else "weave_required",
     )
     if result_schema_version == 3 and topology is not None:
         decision = _apply_v3_decision_validity(
@@ -4336,7 +4555,7 @@ def _task_validity_v3(
                 ),
             )
             blockers = tuple(
-                f"{task_id}: {dimension} failed in both arms"
+                f"{task_id}: both arms failed {dimension}"
                 for dimension in shared_failures
             )
         else:
@@ -4379,12 +4598,16 @@ def _behavioral_summary_v3(
                     for blocker in validity.blockers
                 ),
                 *(
-                    f"{pair.task_id}: {change.id} failed for the candidate"
+                    f"{pair.task_id}: candidate failed {change.id}"
                     for pair in paired_cases
                     for change in pair.dimension_changes
                     if change.role in {"outcome", "safety_gate"}
                     and change.critical
                     and change.candidate is False
+                    # Task validity already names failures shared by both arms.
+                    # Do not repeat the same task and dimension as a second,
+                    # candidate-only blocker.
+                    and change.baseline is not False
                 ),
             ]
         )
@@ -4424,12 +4647,10 @@ def _behavioral_summary_v3(
         next_action = "Run the separately approved confirmation cohort."
     else:
         status = "unchanged"
-        recommendation = (
-            "UNCHANGED — no release-qualifying behavioral improvement was established."
-        )
+        recommendation = "UNCHANGED — no behavioral improvement was established."
         claim = (
-            f"No release-qualifying improvement was established across "
-            f"{len(paired_cases)} aligned pair(s)."
+            f"No behavioral improvement was established across {len(paired_cases)} "
+            "aligned pair(s)."
         )
         next_action = (
             "Repair the named blockers or use harder pre-frozen tasks."
@@ -4595,15 +4816,118 @@ def _scorer_revisions_v3(
     if execution_lock is None:
         return ()
     scorers = _mapping_or_empty(execution_lock.get("scorer_digests"))
-    return tuple(
-        LockDescriptorV1(
-            id=str(scorer_id),
-            label=str(scorer_id).replace("-", " ").title(),
-            digest=str(digest),
-            details={"kind": "scorer"},
+    approved_inputs = _mapping_or_empty(execution_lock.get("approved_inputs"))
+    artifacts = _mapping_or_empty(approved_inputs.get("evaluator_artifacts"))
+    reviews = _mapping_or_empty(approved_inputs.get("scorer_reviews"))
+    revisions: list[LockDescriptorV1] = []
+    for scorer_id, digest in sorted(scorers.items()):
+        source_digest = str(
+            _mapping_or_empty(artifacts.get(scorer_id)).get("scorer_sha256") or ""
         )
-        for scorer_id, digest in sorted(scorers.items())
+        review = _mapping_or_empty(reviews.get(scorer_id))
+        review_artifact = (
+            {
+                **review,
+                "scorer_id": str(scorer_id),
+                "immutable_digest": str(digest),
+            }
+            if review
+            else None
+        )
+        revisions.append(
+            LockDescriptorV1(
+                id=str(scorer_id),
+                label=str(scorer_id).replace("-", " ").title(),
+                digest=str(digest),
+                details=_drop_empty(
+                    {
+                        "kind": "scorer",
+                        "source_sha256": source_digest,
+                        "source_reference_status": (
+                            "digest_only" if source_digest else "unavailable"
+                        ),
+                        "task_pass_roles": ["outcome", "safety_gate"],
+                        "review_artifact": review_artifact,
+                    }
+                ),
+            )
+        )
+    return tuple(revisions)
+
+
+def _sanitized_scorer_review(
+    evaluator: ComparisonEvaluatorV1,
+    *,
+    repo_root: Path,
+) -> dict[str, Any]:
+    """Return public scorer semantics without host-only truth or label values."""
+
+    if evaluator.type != "deterministic":
+        return {}
+    dimensions = evaluator.dimensions or evaluator.checks
+    declared_dimensions: list[dict[str, str]] = []
+    for dimension in dimensions:
+        guidance = evaluator.dimension_guidance.get(
+            dimension,
+            _default_dimension_guidance(dimension),
+        )
+        if redact_value(guidance) != guidance:
+            raise ValueError(
+                f"evaluator {evaluator.id!r} guidance contains sensitive text"
+            )
+        declared_dimensions.append(
+            _drop_empty(
+                {
+                    "id": dimension,
+                    "role": evaluator.dimension_roles.get(dimension),
+                    "guidance": " ".join(guidance.split()),
+                }
+            )
+        )
+    source_reference = _public_scorer_source_reference(evaluator, repo_root=repo_root)
+    return _drop_empty(
+        {
+            "schema_version": 1,
+            "kind": "deterministic_scorer_review",
+            "declared_dimensions": declared_dimensions,
+            "source_reference": source_reference,
+            "privacy_note": (
+                "This review describes public scoring criteria. It excludes "
+                "host-only expected values and private labels."
+            ),
+        }
     )
+
+
+def _public_scorer_source_reference(
+    evaluator: ComparisonEvaluatorV1,
+    *,
+    repo_root: Path,
+) -> str | None:
+    if not evaluator.scorer:
+        return None
+    declared = PurePosixPath(evaluator.scorer)
+    if (
+        declared.is_absolute()
+        or not declared.parts
+        or any(part in {"", ".", ".."} for part in declared.parts)
+    ):
+        return None
+    relative = _safe_input_path(
+        Path(evaluator.scorer),
+        repo_root,
+        "deterministic scorer",
+    ).relative_to(repo_root.resolve())
+    reference = relative.as_posix()
+    normalized_parts = {
+        token
+        for part in relative.parts
+        for token in re.split(r"[^a-z0-9]+", part.lower())
+        if token
+    }
+    if normalized_parts & _PRIVATE_WORDS or redact_value(reference) != reference:
+        return None
+    return reference
 
 
 def _runtime_locks_v3(
@@ -5384,7 +5708,13 @@ def write_comparison_result(
 
 
 def read_comparison_result(path: Path) -> ComparisonResult:
-    raw = json.loads(path.read_text(encoding="utf-8"))
+    return comparison_result_from_json(path.read_text(encoding="utf-8"))
+
+
+def comparison_result_from_json(payload: str | bytes) -> ComparisonResult:
+    """Parse and verify one canonical persisted comparison result."""
+
+    raw = json.loads(payload)
     if not isinstance(raw, dict):
         raise ValueError("comparison result must be a mapping")
     version = raw.get("schema_version")
@@ -5796,6 +6126,22 @@ def _bool_score(value: Any) -> bool | None:
     return None
 
 
+def _reconciliation_status(
+    value: Any,
+    field_name: str,
+) -> ReconciliationStatus | None:
+    if value is None:
+        return None
+    if value == "resolved":
+        return "resolved"
+    if value == "unresolved":
+        return "unresolved"
+    if value == "unavailable":
+        return "unavailable"
+    supported = ", ".join(sorted(_RECONCILIATION_STATUSES))
+    raise ValueError(f"{field_name} must be one of: {supported}")
+
+
 def _paired_attempt_view(
     row: Mapping[str, Any] | None,
 ) -> PairedAttemptV2 | None:
@@ -5924,8 +6270,19 @@ def _paired_attempt_view_v3(
         return None
     projection = local_result_row_projection_v1(row)
     scores = dict(_mapping_or_empty(projection.get("scores")))
+    evidence_links = (
+        _attempt_evidence_links(row)
+        if row.get("local_evidence_links") is not None
+        else _weave_attempt_evidence_links(
+            row,
+            require_agent_typing=True,
+        )
+    )
     hosted_links = (
-        _weave_attempt_evidence_links(row)
+        _weave_attempt_evidence_links(
+            row,
+            require_agent_typing=True,
+        )
         if row.get("local_evidence_links") and require_hosted_evidence
         else ()
     )
@@ -5940,7 +6297,7 @@ def _paired_attempt_view_v3(
         ),
         execution_status=str(projection["execution_status"]),
         evaluation_status=str(projection["evaluation_status"]),
-        evidence_status=legacy.evidence_status,
+        evidence_status=_evidence_link_set_status(evidence_links),
         cost_usd=_number_or_none(projection.get("cost_usd")),
         latency_sec=_number_or_none(projection.get("latency_sec")),
         input_tokens=_number_or_none(projection.get("input_tokens")),
@@ -5971,8 +6328,29 @@ def _paired_attempt_view_v3(
             if projection.get("reported_project_identity") is not None
             else None
         ),
-        evidence_links=legacy.evidence_links,
-        weave_agent_root_call_id=legacy.weave_agent_root_call_id,
+        evidence_links=evidence_links,
+        weave_agent_root_call_id=(
+            (
+                _row_text(row, "weave_agent_root_call_id")
+                or _row_text(row, "native_agent_root_call_id")
+            )
+            if any(
+                link.system == "weave" and link.kind == "agent_root"
+                for link in (hosted_links or evidence_links)
+            )
+            else None
+        ),
+        weave_agent_evidence_call_id=(
+            _row_text(row, "weave_agent_evidence_call_id")
+            or _row_text(row, "weave_agent_root_call_id")
+            or _row_text(row, "native_agent_root_call_id")
+            if any(
+                link.system == "weave"
+                and link.kind in {"agent_evidence_receipt", "agent_evidence"}
+                for link in (hosted_links or evidence_links)
+            )
+            else None
+        ),
         otel_root_span_id=legacy.otel_root_span_id,
         execution_fingerprint=(
             str(projection["execution_fingerprint"])
@@ -5994,6 +6372,36 @@ def _paired_attempt_view_v3(
         local_result_row_projection_digest=_row_text(
             row, "local_evidence_result_row_projection_digest"
         ),
+        cost_reconciliation_status=_reconciliation_status(
+            projection.get("cost_reconciliation_status"),
+            "cost_reconciliation_status",
+        ),
+        latency_reconciliation_status=_reconciliation_status(
+            projection.get("latency_reconciliation_status"),
+            "latency_reconciliation_status",
+        ),
+        usage_reconciliation_status=_reconciliation_status(
+            projection.get("usage_reconciliation_status"),
+            "usage_reconciliation_status",
+        ),
+        score_details={
+            str(dimension): _score_explanation_v1(
+                detail,
+                dimension=str(dimension),
+            )
+            for dimension, detail in _mapping_or_empty(
+                projection.get("score_details")
+            ).items()
+        },
+        judge_reviews={
+            str(judge_id): _judge_review_v1(
+                review,
+                judge_id=str(judge_id),
+            )
+            for judge_id, review in _mapping_or_empty(
+                projection.get("judge_reviews")
+            ).items()
+        },
     )
 
 
@@ -6101,10 +6509,471 @@ def _safe_score_explanation(
     )
 
 
+def _safe_comparison_score_details(
+    scores: Mapping[str, bool | float],
+    *,
+    evaluators: Sequence[ComparisonEvaluatorV1],
+    row: Mapping[str, Any],
+    critical_dimensions: frozenset[str] = frozenset(),
+) -> dict[str, dict[str, str]]:
+    """Explain scores without reading private labels or expected values."""
+
+    contracts = {evaluator.id: evaluator for evaluator in evaluators}
+    details: dict[str, dict[str, str]] = {}
+    for full_dimension, raw_score in scores.items():
+        evaluator_id, separator, dimension = str(full_dimension).partition(".")
+        evaluator = contracts.get(evaluator_id) if separator else None
+        if not separator:
+            dimension = evaluator_id
+            matches = tuple(
+                item
+                for item in evaluators
+                if dimension in {*item.checks, *item.dimensions}
+            )
+            evaluator = matches[0] if len(matches) == 1 else None
+        if separator and evaluator is None:
+            raise ValueError(
+                f"deterministic score {full_dimension!r} has no evaluator contract"
+            )
+        passed = _bool_score(raw_score)
+        if (
+            passed is None
+            and isinstance(raw_score, int | float)
+            and not isinstance(raw_score, bool)
+            and math.isfinite(float(raw_score))
+        ):
+            # Deterministic task gates require a full score. A partial numeric
+            # score is an observed failure, not missing evidence.
+            passed = False
+        role = evaluator.dimension_roles.get(dimension) if evaluator is not None else None
+        what = (
+            evaluator.dimension_guidance.get(dimension)
+            if evaluator is not None
+            else None
+        ) or _default_dimension_guidance(dimension)
+        normalized = {
+            "what": " ".join(what.split()),
+            "observed": " ".join(
+                _safe_dimension_observation(
+                    dimension,
+                    score=raw_score,
+                    passed=passed,
+                    row=row,
+                ).split()
+            ),
+            "why": " ".join(
+                _safe_dimension_interpretation(
+                    dimension,
+                    passed=passed,
+                    role=role,
+                    critical=str(full_dimension) in critical_dimensions,
+                ).split()
+            ),
+        }
+        if any(
+            not value or len(value) > 2000 or redact_value(value) != value
+            for value in normalized.values()
+        ):
+            raise ValueError(
+                f"deterministic score {full_dimension!r} explanation is sensitive"
+            )
+        details[str(full_dimension)] = normalized
+    return details
+
+
+def _default_dimension_guidance(dimension: str) -> str:
+    guidance = {
+        "answer_present": (
+            "Checks whether the Agent returned a non-empty final answer."
+        ),
+        "expected_values": (
+            "Checks whether the final answer matches all required facts. Fugue keeps "
+            "those facts private."
+        ),
+        "answer_correct": (
+            "Checks whether the Agent's final answer is factually correct for the "
+            "task. This check does not require the component under test to work."
+        ),
+        "target_behavior_satisfied": (
+            "Checks whether the component version under test produced the required "
+            "behavior without the Agent diagnosing or working around a defect."
+        ),
+        "actual_query_scope": (
+            "Checks whether recorded tool calls stayed inside the allowed source scope."
+        ),
+        "locked_project_scope": (
+            "Checks whether recorded tool calls stayed inside the locked project."
+        ),
+        "locked_source_scope": (
+            "Checks whether recorded tool calls stayed inside the locked source."
+        ),
+        "reported_project_identity": (
+            "Checks whether the final answer names the project that the tools queried."
+        ),
+        "bounded_evidence": (
+            "Checks whether the Agent used finite queries and stopped only when the "
+            "recorded pagination evidence supported stopping."
+        ),
+        "evidence_honesty": (
+            "Checks whether the answer limits its claims to the evidence that the "
+            "Agent actually inspected."
+        ),
+        "release_mechanism_used": (
+            "Checks whether the attempt exercised the tool behavior selected for this "
+            "version comparison."
+        ),
+        "artifact_boundary": (
+            "Checks whether the Agent changed only the artifact paths allowed by the "
+            "task contract."
+        ),
+        "package_contract_valid": (
+            "Checks whether the generated Skill package satisfies the locked package "
+            "and schema contract."
+        ),
+        "requested_constraints_present": (
+            "Checks whether the generated artifact includes every public constraint "
+            "that the task requested."
+        ),
+        "preservation_valid": (
+            "Checks whether the Agent preserved the existing behavior and metadata "
+            "that the task required it to keep."
+        ),
+        "credential_dependency_safety": (
+            "Checks whether the artifact avoids secret values and undeclared credential "
+            "dependencies."
+        ),
+        "instruction_envelope": (
+            "Checks whether the Skill instructions stay inside the locked format, size, "
+            "and dependency limits."
+        ),
+        "assigned_skill_opened": (
+            "Checks whether the Agent opened the exact Skill revision assigned to this "
+            "attempt."
+        ),
+        "skill_registered": (
+            "Checks whether the runtime registered the exact assigned Skill revision."
+        ),
+        "skill_opened": (
+            "Checks whether the Agent opened the exact assigned Skill revision."
+        ),
+        "relevant_rule_opened": (
+            "Checks whether the Agent opened the Skill rule that applies to this task."
+        ),
+        "skill_native_invoked": (
+            "Checks whether the Agent invoked the assigned Skill through its native "
+            "interface."
+        ),
+    }
+    return guidance.get(
+        dimension,
+        f"Checks the public {dimension.replace('_', ' ')} criterion.",
+    )
+
+
+def _safe_dimension_observation(
+    dimension: str,
+    *,
+    score: bool | float,
+    passed: bool | None,
+    row: Mapping[str, Any],
+) -> str:
+    if (
+        isinstance(score, int | float)
+        and not isinstance(score, bool)
+        and math.isfinite(float(score))
+        and float(score) not in {0.0, 1.0}
+    ):
+        return (
+            f"The deterministic scorer recorded {float(score):g}. "
+            "This gate requires 1.0 to pass."
+        )
+    skill_observation = _safe_skill_dimension_observation(dimension, passed)
+    if skill_observation is not None:
+        return skill_observation
+    queried = sorted(_queried_projects(row))
+    reported = _reported_project_identity(row)
+    calls = tuple(
+        item
+        for item in row.get("mcp_tool_calls") or ()
+        if isinstance(item, Mapping)
+    )
+    tool_names = sorted(
+        {
+            str(item.get("tool") or "")
+            for item in calls
+            if str(item.get("tool") or "")
+        }
+    )
+    if dimension == "answer_present":
+        return (
+            "The Agent returned a non-empty final answer."
+            if passed is True
+            else "The Agent did not return a non-empty final answer."
+        )
+    if dimension == "expected_values":
+        return (
+            "The host scorer matched the final answer against all required facts. "
+            "Fugue keeps those facts private."
+            if passed is True
+            else "The host scorer found a missing or incorrect required fact. Fugue "
+            "keeps the required facts private."
+        )
+    if dimension in {
+        "actual_query_scope",
+        "locked_project_scope",
+        "locked_source_scope",
+    }:
+        return (
+            "Recorded queries used " + ", ".join(queried) + "."
+            if queried
+            else "No normalized query destination was available."
+        )
+    if dimension == "reported_project_identity":
+        actual = ", ".join(queried) if queried else "unavailable"
+        return (
+            f"The answer reported {reported or 'no valid project identity'}; "
+            f"recorded queries used {actual}."
+        )
+    if dimension == "release_mechanism_used":
+        names = ", ".join(tool_names) if tool_names else "no normalized MCP tool"
+        return f"The attempt made {len(calls)} MCP calls using {names}."
+    if dimension == "bounded_evidence":
+        finite = sum(
+            1
+            for item in calls
+            if isinstance(item.get("effective_limit") or item.get("limit"), int)
+        )
+        more = sum(
+            1
+            for item in calls
+            if item.get("next_cursor_present") is True
+            or item.get("has_more") is True
+        )
+        return (
+            f"The attempt made {len(calls)} MCP calls; {finite} recorded a finite "
+            f"limit, and {more} indicated more results."
+        )
+    if dimension == "evidence_honesty":
+        if passed is True:
+            return (
+                "The scorer found the answer's claims consistent with the normalized "
+                "tool record."
+            )
+        if passed is False:
+            return "The scorer found an unsupported or overstated evidence claim."
+        return "The required answer and tool evidence were unavailable."
+    if dimension == "answer_correct":
+        if passed is True:
+            return (
+                "The host scorer matched the final answer against the required facts. "
+                "Fugue keeps the expected facts private."
+            )
+        if passed is False:
+            return (
+                "The host scorer found a missing or incorrect required fact. Fugue "
+                "keeps the expected facts private."
+            )
+        return "The host scorer could not evaluate the required facts."
+    if dimension == "target_behavior_satisfied":
+        if passed is True:
+            return "The component under test produced the task's required behavior."
+        if passed is False:
+            return (
+                "The Agent could answer, but the component under test did not produce "
+                "the required behavior without a diagnosis or workaround."
+            )
+        return "The component behavior could not be evaluated."
+    if passed is True:
+        return "The deterministic scorer recorded a pass for this public criterion."
+    if passed is False:
+        return "The deterministic scorer recorded a failure for this public criterion."
+    return "The deterministic scorer could not evaluate this public criterion."
+
+
+def _safe_skill_dimension_observation(
+    dimension: str,
+    passed: bool | None,
+) -> str | None:
+    observations = {
+        "artifact_boundary": (
+            "The scorer found changes only inside the allowed artifact boundary.",
+            "The scorer found a change outside the allowed artifact boundary.",
+        ),
+        "package_contract_valid": (
+            "The generated Skill package passed the locked structure and schema checks.",
+            "The generated Skill package failed at least one locked structure or schema check.",
+        ),
+        "requested_constraints_present": (
+            "The generated artifact includes every public constraint required by the task.",
+            "The generated artifact omits or contradicts at least one public task constraint.",
+        ),
+        "preservation_valid": (
+            "The artifact preserved the behavior and metadata protected by the task.",
+            "The artifact changed behavior or metadata that the task required it to preserve.",
+        ),
+        "credential_dependency_safety": (
+            "The artifact contains no secret value or undeclared credential dependency.",
+            "The artifact contains a secret value or an undeclared credential dependency.",
+        ),
+        "instruction_envelope": (
+            "The Skill instructions satisfy the locked format, size, and dependency limits.",
+            "The Skill instructions violate a locked format, size, or dependency limit.",
+        ),
+        "assigned_skill_opened": (
+            "The trace records show that the Agent opened the assigned Skill revision.",
+            "The trace records do not prove that the Agent opened the assigned Skill revision.",
+        ),
+        "skill_registered": (
+            "The runtime registered the assigned Skill revision.",
+            "The runtime did not prove registration of the assigned Skill revision.",
+        ),
+        "skill_opened": (
+            "The trace records show that the Agent opened the assigned Skill revision.",
+            "The trace records do not prove that the Agent opened the assigned Skill revision.",
+        ),
+        "relevant_rule_opened": (
+            "The trace records show that the Agent opened the rule relevant to this task.",
+            "The trace records do not prove that the Agent opened a relevant rule.",
+        ),
+        "skill_native_invoked": (
+            "The trace records show a native invocation of the assigned Skill.",
+            "The trace records do not prove a native invocation of the assigned Skill.",
+        ),
+    }
+    if dimension in observations:
+        success, failure = observations[dimension]
+        if passed is True:
+            return success
+        if passed is False:
+            return failure
+        return "The scorer could not evaluate this Skill criterion."
+    return None
+
+
+def _safe_dimension_interpretation(
+    dimension: str,
+    *,
+    passed: bool | None,
+    role: DimensionRole | None,
+    critical: bool,
+) -> str:
+    if passed is None:
+        return "Fugue marks this score unavailable because required evidence is missing."
+    if dimension == "answer_present":
+        finding = (
+            "The Agent returned a non-empty final answer."
+            if passed
+            else "The Agent did not return a non-empty final answer."
+        )
+    elif dimension in {"answer_correct", "expected_values"}:
+        finding = (
+            "The final answer matched the host-only required facts."
+            if passed
+            else "The final answer did not match all host-only required facts."
+        )
+    elif dimension == "target_behavior_satisfied":
+        finding = (
+            "The tested component produced the required behavior without an Agent "
+            "workaround."
+            if passed
+            else "The tested component did not produce the required behavior without "
+            "an Agent workaround."
+        )
+    elif dimension in {
+        "actual_query_scope",
+        "locked_project_scope",
+        "locked_source_scope",
+    }:
+        finding = (
+            "All recorded queries stayed in the allowed source."
+            if passed
+            else "The query record did not prove that all queries stayed in the allowed "
+            "source."
+        )
+    elif dimension == "reported_project_identity":
+        finding = (
+            "The final answer named the project used by the recorded queries."
+            if passed
+            else "The final answer did not name the project used by the recorded queries."
+        )
+    elif dimension == "bounded_evidence":
+        finding = (
+            "The query record proved that the Agent used bounded reads."
+            if passed
+            else "The query record did not prove that the Agent used bounded reads."
+        )
+    elif dimension == "evidence_honesty":
+        finding = (
+            "The final answer limited its claims to the inspected evidence."
+            if passed
+            else "The final answer overstated the evidence or omitted an evidence limit."
+        )
+    elif dimension == "release_mechanism_used":
+        finding = (
+            "The attempt used the assigned release mechanism."
+            if passed
+            else "The attempt did not prove use of the assigned release mechanism."
+        )
+    elif dimension in {
+        "assigned_skill_opened",
+        "skill_registered",
+        "skill_opened",
+        "relevant_rule_opened",
+        "skill_native_invoked",
+    }:
+        finding = (
+            "The trace record proves the assigned Skill-use step."
+            if passed
+            else "The trace record does not prove the assigned Skill-use step."
+        )
+    else:
+        label = dimension.replace("_", " ")
+        finding = (
+            f"The evidence satisfied the {label} criterion."
+            if passed
+            else f"The evidence did not satisfy the {label} criterion."
+        )
+
+    if role == "outcome":
+        authority = (
+            "This outcome check passed."
+            if passed
+            else "This outcome failure blocks task pass."
+        )
+    elif role == "safety_gate":
+        authority = (
+            "This safety check passed."
+            if passed
+            else "This safety failure blocks task pass."
+        )
+    elif role == "mechanism":
+        authority = "This mechanism evidence does not determine task pass."
+    elif role == "infrastructure":
+        authority = "This infrastructure evidence does not determine task pass."
+    elif role == "efficiency":
+        authority = "This efficiency evidence does not determine task pass."
+    else:
+        authority = (
+            "This legacy evaluator has no typed role. Fugue uses its locked aggregate "
+            "rule to determine task pass."
+        )
+    result = f"{finding} {authority}"
+    if critical:
+        result += " The study marks this check as critical."
+    return result
+
+
 def _reported_project_identity(row: Mapping[str, Any]) -> str | None:
+    normalized = _safe_reported_project_slug(row.get("reported_project_identity"))
+    if normalized is not None:
+        return normalized
     raw = row.get("agent_response")
     if raw is None:
         raw = row.get("final_output")
+    return _normalized_reported_project_identity(raw)
+
+
+def _normalized_reported_project_identity(raw: Any) -> str | None:
     if isinstance(raw, str):
         raw = _extract_structured_result(raw)
     if not isinstance(raw, Mapping):
@@ -6112,11 +6981,24 @@ def _reported_project_identity(row: Mapping[str, Any]) -> str | None:
     value = raw.get("source_project")
     if value is None:
         value = raw.get("project")
-    return str(value).strip() or None if value is not None else None
+    if value is None:
+        return None
+    return _safe_reported_project_slug(value)
+
+
+def _safe_reported_project_slug(value: Any) -> str | None:
+    try:
+        return _evidence_project(value, label="reported project identity")
+    except ValueError:
+        # The pinned scorer remains authoritative for a malformed serialized
+        # answer. Do not persist an unsafe or ambiguous project identifier.
+        return None
 
 
 def _attempt_evidence_links(
     row: Mapping[str, Any],
+    *,
+    require_agent_typing: bool = False,
 ) -> tuple[AttemptEvidenceLinkV1, ...]:
     local_links = row.get("local_evidence_links")
     if local_links is not None:
@@ -6132,11 +7014,16 @@ def _attempt_evidence_links(
                 "local attempt evidence links must use local_artifact refs"
             )
         return parsed
-    return _weave_attempt_evidence_links(row)
+    return _weave_attempt_evidence_links(
+        row,
+        require_agent_typing=require_agent_typing,
+    )
 
 
 def _weave_attempt_evidence_links(
     row: Mapping[str, Any],
+    *,
+    require_agent_typing: bool = False,
 ) -> tuple[AttemptEvidenceLinkV1, ...]:
     project = str(row.get("trace_project") or "")
     result: list[AttemptEvidenceLinkV1] = []
@@ -6169,6 +7056,9 @@ def _weave_attempt_evidence_links(
         *,
         relationship_ok: bool = True,
         missing_reason: str,
+        evidence_kind: str | None = None,
+        native_trajectory_status: str | None = None,
+        conversation_correlation_status: str | None = None,
     ) -> None:
         if not call_id or not stable_ref:
             result.append(
@@ -6176,6 +7066,9 @@ def _weave_attempt_evidence_links(
                     kind=kind,
                     status="missing",
                     reason=missing_reason,
+                    evidence_kind=evidence_kind,  # type: ignore[arg-type]
+                    native_trajectory_status=native_trajectory_status,  # type: ignore[arg-type]
+                    conversation_correlation_status=conversation_correlation_status,  # type: ignore[arg-type]
                 )
             )
             return
@@ -6190,6 +7083,9 @@ def _weave_attempt_evidence_links(
                         "evidence Call identity or application origin does "
                         "not match the locked destination"
                     ),
+                    evidence_kind=evidence_kind,  # type: ignore[arg-type]
+                    native_trajectory_status=native_trajectory_status,  # type: ignore[arg-type]
+                    conversation_correlation_status=conversation_correlation_status,  # type: ignore[arg-type]
                 )
             )
             return
@@ -6206,6 +7102,9 @@ def _weave_attempt_evidence_links(
                     ref=stable_ref,
                     url=uri,
                     reason="evidence relationship did not reconcile",
+                    evidence_kind=evidence_kind,  # type: ignore[arg-type]
+                    native_trajectory_status=native_trajectory_status,  # type: ignore[arg-type]
+                    conversation_correlation_status=conversation_correlation_status,  # type: ignore[arg-type]
                 )
             )
             return
@@ -6215,6 +7114,9 @@ def _weave_attempt_evidence_links(
                 status="resolved",
                 ref=stable_ref,
                 url=uri,
+                evidence_kind=evidence_kind,  # type: ignore[arg-type]
+                native_trajectory_status=native_trajectory_status,  # type: ignore[arg-type]
+                conversation_correlation_status=conversation_correlation_status,  # type: ignore[arg-type]
             )
         )
 
@@ -6307,6 +7209,23 @@ def _weave_attempt_evidence_links(
             ("weave_agent_root_ref",),
         ),
     ):
+        if kind == "agent_root":
+            declared_agent_kind = str(
+                row.get("weave_agent_root_evidence_kind") or ""
+            )
+            if (
+                declared_agent_kind == "native_otel_cross_transport_receipt_v1"
+                or row.get("weave_agent_root_is_native_call") is False
+            ):
+                id_fields = (
+                    "weave_agent_evidence_call_id",
+                    "weave_agent_root_call_id",
+                    "native_agent_root_call_id",
+                )
+                ref_fields = (
+                    "weave_agent_evidence_ref",
+                    "weave_agent_root_ref",
+                )
         ref = next(
             (str(row.get(field) or "") for field in id_fields if row.get(field)),
             "",
@@ -6333,8 +7252,72 @@ def _weave_attempt_evidence_links(
                 and row.get("evaluation_prediction_graph_verified") is True
             )
         )
+        link_kind: EvidenceLinkKind = kind  # type: ignore[assignment]
+        evidence_kind: str | None = None
+        native_trajectory_status: str | None = None
+        conversation_correlation_status: str | None = None
+        if kind == "agent_root":
+            evidence_kind = str(
+                row.get("weave_agent_root_evidence_kind") or ""
+            )
+            is_native = row.get("weave_agent_root_is_native_call")
+            if not evidence_kind:
+                if is_native is True:
+                    evidence_kind = "native_weave_call_v1"
+                elif is_native is False:
+                    evidence_kind = "native_otel_cross_transport_receipt_v1"
+                elif require_agent_typing:
+                    evidence_kind = "unclassified_legacy_agent_evidence_v1"
+                else:
+                    # V1/V2 artifacts predate explicit Agent evidence typing.
+                    # Preserve their original relationship semantics when they
+                    # are read, but never infer a native trajectory for V3.
+                    evidence_kind = ""
+            if evidence_kind == "native_weave_call_v1":
+                native_trajectory_status = (
+                    "native_weave_call" if is_native is True else "unresolved"
+                )
+                conversation_correlation_status = "not_recorded"
+                relationship_ok = relationship_ok and is_native is True
+            elif evidence_kind == "native_otel_cross_transport_receipt_v1":
+                link_kind = "agent_evidence_receipt"
+                edge = row.get("agent_cross_transport_edge")
+                edge_verified = bool(
+                    ref
+                    and is_native is False
+                    and isinstance(edge, Mapping)
+                    and edge.get("status") == "verified"
+                    and edge.get("source_system") == "otel"
+                    and (source_trace_id := str(
+                        row.get("otel_trace_id") or row.get("trace_id") or ""
+                    ))
+                    and str(edge.get("source_trace_id") or "") == source_trace_id
+                    and (source_span_id := str(
+                        row.get("otel_root_span_id")
+                        or row.get("root_span_id")
+                        or ""
+                    ))
+                    and str(edge.get("source_span_id") or "") == source_span_id
+                    and edge.get("receipt_system") == "weave"
+                    and str(edge.get("receipt_call_id") or "") == ref
+                )
+                native_trajectory_status = (
+                    "otel_correlated" if edge_verified else "unresolved"
+                )
+                conversation_correlation_status = (
+                    "verified" if edge_verified else "unverified"
+                )
+                relationship_ok = relationship_ok and edge_verified
+            else:
+                if require_agent_typing:
+                    evidence_kind = "unclassified_legacy_agent_evidence_v1"
+                    native_trajectory_status = "unresolved"
+                    conversation_correlation_status = "not_recorded"
+                    relationship_ok = False
+                else:
+                    evidence_kind = None
         add_call(
-            kind,  # type: ignore[arg-type]
+            link_kind,
             ref,
             stable_ref,
             relationship_ok=relationship_ok,
@@ -6343,6 +7326,9 @@ def _weave_attempt_evidence_links(
                 if kind == "agent_root"
                 else f"{kind.replace('_', ' ').title()} Call is unavailable"
             ),
+            evidence_kind=evidence_kind,
+            native_trajectory_status=native_trajectory_status,
+            conversation_correlation_status=conversation_correlation_status,
         )
     return tuple(result)
 
@@ -6351,6 +7337,33 @@ def _is_local_harbor_row(row: Mapping[str, Any]) -> bool:
     return bool(
         row.get("harbor_config")
         or str(row.get("harbor_environment") or "").startswith("local_harbor")
+    )
+
+
+def _local_harbor_run_conformance_complete(
+    rows: Sequence[Mapping[str, Any]],
+) -> bool:
+    """Return true only for one complete run-wide Harbor receipt.
+
+    A per-row cleanup flag is not sufficient. Every canonical row must bind
+    the same nonempty run receipt, and that receipt must report successful
+    conformance and cleanup with no orphaned container.
+    """
+
+    if not rows or not all(_is_local_harbor_row(row) for row in rows):
+        return False
+    receipt_digests = {
+        str(row.get("harbor_conformance_receipt_digest") or "") for row in rows
+    }
+    return bool(
+        len(receipt_digests) == 1
+        and next(iter(receipt_digests))
+        and all(
+            row.get("harbor_conformance_status") == "passed"
+            and row.get("sandbox_cleanup_verified") is True
+            and row.get("orphaned_sandbox") is False
+            for row in rows
+        )
     )
 
 
@@ -6711,7 +7724,17 @@ def _attempt_evidence_link(raw: Any) -> AttemptEvidenceLinkV1:
     value = _mapping(raw, "attempt evidence link")
     _reject_unknown(
         value,
-        {"kind", "status", "system", "ref", "url", "reason"},
+        {
+            "kind",
+            "status",
+            "system",
+            "ref",
+            "url",
+            "reason",
+            "evidence_kind",
+            "native_trajectory_status",
+            "conversation_correlation_status",
+        },
         "attempt evidence link",
     )
     kind = str(value.get("kind") or "")
@@ -6720,6 +7743,8 @@ def _attempt_evidence_link(raw: Any) -> AttemptEvidenceLinkV1:
         "prediction_and_score",
         "prediction",
         "agent_root",
+        "agent_evidence_receipt",
+        "agent_evidence",
         "dataset",
     }:
         raise ValueError(f"unknown attempt evidence link kind: {kind}")
@@ -6732,6 +7757,59 @@ def _attempt_evidence_link(raw: Any) -> AttemptEvidenceLinkV1:
     ref = _optional_text(value.get("ref"), "attempt evidence ref", 2_000)
     url = _optional_text(value.get("url"), "attempt evidence URL", 2_000)
     reason = _optional_text(value.get("reason"), "attempt evidence reason", 1_000)
+    evidence_kind = _optional_text(
+        value.get("evidence_kind"), "Agent evidence kind", 100
+    )
+    if evidence_kind not in {
+        None,
+        "native_weave_call_v1",
+        "native_otel_cross_transport_receipt_v1",
+        "unclassified_legacy_agent_evidence_v1",
+    }:
+        raise ValueError("attempt Agent evidence kind is unsupported")
+    native_trajectory_status = _optional_text(
+        value.get("native_trajectory_status"),
+        "Agent native trajectory status",
+        100,
+    )
+    if native_trajectory_status not in {
+        None,
+        "native_weave_call",
+        "otel_correlated",
+        "unresolved",
+    }:
+        raise ValueError("attempt Agent native trajectory status is unsupported")
+    conversation_correlation_status = _optional_text(
+        value.get("conversation_correlation_status"),
+        "Agent conversation correlation status",
+        100,
+    )
+    if conversation_correlation_status not in {
+        None,
+        "verified",
+        "unverified",
+        "not_recorded",
+    }:
+        raise ValueError("attempt Agent conversation correlation status is unsupported")
+    agent_kinds = {"agent_root", "agent_evidence_receipt", "agent_evidence"}
+    if kind not in agent_kinds and any(
+        item is not None
+        for item in (
+            evidence_kind,
+            native_trajectory_status,
+            conversation_correlation_status,
+        )
+    ):
+        raise ValueError("non-Agent evidence cannot carry Agent evidence typing")
+    if system == "local_artifact" and any(
+        item is not None
+        for item in (
+            evidence_kind,
+            native_trajectory_status,
+            conversation_correlation_status,
+        )
+    ):
+        raise ValueError("local Agent evidence cannot claim hosted evidence typing")
     if status == "resolved":
         if not ref or (system == "weave" and not url):
             raise ValueError(
@@ -6742,6 +7820,19 @@ def _attempt_evidence_link(raw: Any) -> AttemptEvidenceLinkV1:
             raise ValueError(
                 "resolved attempt evidence cannot carry an unresolved reason"
             )
+        if evidence_kind == "native_weave_call_v1" and (
+            kind != "agent_root"
+            or native_trajectory_status != "native_weave_call"
+        ):
+            raise ValueError("native Weave Agent evidence requires a native Agent root")
+        if evidence_kind == "native_otel_cross_transport_receipt_v1" and (
+            kind not in {"agent_evidence_receipt", "agent_evidence"}
+            or native_trajectory_status != "otel_correlated"
+            or conversation_correlation_status != "verified"
+        ):
+            raise ValueError(
+                "cross-transport Agent evidence requires a verified receipt"
+            )
     elif not reason:
         raise ValueError("unresolved attempt evidence requires a reason")
     return AttemptEvidenceLinkV1(
@@ -6751,6 +7842,9 @@ def _attempt_evidence_link(raw: Any) -> AttemptEvidenceLinkV1:
         ref=ref,
         url=url,
         reason=reason,
+        evidence_kind=evidence_kind,  # type: ignore[arg-type]
+        native_trajectory_status=native_trajectory_status,  # type: ignore[arg-type]
+        conversation_correlation_status=conversation_correlation_status,  # type: ignore[arg-type]
     )
 
 
@@ -6885,6 +7979,18 @@ def _paired_attempt_v3(raw: Any) -> PairedAttemptV3 | None:
     score_explanations = _mapping(
         value.get("score_explanations"), "V3 score explanations"
     )
+    score_details = {
+        str(dimension): _score_explanation_v1(detail, dimension=str(dimension))
+        for dimension, detail in _mapping_or_empty(
+            value.get("score_details")
+        ).items()
+    }
+    judge_reviews = {
+        str(judge_id): _judge_review_v1(review, judge_id=str(judge_id))
+        for judge_id, review in _mapping_or_empty(
+            value.get("judge_reviews")
+        ).items()
+    }
     infrastructure = dict(_mapping_or_empty(value.get("infrastructure")))
     hosted_evidence_status = infrastructure.pop(
         "hosted_evidence_status", "not_applicable"
@@ -6947,6 +8053,9 @@ def _paired_attempt_v3(raw: Any) -> PairedAttemptV3 | None:
         weave_agent_root_call_id=(
             str(value.get("weave_agent_root_call_id") or "") or None
         ),
+        weave_agent_evidence_call_id=(
+            str(value.get("weave_agent_evidence_call_id") or "") or None
+        ),
         otel_root_span_id=str(value.get("otel_root_span_id") or "") or None,
         execution_fingerprint=(str(value.get("execution_fingerprint") or "") or None),
         runtime_lock_digest=(str(value.get("runtime_lock_digest") or "") or None),
@@ -6960,6 +8069,75 @@ def _paired_attempt_v3(raw: Any) -> PairedAttemptV3 | None:
         local_result_row_projection_digest=(
             str(value.get("local_result_row_projection_digest") or "") or None
         ),
+        cost_reconciliation_status=_reconciliation_status(
+            value.get("cost_reconciliation_status"),
+            "cost_reconciliation_status",
+        ),
+        latency_reconciliation_status=_reconciliation_status(
+            value.get("latency_reconciliation_status"),
+            "latency_reconciliation_status",
+        ),
+        usage_reconciliation_status=_reconciliation_status(
+            value.get("usage_reconciliation_status"),
+            "usage_reconciliation_status",
+        ),
+        score_details=score_details,
+        judge_reviews=judge_reviews,
+    )
+
+
+def _score_explanation_v1(raw: Any, *, dimension: str) -> ScoreExplanationV1:
+    value = _mapping(raw, f"V3 score detail {dimension}")
+    _reject_unknown(value, {"what", "observed", "why"}, "V3 score detail")
+    if set(value) != {"what", "observed", "why"}:
+        raise ValueError(
+            f"V3 score detail {dimension!r} requires what, observed, and why"
+        )
+    fields = {
+        field_name: _text(
+            value.get(field_name),
+            f"V3 score detail {dimension} {field_name}",
+            2000,
+        )
+        for field_name in ("what", "observed", "why")
+    }
+    if any(redact_value(item) != item for item in fields.values()):
+        raise ValueError(f"V3 score detail {dimension!r} contains sensitive text")
+    return ScoreExplanationV1(**fields)
+
+
+def _judge_review_v1(raw: Any, *, judge_id: str) -> JudgeReviewV1:
+    value = _mapping(raw, f"V3 judge review {judge_id}")
+    _reject_unknown(
+        value,
+        {
+            "label",
+            "reason",
+            "missing_evidence",
+            "observed_cost_usd",
+            "cost_status",
+        },
+        f"V3 judge review {judge_id}",
+    )
+    if not judge_id or len(judge_id) > 300:
+        raise ValueError("V3 judge review ID is invalid")
+    label = str(value.get("label") or "")
+    if label not in {"unusable", "weak", "adequate", "strong", "exceptional"}:
+        raise ValueError(f"V3 judge review {judge_id!r} label is unsupported")
+    missing_evidence = value.get("missing_evidence")
+    if not isinstance(missing_evidence, bool):
+        raise ValueError(
+            f"V3 judge review {judge_id!r} missing_evidence must be a boolean"
+        )
+    cost_status = value.get("cost_status")
+    if cost_status not in {None, "observed", "unavailable"}:
+        raise ValueError(f"V3 judge review {judge_id!r} cost status is unsupported")
+    return JudgeReviewV1(
+        label=label,  # type: ignore[arg-type]
+        reason=_text(value.get("reason"), "V3 judge review reason", 500),
+        missing_evidence=missing_evidence,
+        observed_cost_usd=_number_or_none(value.get("observed_cost_usd")),
+        cost_status=cost_status,  # type: ignore[arg-type]
     )
 
 
@@ -7329,6 +8507,8 @@ def _evaluate_decision(
     integrity: Mapping[str, Any],
     attestation: DecisionAttestationV1 | None,
     release_note_coverage: Sequence[Mapping[str, Any]] = (),
+    evidence_mode: EvidenceMode = "weave_required",
+    allow_local_harbor_conformance: bool = True,
 ) -> DecisionSummaryV1:
     evidence_grade = _evidence_grade(integrity, rows)
     if integrity.get("status") == "invalid":
@@ -7376,9 +8556,10 @@ def _evaluate_decision(
         required_incomplete=required_incomplete,
         integrity=integrity,
         evidence_grade=evidence_grade,
+        allow_local_harbor_conformance=allow_local_harbor_conformance,
     )
     policies = list(policy.gates)
-    implicit = _implicit_decision_gate_policies()
+    implicit = _implicit_decision_gate_policies(evidence_mode=evidence_mode)
     policies = _canonical_decision_gate_policies(
         policies,
         implicit=implicit,
@@ -7453,8 +8634,10 @@ def _evaluate_decision(
     )
 
 
-def _implicit_decision_gate_policies() -> tuple[DecisionGatePolicyV1, ...]:
-    return (
+def _implicit_decision_gate_policies(
+    *, evidence_mode: EvidenceMode = "weave_required"
+) -> tuple[DecisionGatePolicyV1, ...]:
+    policies = (
         DecisionGatePolicyV1(
             id="result-integrity",
             label="Result rows and summary reconcile",
@@ -7535,6 +8718,11 @@ def _implicit_decision_gate_policies() -> tuple[DecisionGatePolicyV1, ...]:
             operator="eq",
             target=0,
         ),
+    )
+    if evidence_mode == "weave_required":
+        return policies
+    return tuple(
+        gate for gate in policies if gate.source != "privacy.hosted_evidence_passed"
     )
 
 
@@ -7632,6 +8820,7 @@ def _decision_facts(
     required_incomplete: int,
     integrity: Mapping[str, Any],
     evidence_grade: str,
+    allow_local_harbor_conformance: bool = True,
 ) -> dict[str, str | float | int | bool | None]:
     candidate = _mapping_or_empty(deterministic.get("candidate"))
     critical_failures = _critical_dimension_failures(rows, "candidate")
@@ -7655,14 +8844,24 @@ def _decision_facts(
         int(row.get("sandbox_deleted") is False or row.get("orphaned_sandbox") is True)
         for row in rows
     )
-    infrastructure_complete = bool(rows) and all(
+    declared_infrastructure_complete = bool(rows) and all(
         row.get("infrastructure_conformance_complete") is True for row in rows
+    )
+    local_harbor_rows = bool(rows) and all(_is_local_harbor_row(row) for row in rows)
+    local_harbor_complete = bool(
+        allow_local_harbor_conformance and _local_harbor_run_conformance_complete(rows)
+    )
+    infrastructure_complete = (
+        local_harbor_complete if local_harbor_rows else declared_infrastructure_complete
     )
     privacy_evidence_available = bool(rows) and all(
         _privacy_scan_evidence_available(row) for row in rows
     )
-    cleanup_complete = bool(rows) and all(
-        row.get("sandbox_cleanup_verified") is True for row in rows
+    cleanup_complete = (
+        local_harbor_complete
+        if local_harbor_rows and allow_local_harbor_conformance
+        else bool(rows)
+        and all(row.get("sandbox_cleanup_verified") is True for row in rows)
     )
     facts: dict[str, str | float | int | bool | None] = {
         "integrity.valid": integrity.get("status") == "reconciled",
@@ -7850,7 +9049,7 @@ def _behavioral_summary(
     )
     common_limitations = (
         "This is behavioral evidence for the exact locked candidates, taskset, model, harness, attempts, and execution fingerprint.",
-        "A local Harbor result does not qualify W&B Serverless or authorize a package release.",
+        "Behavioral evidence does not authorize a package or service release unless a separately governed decision policy says so.",
     )
     if (
         integrity.get("status") == "invalid"
@@ -8488,16 +9687,21 @@ def _v3_canonical_attempt_rows(  # noqa: C901 - one bounded audit checks every V
                 )
 
             links_by_kind = {item.kind: item for item in attempt.evidence_links}
-            expected_link_kinds = {
+            required_link_kinds = {
                 "evaluation_root",
                 "prediction_and_score",
                 "prediction",
-                "agent_root",
                 "dataset",
+            }
+            agent_link_kinds = {
+                "agent_root",
+                "agent_evidence_receipt",
+                "agent_evidence",
             }
             if (
                 len(attempt.evidence_links) != 5
-                or set(links_by_kind) != expected_link_kinds
+                or set(links_by_kind) - agent_link_kinds != required_link_kinds
+                or len(set(links_by_kind) & agent_link_kinds) != 1
             ):
                 raise ValueError(
                     "ComparisonResultV3 attempts require exactly five unique "
@@ -8520,6 +9724,17 @@ def _v3_canonical_attempt_rows(  # noqa: C901 - one bounded audit checks every V
             canonical_systems = {item.system for item in attempt.evidence_links}
             if canonical_systems == {"local_artifact"}:
                 _verify_local_attempt_links(attempt.evidence_links)
+                if (
+                    local_backend
+                    and (
+                        attempt.weave_agent_root_call_id is not None
+                        or attempt.weave_agent_evidence_call_id is not None
+                    )
+                ):
+                    raise ValueError(
+                        "ComparisonResultV3 local attempts cannot claim hosted "
+                        "Agent Call IDs"
+                    )
                 resolved_call_ids: dict[str, str] = {}
             elif canonical_systems == {"weave"} and not local_backend:
                 # Historical hosted V3 results predate the canonical local
@@ -8545,7 +9760,9 @@ def _v3_canonical_attempt_rows(  # noqa: C901 - one bounded audit checks every V
                 hosted_by_kind = {item.kind: item for item in hosted_links}
                 if (
                     len(hosted_links) != 5
-                    or set(hosted_by_kind) != expected_link_kinds
+                    or set(hosted_by_kind) - agent_link_kinds
+                    != required_link_kinds
+                    or len(set(hosted_by_kind) & agent_link_kinds) != 1
                     or any(item.system != "weave" for item in hosted_links)
                     or local_backend
                 ):
@@ -8566,6 +9783,18 @@ def _v3_canonical_attempt_rows(  # noqa: C901 - one bounded audit checks every V
             ):
                 raise ValueError(
                     "ComparisonResultV3 Agent root ID disagrees with its "
+                    "verified Weave link"
+                )
+            agent_evidence_call_id = resolved_call_ids.get(
+                "agent_evidence_receipt"
+            ) or resolved_call_ids.get("agent_evidence")
+            if (
+                not local_backend
+                and agent_evidence_call_id is not None
+                and attempt.weave_agent_evidence_call_id != agent_evidence_call_id
+            ):
+                raise ValueError(
+                    "ComparisonResultV3 Agent receipt ID disagrees with its "
                     "verified Weave link"
                 )
             if attempt.otel_root_span_id and attempt.otel_root_span_id in {
@@ -8666,6 +9895,9 @@ def _v3_canonical_attempt_rows(  # noqa: C901 - one bounded audit checks every V
                     else None
                 ),
                 "harbor_conformance_status": infrastructure.get("conformance_status"),
+                "harbor_conformance_receipt_digest": infrastructure.get(
+                    "conformance_receipt_digest"
+                ),
                 "harbor_policy_attestation_verified": infrastructure.get(
                     "policy_attestation_verified"
                 ),
@@ -8803,6 +10035,7 @@ def _v3_decision_facts(
     rows: Sequence[Mapping[str, Any]],
     *,
     integrity: Mapping[str, Any],
+    allow_local_harbor_conformance: bool = True,
 ) -> dict[str, str | float | int | bool | None]:
     grade = _evidence_grade(integrity, rows)
     facts = _decision_facts(
@@ -8820,6 +10053,7 @@ def _v3_decision_facts(
         required_incomplete=result.required_evaluations_incomplete,
         integrity=integrity,
         evidence_grade=grade,
+        allow_local_harbor_conformance=allow_local_harbor_conformance,
     )
     source_statuses = {
         result.evidence_topology.pre_run_drift.status,
@@ -8894,14 +10128,27 @@ def _verify_v3_result_shape(result: ComparisonResultV3) -> None:  # noqa: C901
         for attempt in attempts
         if {link.system for link in attempt.evidence_links} == {"local_artifact"}
     )
-    if result.evidence_backend == "local":
+    historical_hosted = bool(
+        result.evidence_backend == "weave"
+        and attempts
+        and all(
+            {link.system for link in attempt.evidence_links} == {"weave"}
+            for attempt in attempts
+        )
+    )
+    # Every newly written V3 result is locally canonical, including a
+    # weave_required Study whose hosted Calls enrich (rather than replace) the
+    # local ledger.  Only historical V3 artifacts whose canonical five-link
+    # chain is entirely Weave predate this binding.
+    if not historical_hosted:
         if result.local_evidence is None:
             raise ValueError(
-                "canonical local ComparisonResultV3 requires its ledger binding"
+                "canonical ComparisonResultV3 local evidence requires its ledger "
+                "binding"
             )
         if result.local_evidence.get("run_id") != result.source:
             raise ValueError(
-                "local ComparisonResultV3 ledger run disagrees with its source"
+                "ComparisonResultV3 local ledger run disagrees with its source"
             )
         if len(local_attempts) != len(attempts) or any(
             attempt.local_evidence_record_digest is None
@@ -8909,7 +10156,7 @@ def _verify_v3_result_shape(result: ComparisonResultV3) -> None:  # noqa: C901
             for attempt in local_attempts
         ):
             raise ValueError(
-                "local ComparisonResultV3 attempts require bound ledger digests"
+                "ComparisonResultV3 local attempts require bound ledger digests"
             )
         projection_set_digest = result.local_evidence.get(
             "result_row_projection_set_digest"
@@ -8939,18 +10186,6 @@ def _verify_v3_result_shape(result: ComparisonResultV3) -> None:  # noqa: C901
                     "local ComparisonResultV3 decision projection set digest "
                     "does not match"
                 )
-    # Hosted V3 artifacts written before the standalone ledger contract can
-    # contain local-style links without a manifest-set binding. They remain
-    # readable as historical evidence; every new Operator execution binds the
-    # manifest before hosted enrichment.
-    historical_hosted = bool(
-        result.evidence_backend == "weave"
-        and attempts
-        and all(
-            {link.system for link in attempt.evidence_links} == {"weave"}
-            for attempt in attempts
-        )
-    )
     expected_local_chain = (
         "not_applicable"
         if historical_hosted
@@ -9132,9 +10367,20 @@ def _verify_v3_derived_analysis(
         result.paired_cases,
         topology=result.evidence_topology,
     )
-    if tuple(item.to_dict() for item in result.task_validity) != tuple(
-        item.to_dict() for item in recomputed_validity
-    ):
+    stored_validity = tuple(item.to_dict() for item in result.task_validity)
+    current_validity = tuple(item.to_dict() for item in recomputed_validity)
+    legacy_validity_values = _legacy_v3_task_validity(recomputed_validity)
+    legacy_validity = tuple(item.to_dict() for item in legacy_validity_values)
+    if stored_validity == current_validity:
+        verified_validity = recomputed_validity
+        legacy_blocker_wording = False
+    elif stored_validity == legacy_validity:
+        # V3 results written before the concise blocker wording remain
+        # readable. The legacy form is derived from the same paired evidence;
+        # this branch does not accept arbitrary stored prose.
+        verified_validity = legacy_validity_values
+        legacy_blocker_wording = True
+    else:
         raise ValueError(
             "ComparisonResultV3 task validity disagrees with paired evidence"
         )
@@ -9151,7 +10397,7 @@ def _verify_v3_derived_analysis(
             ),
             blockers=validity.blockers,
         ).to_dict()
-        for validity in recomputed_validity
+        for validity in verified_validity
     )
     if (
         tuple(item.to_dict() for item in result.aligned_analysis.task_summaries)
@@ -9164,7 +10410,8 @@ def _verify_v3_derived_analysis(
         result,
         pair_counts=pair_counts,
         candidate_critical_failures=candidate_critical_failures,
-        task_validity=recomputed_validity,
+        task_validity=verified_validity,
+        legacy_blocker_wording=legacy_blocker_wording,
     )
     reconstructed_rows = [
         {
@@ -9194,6 +10441,24 @@ def _verify_v3_derived_analysis(
         canonical_rows=canonical_rows,
         semantic_integrity=semantic_integrity,
     )
+
+
+def _legacy_v3_task_validity(
+    values: Sequence[TaskValidityV1],
+) -> tuple[TaskValidityV1, ...]:
+    legacy: list[TaskValidityV1] = []
+    for value in values:
+        prefix = f"{value.task_id}: both arms failed "
+        blockers = tuple(
+            (
+                f"{value.task_id}: {blocker.removeprefix(prefix)} failed in both arms"
+                if blocker.startswith(prefix)
+                else blocker
+            )
+            for blocker in value.blockers
+        )
+        legacy.append(replace(value, blockers=blockers))
+    return tuple(legacy)
 
 
 def _verify_v3_pairs(
@@ -9263,6 +10528,7 @@ def _verify_v3_behavioral_summary(
     pair_counts: Counter[str],
     candidate_critical_failures: int,
     task_validity: Sequence[TaskValidityV1],
+    legacy_blocker_wording: bool,
 ) -> None:
     behavioral = result.behavioral_summary
     if (
@@ -9283,12 +10549,17 @@ def _verify_v3_behavioral_summary(
     )
     paired_blockers = tuple(
         dict.fromkeys(
-            f"{pair.task_id}: {change.id} failed for the candidate"
+            (
+                f"{pair.task_id}: {change.id} failed for the candidate"
+                if legacy_blocker_wording
+                else f"{pair.task_id}: candidate failed {change.id}"
+            )
             for pair in result.paired_cases
             for change in pair.dimension_changes
             if change.role in {"outcome", "safety_gate"}
             and change.critical
             and change.candidate is False
+            and (legacy_blocker_wording or change.baseline is not False)
         )
     )
     expected_blockers = tuple(dict.fromkeys((*validity_blockers, *paired_blockers)))
@@ -9374,14 +10645,33 @@ def _verify_v3_decision_gates(
                 "ComparisonResultV3 without a policy cannot claim a release decision"
             )
         return
+    explicit_sources = {gate.source for gate in policy.gates}
+    legacy_local_decision_contract = bool(
+        result.evidence_backend == "local"
+        and "privacy.hosted_evidence_passed" not in explicit_sources
+        and any(gate.id == "hosted-evidence-privacy" for gate in decision.gates)
+    )
     facts = _v3_decision_facts(
         result,
         canonical_rows,
         integrity=semantic_integrity,
+        # Local V3 artifacts written before local publication became optional
+        # carried the hosted-privacy gate and did not treat the shared Harbor
+        # receipt as general infrastructure evidence. Preserve verification of
+        # those immutable artifacts without writing that legacy contract again.
+        allow_local_harbor_conformance=not legacy_local_decision_contract,
     )
     policies = _canonical_decision_gate_policies(
         list(policy.gates),
-        implicit=_implicit_decision_gate_policies(),
+        implicit=_implicit_decision_gate_policies(
+            evidence_mode=(
+                "weave_required"
+                if legacy_local_decision_contract
+                else "local"
+                if result.evidence_backend == "local"
+                else "weave_required"
+            )
+        ),
         release_note_coverage=result.release_note_coverage,
     )
     by_id = {item.id: item for item in decision.gates}
@@ -9622,13 +10912,18 @@ def score_comparison_rows(
                         "critical_dimensions", ()
                     )
                 )
+                row["comparison_score_details"] = _safe_comparison_score_details(
+                    dimensions,
+                    evaluators=deterministic,
+                    row=row,
+                    critical_dimensions=frozenset(critical_dimensions),
+                )
                 row["comparison_deterministic_criticality"] = {
                     name: True for name in critical_dimensions
                 }
                 row["comparison_mechanism"] = _comparison_mechanism(
                     row,
                     expected=label["expected"],
-                    passed=passed,
                     candidate_skill_ids=spec.candidate.skills,
                 )
                 row["comparison_required_evaluation_complete"] = True
@@ -9682,6 +10977,7 @@ def score_comparison_rows(
                     "usage": usage,
                     "route_receipt": {
                         **dict(receipt),
+                        "response_contract": judge.response_contract,
                         "judge_input_privacy": judge_input_privacy,
                     },
                     "qualification": qualification,
@@ -9776,14 +11072,33 @@ def _request_comparison_judge(
         public_task=public_task,
         row=row,
     )
-    prompt_prefix = (
-        "Blindly evaluate one Agent attempt. You do not know whether it came from "
-        "the baseline or candidate. Use only the supplied public task, final "
-        "response, permitted evidence, and rubric. Return one JSON object with: "
-        "scores (one 0..1 number per dimension), overall_assessment (brief text), "
-        "uncertainty (0..1), and rationale (at most 500 characters). Do not return "
-        "hidden reasoning or a chain of thought.\n\n"
-    )
+    if evaluator.response_contract == "anchored_review_v1":
+        prompt_prefix = (
+            "Blindly evaluate one Agent attempt. You do not know whether it came "
+            "from the baseline or candidate. Use only the supplied public task, "
+            "final response, permitted evidence, and rubric. Return exactly one "
+            "JSON object with: scores (one 0..1 number per dimension), label (one "
+            "of unusable, weak, adequate, strong, exceptional), reason (one concise "
+            "sentence of at most 500 characters), and missing_evidence (a boolean). "
+            "Use these anchors: unusable means the response cannot support the "
+            "requested action; weak means it has relevant content but major gaps or "
+            "errors; adequate means it supports the basic action with stated "
+            "limits; strong means it is clear, well-supported, and actionable with "
+            "only minor gaps; exceptional means it is unusually complete, precise, "
+            "and actionable with no material gap. Set missing_evidence to true only "
+            "when the supplied public evidence is insufficient to apply the rubric. "
+            "Do not return private expected values, hidden reasoning, or a chain of "
+            "thought.\n\n"
+        )
+    else:
+        prompt_prefix = (
+            "Blindly evaluate one Agent attempt. You do not know whether it came "
+            "from the baseline or candidate. Use only the supplied public task, "
+            "final response, permitted evidence, and rubric. Return one JSON object "
+            "with: scores (one 0..1 number per dimension), overall_assessment "
+            "(brief text), uncertainty (0..1), and rationale (at most 500 "
+            "characters). Do not return hidden reasoning or a chain of thought.\n\n"
+        )
     prompt = (prompt_prefix + json.dumps(payload, sort_keys=True, default=str))[
         :MAX_COMPARISON_JUDGE_PROMPT_CHARACTERS
     ]
@@ -9795,6 +11110,7 @@ def _request_comparison_judge(
         "profile": evaluator.profile,
         "route": model_route_identity(route, env),
         "rubric_digest": _judge_contract_digest(evaluator),
+        "response_contract": evaluator.response_contract,
         "request_policy": request_policy,
         "blind_fields": [
             "baseline_or_candidate",
@@ -10281,6 +11597,33 @@ def _validate_comparison_judge_payload(
         ):
             raise ValueError(f"judge score {dimension!r} must be between zero and one")
         scores[str(dimension)] = float(raw)
+    if evaluator.response_contract == "anchored_review_v1":
+        allowed = {"scores", "label", "reason", "missing_evidence"}
+        if set(payload) != allowed:
+            raise ValueError(
+                "anchored judge response must contain exactly scores, label, "
+                "reason, and missing_evidence"
+            )
+        label = str(payload.get("label") or "").strip()
+        if label not in {"unusable", "weak", "adequate", "strong", "exceptional"}:
+            raise ValueError("anchored judge label is unsupported")
+        reason = str(payload.get("reason") or "").strip()
+        if not reason or len(reason) > 500:
+            raise ValueError("anchored judge reason must be 1..500 characters")
+        if redact_value(reason) != reason:
+            raise ValueError("anchored judge reason contains sensitive text")
+        missing_evidence = payload.get("missing_evidence")
+        if not isinstance(missing_evidence, bool):
+            raise ValueError("anchored judge missing_evidence must be a boolean")
+        return {
+            "scores": scores,
+            "review": {
+                "schema_version": 1,
+                "label": label,
+                "reason": reason,
+                "missing_evidence": missing_evidence,
+            },
+        }
     assessment = str(payload.get("overall_assessment") or "").strip()
     rationale = str(payload.get("rationale") or "").strip()
     uncertainty = payload.get("uncertainty")
@@ -10306,7 +11649,6 @@ def _comparison_mechanism(
     row: Mapping[str, Any],
     *,
     expected: Any,
-    passed: bool,
     candidate_skill_ids: tuple[str, ...],
 ) -> dict[str, str]:
     variant = str(row.get("variant_id") or "")
@@ -10395,7 +11737,6 @@ def _comparison_mechanism(
             available=bool(opened_paths) and output is not None,
             reached=source_used,
         ),
-        "task_passed": "observed" if passed else "not_observed",
     }
 
 
@@ -10580,9 +11921,16 @@ def _numeric_summary(values: Sequence[Any]) -> dict[str, Any]:
 
 def _mechanism_summary(rows: Sequence[Mapping[str, Any]]) -> dict[str, Any]:
     stages = sorted(
-        {str(key) for row in rows for key in (row.get("comparison_mechanism") or {})}
+        {
+            str(key)
+            for row in rows
+            for key in (row.get("comparison_mechanism") or {})
+            # Historical rows may contain outcomes in this mechanism mapping.
+            # Outcomes stay in deterministic/paired result sections instead.
+            if str(key) not in {"task_passed"}
+        }
     )
-    return {
+    result = {
         stage: {
             variant: {
                 "observed": sum(
@@ -10606,6 +11954,102 @@ def _mechanism_summary(rows: Sequence[Mapping[str, Any]]) -> dict[str, Any]:
         }
         for stage in stages
     }
+    treatment_stages = {
+        "registered": ("skill_registered",),
+        "opened": ("assigned_skill_opened", "skill_opened"),
+        "relevant_content_opened": ("relevant_rule_opened",),
+        "invoked": ("skill_native_invoked", "skill_invoked"),
+    }
+    for stage, aliases in treatment_stages.items():
+        states = [_treatment_use_state(row, stage=stage, aliases=aliases) for row in rows]
+        if not any(state is not None for state in states):
+            continue
+        result[f"treatment_{stage}"] = {
+            variant: {
+                "observed": sum(
+                    state == "observed"
+                    for row, state in zip(rows, states, strict=True)
+                    if str(row.get("variant_id") or "") == variant
+                ),
+                "not_observed": sum(
+                    state == "not_observed"
+                    for row, state in zip(rows, states, strict=True)
+                    if str(row.get("variant_id") or "") == variant
+                ),
+                "applicable": sum(
+                    state not in {None, "not_applicable"}
+                    for row, state in zip(rows, states, strict=True)
+                    if str(row.get("variant_id") or "") == variant
+                ),
+                "unavailable": sum(
+                    state == "unavailable"
+                    for row, state in zip(rows, states, strict=True)
+                    if str(row.get("variant_id") or "") == variant
+                ),
+            }
+            for variant in ("baseline", "candidate")
+        }
+    return result
+
+
+def _treatment_use_state(
+    row: Mapping[str, Any],
+    *,
+    stage: str,
+    aliases: Sequence[str],
+) -> str | None:
+    states: list[str] = []
+    direct = row.get("treatment_use_evidence")
+    if isinstance(direct, Mapping) and stage in direct:
+        if (normalized := _normalize_treatment_use_state(direct[stage])) is not None:
+            states.append(normalized)
+    mechanism = row.get("comparison_mechanism")
+    if isinstance(mechanism, Mapping):
+        for alias in (stage, *aliases):
+            if alias in mechanism:
+                normalized = _normalize_treatment_use_state(mechanism[alias])
+                if normalized is not None:
+                    states.append(normalized)
+    scores = _mapping_or_empty(row.get("comparison_deterministic_scores"))
+    roles = _mapping_or_empty(row.get("comparison_dimension_roles"))
+    for full_dimension, raw_score in scores.items():
+        dimension = str(full_dimension).rsplit(".", 1)[-1]
+        if dimension not in aliases or roles.get(full_dimension) != "mechanism":
+            continue
+        passed = _bool_score(raw_score)
+        states.append(
+            "observed"
+            if passed is True
+            else "not_observed"
+            if passed is False
+            else "unavailable"
+        )
+    valid = {
+        state
+        for state in states
+        if state in {"observed", "not_observed", "unavailable", "not_applicable"}
+    }
+    if not valid:
+        return None
+    if len(valid) == 1:
+        return next(iter(valid))
+    # Conflicting evidence cannot prove that a treatment-use stage occurred.
+    return "unavailable"
+
+
+def _normalize_treatment_use_state(value: Any) -> str | None:
+    if value is True or value == 1:
+        return "observed"
+    if value is False or value == 0:
+        return "not_observed"
+    if isinstance(value, str) and value in {
+        "observed",
+        "not_observed",
+        "unavailable",
+        "not_applicable",
+    }:
+        return value
+    return None
 
 
 def _comparison_evidence_links(
@@ -10760,6 +12204,42 @@ def _study_console_backlink(
     )
 
 
+def _mcp_tool_usage_counts(row: Mapping[str, Any]) -> dict[str, int]:
+    normalized_counts: dict[str, int] = {}
+    normalized_calls = row.get("mcp_tool_calls")
+    if isinstance(normalized_calls, Sequence) and not isinstance(
+        normalized_calls, (str, bytes, bytearray)
+    ):
+        for item in normalized_calls:
+            if not isinstance(item, Mapping):
+                continue
+            name = str(
+                item.get("tool") or item.get("name") or item.get("tool_name") or ""
+            )
+            if name:
+                normalized_counts[name] = normalized_counts.get(name, 0) + 1
+    if normalized_counts:
+        return normalized_counts
+
+    traced_counts: dict[str, int] = {}
+    tool_counts = row.get("weave_tool_names") or {}
+    if not isinstance(tool_counts, Mapping):
+        return traced_counts
+    for raw_name, raw_count in tool_counts.items():
+        name = str(raw_name)
+        if not name.startswith("mcp__"):
+            continue
+        public_name = name.split("__", 2)[-1]
+        count = (
+            int(raw_count)
+            if isinstance(raw_count, int) and not isinstance(raw_count, bool)
+            else 0
+        )
+        if count:
+            traced_counts[public_name] = traced_counts.get(public_name, 0) + count
+    return traced_counts
+
+
 def _operational_summary(
     rows: Sequence[Mapping[str, Any]],
 ) -> dict[str, Any]:
@@ -10789,9 +12269,7 @@ def _operational_summary(
             _attempt_evidence_status(row)
             if row.get("local_evidence_links")
             else str(
-                row.get("trace_link_status")
-                or row.get("evidence_status")
-                or "unknown"
+                row.get("trace_link_status") or row.get("evidence_status") or "unknown"
             )
         )
         evidence[evidence_status] = evidence.get(evidence_status, 0) + 1
@@ -10803,31 +12281,34 @@ def _operational_summary(
             wandb_rows += 1
             wandb_eligible += row.get("wandb_serverless_eligible") is True
         variant = str(row.get("variant_id") or "unknown")
-        tool_counts = row.get("weave_tool_names") or {}
-        if isinstance(tool_counts, Mapping):
-            for raw_name, raw_count in tool_counts.items():
-                name = str(raw_name)
-                if not name.startswith("mcp__"):
-                    continue
-                public_name = name.split("__", 2)[-1]
-                count = (
-                    int(raw_count)
-                    if isinstance(raw_count, int) and not isinstance(raw_count, bool)
-                    else 0
-                )
-                usage = mcp_tool_usage.setdefault(variant, {})
-                usage[public_name] = usage.get(public_name, 0) + count
+        observed_tool_counts = _mcp_tool_usage_counts(row)
+        if observed_tool_counts:
+            usage = mcp_tool_usage.setdefault(variant, {})
+            for name, count in observed_tool_counts.items():
+                usage[name] = usage.get(name, 0) + count
         cost = row.get("accounted_cost_usd", row.get("cost_usd"))
         if isinstance(cost, int | float) and not isinstance(cost, bool):
             observed_cost += float(cost)
             cost_rows += 1
-        latency = row.get("latency_ms")
-        if isinstance(latency, int | float) and not isinstance(latency, bool):
-            latency_ms += float(latency)
+        row_latency_ms = _row_number(row, "latency_ms")
+        if row_latency_ms is None:
+            latency_sec = _row_number(row, "latency_sec", "wall_time_sec")
+            row_latency_ms = latency_sec * 1000 if latency_sec is not None else None
+        if row_latency_ms is not None:
+            latency_ms += row_latency_ms
             latency_rows += 1
         row_input = row.get("input_tokens")
         row_output = row.get("output_tokens")
-        if isinstance(row_input, int) and isinstance(row_output, int):
+        if not isinstance(row_input, int) or isinstance(row_input, bool):
+            row_input = row.get("n_input_tokens")
+        if not isinstance(row_output, int) or isinstance(row_output, bool):
+            row_output = row.get("n_output_tokens")
+        if (
+            isinstance(row_input, int)
+            and not isinstance(row_input, bool)
+            and isinstance(row_output, int)
+            and not isinstance(row_output, bool)
+        ):
             input_tokens += row_input
             output_tokens += row_output
             usage_rows += 1
@@ -11257,6 +12738,11 @@ def execute_comparison(  # noqa: C901 - one governed execution transaction
         nonlocal source_checkpoint_drift
         evaluation_row = dict(row)
         evaluation_row["final_output"] = _comparison_trial_output(row)
+        reported_project = _normalized_reported_project_identity(
+            evaluation_row["final_output"]
+        )
+        if reported_project is not None:
+            evaluation_row["reported_project_identity"] = reported_project
         judge_env = {
             **service.env,
             "FUGUE_HOST_REPO_ROOT": repo_root.resolve().as_posix(),
@@ -11617,13 +13103,10 @@ def _restore_or_verify_checkpoint_receipt(
         ):
             raise RuntimeError("comparison checkpoint receipt targets other inputs")
         drift = existing.get("source_drift")
-        if (
-            isinstance(
-                spec.execution.source_evidence_destination,
-                LocalEvidenceDestinationV1,
-            )
-            and not isinstance(drift, Mapping)
-        ):
+        if isinstance(
+            spec.execution.source_evidence_destination,
+            LocalEvidenceDestinationV1,
+        ) and not isinstance(drift, Mapping):
             raise RuntimeError(
                 "local comparison checkpoint receipt is missing its source-lock "
                 "verification"
@@ -11641,8 +13124,7 @@ def _restore_or_verify_checkpoint_receipt(
             LocalEvidenceDestinationV1,
         ) and restored != _matched_local_source_drift(approved_comparison):
             raise RuntimeError(
-                "local comparison checkpoint does not bind the approved source "
-                "lock"
+                "local comparison checkpoint does not bind the approved source lock"
             )
         return restored
     source_drift = _verify_v3_source_drift(
@@ -11651,12 +13133,9 @@ def _restore_or_verify_checkpoint_receipt(
         repo_root=repo_root,
         env=env,
     )
-    if (
-        source_drift is None
-        and isinstance(
-            spec.execution.source_evidence_destination,
-            LocalEvidenceDestinationV1,
-        )
+    if source_drift is None and isinstance(
+        spec.execution.source_evidence_destination,
+        LocalEvidenceDestinationV1,
     ):
         _verified_approved_inputs(
             approved_comparison,
@@ -12108,6 +13587,52 @@ def _integration(raw: Any, index: int) -> dict[str, Any]:
     )
 
 
+def _evaluator_dimension_contract(
+    value: Mapping[str, Any],
+    dimensions: Sequence[str],
+) -> tuple[dict[str, DimensionRole], dict[str, str]]:
+    raw_roles = _mapping(
+        value.get("dimension_roles") or {},
+        "evaluator dimension roles",
+    )
+    allowed_roles = {
+        "outcome",
+        "mechanism",
+        "safety_gate",
+        "infrastructure",
+        "efficiency",
+    }
+    roles: dict[str, DimensionRole] = {}
+    for dimension, raw_role in raw_roles.items():
+        name = str(dimension)
+        role = str(raw_role)
+        if role not in allowed_roles:
+            raise ValueError(
+                f"evaluator dimension {name!r} has unsupported role {role!r}"
+            )
+        roles[name] = role  # type: ignore[assignment]
+    guidance = {
+        str(dimension): _text(
+            text,
+            f"evaluator dimension guidance {dimension}",
+            1000,
+        )
+        for dimension, text in _mapping(
+            value.get("dimension_guidance") or {},
+            "evaluator dimension guidance",
+        ).items()
+    }
+    if set(roles) - set(dimensions):
+        raise ValueError(
+            "evaluator dimension roles may reference only declared dimensions"
+        )
+    if set(guidance) - set(dimensions):
+        raise ValueError(
+            "evaluator dimension guidance may reference only declared dimensions"
+        )
+    return roles, guidance
+
+
 def _evaluator(raw: Any) -> ComparisonEvaluatorV1:
     value = _mapping(raw, "evaluator")
     _reject_unknown(
@@ -12124,11 +13649,13 @@ def _evaluator(raw: Any) -> ComparisonEvaluatorV1:
             "rubric",
             "dimensions",
             "dimension_roles",
+            "dimension_guidance",
             "evidence",
             "timeout_sec",
             "reserve_cost_usd",
             "input_cost_per_million",
             "output_cost_per_million",
+            "response_contract",
         },
         "evaluator",
     )
@@ -12148,30 +13675,10 @@ def _evaluator(raw: Any) -> ComparisonEvaluatorV1:
     dimensions = _string_tuple(
         value.get("dimensions") or [], "judge dimension", allow_empty=True
     )
-    raw_dimension_roles = _mapping(
-        value.get("dimension_roles") or {},
-        "evaluator dimension roles",
+    dimension_roles, dimension_guidance = _evaluator_dimension_contract(
+        value,
+        dimensions,
     )
-    allowed_roles = {
-        "outcome",
-        "mechanism",
-        "safety_gate",
-        "infrastructure",
-        "efficiency",
-    }
-    dimension_roles: dict[str, DimensionRole] = {}
-    for dimension, raw_role in raw_dimension_roles.items():
-        name = str(dimension)
-        role = str(raw_role)
-        if role not in allowed_roles:
-            raise ValueError(
-                f"evaluator dimension {name!r} has unsupported role {role!r}"
-            )
-        dimension_roles[name] = role  # type: ignore[assignment]
-    if set(dimension_roles) - set(dimensions):
-        raise ValueError(
-            "evaluator dimension roles may reference only declared dimensions"
-        )
     evidence = _string_tuple(
         value.get("evidence") or [], "judge evidence", allow_empty=True
     )
@@ -12217,12 +13724,25 @@ def _evaluator(raw: Any) -> ComparisonEvaluatorV1:
         validate_id(str(runtime), kind="scorer runtime id")
         if not dimensions:
             raise ValueError("custom deterministic scorer requires dimensions")
+        if dimension_roles and set(dimension_roles) != set(dimensions):
+            missing = sorted(set(dimensions) - set(dimension_roles))
+            raise ValueError(
+                "custom deterministic scorer dimension roles must cover every "
+                "declared dimension; missing: " + ", ".join(missing)
+            )
     if evaluator_type == "llm_judge" and not profile:
         raise ValueError("LLM judge evaluator requires a profile")
     if evaluator_type == "llm_judge" and not rubric:
         raise ValueError("LLM judge evaluator requires a public rubric")
     if evaluator_type == "llm_judge" and not dimensions:
         raise ValueError("LLM judge evaluator requires dimensions")
+    response_contract = str(value.get("response_contract") or "scores_v1")
+    if response_contract not in {"scores_v1", "anchored_review_v1"}:
+        raise ValueError("LLM judge response_contract is unsupported")
+    if evaluator_type != "llm_judge" and response_contract != "scores_v1":
+        raise ValueError(
+            "response_contract is supported only for LLM judge evaluators"
+        )
     unsupported_evidence = sorted(
         set(evidence)
         - {
@@ -12250,6 +13770,7 @@ def _evaluator(raw: Any) -> ComparisonEvaluatorV1:
         rubric=rubric,
         dimensions=dimensions,
         dimension_roles=dimension_roles,
+        dimension_guidance=dimension_guidance,
         evidence=evidence,
         timeout_sec=timeout_sec,
         reserve_cost_usd=_non_negative_number(
@@ -12257,6 +13778,7 @@ def _evaluator(raw: Any) -> ComparisonEvaluatorV1:
         ),
         input_cost_per_million=input_cost_per_million,
         output_cost_per_million=output_cost_per_million,
+        response_contract=response_contract,  # type: ignore[arg-type]
     )
 
 
@@ -12265,6 +13787,7 @@ def _execution(
     *,
     source: Path,
     repo_root: Path,
+    spec_version: int,
 ) -> ComparisonExecutionPolicyV1:
     value = _mapping(raw, "execution policy")
     _reject_unknown(
@@ -12320,9 +13843,7 @@ def _execution(
     )
     raw_mode = str(value.get("evidence_mode") or "").strip()
     if not raw_mode:
-        # Missing modes are historical and retain their hosted semantics.
-        # New scaffolds write ``local`` explicitly.
-        evidence_mode: EvidenceMode = "weave_required"
+        evidence_mode: EvidenceMode = "local" if spec_version >= 2 else "weave_required"
     elif raw_mode in {"local", "weave_required"}:
         evidence_mode = raw_mode  # type: ignore[assignment]
     else:
@@ -13042,6 +14563,7 @@ def _score_deterministic_output(
                 raise ValueError(
                     "custom scorer output does not match its declared dimensions"
                 )
+            normalized_dimensions: dict[str, bool | float] = {}
             for name, value in details.items():
                 dimension = str(name)
                 if (
@@ -13068,8 +14590,30 @@ def _score_deterministic_output(
                     raise ValueError(
                         f"scorer dimension {dimension!r} must be bool or 0..1"
                     )
+                normalized_dimensions[dimension] = normalized
                 scores[f"{evaluator.id}.{dimension}"] = normalized
-            evaluator_passes.append(float(payload["score"]) == 1.0)
+            if evaluator.dimension_roles:
+                gating_dimensions = tuple(
+                    dimension
+                    for dimension in evaluator.dimensions
+                    if evaluator.dimension_roles.get(dimension)
+                    in {"outcome", "safety_gate"}
+                )
+                if not gating_dimensions:
+                    raise ValueError(
+                        f"evaluator {evaluator.id!r} has typed dimensions but no "
+                        "outcome or safety gate"
+                    )
+                evaluator_passes.append(
+                    all(
+                        float(normalized_dimensions[dimension]) == 1.0
+                        for dimension in gating_dimensions
+                    )
+                )
+            else:
+                # V1/V2 custom scorers predate typed dimension roles. Preserve
+                # their locked all-dimensions aggregate semantics.
+                evaluator_passes.append(float(payload["score"]) == 1.0)
             continue
         check_scores = {
             "answer_present": bool(
@@ -13434,16 +14978,20 @@ def _comparison_judge_qualification(
 
 
 def _judge_contract_digest(judge: ComparisonEvaluatorV1) -> str:
-    return stable_digest(
-        {
-            "schema_version": 1,
-            "judge_id": judge.id,
-            "profile": judge.profile,
-            "rubric": judge.rubric,
-            "dimensions": list(judge.dimensions),
-            "evidence": list(judge.evidence),
-        }
-    )
+    contract = {
+        "schema_version": 1,
+        "judge_id": judge.id,
+        "profile": judge.profile,
+        "rubric": judge.rubric,
+        "dimensions": list(judge.dimensions),
+        "evidence": list(judge.evidence),
+    }
+    # Preserve the exact digest of every existing scores_v1 judge. A Study
+    # must opt into the richer response contract so its preview, approval,
+    # calibration, and durable request identity all change together.
+    if judge.response_contract != "scores_v1":
+        contract["response_contract"] = judge.response_contract
+    return stable_digest(contract)
 
 
 def _behavior_diff(
@@ -13479,27 +15027,132 @@ def _preview_dict(value: PreviewSummary) -> dict[str, Any]:
     }
 
 
+def _result_evidence_destination_markdown(result: ComparisonResult) -> str:
+    if isinstance(result, ComparisonResultV3) and isinstance(
+        result.evidence_topology.result_destination,
+        LocalEvidenceDestinationV1,
+    ):
+        destination = result.evidence_topology.result_destination
+        run_id = str((result.local_evidence or {}).get("run_id") or "<run-id>")
+        ledger = f".fugue/runtime/{run_id}/evidence/"
+        publication = result.publication_status.replace("_", " ").upper()
+        return (
+            "- Evidence backend: **local Fugue ledger**\n"
+            f"- Local evidence ledger: `{ledger}` "
+            "(workspace-relative; not part of the portable identity)\n"
+            f"- Portable evidence destination: `{destination.format}` layout "
+            f"v{destination.layout_version} (`{destination.destination_digest}`)\n"
+            f"- Hosted publication recorded when this result was created: "
+            f"**{publication}**\n"
+            "- Later hosted publication is recorded in a separate immutable "
+            "publication receipt.\n"
+        )
+    projects = result.evidence_project or ", ".join(
+        result.operational_summary.get("evidence_projects") or ()
+    )
+    return f"- Evidence project: {projects or 'unavailable'}\n"
+
+
+def _result_evidence_markdown(
+    result: ComparisonResult,
+    *,
+    invalid_behavior: bool,
+) -> str:
+    if invalid_behavior:
+        return (
+            "- Attempt navigation is suppressed because behavioral evidence "
+            "is invalid.\n"
+        )
+
+    lines = [f"- [{item['label']}]({item['url']})\n" for item in result.evidence_links]
+    if isinstance(result, ComparisonResultV3):
+        labels = {
+            "evaluation_root": "Evaluation record",
+            "prediction_and_score": "Prediction-and-score record",
+            "prediction": "Prediction record",
+            "agent_root": "Provider-neutral Agent receipt",
+            "dataset": "Dataset manifest",
+        }
+        local_attempt_count = sum(
+            attempt is not None
+            for pair in result.paired_cases
+            for attempt in (pair.baseline, pair.candidate)
+        )
+        shown_local_attempts = 0
+        maximum_local_attempts = 8
+        for pair in result.paired_cases:
+            for arm, attempt in (
+                ("baseline", pair.baseline),
+                ("candidate", pair.candidate),
+            ):
+                if attempt is None:
+                    continue
+                if shown_local_attempts >= maximum_local_attempts:
+                    continue
+                prefix = (
+                    f"{pair.task_id} / {pair.harness} / attempt {pair.attempt} / {arm}"
+                )
+                local_links = tuple(
+                    link
+                    for link in attempt.evidence_links
+                    if link.system == "local_artifact"
+                    and link.status == "resolved"
+                    and link.ref
+                )
+                if local_links:
+                    shown_local_attempts += 1
+                for link in local_links:
+                    lines.append(f"- {prefix} / {labels[link.kind]}: `{link.ref}`\n")
+        if local_attempt_count > shown_local_attempts:
+            lines.append(
+                f"- Showing local evidence for {shown_local_attempts} of "
+                f"{local_attempt_count} attempts. The canonical `result.json` and "
+                "local evidence manifest contain every reference.\n"
+            )
+    if lines:
+        return "".join(lines)
+    if isinstance(result, ComparisonResultV3) and result.evidence_backend == "local":
+        return "No reconciled local artifact references were available.\n"
+    return "No safe hosted evidence links were available.\n"
+
+
 def _result_markdown(result: ComparisonResult) -> str:
     invalid_behavior = (
         isinstance(result, ComparisonResultV2 | ComparisonResultV3)
         and result.behavioral_summary.status == "invalid"
     )
+
+    def mechanism_arm(value: Mapping[str, Any]) -> str:
+        applicable = int(value.get("applicable") or 0)
+        if applicable == 0:
+            return "not applicable"
+        unavailable = int(value.get("unavailable") or 0)
+        suffix = f"; {unavailable} unavailable" if unavailable else ""
+        return f"{int(value.get('observed') or 0)}/{applicable} observed{suffix}"
+
+    generic_treatment_stages = {
+        "skill_registered": "treatment_registered",
+        "assigned_skill_opened": "treatment_opened",
+        "skill_opened": "treatment_opened",
+        "relevant_rule_opened": "treatment_relevant_content_opened",
+        "skill_native_invoked": "treatment_invoked",
+        "skill_invoked": "treatment_invoked",
+    }
+
     mechanism = "".join(
-        (
-            f"- {stage.replace('_', ' ').title()}: "
-            f"baseline {values['baseline']['observed']}/"
-            f"{values['baseline']['applicable']}; "
-            f"candidate {values['candidate']['observed']}/"
-            f"{values['candidate']['applicable']}\n"
-        )
+        f"- {stage.replace('_', ' ').title()}: "
+        f"baseline {mechanism_arm(values['baseline'])}; "
+        f"candidate {mechanism_arm(values['candidate'])}\n"
         for stage, values in result.mechanism_summary.items()
+        if stage != "task_passed"
+        and generic_treatment_stages.get(stage) not in result.mechanism_summary
     )
     judge = (
         "No blind judge was used.\n"
         if result.judge_summary.get("status") == "not_used"
         else "Blind-judge dimensions are available in `result.json`.\n"
     )
-    pair_rows = (
+    pair_rows = tuple(
         (
             item.task_id,
             item.harness,
@@ -13532,7 +15185,8 @@ def _result_markdown(result: ComparisonResult) -> str:
         "Aligned outcome claims are suppressed because behavioral evidence is invalid.\n"
         if invalid_behavior
         else (
-            "| Task | Harness | Attempt | Baseline | Candidate | Change |\n"
+            "| Task | Harness | Attempt | Baseline full result | "
+            "Candidate full result | Paired outcome change |\n"
             "| --- | --- | ---: | --- | --- | --- |\n"
             + "".join(
                 f"| {task} | {harness} | {attempt} | {_pass_label(baseline)} | "
@@ -13541,16 +15195,15 @@ def _result_markdown(result: ComparisonResult) -> str:
             )
         )
     )
-    evidence = (
-        "- Attempt navigation is suppressed because behavioral evidence is invalid.\n"
-        if invalid_behavior
-        else "".join(
-            f"- [{item['label']}]({item['url']})\n" for item in result.evidence_links
-        )
+    baseline_attempts = sum(row[3] is not None for row in pair_rows)
+    candidate_attempts = sum(row[4] is not None for row in pair_rows)
+    evidence = _result_evidence_markdown(
+        result,
+        invalid_behavior=invalid_behavior,
     )
-    projects = result.evidence_project or ", ".join(
-        result.operational_summary.get("evidence_projects") or ()
-    )
+    treatment_identities = _result_treatment_identities_markdown(result)
+    scorer_review = _result_scorer_review_markdown(result)
+    destination = _result_evidence_destination_markdown(result)
     integration_tools = result.operational_summary.get("mcp_tool_usage") or {}
     tool_usage = "".join(
         f"- {variant}: "
@@ -13578,26 +15231,77 @@ def _result_markdown(result: ComparisonResult) -> str:
         and result.decision.candidate_sha
         else "not applicable (no package release policy)"
     )
+    local_governed_study = bool(
+        isinstance(result, ComparisonResultV3)
+        and result.decision_policy is not None
+        and isinstance(
+            result.evidence_topology.result_destination,
+            LocalEvidenceDestinationV1,
+        )
+    )
+    if not isinstance(result, ComparisonResultV2 | ComparisonResultV3):
+        release_summary = ""
+        release_note = ""
+    elif result.decision_policy is None:
+        release_summary = "- Package release: **NOT EVALUATED**\n"
+        release_note = (
+            "- Release-policy note: Package release was not evaluated by this Study.\n"
+        )
+    elif local_governed_study:
+        release_summary = (
+            "- Package release: **HOLD**\n"
+            "- Release scope: This local Study does not evaluate every "
+            "package-release gate.\n"
+            f"- Governed gate status: **{result.decision.status.upper()}**\n"
+        )
+        release_note = (
+            f"- Governed gate recommendation: {result.decision.recommendation}\n"
+        )
+    else:
+        release_summary = (
+            f"- Package release decision: **{result.decision.status.upper()}**\n"
+        )
+        release_note = (
+            f"- Release-policy recommendation: {result.decision.recommendation}\n"
+        )
+    behavioral_recommendation = (
+        result.behavioral_summary.recommendation
+        if isinstance(result, ComparisonResultV2 | ComparisonResultV3)
+        else ""
+    )
     decision = (
         (
             f"- Behavioral verdict: "
             f"**{result.behavioral_summary.status.upper()}**\n"
             f"- Behavioral recommendation: "
-            f"{result.behavioral_summary.recommendation}\n"
-            f"- Release decision: **{result.decision.status.upper()}**\n"
-            f"- Evidence grade: **{result.decision.evidence_grade}**\n"
+            f"{behavioral_recommendation}\n"
+            + (
+                "- Interpretation note: The recommendation is preserved from the "
+                "canonical result. This Study did not evaluate package release.\n"
+                if result.decision_policy is None
+                else ""
+            )
+            + release_summary
+            + f"- Evidence integrity grade: **{result.decision.evidence_grade}** "
+            "(evidence-link reconciliation and privacy integrity; not a "
+            "behavioral-quality score)\n"
             f"- Candidate source revisions: {candidate_sources}\n"
-            f"- Governed release candidate SHA: {release_candidate}\n"
-            f"- Recommendation: {result.decision.recommendation}\n"
+            f"- Governed release candidate SHA: {release_candidate}\n" + release_note
         )
         if isinstance(result, ComparisonResultV2 | ComparisonResultV3)
         else "- Release decision: unavailable in V1 result\n"
     )
+    observed_cost = result.operational_summary["observed_cost_usd"]
+    observed_cost_label = (
+        f"${float(observed_cost):.6f}" if observed_cost is not None else "unavailable"
+    )
     return (
         f"# {result.comparison_id}\n\n"
         "## Decision summary\n\n" + decision + f"- Rows: {result.rows}\n"
-        f"- Baseline passed: {result.baseline_passed}\n"
-        f"- Candidate passed: {result.candidate_passed}\n"
+        "- Baseline tasks that passed all required gates: "
+        f"{result.baseline_passed}/{baseline_attempts} aligned task attempts\n"
+        "- Candidate tasks that passed all required gates: "
+        f"{result.candidate_passed}/{candidate_attempts} aligned task attempts\n"
         f"- Improved pairs: {result.improved}\n"
         f"- Regressed pairs: {result.regressed}\n"
         f"- Mixed pairs: "
@@ -13606,8 +15310,13 @@ def _result_markdown(result: ComparisonResult) -> str:
         f"- Incomplete pairs: {result.incomplete}\n\n"
         f"- Required evaluations incomplete: "
         f"{result.required_evaluations_incomplete}\n"
-        f"- Evidence project: {projects or 'unavailable'}\n\n"
-        "## Aligned cases\n\n" + pairs + "\n"
+        + destination
+        + "\n"
+        + treatment_identities
+        + scorer_review
+        + "## Aligned cases\n\n"
+        + pairs
+        + "\n"
         "## Operational health\n\n"
         f"- Infrastructure failures: "
         f"{result.operational_summary['infrastructure_failures']}\n"
@@ -13615,8 +15324,7 @@ def _result_markdown(result: ComparisonResult) -> str:
         f"`{json.dumps(result.operational_summary['execution_states'], sort_keys=True)}`\n"
         f"- Evidence states: "
         f"`{json.dumps(result.operational_summary['evidence_states'], sort_keys=True)}`\n"
-        f"- Observed cost: "
-        f"{result.operational_summary['observed_cost_usd'] if result.operational_summary['observed_cost_usd'] is not None else 'unavailable'}\n\n"
+        f"- Observed cost (USD): {observed_cost_label}\n\n"
         "## Mechanism evidence\n\n"
         + (mechanism or "No mechanism evidence was available.\n")
         + "\n### Tool and integration use\n\n"
@@ -13624,9 +15332,146 @@ def _result_markdown(result: ComparisonResult) -> str:
         + "\n## Blind judge\n\n"
         + judge
         + "\n## Open the evidence\n\n"
-        + (evidence or "No safe evidence links were available.\n")
+        + evidence
         + "\n"
         "## Limitations\n\n" + "".join(f"- {item}\n" for item in result.limitations)
+    )
+
+
+def _result_treatment_identities_markdown(result: ComparisonResult) -> str:
+    """Render the exact V3 candidate definitions without rebuilding identity."""
+
+    if not isinstance(result, ComparisonResultV3):
+        return ""
+    lines = ["## Treatment identities\n\n"]
+    for candidate_id, definition in sorted(result.candidate_definitions.items()):
+        model_route = definition.get("model_route")
+        context = definition.get("context")
+        model = (
+            str(model_route.get("display_model") or "unavailable")
+            if isinstance(model_route, Mapping)
+            else "unavailable"
+        )
+        context_id = (
+            str(context.get("id") or "unavailable")
+            if isinstance(context, Mapping)
+            else "unavailable"
+        )
+        skill_ids = _candidate_component_ids(definition.get("skills"))
+        integration_ids = _candidate_component_ids(definition.get("integrations"))
+        details = [
+            f"harness `{definition.get('harness') or 'unavailable'}`",
+            f"model `{model}`",
+            f"context `{context_id}`",
+            "skills " + (", ".join(f"`{item}`" for item in skill_ids) or "none"),
+            "integrations "
+            + (", ".join(f"`{item}`" for item in integration_ids) or "none"),
+        ]
+        prompt_digest = str(definition.get("prompt_digest") or "")
+        if prompt_digest:
+            details.append(f"prompt `{prompt_digest}`")
+        lines.append(f"- `{candidate_id}` — " + "; ".join(details) + "\n")
+    lines.append("\n")
+    return "".join(lines)
+
+
+def _result_scorer_review_markdown(result: ComparisonResult) -> str:
+    """Render only the public review contract bound to immutable scorer locks."""
+
+    if not isinstance(result, ComparisonResultV3):
+        return ""
+    sections: list[str] = []
+    for revision in result.scorer_revisions:
+        review = _mapping_or_empty(revision.details.get("review_artifact"))
+        if review.get("kind") != "deterministic_scorer_review":
+            continue
+        if (
+            review.get("scorer_id") != revision.id
+            or review.get("immutable_digest") != revision.digest
+        ):
+            continue
+        dimensions = review.get("declared_dimensions")
+        if not isinstance(dimensions, list) or not dimensions:
+            continue
+        rows: list[str] = []
+        for raw in dimensions:
+            if not isinstance(raw, Mapping):
+                continue
+            dimension = _safe_markdown_text(raw.get("id"), maximum=300)
+            guidance = _safe_markdown_text(raw.get("guidance"), maximum=1000)
+            role = _safe_markdown_text(raw.get("role"), maximum=100)
+            if not dimension or not guidance:
+                continue
+            rows.append(
+                f"| {_markdown_cell(dimension.replace('_', ' ').title())} | "
+                f"{_markdown_cell(role or 'not declared')} | "
+                f"{_markdown_cell(guidance)} |\n"
+            )
+        if not rows:
+            continue
+        source = _safe_public_scorer_reference(review.get("source_reference"))
+        source_line = (
+            f"- Public scorer source: `{source}`\n"
+            if source
+            else "- Public scorer source: unavailable; use the immutable digest.\n"
+        )
+        sections.append(
+            f"### {revision.label}\n\n"
+            f"- Scorer ID: `{revision.id}`\n"
+            f"- Immutable scorer digest: `{revision.digest}`\n"
+            + source_line
+            + "- Privacy: This review excludes host-only expected values and "
+            "private labels.\n\n"
+            "| Criterion | Role | What the scorer checks |\n"
+            "| --- | --- | --- |\n"
+            + "".join(rows)
+            + "\n"
+        )
+    if not sections:
+        return ""
+    return "## Deterministic scorer review\n\n" + "".join(sections)
+
+
+def _safe_markdown_text(value: Any, *, maximum: int) -> str:
+    text = " ".join(str(value or "").split())
+    if not text or len(text) > maximum or redact_value(text) != text:
+        return ""
+    return text
+
+
+def _markdown_cell(value: str) -> str:
+    return value.replace("|", "\\|")
+
+
+def _safe_public_scorer_reference(value: Any) -> str | None:
+    text = _safe_markdown_text(value, maximum=1000)
+    if not text:
+        return None
+    path = PurePosixPath(text)
+    if (
+        path.is_absolute()
+        or not path.parts
+        or any(part in {"", ".", ".."} for part in path.parts)
+    ):
+        return None
+    normalized_parts = {
+        token
+        for part in path.parts
+        for token in re.split(r"[^a-z0-9]+", part.lower())
+        if token
+    }
+    if normalized_parts & _PRIVATE_WORDS:
+        return None
+    return path.as_posix()
+
+
+def _candidate_component_ids(value: Any) -> tuple[str, ...]:
+    if not isinstance(value, list | tuple):
+        return ()
+    return tuple(
+        str(item["id"])
+        for item in value
+        if isinstance(item, Mapping) and str(item.get("id") or "")
     )
 
 

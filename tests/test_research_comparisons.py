@@ -25,7 +25,7 @@ from fugue.bench.comparison import (
     write_comparison_result,
 )
 from fugue.bench.files import atomic_write_json
-from fugue.model_plane import trace_destination_identity
+from fugue.model_plane import default_evidence_destination, trace_destination_identity
 from fugue.research.approvals import ApprovalLedger
 from fugue.research.comparisons import (
     COMPARISON_RESULT_ROOT,
@@ -181,6 +181,7 @@ def test_exact_approval_is_required_and_launch_is_idempotent(
         maximum_cells=int(preview["readiness"]["estimated_cells"]),
         approved_by="operator",
         operation_id="approve-comparison",
+        candidate_definitions=preview["matrix"]["candidate_definitions"],
     )
     started = service.start(
         "study-1",
@@ -229,6 +230,7 @@ def test_approval_limits_are_checked_before_worker_launch(tmp_path: Path) -> Non
         maximum_cells=1,
         approved_by="operator",
         operation_id="approve-too-small",
+        candidate_definitions=preview["matrix"]["candidate_definitions"],
     )
 
     with pytest.raises(ResearchError) as denied:
@@ -309,6 +311,16 @@ def test_result_projection_is_safe_and_result_digest_is_verified(
         "score_summaries",
     } & view.keys()
     assert any(item["kind"] == "comparison_result" for item in view["evidence_links"])
+    [comparison_rows_link] = [
+        item
+        for item in view["evidence_links"]
+        if item["kind"] == "comparison_rows"
+    ]
+    assert comparison_rows_link == {
+        "system": "fugue",
+        "kind": "comparison_rows",
+        "ref": "wandb-artifact://entity/project/comparison:v1",
+    }
 
     result_service = ComparisonControlService(
         tmp_path,
@@ -402,7 +414,18 @@ def test_v1_result_projection_remains_backward_compatible(tmp_path: Path) -> Non
         if item.summary.get("experiment_view", {}).get("kind") == "evaluation"
     ]
     assert len(evaluations) == 1
-    assert evaluations[0].summary["experiment_view"]["schema_version"] == 1
+    legacy_view = evaluations[0].summary["experiment_view"]
+    assert legacy_view["schema_version"] == 1
+    [comparison_rows_link] = [
+        item
+        for item in legacy_view["evidence_links"]
+        if item["kind"] == "comparison_rows"
+    ]
+    assert comparison_rows_link == {
+        "system": "fugue",
+        "kind": "comparison_rows",
+        "ref": "legacy-run",
+    }
 
 
 def test_direct_comparison_projection_is_idempotent_and_preserves_v2_pairs(
@@ -503,6 +526,16 @@ def test_direct_comparison_projection_is_idempotent_and_preserves_v2_pairs(
     )
     assert evaluation["schema_version"] == 2
     assert evaluation["behavioral_summary"]["status"] == "improved"
+    [comparison_rows_link] = [
+        link
+        for link in evaluation["evidence_links"]
+        if link["kind"] == "comparison_rows"
+    ]
+    assert comparison_rows_link == {
+        "system": "fugue",
+        "kind": "comparison_rows",
+        "ref": "local-run-1",
+    }
     [projected_pair] = evaluation["paired_cases"]
     assert projected_pair["pair_id"] == result.paired_cases[0].pair_id
     assert projected_pair["task_id"] == "task-1"
@@ -581,7 +614,11 @@ def test_execute_comparison_surfaces_result_projection_failure_separately(
             research_id=research_id,
             approval_required=False,
             preparation_required=False,
+            evidence_mode="weave_required",
             evidence_project="wandb/projection-test",
+            evidence_destination=default_evidence_destination(
+                "wandb/projection-test"
+            ),
         ),
     )
     spec = comparison_module.comparison_from_dict(

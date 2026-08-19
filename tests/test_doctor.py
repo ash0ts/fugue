@@ -22,6 +22,10 @@ def test_doctor_is_ready_in_an_empty_workspace(tmp_path: Path) -> None:
     assert report["assets"]["vendor_archive"] is True
     assert "none" in report["assets"]["context_systems"]
     assert report["assets"]["schemas"] > 0
+    assert report["assets"]["runtime_groups"]["fugue-context"] == {
+        "files": 2,
+        "available": True,
+    }
     assert report["host"]["architecture"]
     assert report["host"]["free_disk_bytes"] > 0
     assert "daemon_available" in report["host"]["docker"]
@@ -195,6 +199,48 @@ def test_required_local_runner_enforces_python_and_architecture(
     assert requirements["host_architecture"]["ready"] is False
 
 
+def test_doctor_rejects_unqualified_future_python(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    monkeypatch.setattr("fugue.doctor._python_version_info", lambda: (3, 14, 0))
+
+    report = doctor_report(tmp_path)
+
+    assert report["python"]["supported"] is False
+    assert report["python"]["local_runner_supported"] is False
+
+
+def test_required_local_runner_rejects_unqualified_future_python(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    monkeypatch.setattr("fugue.doctor._python_version_info", lambda: (3, 14, 0))
+    monkeypatch.setattr("fugue.doctor.version", lambda name: "0.18.0")
+    monkeypatch.setattr("fugue.doctor.importlib.util.find_spec", lambda name: object())
+    monkeypatch.setattr(
+        "fugue.doctor.resolve_console_script", lambda name: f"/venv/bin/{name}"
+    )
+    monkeypatch.setattr(
+        "fugue.doctor._docker_status",
+        lambda **_kwargs: {
+            "cli_available": True,
+            "daemon_available": True,
+            "detail": "27.5.1",
+            "network_ready": True,
+            "network_detail": "probe passed",
+        },
+    )
+
+    report = doctor_report(
+        tmp_path,
+        required_capabilities=("local-runner",),
+    )
+
+    assert report["ok"] is False
+    assert report["readiness"]["requirements"]["python_local_runner"]["ready"] is False
+
+
 def test_docker_network_probe_fails_closed_on_address_pool_exhaustion(
     monkeypatch,
 ) -> None:
@@ -264,6 +310,7 @@ def test_required_local_runner_cli_reads_model_credential_from_env_file(
 ) -> None:
     env_file = tmp_path / ".env"
     env_file.write_text("ANTHROPIC_API_KEY=credential-from-file\n")
+    env_file.chmod(0o600)
     observed: dict[str, object] = {}
 
     def fake_report(*args, **kwargs):

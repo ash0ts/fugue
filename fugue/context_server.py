@@ -14,9 +14,11 @@ from typing import Any
 
 from fugue.bench.context import (
     ContextRuntime,
+    ContextSystemSpec,
     PreparedContext,
     RetrievalQuery,
     get_context_system,
+    load_context_system,
     query_context,
 )
 from fugue.redaction import redact_text, secrets_from_env
@@ -25,6 +27,7 @@ from fugue.redaction import redact_text, secrets_from_env
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(prog="python -m fugue.context_server")
     parser.add_argument("--system", required=True)
+    parser.add_argument("--config", type=Path)
     parser.add_argument("--prepared", type=Path, required=True)
     parser.add_argument("--repo-root", type=Path, default=Path.cwd())
     parser.add_argument(
@@ -41,7 +44,7 @@ def main(argv: list[str] | None = None) -> int:
         raise RuntimeError('install context dependencies with: uv pip install -e ".[context]"') from exc
 
     repo_root = args.repo_root.resolve()
-    spec = get_context_system(args.system, _fugue_repo_root(repo_root))
+    spec = _selected_context_system(args.system, args.config, repo_root)
     manifest_path = args.prepared / "context-manifest.json"
     manifest = json.loads(manifest_path.read_text()) if manifest_path.is_file() else {}
     prepared = PreparedContext(
@@ -133,6 +136,23 @@ def main(argv: list[str] | None = None) -> int:
         _start_portable_server(args.host, args.port + 1, spec.id, retrieve)
     server.run(transport=args.transport)
     return 0
+
+
+def _selected_context_system(
+    system_id: str,
+    config: Path | None,
+    repo_root: Path,
+) -> ContextSystemSpec:
+    spec = (
+        load_context_system(config.resolve())
+        if config is not None
+        else get_context_system(system_id, _fugue_repo_root(repo_root))
+    )
+    if spec.id != system_id:
+        raise ValueError(
+            f"context config id {spec.id} does not match requested system {system_id}"
+        )
+    return spec
 
 
 def _record_event(path: Path, event: dict[str, Any]) -> None:

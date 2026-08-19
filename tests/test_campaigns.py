@@ -197,12 +197,14 @@ judges: []
 scorer_runtimes: []
 """
     )
-    (tmp_path / ".env").write_text(
+    env_file = tmp_path / ".env"
+    env_file.write_text(
         "OPENAI_API_KEY=model-secret\n"
         "WANDB_API_KEY=trace-secret\n"
         "WANDB_ENTITY=team\n"
         "WANDB_PROJECT=fugue-experiments\n"
     )
+    env_file.chmod(0o600)
 
 
 def _selection_campaign_repo(tmp_path: Path) -> None:
@@ -501,7 +503,7 @@ class FakeCampaignOperator(OperatorService):
             "schema_version": 1,
             "run_id": run_id,
             "runtime": {
-                "fugue_source": resolve_fugue_source_provenance(self.repo_root)
+                "study_workspace": resolve_fugue_source_provenance(self.repo_root)
             },
             "candidate_runtime": candidate_runtime,
             "planned_matrix": planned_matrix,

@@ -4,13 +4,17 @@ import hashlib
 import json
 import os
 import subprocess
+from collections.abc import Mapping
 from importlib.metadata import Distribution, PackageNotFoundError, distribution
 from importlib.resources import files
 from importlib.resources.abc import Traversable
 from pathlib import Path, PurePosixPath
 from typing import Any
 
-SOURCE_PROVENANCE_SCHEMA_VERSION = 1
+STUDY_WORKSPACE_PROVENANCE_SCHEMA_VERSION = 1
+# Kept for callers that imported the original constant. New artifacts use the
+# ``study_workspace`` field and the canonical name above.
+SOURCE_PROVENANCE_SCHEMA_VERSION = STUDY_WORKSPACE_PROVENANCE_SCHEMA_VERSION
 DISTRIBUTION_PROVENANCE_SCHEMA_VERSION = 2
 _INSTALLED_DISTRIBUTION_DIGEST_KIND = "installed_distribution_contract_v1"
 _PACKAGE_CONTENT_FALLBACK_DIGEST_KIND = "package_content_fallback_v1"
@@ -45,20 +49,26 @@ _FALLBACK_EXCLUDED_ROOTS = {
 
 
 def resolve_fugue_source_provenance(repo_root: Path) -> dict[str, Any]:
-    """Resolve user-workspace source state (legacy public name)."""
+    """Resolve study-workspace state through the legacy public name."""
 
-    return resolve_workspace_source_provenance(repo_root)
+    return resolve_study_workspace_provenance(repo_root)
 
 
 def resolve_workspace_source_provenance(repo_root: Path) -> dict[str, Any]:
-    """Resolve the user workspace independently of Fugue's installation."""
+    """Resolve study-workspace state through the legacy generic name."""
+
+    return resolve_study_workspace_provenance(repo_root)
+
+
+def resolve_study_workspace_provenance(repo_root: Path) -> dict[str, Any]:
+    """Resolve the user's study workspace independently of Fugue itself."""
 
     root = repo_root.resolve()
     commit = _git(root, "rev-parse", "--verify", "HEAD")
     if commit is None:
         digest, files = _fallback_tree_digest(root)
         return {
-            "schema_version": SOURCE_PROVENANCE_SCHEMA_VERSION,
+            "schema_version": STUDY_WORKSPACE_PROVENANCE_SCHEMA_VERSION,
             "kind": "unversioned",
             "dirty": True,
             "digest": digest,
@@ -66,7 +76,7 @@ def resolve_workspace_source_provenance(repo_root: Path) -> dict[str, Any]:
         }
     tree = _git(root, "rev-parse", "--verify", "HEAD^{tree}")
     if tree is None:
-        raise ValueError(f"unable to resolve Fugue source tree: {root}")
+        raise ValueError(f"unable to resolve study workspace tree: {root}")
     status = _git_bytes(
         root,
         "status",
@@ -75,9 +85,9 @@ def resolve_workspace_source_provenance(repo_root: Path) -> dict[str, Any]:
         "--untracked-files=all",
     )
     if status is None:
-        raise ValueError(f"unable to inspect Fugue source state: {root}")
+        raise ValueError(f"unable to inspect study workspace state: {root}")
     provenance: dict[str, Any] = {
-        "schema_version": SOURCE_PROVENANCE_SCHEMA_VERSION,
+        "schema_version": STUDY_WORKSPACE_PROVENANCE_SCHEMA_VERSION,
         "kind": "git",
         "commit": commit.decode().strip(),
         "tree": tree.decode().strip(),
@@ -86,6 +96,31 @@ def resolve_workspace_source_provenance(repo_root: Path) -> dict[str, Any]:
     if status:
         provenance["dirty_digest"] = _dirty_tree_digest(root, status)
     return provenance
+
+
+def study_workspace_provenance(
+    value: Mapping[str, Any],
+) -> dict[str, Any] | None:
+    """Read canonical or legacy study-workspace provenance.
+
+    New execution and snapshot artifacts write ``study_workspace``. Persisted
+    V1 artifacts may still contain the historical ``fugue_source`` field. If
+    both fields are present they must describe the same workspace; accepting
+    conflicting aliases would make the execution identity ambiguous.
+    """
+
+    current = value.get("study_workspace")
+    legacy = value.get("fugue_source")
+    if current is not None and not isinstance(current, Mapping):
+        raise ValueError("study workspace provenance must be an object")
+    if legacy is not None and not isinstance(legacy, Mapping):
+        raise ValueError("legacy study workspace provenance must be an object")
+    if current is not None and legacy is not None and dict(current) != dict(legacy):
+        raise ValueError(
+            "study_workspace and legacy fugue_source provenance disagree"
+        )
+    selected = current if current is not None else legacy
+    return dict(selected) if isinstance(selected, Mapping) else None
 
 
 def resolve_fugue_distribution_provenance() -> dict[str, Any]:
@@ -272,7 +307,7 @@ def _dirty_tree_digest(root: Path, status: bytes) -> str:
     digest.update(status)
     diff = _git_bytes(root, "diff", "--binary", "HEAD", "--")
     if diff is None:
-        raise ValueError(f"unable to hash dirty Fugue source: {root}")
+        raise ValueError(f"unable to hash dirty study workspace: {root}")
     digest.update(b"diff\0")
     digest.update(diff)
     untracked = _git_bytes(
@@ -283,11 +318,11 @@ def _dirty_tree_digest(root: Path, status: bytes) -> str:
         "-z",
     )
     if untracked is None:
-        raise ValueError(f"unable to hash untracked Fugue source: {root}")
+        raise ValueError(f"unable to hash untracked study workspace: {root}")
     for raw_path in sorted(item for item in untracked.split(b"\0") if item):
         relative = PurePosixPath(os.fsdecode(raw_path))
         if relative.is_absolute() or ".." in relative.parts:
-            raise ValueError(f"unsafe untracked source path: {relative}")
+            raise ValueError(f"unsafe untracked study workspace path: {relative}")
         source = root / Path(*relative.parts)
         digest.update(b"untracked\0")
         digest.update(raw_path)

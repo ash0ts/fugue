@@ -1362,7 +1362,8 @@ def _discover_mcp_source(
         from mcp.client.stdio import stdio_client
     except ImportError as exc:
         raise RuntimeError(
-            "MCP evaluation discovery requires the Fugue context extra"
+            "MCP evaluation discovery requires the optional MCP client: "
+            '`python -m pip install "fugue[mcp]"`'
         ) from exc
 
     async def discover() -> list[EvaluationSource]:

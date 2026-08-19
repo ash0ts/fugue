@@ -18,6 +18,7 @@ from fugue.bench.library import (
 )
 from fugue.bench.manifest import load_manifest
 from fugue.bench.services import GRAPHITI_SERVICE, ManagedServiceStatus
+from fugue.model_plane import default_evidence_destination
 
 
 def test_long_job_names_keep_a_deterministic_unique_suffix() -> None:
@@ -405,6 +406,11 @@ tasks:
         jobs[0].resolved_candidate.execution_fingerprint
         == jobs[1].resolved_candidate.execution_fingerprint
     )
+    assert all(
+        "study_workspace" in job.resolved_candidate.execution_definition
+        and "fugue_source" not in job.resolved_candidate.execution_definition
+        for job in jobs
+    )
     assert (
         jobs[0].config["fugue"]["task_runtime"]["dataset_path"]
         != jobs[1].config["fugue"]["task_runtime"]["dataset_path"]
@@ -621,6 +627,9 @@ tasks:
     strict_jobs = render_jobs(
         experiment=replace(
             experiment,
+            evidence_mode="weave_required",
+            evidence_project="wandb/fugue-test",
+            evidence_destination=default_evidence_destination("wandb/fugue-test"),
             require_live_evidence=True,
             evidence_checkpoint_cells=1,
         ),
@@ -1240,8 +1249,14 @@ tasks:
     assert job.env["FUGUE_CONTEXT_DELIVERY"] == "portable"
     compose_paths = job.config["environment"]["extra_docker_compose"]
     compose_path = next(path for path in compose_paths if "context-runtime" in path)
-    assert job.generated_runtime_files == tuple(
-        tmp_path / path for path in compose_paths
+    context_config = next(
+        path
+        for path in job.generated_runtime_files
+        if "context-runtime-config" in path.as_posix()
+    )
+    assert job.generated_runtime_files == (
+        context_config,
+        *(tmp_path / path for path in compose_paths),
     )
     policy_path = next(path for path in compose_paths if "trial-policy" in path)
     policy = yaml.safe_load((tmp_path / policy_path).read_text())
@@ -1274,12 +1289,25 @@ tasks:
     assert "FUGUE_BRIDGE_BASE_URL" not in service["environment"]
     assert "WANDB_API_KEY" not in service["environment"]
     assert agent["env"]["FUGUE_CONTEXT_QUERY_URL"] == descriptor["query_url"]
-    dockerfile = Path(__file__).parents[1] / "Dockerfile.context"
+    dockerfile = (
+        Path(__file__).parents[1]
+        / "fugue/resources/runtime/fugue-context/Dockerfile"
+    )
     assert "ghcr.io/astral-sh/uv:0.11.27" in dockerfile.read_text()
     assert "fugue.context_server" in service["command"]
     assert "8001" in service["healthcheck"]["test"][-1]
     assert (
         next(iter(job.context_cache_keys.values())) in service["volumes"][0]["source"]
+    )
+    assert service["volumes"][1] == {
+        "type": "bind",
+        "source": context_config.resolve().as_posix(),
+        "target": "/context-config/context-system.yaml",
+        "read_only": True,
+        "bind": {"create_host_path": False},
+    }
+    assert service["command"][service["command"].index("--config") + 1] == (
+        "/context-config/context-system.yaml"
     )
     assert service["network_mode"] == "service:main"
     assert "main" not in compose["services"]
@@ -1358,7 +1386,15 @@ interfaces:
     integration_path = next(
         path for path in compose_paths if "integrations" in path.as_posix()
     )
-    assert job.generated_runtime_files == tuple(compose_paths)
+    context_config = next(
+        path
+        for path in job.generated_runtime_files
+        if "context-runtime-config" in path.as_posix()
+    )
+    assert job.generated_runtime_files == (
+        context_config,
+        *compose_paths,
+    )
     context_service = yaml.safe_load(context_path.read_text())["services"][
         "fugue-context"
     ]

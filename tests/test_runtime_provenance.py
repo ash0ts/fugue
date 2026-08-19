@@ -178,6 +178,49 @@ def test_uninstalled_package_fallback_is_explicit(
     assert value["source_commit"] == "a" * 40
 
 
+def test_study_workspace_reader_accepts_legacy_field_but_rejects_ambiguity() -> None:
+    provenance = {
+        "schema_version": 1,
+        "kind": "git",
+        "commit": "a" * 40,
+        "tree": "b" * 40,
+        "dirty": False,
+    }
+
+    assert runtime_provenance.study_workspace_provenance(
+        {"study_workspace": provenance}
+    ) == provenance
+    assert runtime_provenance.study_workspace_provenance(
+        {"fugue_source": provenance}
+    ) == provenance
+    assert runtime_provenance.study_workspace_provenance(
+        {"study_workspace": provenance, "fugue_source": dict(provenance)}
+    ) == provenance
+
+    with pytest.raises(ValueError, match="provenance disagree"):
+        runtime_provenance.study_workspace_provenance(
+            {
+                "study_workspace": provenance,
+                "fugue_source": {**provenance, "commit": "c" * 40},
+            }
+        )
+    with pytest.raises(ValueError, match="study workspace provenance must be"):
+        runtime_provenance.study_workspace_provenance(
+            {"study_workspace": "not-an-object"}
+        )
+
+
+def test_legacy_source_resolver_aliases_canonical_study_workspace(
+    tmp_path: Path,
+) -> None:
+    (tmp_path / "study.yaml").write_text("id: study\n", encoding="utf-8")
+
+    canonical = runtime_provenance.resolve_study_workspace_provenance(tmp_path)
+
+    assert runtime_provenance.resolve_workspace_source_provenance(tmp_path) == canonical
+    assert runtime_provenance.resolve_fugue_source_provenance(tmp_path) == canonical
+
+
 def _write_package(root: Path) -> Path:
     package = root / "fugue"
     resources = package / "resources"

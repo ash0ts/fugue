@@ -31,6 +31,7 @@ def test_cli_lazily_prepares_runnable_wandb_mcp_reference(
 
     env_file = tmp_path / "operator.env"
     env_file.write_text("WANDB_API_KEY=not-serialized\n", encoding="utf-8")
+    env_file.chmod(0o600)
     captured: dict[str, object] = {}
 
     def prepare(**kwargs: object) -> SimpleNamespace:
@@ -186,14 +187,45 @@ def test_packaged_v8_v7_assets_are_exact_copies(
 def test_packaged_comparison_is_local_and_reference_bound() -> None:
     template = yaml.safe_load(_resource_text("comparison.yaml.template"))
     assert template["schema_version"] == 3
+    assert template["id"] == (
+        "mcp-main-vs-0-4-{{CANDIDATE_SHORT}}-harbor-canary-v11"
+    )
     assert template["execution"]["evidence_mode"] == "local"
     assert template["execution"]["environment"] == {"type": "docker"}
     assert template["execution"]["attempts"] == 1
+    assert template["execution"]["concurrency"] == 1
+    assert template["execution"]["evidence_checkpoint_cells"] == 2
+    assert template["execution"]["research_id"] == (
+        "fugue-mcp-release-qualification-v1"
+    )
+    assert template["execution"]["study_console_base_url"] == (
+        "http://127.0.0.1:18080"
+    )
+    assert template["supersedes"] == [
+        {
+            "result_digest": (
+                "e062f5b392a36d9ebd97adc3ab58b6e253cdd9dd943381342d51d76303bbcf38"
+            ),
+            "reason": (
+                "V10 compared the same locked tasks against the earlier 5c6cc1c9 "
+                "staging candidate; this Study freezes the current staging head "
+                "under a new candidate, preview, approval, and Study identity."
+            ),
+        }
+    ]
     assert template["execution"]["reference_study"] == {
         "id": "wandb-mcp-release",
         "version": 1,
         "intent": "python-package-release-qualification",
     }
+    cleanup_gate = next(
+        gate
+        for gate in template["decision_policy"]["gates"]
+        if gate["id"] == "no-harbor-orphans"
+    )
+    assert cleanup_gate["source"] == "cleanup.orphans"
+    assert cleanup_gate["operator"] == "eq"
+    assert cleanup_gate["target"] == 0
     assert "evidence_project" not in template["execution"]
     assert "evidence_destination" not in template["execution"]
     assert template["execution"]["source_evidence_project"] == (
@@ -222,6 +254,23 @@ def test_packaged_comparison_is_local_and_reference_bound() -> None:
     assert len(json.loads(_resource_text("tasks.jsonl").splitlines()[0])) > 0
     assert len(_resource_text("tasks.jsonl").splitlines()) == 4
     assert len(_resource_text("private-labels.jsonl").splitlines()) == 4
+
+
+def test_packaged_reference_contains_the_pinned_scorer_runtime_profile() -> None:
+    profile = yaml.safe_load(
+        _resource_text("configs/fugue/task-authoring/profiles.yaml")
+    )
+    [scorer] = profile["scorer_runtimes"]
+    assert scorer == {
+        "id": "python312-sandbox-v1",
+        "title": "Isolated Python 3.12 scorer",
+        "image": (
+            "python:3.12.10-slim-bookworm@sha256:"
+            "fd95fa221297a88e1cf49c55ec1828edd7c5a428187e67b5d1805692d11588db"
+        ),
+        "platform": "{{FUGUE_SCORER_PLATFORM}}",
+        "command": ["python", "/input/scorer.py", "/input/input.json"],
+    }
 
 
 def test_release_contract_and_wbaf_provenance_are_exact_and_bounded() -> None:

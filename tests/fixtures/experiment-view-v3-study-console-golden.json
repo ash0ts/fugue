@@ -223,6 +223,7 @@
           "wandb/fugue-mcp-release-source-v2"
         ],
         "attempt_id": "76254a6bef570ea2dbf5e4ab975735256169e207d1dae84380c660aec4c5f8b5",
+        "cost_reconciliation_status": "resolved",
         "cost_usd": 0.1,
         "evaluation_status": "completed",
         "evidence_links": [
@@ -247,9 +248,12 @@
             "system": "weave",
             "url": "https://wandb.ai/wandb/fugue-mcp-release-qualification-v1/weave/calls/baseline-prediction"
           },
-          {
-            "kind": "agent_root",
-            "ref": "baseline-agent_root",
+        {
+          "conversation_correlation_status": "not_recorded",
+          "evidence_kind": "native_weave_call_v1",
+          "kind": "agent_root",
+          "native_trajectory_status": "native_weave_call",
+          "ref": "baseline-agent_root",
             "status": "resolved",
             "system": "weave",
             "url": "https://wandb.ai/wandb/fugue-mcp-release-qualification-v1/weave/calls/baseline-agent_root"
@@ -278,6 +282,7 @@
           "cleanup_verified": true
         },
         "input_tokens": 100.0,
+        "latency_reconciliation_status": "unresolved",
         "latency_sec": 3.0,
         "otel_root_span_id": "baseline-otel-root-span",
         "output_tokens": 20.0,
@@ -308,6 +313,7 @@
           "query_wandb",
           "summarize_evaluation"
         ],
+        "usage_reconciliation_status": "resolved",
         "weave_agent_root_call_id": "baseline-agent_root"
       },
       "candidate": {
@@ -315,6 +321,7 @@
           "wandb/fugue-mcp-release-source-v2"
         ],
         "attempt_id": "2373d4ff51aee7c4d903635a5459f9c2059ebc146fc5785dbdc0e8a608c7757b",
+        "cost_reconciliation_status": "resolved",
         "cost_usd": 0.1,
         "evaluation_status": "completed",
         "evidence_links": [
@@ -339,9 +346,12 @@
             "system": "weave",
             "url": "https://wandb.ai/wandb/fugue-mcp-release-qualification-v1/weave/calls/candidate-prediction"
           },
-          {
-            "kind": "agent_root",
-            "ref": "candidate-agent_root",
+        {
+          "conversation_correlation_status": "not_recorded",
+          "evidence_kind": "native_weave_call_v1",
+          "kind": "agent_root",
+          "native_trajectory_status": "native_weave_call",
+          "ref": "candidate-agent_root",
             "status": "resolved",
             "system": "weave",
             "url": "https://wandb.ai/wandb/fugue-mcp-release-qualification-v1/weave/calls/candidate-agent_root"
@@ -370,6 +380,7 @@
           "cleanup_verified": true
         },
         "input_tokens": 100.0,
+        "latency_reconciliation_status": "resolved",
         "latency_sec": 3.0,
         "otel_root_span_id": "candidate-otel-root-span",
         "output_tokens": 20.0,
@@ -400,6 +411,7 @@
           "query_wandb",
           "summarize_evaluation"
         ],
+        "usage_reconciliation_status": "resolved",
         "weave_agent_root_call_id": "candidate-agent_root"
       },
       "dimension_changes": [

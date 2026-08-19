@@ -597,6 +597,87 @@ def _build_lock(
     )
 
 
+def test_operational_summary_uses_attempt_scoped_mcp_and_usage_fallbacks() -> None:
+    summary = _operational_summary(
+        (
+            {
+                "variant_id": "baseline",
+                "mcp_tool_calls": [
+                    {"tool": "query_wandb_tool"},
+                    {"name": "query_wandb_tool"},
+                    {"tool_name": "get_run_history_tool"},
+                    {},
+                ],
+                # Attempt-scoped normalized calls take precedence over this
+                # cumulative trace summary.
+                "weave_tool_names": {
+                    "mcp__wandb__query_wandb_tool": 99,
+                },
+                "latency_ms": None,
+                "wall_time_sec": 2.0,
+                "input_tokens": None,
+                "output_tokens": None,
+                "n_input_tokens": 100,
+                "n_output_tokens": 20,
+            },
+            {
+                "variant_id": "candidate",
+                "mcp_tool_calls": [],
+                "weave_tool_names": {
+                    "mcp__wandb__summarize_evaluation_tool": 3,
+                    "Read": 7,
+                },
+                # The direct latency wins. Wall time is only a fallback.
+                "latency_ms": 500.0,
+                "wall_time_sec": 9.0,
+                "n_input_tokens": 80,
+                "n_output_tokens": 10,
+            },
+        )
+    )
+
+    assert summary["mcp_tool_usage"] == {
+        "baseline": {
+            "get_run_history_tool": 1,
+            "query_wandb_tool": 2,
+        },
+        "candidate": {"summarize_evaluation_tool": 3},
+    }
+    assert summary["latency_ms"] == 2500.0
+    assert summary["latency_rows"] == 2
+    assert summary["input_tokens"] == 180
+    assert summary["output_tokens"] == 30
+    assert summary["usage_rows"] == 2
+
+
+def test_v3_behavioral_summary_names_shared_critical_failure_once(
+    tmp_path: Path,
+) -> None:
+    result = _result(
+        pairs=(
+            _pair(
+                task_id="shared-critical-failure",
+                attempt=1,
+                baseline_passed=False,
+                candidate_passed=False,
+            ),
+        )
+    )
+    expected = (
+        "shared-critical-failure: both arms failed "
+        "maintainer.factual_correctness",
+    )
+
+    assert result.task_validity[0].blockers == expected
+    assert result.behavioral_summary.critical_blockers == expected
+
+    result_path = tmp_path / "result.json"
+    result_path.write_text(json.dumps(result.to_dict()), encoding="utf-8")
+    assert read_comparison_result(result_path).behavioral_summary.critical_blockers == (
+        expected
+    )
+
+
 def test_v10_failure_lock_binds_repeated_real_failure_without_answers(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,

@@ -73,6 +73,9 @@ aggregation
 evidence_inputs
 rubric_summary
 observation
+# ``ScoreExplanationV1`` serializes this field through ``dataclasses.asdict``;
+# V3 readers require it as the public reason for a deterministic score.
+why
 
 # `events.jsonl` is an explicitly non-authoritative diagnostic journal. This
 # supported inspection hook is exercised directly by integrity tests but is
@@ -197,6 +200,9 @@ _.on_job_end
 # Supported public analysis/builders.
 factorial_difference_in_differences
 build_trace_selection
+# Pre-standalone callers may still import the original workspace-provenance
+# schema constant. New artifacts use STUDY_WORKSPACE_PROVENANCE_SCHEMA_VERSION.
+SOURCE_PROVENANCE_SCHEMA_VERSION
 # Imported by the checked-in zero-model MCP qualification entrypoints under
 # examples/comparisons/wandb-mcp-maintenance/.
 qualify_locked_mcp_revisions

@@ -73,6 +73,34 @@ def test_programmatic_experiment_with_hosted_destination_infers_weave() -> None:
     assert experiment.evidence_destination.project == "project"
 
 
+def test_run_snapshot_to_dict_uses_json_container_types() -> None:
+    snapshot = RunSnapshotV1(
+        schema_version=1,
+        identity_schema_version=1,
+        run_id="run-json-containers",
+        experiment={},
+        request={},
+        assets={},
+        candidates={},
+        candidate_runtime={
+            "candidate": {
+                "model_route": {"tool_result_modalities": ("text", "image")}
+            }
+        },
+        planned_matrix=(),
+        evaluation={},
+        runtime={},
+        required_env=(),
+    )
+
+    value = snapshot.to_dict()
+
+    assert value["candidate_runtime"]["candidate"]["model_route"][
+        "tool_result_modalities"
+    ] == ["text", "image"]
+    assert json.loads(json.dumps(value, sort_keys=True)) == value
+
+
 def make_operator_repo(tmp_path: Path) -> OperatorService:
     (tmp_path / "configs/fugue/experiments").mkdir(parents=True)
     (tmp_path / "configs/fugue/context-systems").mkdir(parents=True)
@@ -148,13 +176,15 @@ evidence:
   metrics: {pass_rate: 1.0}
 """
     )
-    (tmp_path / ".env").write_text(
+    env_file = tmp_path / ".env"
+    env_file.write_text(
         "OPENAI_API_KEY=model-secret\n"
         "WANDB_API_KEY=trace-secret\n"
         "WANDB_ENTITY=team\n"
         "WANDB_PROJECT=fugue-experiments\n"
     )
-    return OperatorService(tmp_path, tmp_path / ".env")
+    env_file.chmod(0o600)
+    return OperatorService(tmp_path, env_file)
 
 
 def test_hosted_evidence_finishes_after_canonical_local_row() -> None:
@@ -527,7 +557,7 @@ variants:
     (tmp_path / "configs/fugue/skills/demo-skill/SKILL.md").write_text(
         "# Demo skill\n\nThis drift occurred after discovery.\n"
     )
-    with pytest.raises(ValueError, match="source tree differs"):
+    with pytest.raises(ValueError, match="study workspace differs"):
         service.rendered_jobs(
             ExperimentRequest(
                 experiment_id="loop",
@@ -1745,7 +1775,7 @@ def test_evaluation_assets_are_host_only_and_snapshot_records_only_digest(
     )
 
 
-def test_operator_resolves_source_provenance_once_per_plan(
+def test_operator_resolves_study_workspace_provenance_once_per_plan(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -1764,7 +1794,7 @@ def test_operator_resolves_source_provenance_once_per_plan(
         return provenance
 
     monkeypatch.setattr(
-        "fugue.bench.operator.resolve_fugue_source_provenance",
+        "fugue.bench.operator.resolve_study_workspace_provenance",
         resolve_once,
     )
     jobs = service.rendered_jobs(
@@ -1776,7 +1806,12 @@ def test_operator_resolves_source_provenance_once_per_plan(
     assert len(jobs) == 2
     assert calls == [tmp_path]
     assert all(
-        job.resolved_candidate.execution_definition["fugue_source"] == provenance
+        job.resolved_candidate.execution_definition["study_workspace"]
+        == provenance
+        for job in jobs
+    )
+    assert all(
+        "fugue_source" not in job.resolved_candidate.execution_definition
         for job in jobs
     )
     assert all(
@@ -1784,6 +1819,59 @@ def test_operator_resolves_source_provenance_once_per_plan(
         == "installed_distribution"
         for job in jobs
     )
+
+
+def test_snapshot_reads_legacy_fugue_source_as_study_workspace(
+    tmp_path: Path,
+) -> None:
+    service = make_operator_repo(tmp_path)
+    experiment = service.experiment("demo")
+    [job] = service.rendered_jobs(
+        service.request_for_experiment(experiment),
+        run_id="legacy-workspace",
+        experiment=experiment,
+    )
+    execution = job.resolved_candidate.execution_definition
+    workspace = execution.pop("study_workspace")
+    execution["fugue_source"] = workspace
+    legacy_job = replace(
+        job,
+        resolved_candidate=ResolvedCandidate(
+            candidate_id=job.candidate_id,
+            execution_fingerprint=stable_digest(execution),
+            _definition_json=json.dumps(
+                job.resolved_candidate.definition,
+                sort_keys=True,
+                separators=(",", ":"),
+            ),
+            _execution_definition_json=json.dumps(
+                execution,
+                sort_keys=True,
+                separators=(",", ":"),
+            ),
+        ),
+    )
+    cells = plan_cells(
+        [legacy_job],
+        run_id="legacy-workspace",
+        run_name="legacy workspace",
+    )
+
+    snapshot = build_run_snapshot(
+        repo_root=tmp_path,
+        run_id="legacy-workspace",
+        experiment=experiment,
+        request={"experiment_id": "demo"},
+        jobs=[legacy_job],
+        cells=cells,
+        env=service.env,
+    ).to_dict()
+
+    assert snapshot["runtime"]["study_workspace"] == workspace
+    assert "fugue_source" not in snapshot["runtime"]
+    assert snapshot["candidate_runtime"][job.candidate_id][
+        "study_workspace"
+    ] == workspace
 
 
 def test_snapshot_locks_generated_context_runtime_per_cell(tmp_path: Path) -> None:
@@ -1841,7 +1929,7 @@ config:
     runtime_file = next(
         item
         for item in job.generated_runtime_files
-        if "context-runtime" in item.as_posix()
+        if item.resolve() == (tmp_path / asset["path"]).resolve()
     )
     raw = runtime_file.read_bytes()
     assert asset["kind"] == "generated_runtime"
@@ -1852,16 +1940,19 @@ config:
         snapshot["candidate_runtime"][job.candidate_id]["context_runtime"]
         == (job.resolved_candidate.execution_definition["context_runtime"])
     )
-    fugue_source = job.resolved_candidate.execution_definition["fugue_source"]
-    assert fugue_source["kind"] == "unversioned"
-    assert fugue_source["dirty"] is True
-    assert snapshot["runtime"]["fugue_source"] == fugue_source
+    study_workspace = job.resolved_candidate.execution_definition[
+        "study_workspace"
+    ]
+    assert study_workspace["kind"] == "unversioned"
+    assert study_workspace["dirty"] is True
+    assert snapshot["runtime"]["study_workspace"] == study_workspace
+    assert "fugue_source" not in snapshot["runtime"]
     assert snapshot["runtime"]["fugue_distribution"]["kind"] == (
         "installed_distribution"
     )
-    assert snapshot["candidate_runtime"][job.candidate_id]["fugue_source"] == (
-        fugue_source
-    )
+    assert snapshot["candidate_runtime"][job.candidate_id][
+        "study_workspace"
+    ] == study_workspace
     assert verify_snapshot(snapshot)
     tampered = json.loads(json.dumps(snapshot))
     tampered["assets"][asset_id]["body"] += "\n# changed after planning\n"

@@ -1,4 +1,4 @@
-schema_version: 1
+schema_version: 2
 id: harness-config-change-local-v1
 question: Does a larger Claude Code turn budget improve multi-file maintenance analysis while the harness itself stays fixed?
 taskset:

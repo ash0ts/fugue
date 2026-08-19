@@ -18,7 +18,16 @@ def test_wheel_runs_from_empty_directory_without_harbor_or_weave(
     repo_root = Path(__file__).resolve().parents[1]
     wheel_dir = tmp_path / "wheel"
     subprocess.run(
-        ["uv", "build", "--wheel", "--out-dir", wheel_dir.as_posix()],
+        [
+            "uv",
+            "build",
+            "--wheel",
+            "--no-build-isolation",
+            "--python",
+            sys.executable,
+            "--out-dir",
+            wheel_dir.as_posix(),
+        ],
         cwd=repo_root,
         env={**os.environ, "UV_CACHE_DIR": (tmp_path / "uv-cache").as_posix()},
         check=True,
@@ -34,7 +43,10 @@ def test_wheel_runs_from_empty_directory_without_harbor_or_weave(
             "__pycache__" in name or name.endswith(".pyc") for name in names
         )
         assert "fugue/resources/context-systems/none.yaml" in names
+        assert "fugue/resources/asset-manifest-v1.json" in names
         assert "fugue/resources/runtime/claude-code/package.json" in names
+        assert "fugue/resources/runtime/fugue-context/Dockerfile" in names
+        assert "fugue/resources/runtime/fugue-context/requirements.lock" in names
         assert "fugue/resources/vendor/weave-node-sdk.tgz" in names
         assert "fugue/resources/ci/standalone-comparison.yml" in names
         assert archive.read("fugue/resources/source-commit.txt").decode() == (
@@ -87,6 +99,8 @@ sys.meta_path.insert(0, OptionalDependencyBlocker())
     assert doctor.returncode == 0, doctor.stderr
     report = json.loads(doctor.stdout)
     assert report["ok"] is True
+    assert report["assets"]["integrity"]["ready"] is True
+    assert report["assets"]["integrity"]["verified_files"] > 0
     assert report["distribution"]["source_commit"] == _git_head(repo_root)
     assert report["optional_features"]["weave"]["installed"] is False
     assert report["optional_features"]["local_runner"]["installed"] is False
@@ -120,6 +134,23 @@ sys.meta_path.insert(0, OptionalDependencyBlocker())
     )
     assert package_root.returncode == 0, package_root.stderr
     assert Path(package_root.stdout.strip()).is_relative_to(installed)
+
+    portable_context = empty / "portable-context"
+    materialized = _wheel_python(
+        empty,
+        env,
+        "from pathlib import Path; "
+        "from fugue.bench.portable_runtime import "
+        "materialize_build_context, recipe_sha256; "
+        f"materialize_build_context(Path({str(portable_context)!r})); "
+        "print(recipe_sha256())",
+    )
+    assert materialized.returncode == 0, materialized.stderr
+    assert len(materialized.stdout.strip()) == 64
+    assert (portable_context / "Dockerfile").is_file()
+    assert (portable_context / "requirements.lock").is_file()
+    assert (portable_context / "fugue/context_server.py").is_file()
+    assert not (portable_context / "Dockerfile.context").exists()
 
     for template in (
         "skill-change",

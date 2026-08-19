@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import hashlib
 import json
 import subprocess
 from pathlib import Path
@@ -9,6 +10,7 @@ import pytest
 
 import fugue.bench.run_conformance as conformance_module
 from fugue.bench.candidates import stable_digest
+from fugue.bench.local_evidence import _public_payload
 from fugue.bench.run_conformance import (
     _HostedEvidenceSnapshot,
     _required_conversation_ids,
@@ -96,6 +98,52 @@ def _inventory(*container_ids: str) -> dict[str, object]:
         "backend": "local_harbor_docker",
         "container_ids": list(container_ids),
     }
+
+
+def _durable_execution_scope(*, cleanup_verified: bool = True) -> dict[str, object]:
+    physical_id = "a" * 64
+    physical = {
+        "schema_version": 1,
+        "logical_attempt_id": "b" * 64,
+        "physical_execution_id": physical_id,
+        "retry_ordinal": 0,
+        "controller_id": "comparison-run",
+        "terminal_kind": "success",
+        "cleanup_verified": cleanup_verified,
+        "cleanup_scope_verified": cleanup_verified,
+        "cleanup_post_run_inventory": cleanup_verified,
+        "cleanup_receipt_reference": (
+            ".fugue/runtime/run/cleanup.json" if cleanup_verified else None
+        ),
+    }
+    scope = {
+        "schema_version": 1,
+        "schedule_digest": "c" * 64,
+        "event_chain_digest": "d" * 64,
+        "physical_execution_ids": [physical_id],
+        "physical_executions": [physical],
+        "physical_execution_set_digest": stable_digest([physical_id]),
+        "journal_complete": True,
+    }
+    return {**scope, "scope_digest": stable_digest(scope)}
+
+
+def _write_verified_input_lock(
+    run_dir: Path,
+    payload: dict[str, object],
+) -> Path:
+    value = {
+        "schema_version": 1,
+        "snapshot_sha256": "",
+        "lock_sha256": "",
+        **payload,
+    }
+    digest = stable_digest(value)
+    value["snapshot_sha256"] = digest
+    value["lock_sha256"] = digest
+    path = run_dir / "input-lock.json"
+    path.write_text(json.dumps(value) + "\n")
+    return path
 
 
 def _hosted_row() -> dict[str, object]:
@@ -485,6 +533,63 @@ def test_first_cell_conformance_proves_cleanup_and_private_boundary(
     assert receipt["docker_cleanup"]["matched_networks"] == []
     assert len(receipt["receipt_sha256"]) == 64
     assert "wandb-secret-value" not in json.dumps(receipt)
+    assert _public_payload(
+        receipt,
+        secret_values=("wandb-secret-value",),
+    ) == receipt
+
+
+def test_first_cell_conformance_rejects_unconfigured_token_shaped_secret(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    run_id = "run-unconfigured-token-shape"
+    job = _local_job(tmp_path, run_id)
+    (job.result_path.parent / "agent-output.txt").write_text(
+        "unexpected sk-unconfiguredtokenvalue123456\n",
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(
+        conformance_module.subprocess,
+        "run",
+        lambda command, **kwargs: subprocess.CompletedProcess(
+            command,
+            0,
+            stdout="",
+            stderr="",
+        ),
+    )
+    cell = SimpleNamespace(
+        id="cell-1",
+        run_id=run_id,
+        attempt_id="b" * 64,
+        config_path=job.config_path,
+    )
+
+    receipt = capture_local_cell_conformance(
+        repo_root=tmp_path,
+        cell=cell,
+        job=job,
+        env={},
+        host_scorer_names=("comparison.deterministic.answer",),
+        pre_execution_inventory=_inventory(),
+    )
+
+    scan = receipt["local_artifact_privacy_scan"]
+    assert receipt["status"] == "failed"
+    assert scan["status"] == "failed"
+    assert scan["configured_sensitive_value_count"] == 0
+    assert scan["redaction_pattern_detector"] == "fugue.redaction.redact_text"
+    assert scan["files_with_matches"] == [
+        {
+            "path": (
+                ".fugue/runtime/jobs/demo/run-unconfigured-token-shape/"
+                "job/agent-output.txt"
+            ),
+            "match_count": 1,
+            "configured_value_match_count": 0,
+            "token_shape_match_count": 1,
+        }
+    ]
 
 
 def test_private_boundary_rejects_neutral_key_private_bundle_copy(
@@ -610,6 +715,179 @@ def test_private_boundary_rejects_leaves_copied_from_nested_private_list(
     assert {
         path.rsplit(".", 1)[-1] for path in receipt["tainted_agent_inputs"]
     } >= {"allowed", "message", "threshold"}
+
+
+def test_private_boundary_accepts_only_verified_public_job_fields(
+    tmp_path: Path,
+) -> None:
+    run_id = "run-verified-public-job-fields"
+    job = _local_job(tmp_path, run_id)
+    run_dir = tmp_path / ".fugue/runtime" / run_id
+    source_project = "wandb/public-source"
+    public_tool = "query_public_tool"
+    private_value = "host-only-answer"
+    private_tool = "host_only_tool"
+    private_source_project = "wandb/host-only-source"
+    private_record = {
+        "id": "public-task-a",
+        "expected": {
+            "source_project": source_project,
+            "required_tools": [public_tool, private_tool],
+            "n_tasks": 1,
+            "read_only": True,
+            "create_host_path": False,
+            "private_answer": private_value,
+            "private_source_project": private_source_project,
+        },
+    }
+    private_bytes = (json.dumps(private_record, sort_keys=True) + "\n").encode()
+    private_digest = hashlib.sha256(private_bytes).hexdigest()
+    private_path = (
+        tmp_path
+        / ".fugue/private/comparison-inputs/labels"
+        / f"{private_digest}.jsonl"
+    )
+    private_path.parent.mkdir(parents=True)
+    private_path.write_bytes(private_bytes)
+    private_path.chmod(0o600)
+    _write_verified_input_lock(
+        run_dir,
+        {
+            "experiment": {"source_evidence_project": source_project},
+            "candidates": {
+                job.resolved_candidate.candidate_id: {
+                    "integrations": [
+                        {
+                            "allowed_tools": {
+                                "public-mcp": [public_tool],
+                            }
+                        }
+                    ]
+                }
+            },
+            "request": {
+                "approved_inputs": {
+                    "private_labels_sha256": private_digest,
+                }
+            },
+        },
+    )
+    job.config.update(
+        {
+            "agents": [
+                {
+                    "env": {"FUGUE_SOURCE_EVIDENCE_PROJECT": source_project},
+                    "mcp_servers": [
+                        {
+                            "name": "public-mcp",
+                            "args": [
+                                "--allow-tool",
+                                public_tool,
+                                "--source-project",
+                                source_project,
+                            ],
+                        }
+                    ],
+                    "kwargs": {},
+                }
+            ],
+            "datasets": [{"n_tasks": 1}],
+            "environment": {
+                "mounts": [
+                    {
+                        "read_only": True,
+                        "bind": {"create_host_path": False},
+                    }
+                ]
+            },
+        }
+    )
+
+    receipt = conformance_module._private_label_boundary(
+        run_dir=run_dir,
+        jobs=[job],
+        host_scorer_names=("comparison.deterministic.answer",),
+    )
+
+    assert receipt["status"] == "passed", receipt
+    assert receipt["tainted_agent_inputs"] == []
+
+    job.config["agents"][0]["kwargs"]["leaked_answer"] = private_value
+    leaked = conformance_module._private_label_boundary(
+        run_dir=run_dir,
+        jobs=[job],
+        host_scorer_names=("comparison.deterministic.answer",),
+    )
+    assert leaked["status"] == "failed"
+    assert any("leaked_answer" in path for path in leaked["tainted_agent_inputs"])
+
+    del job.config["agents"][0]["kwargs"]["leaked_answer"]
+    job.config["agents"][0]["mcp_servers"][0]["args"][1] = private_tool
+    unapproved_tool = conformance_module._private_label_boundary(
+        run_dir=run_dir,
+        jobs=[job],
+        host_scorer_names=("comparison.deterministic.answer",),
+    )
+    assert unapproved_tool["status"] == "failed"
+    assert any("args[1]" in path for path in unapproved_tool["tainted_agent_inputs"])
+
+    job.config["agents"][0]["mcp_servers"][0]["args"][1] = public_tool
+    job.config["agents"][0]["env"][
+        "FUGUE_SOURCE_EVIDENCE_PROJECT"
+    ] = private_source_project
+    wrong_source = conformance_module._private_label_boundary(
+        run_dir=run_dir,
+        jobs=[job],
+        host_scorer_names=("comparison.deterministic.answer",),
+    )
+    assert wrong_source["status"] == "failed"
+    assert any(
+        "FUGUE_SOURCE_EVIDENCE_PROJECT" in path
+        for path in wrong_source["tainted_agent_inputs"]
+    )
+
+    job.config["agents"][0]["env"][
+        "FUGUE_SOURCE_EVIDENCE_PROJECT"
+    ] = source_project
+    job.config["environment"]["mounts"][0].update(
+        {"source": private_path.as_posix(), "target": "/input/private.jsonl"}
+    )
+    private_mount = conformance_module._private_label_boundary(
+        run_dir=run_dir,
+        jobs=[job],
+        host_scorer_names=("comparison.deterministic.answer",),
+    )
+    assert private_mount["status"] == "failed"
+    assert any("source" in path for path in private_mount["tainted_agent_inputs"])
+
+
+def test_private_boundary_rejects_tampered_input_lock_exemptions(
+    tmp_path: Path,
+) -> None:
+    run_id = "run-tampered-public-job-fields"
+    job = _local_job(tmp_path, run_id)
+    run_dir = tmp_path / ".fugue/runtime" / run_id
+    input_lock = _write_verified_input_lock(
+        run_dir,
+        {
+            "experiment": {"source_evidence_project": "wandb/public-source"},
+            "candidates": {job.resolved_candidate.candidate_id: {}},
+        },
+    )
+    payload = json.loads(input_lock.read_text())
+    payload["experiment"]["source_evidence_project"] = "wandb/tampered-source"
+    input_lock.write_text(json.dumps(payload) + "\n")
+    assert input_lock.is_file()
+    assert not conformance_module.verify_snapshot(payload)
+
+    receipt = conformance_module._private_label_boundary(
+        run_dir=run_dir,
+        jobs=[job],
+        host_scorer_names=("comparison.deterministic.answer",),
+    )
+
+    assert receipt["status"] == "unavailable", receipt
+    assert receipt["reason"] == "the run input lock failed snapshot verification"
 
 
 def test_private_boundary_rejects_host_only_bundle_mount(tmp_path: Path) -> None:
@@ -971,4 +1249,92 @@ def test_harbor_cleanup_is_unavailable_for_unattributed_new_container(
     assert result.status == "unavailable"
     assert value["docker_cleanup"]["unattributed_new_containers"] == [
         "unknown-new"
+    ]
+
+
+def test_durable_harbor_cleanup_ignores_unrelated_host_containers(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    job = _local_job(tmp_path, "run-durable-unrelated")
+
+    def run(command, **kwargs):
+        if command == ["docker", "container", "ls", "--all", "--quiet"]:
+            return subprocess.CompletedProcess(command, 0, "unknown-new\n", "")
+        return subprocess.CompletedProcess(command, 0, "", "")
+
+    monkeypatch.setattr(conformance_module.subprocess, "run", run)
+
+    result = write_harbor_run_conformance_receipt(
+        repo_root=tmp_path,
+        run_id="run-durable-unrelated",
+        jobs=[job],
+        env={"WANDB_API_KEY": "wandb-secret-value"},
+        pre_execution_inventory=_inventory(),
+        execution_scope=_durable_execution_scope(),
+    )
+
+    value = json.loads(result.path.read_text())
+    assert result.status == "passed"
+    assert value["docker_cleanup"]["scope"]["kind"] == (
+        "exact_physical_compose_projects"
+    )
+
+
+def test_durable_harbor_cleanup_rejects_unverified_physical_cleanup(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    job = _local_job(tmp_path, "run-durable-unverified")
+    monkeypatch.setattr(
+        conformance_module.subprocess,
+        "run",
+        lambda command, **kwargs: subprocess.CompletedProcess(command, 0, "", ""),
+    )
+
+    result = write_harbor_run_conformance_receipt(
+        repo_root=tmp_path,
+        run_id="run-durable-unverified",
+        jobs=[job],
+        env={"WANDB_API_KEY": "wandb-secret-value"},
+        pre_execution_inventory=_inventory(),
+        execution_scope=_durable_execution_scope(cleanup_verified=False),
+    )
+
+    value = json.loads(result.path.read_text())
+    assert result.status == "unavailable"
+    assert value["docker_cleanup"]["reason"] == (
+        "a physical execution lacks verified scoped cleanup"
+    )
+
+
+def test_durable_harbor_cleanup_fails_for_exact_project_orphan(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    job = _local_job(tmp_path, "run-durable-orphan")
+
+    def run(command, **kwargs):
+        if command[1:3] == ["container", "ls"]:
+            return subprocess.CompletedProcess(command, 0, "matching\n", "")
+        return subprocess.CompletedProcess(command, 0, "", "")
+
+    monkeypatch.setattr(conformance_module.subprocess, "run", run)
+
+    result = write_harbor_run_conformance_receipt(
+        repo_root=tmp_path,
+        run_id="run-durable-orphan",
+        jobs=[job],
+        env={"WANDB_API_KEY": "wandb-secret-value"},
+        pre_execution_inventory=_inventory(),
+        execution_scope=_durable_execution_scope(),
+    )
+
+    value = json.loads(result.path.read_text())
+    assert result.status == "failed"
+    assert value["docker_cleanup"]["matched_containers"] == [
+        {
+            "attribution": "exact_compose_project_label",
+            "compose_project": value["docker_cleanup"]["scope"][
+                "compose_projects"
+            ][0],
+            "container_id": "matching",
+        }
     ]

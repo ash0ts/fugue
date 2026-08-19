@@ -1,17 +1,15 @@
 FROM ghcr.io/astral-sh/uv:0.11.27@sha256:4d01caf3b22dfd11003455e2e68153da08c4ee1fa54fdbd166c6282d22693419 AS uv
 FROM python:3.13.5-slim-bookworm@sha256:4c2cf9917bd1cbacc5e9b07320025bdb7cdf2df7b0ceaccb55e9dd7e30987419
 
-COPY --from=uv /uv /uvx /bin/
+COPY --from=uv /uv /bin/uv
 
 WORKDIR /opt/fugue
 
-COPY pyproject.toml uv.lock README.md ./
+COPY requirements.lock ./
+RUN uv pip install --system --no-cache --require-hashes -r requirements.lock
+
 COPY fugue ./fugue
-COPY configs ./configs
 
-RUN uv sync --frozen --no-dev --extra context
-
-ENV PATH="/opt/fugue/.venv/bin:${PATH}"
 ENV PYTHONPATH="/opt/fugue"
 
 ENTRYPOINT []

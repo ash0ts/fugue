@@ -5,6 +5,7 @@ from pathlib import Path
 import pytest
 
 from fugue.bench.library import (
+    ExperimentSpec,
     experiment_from_data,
     experiment_to_yaml,
     get_agent_preset,
@@ -71,6 +72,34 @@ def test_experiment_evidence_project_requires_exact_entity_project_slug() -> Non
                 "title": "Invalid",
                 "evidence_project": "news-research-agent",
             }
+        )
+
+
+def test_versioned_experiment_document_defaults_preserve_legacy_semantics() -> None:
+    legacy = experiment_from_data({"id": "legacy", "title": "Legacy"})
+    standalone = experiment_from_data(
+        {"schema_version": 2, "id": "standalone", "title": "Standalone"}
+    )
+
+    assert legacy.schema_version == 1
+    assert legacy.evidence_mode == "weave_required"
+    assert standalone.schema_version == 2
+    assert standalone.evidence_mode == "local"
+    assert standalone.evidence_destination.kind == "local"
+
+    with pytest.raises(ValueError, match="schema_version must be 1 or 2"):
+        experiment_from_data(
+            {"schema_version": 3, "id": "unsupported", "title": "Unsupported"}
+        )
+
+
+def test_explicit_local_experiment_cannot_silently_switch_to_weave() -> None:
+    with pytest.raises(ValueError, match="hosted result destination"):
+        ExperimentSpec(
+            id="local-only",
+            title="Local only",
+            evidence_mode="local",
+            evidence_project="wandb/should-not-activate",
         )
 
 

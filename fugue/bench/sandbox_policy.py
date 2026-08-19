@@ -42,6 +42,14 @@ _MEMORY_LIMIT = re.compile(r"^[1-9][0-9]*(?:\.[0-9]+)?[kmgtpe]?(?:i?b)?$", re.I)
 _HARBOR_TASK_CPU_LIMIT = "${CPUS:-8.0}"
 _HARBOR_TASK_MEMORY_LIMIT = "${MEMORY:-16384M}"
 _LOCKED_BRIDGE = "http://host.docker.internal:4000"
+_IMPORTED_FUGUE_PACKAGE_ROOT = Path(__file__).resolve().parents[1]
+_REVIEWED_FUGUE_PACKAGE_MOUNTS = {
+    "__init__.py": "/fugue-src/fugue/__init__.py",
+    "mcp_proxy.py": "/fugue-src/fugue/mcp_proxy.py",
+    "mcp_evidence.py": "/fugue-src/fugue/mcp_evidence.py",
+    "redaction.py": "/fugue-src/fugue/redaction.py",
+    "context_client.py": "/usr/local/bin/fugue-context",
+}
 
 
 @dataclass(frozen=True)
@@ -411,13 +419,10 @@ def _validate_mount(
         raise ValueError("Harbor bind sources must be absolute")
     resolved = source_path.resolve()
     root = repo_root.resolve()
-    package_root = Path(__file__).resolve().parents[2]
-    reviewed_package_mount = (
-        read_only
-        and resolved.is_relative_to(package_root)
-        and (
-            target.startswith("/fugue-src/") or target == "/usr/local/bin/fugue-context"
-        )
+    reviewed_package_mount = read_only and any(
+        resolved == (_IMPORTED_FUGUE_PACKAGE_ROOT / relative).resolve()
+        and target == reviewed_target
+        for relative, reviewed_target in _REVIEWED_FUGUE_PACKAGE_MOUNTS.items()
     )
     if not resolved.is_relative_to(root) and not reviewed_package_mount:
         raise ValueError("Harbor bind sources must stay within the Fugue checkout")

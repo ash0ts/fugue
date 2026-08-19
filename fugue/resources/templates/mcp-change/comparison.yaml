@@ -1,4 +1,4 @@
-schema_version: 1
+schema_version: 2
 id: mcp-change-local-v1
 question: Does the current configuration of an offline MCP catalogue improve exact configuration lookup over its legacy configuration?
 taskset:

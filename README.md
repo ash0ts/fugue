@@ -73,7 +73,7 @@ The outer loop remains the researcher. Fugue remains the laboratory.
 | Fugue | Experiment validation, immutable identity, matrix expansion, preparation, approval checks, admission, scheduling, recovery, evaluation, evidence reconciliation | Hypothesis generation, winner selection, writable application code, raw trace storage |
 | Harbor | One isolated environment for each admitted Agent cell | Experiment design, scoring, research memory |
 | Local evidence ledger | Dataset, evaluation, prediction, transcript/tool digests, policy, privacy, usage, and cleanup receipts | Admission policy, runtime isolation, optional hosted publication |
-| W&B Weave | Optional hosted copy of an unchanged completed result and its evidence | Canonical scoring, classification, or identity |
+| W&B Weave | Optional hosted, digest-bound projection of a completed local result and its sanitized evidence-chain metadata | Canonical scoring, classification, or identity |
 | Study Console or another sink | A public-safe view of why the Study exists, its design, live progress, result, and evidence links | Execution, approval, retries, copied trace bodies |
 
 This division is important. An Agent can say, “these production traces suggest
@@ -111,17 +111,20 @@ flowchart TB
   committed before the first cell runs.
 - **Exact approval.** Paid Agent, judge, or interactor calls require approval
   bound to one preview digest, cell limit, and spend ceiling.
-- **Isolated execution.** Each cell runs through Harbor without access to the
-  Docker socket, host paths, dependency installation, downloads, builds, or
-  service startup.
+- **Isolated execution.** Each cell runs through Harbor without the Docker
+  socket or unapproved host paths. It receives only declared read-only
+  task/runtime mounts, scoped writable outputs, and allowlisted model or
+  integration network access. Trials cannot install, download, build, start
+  undeclared services, or access host services.
 - **Durable recovery.** Operation IDs, leases, and immutable run identities
   make control-plane retries safe. An already-launched trial is reconciled,
   never silently launched again.
 - **Reconciled evidence.** Every coordinate becomes terminal, explicitly not
-  applicable, or cancelled. Agent cells resolve to one local Dataset record,
-  evaluation, prediction-and-score record, prediction, provider-neutral Agent
-  receipt, and the required policy/privacy/cleanup receipts. Hosted Call links
-  are an additional contract only in `weave_required` mode or after publication.
+  applicable, or cancelled. Agent cells resolve to one local dataset manifest,
+  evaluation record, prediction-and-score record, prediction record, and
+  provider-neutral Agent receipt. They also resolve the required policy,
+  privacy, and cleanup receipts. Hosted Call links are an additional contract
+  only in `weave_required` mode or after publication.
 - **Bounded conclusions.** Results retain their task, treatment, attempt,
   evidence, uncertainty, exclusions, and limitations. Fugue does not emit a
   universal model or harness ranking.
@@ -253,13 +256,18 @@ Console, a GitHub App, or a W&B project:
 
 ```bash
 python -m pip install "fugue[local-runner]"
-fugue doctor
 fugue init my-study --template prompt-change
-fugue check my-study/comparison.yaml
-fugue compare my-study/comparison.yaml --prepare
-fugue compare my-study/comparison.yaml --preview --json
+cd my-study
+install -m 600 .env.example .env
+# Set ANTHROPIC_API_KEY in .env.
+fugue doctor --require local-runner \
+  --model anthropic/claude-sonnet-5 --env-file .env
+fugue check comparison.yaml --env-file .env
+fugue compare comparison.yaml --prepare --env-file .env
+fugue compare comparison.yaml --preview --env-file .env --json
 fugue approve PREVIEW_DIGEST --max-usd 10 --max-cells 8
-fugue compare my-study/comparison.yaml --run --approval APPROVAL_DIGEST
+fugue compare comparison.yaml \
+  --run --approval APPROVAL_DIGEST --env-file .env
 fugue result latest
 ```
 
@@ -269,10 +277,11 @@ Skill, MCP, memory, and harness templates all use the same lifecycle and result
 schema. Planning and replay support Python 3.12 and 3.13; Harbor execution
 requires Python 3.13 and Docker.
 
-`check` reproduces intended failures, verifies known-good outputs, resolves the
-actual baseline/candidate diff, checks required components and judge
-calibration, and computes the exact attempt and cost bounds. It can answer
-`ready`, `needs_review`, `blocked`, or `no_comparison_justified`. A blocked or
+`check` validates the declared comparison without model spend. When the study
+declares base/gold fixtures or judge calibration, it verifies those gates. It
+also resolves treatment identities, required components, and exact attempt and
+cost bounds. It can answer `ready`,
+`needs_review`, `blocked`, or `no_comparison_justified`. A blocked or
 unnecessary comparison does not run.
 
 Simple tasksets can be written as strict JSONL, built through
@@ -305,12 +314,79 @@ uv run fugue result latest
 
 The result separates deterministic task outcomes, blind-judge dimensions,
 mechanism evidence, infrastructure health, and evidence completeness. Local
-mode writes one canonical Dataset, evaluation, prediction-and-score,
-prediction, and Agent receipt per attempt. `weave_required` mode additionally
-binds native hosted Calls. `fugue publish weave RESULT --project ENTITY/PROJECT`
-can publish a completed local result later without changing its digest.
+mode writes one canonical dataset manifest, evaluation record,
+prediction-and-score record, prediction record, and provider-neutral Agent
+receipt per attempt. `weave_required` mode additionally binds native hosted
+Calls. `fugue publish weave RESULT --project ENTITY/PROJECT` publishes a
+digest-bound sanitized projection and writes a separate publication receipt.
+It does not change or re-score the local result, and it does not relabel a
+provider-neutral Agent receipt as a native Weave Agent Call. The projection
+contains Fugue Research-scope and Study-key labels, scores, safe excerpts, and
+evidence-chain metadata. These labels do not claim generated Study Console
+identities.
+Raw local transcript and tool-event artifact files remain local. Review the
+destination project's access policy before publishing.
 CI uses distinct exit codes for a passed gate (`0`), a completed regression
 (`1`), an invalid comparison (`2`), and incomplete required evidence (`3`).
+
+To share several results with colleagues, publish one digest-bound projection
+for each result. The projection contains that result's evidence chains. Assign
+a Fugue Research scope and Study key to each projection. Then build one
+immutable local index and publish that index to a W&B project:
+
+```bash
+python -m pip install "fugue[weave]"
+fugue publish weave RESULT.json \
+  --project ENTITY/EVIDENCE_PROJECT \
+  --research-id agent-change-research-v1 \
+  --study-id prompt-change-v1
+
+fugue study index \
+  --research-id agent-change-research-v1 \
+  --title "Agent change experiments" \
+  --objective "Compare exact candidates on locked tasks." \
+  --source RESULT.json weave-publication-receipt.json \
+  --output research-index.json
+
+python -m pip install "fugue[wandb-index]"
+fugue publish wandb-index research-index.json \
+  --project ENTITY/INDEX_PROJECT \
+  --receipt research-index-publication-receipt.json
+
+python -m pip install "fugue[wandb-report]"
+fugue publish wandb-report research-index.json \
+  --index-receipt research-index-publication-receipt.json \
+  --receipt research-index-report-publication-receipt.json
+```
+
+First publish the index. The Report command uses the W&B project and
+application origin recorded in `--index-receipt`; it cannot select a different
+destination.
+
+`fugue publish wandb-index` creates a deterministic W&B Run and an immutable
+Artifact version. Share the returned Run URL with colleagues who can access the
+target project. The Run contains a digest-bound table that shows each Study's
+behavioral status and next action, governed decision and next action, task
+validity, evidence integrity, exact result and qualification digests, candidate
+assignments, and primary prediction-and-score evidence link. The Artifact
+version contains the exact Research index. The index embeds each result and
+its Weave publication receipt and binds both sources by digest. The pinned W&B
+SDK does not provide the first-class
+Research/Study API. Study Console provides a separate `wandb_study` prototype.
+These index and Report commands do not write that store or create a Study
+Console link.
+
+`fugue publish wandb-report` creates a W&B Report that is bound to the
+index-projection digest. Colleagues can read the Report if the W&B project and
+Report settings grant access. W&B labels its Reports API Public Preview. This
+status describes the API maturity; it does not make the Report public. Fugue
+reads the saved Report from W&B and compares the Report fields and Markdown
+with the prepared projection. Fugue then writes a local Report-publication
+receipt. This command does not change access settings or request a public share
+link. The local Research index and index-publication receipt remain
+authoritative. The deterministic Run and immutable Artifact version are the
+canonical hosted index publication. The Report is an optional presentation
+view and cannot change the local index or any result.
 
 Normal MCP configurations and standard Agent Skills are candidate inputs, not
 special experiment types:
@@ -324,13 +400,13 @@ uv run fugue skills import ./skills/verify-current-source
 uv run fugue skills lock verify-current-source
 ```
 
-Fugue imports only the selected component, strips secret values, resolves the
-exact source and dependency closure for the Harbor platform during
-preparation, records the tool manifest and built-wheel hashes in a
-content-addressed lock, and mounts that runtime read-only into an isolated
-attempt. Non-secret process settings may be locked explicitly; credentials
-remain runtime references. Fugue never edits global Codex, Claude Code, MCP,
-or Skill configuration.
+The import command selects one component and removes secret values. The lock
+and preparation steps resolve its exact source and dependency closure for the
+selected Harbor platform. Fugue records the tool manifest and built-wheel
+hashes in a content-addressed lock. During a trial, Fugue mounts the prepared
+runtime read-only. Fugue injects credentials from runtime references and does
+not store their values in the lock. Fugue never edits global Codex, Claude
+Code, MCP, or Skill configuration.
 
 This remains a technical preview. The package is still named `fugue`; no new
 distribution or container is being released from this work.
@@ -341,8 +417,11 @@ Use the operator CLI or TUI when a human is directly designing and running a
 saved experiment:
 
 ```text
-ExperimentSpec → preview → prepare → run → normalized evidence → analysis
+ExperimentSpec → check → prepare → final preview → approval → run → normalized evidence → analysis
 ```
+
+A preview created before preparation is exploratory. If preparation changes a
+locked input, generate and approve a new preview before execution.
 
 Use the Research service when Aria or another outer loop needs a governed
 laboratory:
@@ -470,16 +549,17 @@ fugue run pilot
 fugue run pilot --detach
 ```
 
-Before the first cell starts, `OperatorService` resolves the full plan,
-persists the experiment snapshot, prepares context, renders jobs, plans cells,
-and atomically writes `.fugue/runtime/RUN_ID/input-lock.json`. A failure before
-that commit leaves the run failed in its `starting` phase and executes no cell.
+Before the first cell starts, `OperatorService` resolves the full plan. It
+persists the experiment snapshot. It verifies the prepared context and runtime
+locks. It renders jobs and plans cells. It then writes
+`.fugue/runtime/RUN_ID/input-lock.json` atomically. If any step fails before
+that write completes, Fugue executes no cell.
 
 ```mermaid
 flowchart TD
     REQUEST["ExperimentRequest"] --> RESOLVE["Resolve and validate exact plan"]
     RESOLVE --> SNAPSHOT["Persist experiment snapshot"]
-    SNAPSHOT --> CONTEXT["Prepare required context"]
+    SNAPSHOT --> CONTEXT["Verify prepared context and runtime locks"]
     CONTEXT --> RENDER["Render jobs and planned cells"]
     RENDER --> LOCK["Atomically write input-lock.json"]
     LOCK --> RUNNING["Transition run to running"]
@@ -520,6 +600,10 @@ candidate and workload, keeps the returned URLs in the run manifest, and
 attaches each verified Agent root to its prediction with Weave's GenAI span
 reference. A completed local result can instead be published afterward through
 the explicit `fugue publish weave` command.
+
+`--fetch-weave` only asks Fugue to hydrate hosted evidence for an explicitly
+`weave_required` run. It does not publish, upload, or otherwise change a local
+evidence run.
 
 ```mermaid
 flowchart LR

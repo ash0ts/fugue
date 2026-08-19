@@ -4,7 +4,7 @@ import json
 import math
 import re
 from collections.abc import Mapping, Sequence
-from dataclasses import asdict, dataclass, replace
+from dataclasses import asdict, dataclass, field, replace
 from datetime import UTC, datetime
 from typing import Any, Literal
 
@@ -159,6 +159,7 @@ class ExecutionApprovalV1:
     operation_id: str
     created_at: str
     expires_at: str
+    candidate_definitions: dict[str, dict[str, Any]] = field(default_factory=dict)
     approval_digest: str = ""
 
     def to_dict(self) -> dict[str, Any]:
@@ -420,6 +421,22 @@ def execution_approval_from_dict(raw: Mapping[str, Any]) -> ExecutionApprovalV1:
     subject_kind = str(raw.get("subject_kind") or "")
     if subject_kind not in {"experiment", "trace_audit"}:
         raise ValueError("approval subject_kind must be experiment or trace_audit")
+    candidate_definitions = _mapping(
+        raw.get("candidate_definitions") or {},
+        "approval candidate definitions",
+    )
+    normalized_candidates: dict[str, dict[str, Any]] = {}
+    for candidate_id, definition in candidate_definitions.items():
+        candidate_digest = _digest_value(candidate_id, "approval candidate id")
+        candidate_definition = _mapping(
+            definition,
+            f"approval candidate {candidate_digest} definition",
+        )
+        if stable_digest(candidate_definition) != candidate_digest:
+            raise ValueError(
+                "approval candidate definition does not match its candidate id"
+            )
+        normalized_candidates[candidate_digest] = _json(candidate_definition)
     approval = ExecutionApprovalV1(
         schema_version=_schema(raw, "execution approval"),
         approval_id=validate_id(str(raw.get("approval_id") or ""), kind="approval id"),
@@ -439,6 +456,7 @@ def execution_approval_from_dict(raw: Mapping[str, Any]) -> ExecutionApprovalV1:
         ),
         created_at=_timestamp(raw.get("created_at"), "approval creation time"),
         expires_at=_timestamp(raw.get("expires_at"), "approval expiry"),
+        candidate_definitions=dict(sorted(normalized_candidates.items())),
         approval_digest=_digest_value(raw.get("approval_digest"), "approval digest"),
     )
     if approval.expires_at <= approval.created_at:
