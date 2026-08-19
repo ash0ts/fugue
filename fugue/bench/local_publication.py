@@ -86,6 +86,26 @@ def _attempt_score_details(attempt: Any) -> dict[str, dict[str, str]]:
     return details
 
 
+def _attempt_judge_reviews(attempt: Any) -> dict[str, dict[str, Any]]:
+    """Serialize optional anchored reviews, including legacy test doubles."""
+
+    raw = getattr(attempt, "judge_reviews", {})
+    if not isinstance(raw, Mapping):
+        raise LocalResultPublicationError("comparison judge reviews must be an object")
+    reviews: dict[str, dict[str, Any]] = {}
+    for judge_id, item in raw.items():
+        if callable(getattr(item, "to_dict", None)):
+            value = item.to_dict()
+        elif isinstance(item, Mapping):
+            value = dict(item)
+        else:
+            raise LocalResultPublicationError(
+                f"comparison judge review {judge_id!r} is invalid"
+            )
+        reviews[str(judge_id)] = value
+    return reviews
+
+
 @dataclass(frozen=True)
 class StudyPublicationScopeV1:
     research_id: str
@@ -1423,6 +1443,7 @@ def _validate_result_local_evidence_binding(
                 latency_reconciliation_status=attempt.latency_reconciliation_status,
                 usage_reconciliation_status=attempt.usage_reconciliation_status,
                 score_details=_attempt_score_details(attempt),
+                judge_reviews=_attempt_judge_reviews(attempt),
             )
             if stable_digest(projection) != record.result_row_projection_digest:
                 raise LocalResultPublicationError(

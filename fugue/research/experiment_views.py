@@ -2422,6 +2422,7 @@ def _optional_canonical_attempt_v3(raw: Any) -> dict[str, Any] | None:
         "cost_reconciliation_status",
         "latency_reconciliation_status",
         "usage_reconciliation_status",
+        "judge_reviews",
     }
     base_allowed = {item for item in value if item not in extras}
     base = _optional_canonical_attempt({key: value[key] for key in base_allowed})
@@ -2465,6 +2466,7 @@ def _optional_canonical_attempt_v3(raw: Any) -> dict[str, Any] | None:
         value.get("score_details"),
         scores=base["scores"],
     )
+    judge_reviews = _optional_judge_reviews_v1(value.get("judge_reviews"))
     actual_query_scope = tuple(
         _text(item, "V3 paired_attempt.actual_query_scope", 500)
         for item in _sequence(
@@ -2477,6 +2479,8 @@ def _optional_canonical_attempt_v3(raw: Any) -> dict[str, Any] | None:
     base["score_explanations"] = explanations
     if score_details:
         base["score_details"] = score_details
+    if judge_reviews:
+        base["judge_reviews"] = judge_reviews
     base["actual_query_scope"] = actual_query_scope
     excerpt = _optional_text(
         value.get("sanitized_answer_excerpt"),
@@ -2561,6 +2565,69 @@ def _optional_score_details_v1(
     if any(key.startswith("comparison.judge.") for key in details):
         raise ValueError("V3 score details may not publish blind-judge rationale")
     return details
+
+
+def _optional_judge_reviews_v1(raw: Any) -> dict[str, dict[str, Any]]:
+    reviews: dict[str, dict[str, Any]] = {}
+    for raw_judge_id, raw_review in _mapping_or_empty(raw).items():
+        judge_id = _text(raw_judge_id, "V3 judge review ID", 300)
+        review = _mapping(raw_review, f"V3 judge review {judge_id}")
+        _reject_unknown(
+            review,
+            {
+                "label",
+                "reason",
+                "missing_evidence",
+                "observed_cost_usd",
+                "cost_status",
+            },
+            f"V3 judge review {judge_id}",
+        )
+        label = str(review.get("label") or "")
+        if label not in {
+            "unusable",
+            "weak",
+            "adequate",
+            "strong",
+            "exceptional",
+        }:
+            raise ValueError(f"V3 judge review {judge_id!r} label is unsupported")
+        reason = _text(review.get("reason"), "V3 judge review reason", 500)
+        if redact_text(reason) != reason:
+            raise ValueError(f"V3 judge review {judge_id!r} reason is sensitive")
+        missing_evidence = _required_bool(
+            review.get("missing_evidence"),
+            "V3 judge review missing_evidence",
+        )
+        cost_status = review.get("cost_status")
+        if cost_status not in {None, "observed", "unavailable"}:
+            raise ValueError(
+                f"V3 judge review {judge_id!r} cost status is unsupported"
+            )
+        cost = _optional_float(review.get("observed_cost_usd"))
+        if cost is not None and cost < 0:
+            raise ValueError(
+                f"V3 judge review {judge_id!r} observed cost is invalid"
+            )
+        if cost_status == "observed" and cost is None:
+            raise ValueError(
+                f"V3 judge review {judge_id!r} observed cost is missing"
+            )
+        if cost_status == "unavailable" and cost is not None:
+            raise ValueError(
+                f"V3 judge review {judge_id!r} unavailable cost has a value"
+            )
+        normalized: dict[str, Any] = {
+            "label": label,
+            "reason": reason,
+            "missing_evidence": missing_evidence,
+        }
+        if cost is not None:
+            normalized["observed_cost_usd"] = cost
+        if cost_status is not None:
+            normalized["cost_status"] = cost_status
+        reviews[judge_id] = normalized
+    return reviews
 
 
 def _canonical_attempt_identity(raw: Any) -> dict[str, Any]:

@@ -107,6 +107,8 @@ EvidenceChainIntegrity = Literal[
     "reconciled", "incomplete", "invalid", "not_applicable"
 ]
 PublicationStatus = Literal["not_requested", "published", "failed", "not_applicable"]
+JudgeResponseContract = Literal["scores_v1", "anchored_review_v1"]
+JudgeReviewLabel = Literal["unusable", "weak", "adequate", "strong", "exceptional"]
 _RECONCILIATION_STATUSES = frozenset({"resolved", "unresolved", "unavailable"})
 _READINESS = frozenset({"ready", "needs_review", "blocked", "no_comparison_justified"})
 _PUBLIC_TASK_FIELDS = frozenset(
@@ -188,9 +190,13 @@ class ComparisonEvaluatorV1:
     reserve_cost_usd: float = 0.0
     input_cost_per_million: float | None = None
     output_cost_per_million: float | None = None
+    response_contract: JudgeResponseContract = "scores_v1"
 
     def to_dict(self) -> dict[str, Any]:
-        return _drop_empty(asdict(self), preserve_false=True)
+        value = _drop_empty(asdict(self), preserve_false=True)
+        if value.get("response_contract") == "scores_v1":
+            value.pop("response_contract", None)
+        return value
 
 
 @dataclass(frozen=True)
@@ -477,6 +483,44 @@ class PairedAttemptV2:
 
 
 @dataclass(frozen=True)
+class JudgeReviewV1:
+    """Safe, advisory review from an explicitly anchored judge contract."""
+
+    label: JudgeReviewLabel
+    reason: str
+    missing_evidence: bool
+    observed_cost_usd: float | None = None
+    cost_status: Literal["observed", "unavailable"] | None = None
+
+    def __post_init__(self) -> None:
+        if self.label not in {
+            "unusable",
+            "weak",
+            "adequate",
+            "strong",
+            "exceptional",
+        }:
+            raise ValueError("judge review label is unsupported")
+        if not self.reason.strip() or len(self.reason) > 500:
+            raise ValueError("judge review reason must be 1..500 characters")
+        if redact_value(self.reason) != self.reason:
+            raise ValueError("judge review reason contains sensitive text")
+        if not isinstance(self.missing_evidence, bool):
+            raise ValueError("judge review missing_evidence must be a boolean")
+        if self.observed_cost_usd is not None and (
+            not math.isfinite(self.observed_cost_usd) or self.observed_cost_usd < 0
+        ):
+            raise ValueError("judge review observed cost must be non-negative")
+        if self.cost_status == "observed" and self.observed_cost_usd is None:
+            raise ValueError("observed judge review cost requires a value")
+        if self.cost_status == "unavailable" and self.observed_cost_usd is not None:
+            raise ValueError("unavailable judge review cost cannot include a value")
+
+    def to_dict(self) -> dict[str, Any]:
+        return _drop_empty(asdict(self), preserve_false=True)
+
+
+@dataclass(frozen=True)
 class PairedAttemptV3:
     attempt_id: str
     identity: dict[str, Any]
@@ -512,12 +556,18 @@ class PairedAttemptV3:
     latency_reconciliation_status: ReconciliationStatus | None = None
     usage_reconciliation_status: ReconciliationStatus | None = None
     score_details: dict[str, ScoreExplanationV1] = field(default_factory=dict)
+    judge_reviews: dict[str, JudgeReviewV1] = field(default_factory=dict)
 
     def __post_init__(self) -> None:
         if set(self.score_details) - set(self.scores):
             raise ValueError("V3 score details reference an unknown score")
         if any(key.startswith("comparison.judge.") for key in self.score_details):
             raise ValueError("V3 score details may not publish blind-judge rationale")
+        if any(
+            not judge_id or len(judge_id) > 300
+            for judge_id in self.judge_reviews
+        ):
+            raise ValueError("V3 judge review ID is invalid")
         for field_name in (
             "cost_reconciliation_status",
             "latency_reconciliation_status",
@@ -579,6 +629,9 @@ class PairedAttemptV3:
                 usage_reconciliation_status=self.usage_reconciliation_status,
                 score_details={
                     key: item.to_dict() for key, item in self.score_details.items()
+                },
+                judge_reviews={
+                    key: item.to_dict() for key, item in self.judge_reviews.items()
                 },
             )
             if stable_digest(projection) != self.local_result_row_projection_digest:
@@ -723,6 +776,8 @@ class ComparisonSpecV1:
                     evaluator.pop("dimension_roles", None)
                 if not evaluator.get("dimension_guidance"):
                     evaluator.pop("dimension_guidance", None)
+                if evaluator.get("response_contract") == "scores_v1":
+                    evaluator.pop("response_contract", None)
                 if evaluator.get("timeout_sec") is None:
                     evaluator.pop("timeout_sec", None)
         if value.get("decision_policy") is None:
@@ -6200,6 +6255,15 @@ def _paired_attempt_view_v3(
                 projection.get("score_details")
             ).items()
         },
+        judge_reviews={
+            str(judge_id): _judge_review_v1(
+                review,
+                judge_id=str(judge_id),
+            )
+            for judge_id, review in _mapping_or_empty(
+                projection.get("judge_reviews")
+            ).items()
+        },
     )
 
 
@@ -7480,6 +7544,12 @@ def _paired_attempt_v3(raw: Any) -> PairedAttemptV3 | None:
             value.get("score_details")
         ).items()
     }
+    judge_reviews = {
+        str(judge_id): _judge_review_v1(review, judge_id=str(judge_id))
+        for judge_id, review in _mapping_or_empty(
+            value.get("judge_reviews")
+        ).items()
+    }
     infrastructure = dict(_mapping_or_empty(value.get("infrastructure")))
     hosted_evidence_status = infrastructure.pop(
         "hosted_evidence_status", "not_applicable"
@@ -7568,6 +7638,7 @@ def _paired_attempt_v3(raw: Any) -> PairedAttemptV3 | None:
             "usage_reconciliation_status",
         ),
         score_details=score_details,
+        judge_reviews=judge_reviews,
     )
 
 
@@ -7589,6 +7660,41 @@ def _score_explanation_v1(raw: Any, *, dimension: str) -> ScoreExplanationV1:
     if any(redact_value(item) != item for item in fields.values()):
         raise ValueError(f"V3 score detail {dimension!r} contains sensitive text")
     return ScoreExplanationV1(**fields)
+
+
+def _judge_review_v1(raw: Any, *, judge_id: str) -> JudgeReviewV1:
+    value = _mapping(raw, f"V3 judge review {judge_id}")
+    _reject_unknown(
+        value,
+        {
+            "label",
+            "reason",
+            "missing_evidence",
+            "observed_cost_usd",
+            "cost_status",
+        },
+        f"V3 judge review {judge_id}",
+    )
+    if not judge_id or len(judge_id) > 300:
+        raise ValueError("V3 judge review ID is invalid")
+    label = str(value.get("label") or "")
+    if label not in {"unusable", "weak", "adequate", "strong", "exceptional"}:
+        raise ValueError(f"V3 judge review {judge_id!r} label is unsupported")
+    missing_evidence = value.get("missing_evidence")
+    if not isinstance(missing_evidence, bool):
+        raise ValueError(
+            f"V3 judge review {judge_id!r} missing_evidence must be a boolean"
+        )
+    cost_status = value.get("cost_status")
+    if cost_status not in {None, "observed", "unavailable"}:
+        raise ValueError(f"V3 judge review {judge_id!r} cost status is unsupported")
+    return JudgeReviewV1(
+        label=label,  # type: ignore[arg-type]
+        reason=_text(value.get("reason"), "V3 judge review reason", 500),
+        missing_evidence=missing_evidence,
+        observed_cost_usd=_number_or_none(value.get("observed_cost_usd")),
+        cost_status=cost_status,  # type: ignore[arg-type]
+    )
 
 
 def _paired_case(raw: Any) -> PairedCaseV2:
@@ -10397,6 +10503,7 @@ def score_comparison_rows(
                     "usage": usage,
                     "route_receipt": {
                         **dict(receipt),
+                        "response_contract": judge.response_contract,
                         "judge_input_privacy": judge_input_privacy,
                     },
                     "qualification": qualification,
@@ -10491,14 +10598,33 @@ def _request_comparison_judge(
         public_task=public_task,
         row=row,
     )
-    prompt_prefix = (
-        "Blindly evaluate one Agent attempt. You do not know whether it came from "
-        "the baseline or candidate. Use only the supplied public task, final "
-        "response, permitted evidence, and rubric. Return one JSON object with: "
-        "scores (one 0..1 number per dimension), overall_assessment (brief text), "
-        "uncertainty (0..1), and rationale (at most 500 characters). Do not return "
-        "hidden reasoning or a chain of thought.\n\n"
-    )
+    if evaluator.response_contract == "anchored_review_v1":
+        prompt_prefix = (
+            "Blindly evaluate one Agent attempt. You do not know whether it came "
+            "from the baseline or candidate. Use only the supplied public task, "
+            "final response, permitted evidence, and rubric. Return exactly one "
+            "JSON object with: scores (one 0..1 number per dimension), label (one "
+            "of unusable, weak, adequate, strong, exceptional), reason (one concise "
+            "sentence of at most 500 characters), and missing_evidence (a boolean). "
+            "Use these anchors: unusable means the response cannot support the "
+            "requested action; weak means it has relevant content but major gaps or "
+            "errors; adequate means it supports the basic action with stated "
+            "limits; strong means it is clear, well-supported, and actionable with "
+            "only minor gaps; exceptional means it is unusually complete, precise, "
+            "and actionable with no material gap. Set missing_evidence to true only "
+            "when the supplied public evidence is insufficient to apply the rubric. "
+            "Do not return private expected values, hidden reasoning, or a chain of "
+            "thought.\n\n"
+        )
+    else:
+        prompt_prefix = (
+            "Blindly evaluate one Agent attempt. You do not know whether it came "
+            "from the baseline or candidate. Use only the supplied public task, "
+            "final response, permitted evidence, and rubric. Return one JSON object "
+            "with: scores (one 0..1 number per dimension), overall_assessment "
+            "(brief text), uncertainty (0..1), and rationale (at most 500 "
+            "characters). Do not return hidden reasoning or a chain of thought.\n\n"
+        )
     prompt = (prompt_prefix + json.dumps(payload, sort_keys=True, default=str))[
         :MAX_COMPARISON_JUDGE_PROMPT_CHARACTERS
     ]
@@ -10510,6 +10636,7 @@ def _request_comparison_judge(
         "profile": evaluator.profile,
         "route": model_route_identity(route, env),
         "rubric_digest": _judge_contract_digest(evaluator),
+        "response_contract": evaluator.response_contract,
         "request_policy": request_policy,
         "blind_fields": [
             "baseline_or_candidate",
@@ -10996,6 +11123,33 @@ def _validate_comparison_judge_payload(
         ):
             raise ValueError(f"judge score {dimension!r} must be between zero and one")
         scores[str(dimension)] = float(raw)
+    if evaluator.response_contract == "anchored_review_v1":
+        allowed = {"scores", "label", "reason", "missing_evidence"}
+        if set(payload) != allowed:
+            raise ValueError(
+                "anchored judge response must contain exactly scores, label, "
+                "reason, and missing_evidence"
+            )
+        label = str(payload.get("label") or "").strip()
+        if label not in {"unusable", "weak", "adequate", "strong", "exceptional"}:
+            raise ValueError("anchored judge label is unsupported")
+        reason = str(payload.get("reason") or "").strip()
+        if not reason or len(reason) > 500:
+            raise ValueError("anchored judge reason must be 1..500 characters")
+        if redact_value(reason) != reason:
+            raise ValueError("anchored judge reason contains sensitive text")
+        missing_evidence = payload.get("missing_evidence")
+        if not isinstance(missing_evidence, bool):
+            raise ValueError("anchored judge missing_evidence must be a boolean")
+        return {
+            "scores": scores,
+            "review": {
+                "schema_version": 1,
+                "label": label,
+                "reason": reason,
+                "missing_evidence": missing_evidence,
+            },
+        }
     assessment = str(payload.get("overall_assessment") or "").strip()
     rationale = str(payload.get("rationale") or "").strip()
     uncertainty = payload.get("uncertainty")
@@ -12931,6 +13085,7 @@ def _evaluator(raw: Any) -> ComparisonEvaluatorV1:
             "reserve_cost_usd",
             "input_cost_per_million",
             "output_cost_per_million",
+            "response_contract",
         },
         "evaluator",
     )
@@ -13011,6 +13166,13 @@ def _evaluator(raw: Any) -> ComparisonEvaluatorV1:
         raise ValueError("LLM judge evaluator requires a public rubric")
     if evaluator_type == "llm_judge" and not dimensions:
         raise ValueError("LLM judge evaluator requires dimensions")
+    response_contract = str(value.get("response_contract") or "scores_v1")
+    if response_contract not in {"scores_v1", "anchored_review_v1"}:
+        raise ValueError("LLM judge response_contract is unsupported")
+    if evaluator_type != "llm_judge" and response_contract != "scores_v1":
+        raise ValueError(
+            "response_contract is supported only for LLM judge evaluators"
+        )
     unsupported_evidence = sorted(
         set(evidence)
         - {
@@ -13046,6 +13208,7 @@ def _evaluator(raw: Any) -> ComparisonEvaluatorV1:
         ),
         input_cost_per_million=input_cost_per_million,
         output_cost_per_million=output_cost_per_million,
+        response_contract=response_contract,  # type: ignore[arg-type]
     )
 
 
@@ -14245,16 +14408,20 @@ def _comparison_judge_qualification(
 
 
 def _judge_contract_digest(judge: ComparisonEvaluatorV1) -> str:
-    return stable_digest(
-        {
-            "schema_version": 1,
-            "judge_id": judge.id,
-            "profile": judge.profile,
-            "rubric": judge.rubric,
-            "dimensions": list(judge.dimensions),
-            "evidence": list(judge.evidence),
-        }
-    )
+    contract = {
+        "schema_version": 1,
+        "judge_id": judge.id,
+        "profile": judge.profile,
+        "rubric": judge.rubric,
+        "dimensions": list(judge.dimensions),
+        "evidence": list(judge.evidence),
+    }
+    # Preserve the exact digest of every existing scores_v1 judge. A Study
+    # must opt into the richer response contract so its preview, approval,
+    # calibration, and durable request identity all change together.
+    if judge.response_contract != "scores_v1":
+        contract["response_contract"] = judge.response_contract
+    return stable_digest(contract)
 
 
 def _behavior_diff(

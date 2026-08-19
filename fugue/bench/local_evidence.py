@@ -167,6 +167,9 @@ def local_result_row_projection_v1(row: Mapping[str, Any]) -> dict[str, Any]:
     score_details = _projection_score_details(row, scores=scores)
     if score_details:
         projection["score_details"] = score_details
+    judge_reviews = _projection_judge_reviews(row)
+    if judge_reviews:
+        projection["judge_reviews"] = judge_reviews
     for field_name in (
         "cost_reconciliation_status",
         "latency_reconciliation_status",
@@ -203,6 +206,7 @@ def local_result_attempt_projection_v1(
     latency_reconciliation_status: ReconciliationStatus | None = None,
     usage_reconciliation_status: ReconciliationStatus | None = None,
     score_details: Mapping[str, Mapping[str, str]] | None = None,
+    judge_reviews: Mapping[str, Mapping[str, Any]] | None = None,
 ) -> dict[str, Any]:
     """Project an already-normalized V3 attempt using the canonical shape."""
 
@@ -239,6 +243,14 @@ def local_result_attempt_projection_v1(
         projection["score_details"] = {
             str(dimension): _projection_score_detail(detail, dimension=str(dimension))
             for dimension, detail in score_details.items()
+        }
+    if judge_reviews:
+        projection["judge_reviews"] = {
+            str(judge_id): _projection_normalized_judge_review(
+                review,
+                judge_id=str(judge_id),
+            )
+            for judge_id, review in sorted(judge_reviews.items())
         }
     return projection
 
@@ -283,6 +295,112 @@ def _projection_score_detail(
             )
         detail[field_name] = text
     return detail
+
+
+def _projection_judge_reviews(
+    row: Mapping[str, Any],
+) -> dict[str, dict[str, Any]]:
+    """Project only explicit anchored reviews; never infer them from scores."""
+
+    reviews: dict[str, dict[str, Any]] = {}
+    for raw_judge_id, raw_result in sorted(
+        _projection_mapping(row.get("comparison_judges")).items()
+    ):
+        judge_id = str(raw_judge_id)
+        result = _projection_mapping(raw_result)
+        receipt = _projection_mapping(result.get("route_receipt"))
+        response_contract = str(receipt.get("response_contract") or "scores_v1")
+        if response_contract not in {"scores_v1", "anchored_review_v1"}:
+            raise ValueError(f"judge {judge_id!r} response contract is unsupported")
+        raw_review = result.get("review")
+        if response_contract == "scores_v1":
+            if raw_review is not None:
+                raise ValueError(
+                    f"legacy numeric judge {judge_id!r} cannot publish a review"
+                )
+            continue
+        if result.get("status") != "scored":
+            if raw_review is not None:
+                raise ValueError(
+                    f"unavailable judge {judge_id!r} cannot publish a review"
+                )
+            continue
+        review = _projection_mapping(raw_review)
+        if set(review) != {
+            "schema_version",
+            "label",
+            "reason",
+            "missing_evidence",
+        } or review.get("schema_version") != 1:
+            raise ValueError(f"judge {judge_id!r} review contract is invalid")
+        projected: dict[str, Any] = {
+            "label": review.get("label"),
+            "reason": review.get("reason"),
+            "missing_evidence": review.get("missing_evidence"),
+        }
+        observed_cost = _projection_number(result.get("cost_usd"))
+        if result.get("cost_observation_complete") is True and observed_cost is not None:
+            projected["observed_cost_usd"] = observed_cost
+            projected["cost_status"] = "observed"
+        else:
+            projected["cost_status"] = "unavailable"
+        reviews[judge_id] = _projection_normalized_judge_review(
+            projected,
+            judge_id=judge_id,
+        )
+    return reviews
+
+
+def _projection_normalized_judge_review(
+    raw: Any,
+    *,
+    judge_id: str,
+) -> dict[str, Any]:
+    value = _projection_mapping(raw)
+    allowed = {
+        "label",
+        "reason",
+        "missing_evidence",
+        "observed_cost_usd",
+        "cost_status",
+    }
+    if set(value) - allowed:
+        raise ValueError(f"judge review {judge_id!r} contains unknown fields")
+    label = str(value.get("label") or "")
+    if label not in {"unusable", "weak", "adequate", "strong", "exceptional"}:
+        raise ValueError(f"judge review {judge_id!r} label is unsupported")
+    reason = " ".join(str(value.get("reason") or "").split())
+    if not reason or len(reason) > 500:
+        raise ValueError(f"judge review {judge_id!r} reason is invalid")
+    if redact_text(reason) != reason:
+        raise ValueError(f"judge review {judge_id!r} reason is sensitive")
+    missing_evidence = value.get("missing_evidence")
+    if not isinstance(missing_evidence, bool):
+        raise ValueError(
+            f"judge review {judge_id!r} missing_evidence must be a boolean"
+        )
+    cost_status = value.get("cost_status")
+    if cost_status not in {None, "observed", "unavailable"}:
+        raise ValueError(f"judge review {judge_id!r} cost status is unsupported")
+    cost = _projection_number(value.get("observed_cost_usd"))
+    if cost is not None and cost < 0:
+        raise ValueError(f"judge review {judge_id!r} observed cost is invalid")
+    if cost_status == "observed" and cost is None:
+        raise ValueError(f"judge review {judge_id!r} observed cost is missing")
+    if cost_status == "unavailable" and cost is not None:
+        raise ValueError(
+            f"judge review {judge_id!r} unavailable cost cannot include a value"
+        )
+    result: dict[str, Any] = {
+        "label": label,
+        "reason": reason,
+        "missing_evidence": missing_evidence,
+    }
+    if cost is not None:
+        result["observed_cost_usd"] = cost
+    if cost_status is not None:
+        result["cost_status"] = cost_status
+    return result
 
 
 def _reconciliation_status(value: Any, field_name: str) -> ReconciliationStatus:

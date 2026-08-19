@@ -282,6 +282,57 @@ def test_v3_view_rejects_sensitive_structured_score_details() -> None:
         experiment_view_from_dict(payload)
 
 
+def test_v3_view_accepts_safe_anchored_judge_review() -> None:
+    payload = json.loads(_V3_STUDY_CONSOLE_GOLDEN.read_text(encoding="utf-8"))
+    candidate = payload["paired_cases"][0]["candidate"]
+    candidate["judge_reviews"] = {
+        "maintainer-actionability": {
+            "label": "strong",
+            "reason": (
+                "The answer gives a concrete next action and states its evidence "
+                "limit."
+            ),
+            "missing_evidence": False,
+            "observed_cost_usd": 0.04,
+            "cost_status": "observed",
+        }
+    }
+
+    view = experiment_view_from_dict(payload)
+
+    assert view.paired_cases[0]["candidate"]["judge_reviews"] == {
+        "maintainer-actionability": {
+            "label": "strong",
+            "reason": (
+                "The answer gives a concrete next action and states its evidence "
+                "limit."
+            ),
+            "missing_evidence": False,
+            "observed_cost_usd": 0.04,
+            "cost_status": "observed",
+        }
+    }
+
+
+def test_v3_view_rejects_unanchored_or_sensitive_judge_review() -> None:
+    payload = json.loads(_V3_STUDY_CONSOLE_GOLDEN.read_text(encoding="utf-8"))
+    candidate = payload["paired_cases"][0]["candidate"]
+    candidate["judge_reviews"] = {
+        "maintainer-actionability": {
+            "label": "0.83",
+            "reason": "api_key=sk-example-secret-value",
+            "missing_evidence": False,
+        }
+    }
+
+    with pytest.raises(ValueError, match="label is unsupported"):
+        experiment_view_from_dict(payload)
+
+    candidate["judge_reviews"]["maintainer-actionability"]["label"] = "strong"
+    with pytest.raises(ValueError, match="reason is sensitive"):
+        experiment_view_from_dict(payload)
+
+
 def test_v3_view_rejects_attempt_identity_mismatch() -> None:
     payload = json.loads(_V3_STUDY_CONSOLE_GOLDEN.read_text(encoding="utf-8"))
     payload["paired_cases"][0]["candidate"]["identity"]["candidate"] = (

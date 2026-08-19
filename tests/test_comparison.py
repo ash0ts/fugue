@@ -105,6 +105,21 @@ def test_new_programmatic_comparison_policy_defaults_to_local_evidence() -> None
     assert policy.evidence_destination.kind == "local"
 
 
+def test_judge_response_contract_is_explicit_and_legacy_default_is_omitted() -> None:
+    legacy = ComparisonEvaluatorV1(
+        id="legacy-review",
+        type="llm_judge",
+        required=False,
+        profile="wandb/anthropic/claude-opus-4-8",
+        rubric="Assess usefulness.",
+        dimensions=("usefulness",),
+    )
+    anchored = replace(legacy, response_contract="anchored_review_v1")
+
+    assert "response_contract" not in legacy.to_dict()
+    assert anchored.to_dict()["response_contract"] == "anchored_review_v1"
+
+
 def test_explicit_local_comparison_policy_cannot_silently_switch_to_weave() -> None:
     with pytest.raises(ValueError, match="W&B result destination"):
         ComparisonExecutionPolicyV1(
@@ -3583,6 +3598,141 @@ def test_v3_attempt_exports_blind_judge_scores_without_rationale() -> None:
         == "Blind judge score; no rationale or private truth is published."
     )
     assert "score_details" not in attempt.to_dict()
+    assert attempt.judge_reviews == {}
+
+
+def test_anchored_judge_projects_safe_advisory_review_per_attempt() -> None:
+    root = Path.cwd()
+    spec = load_comparison(EXAMPLE / "comparison.yaml", repo_root=root)
+    judge = ComparisonEvaluatorV1(
+        id="maintainer-review",
+        type="llm_judge",
+        required=False,
+        profile="wandb/anthropic/claude-opus-4-8",
+        rubric="Assess whether the response is useful and actionable.",
+        dimensions=("maintenance_actionability",),
+        evidence=("tool_names",),
+        reserve_cost_usd=0.1,
+        response_contract="anchored_review_v1",
+    )
+
+    def anchored_request(**_kwargs: object):
+        return (
+            {
+                "scores": {"maintenance_actionability": 0.8},
+                "label": "strong",
+                "reason": (
+                    "The answer names a concrete next action and states its "
+                    "evidence limit."
+                ),
+                "missing_evidence": False,
+            },
+            {"cost_usd": 0.04},
+            {"request_policy": {"automatic_retries": 0}},
+        )
+
+    rows = score_comparison_rows(
+        replace(spec, evaluators=(*spec.evaluators, judge)),
+        [
+            {
+                "answer": {"amount": 125, "source": "expense-policy-v4.md"},
+                "task_id": "expense-limit",
+                "trial_index": 1,
+                "variant_id": "candidate",
+                "harness": "claude-code",
+                "mcp_tool_names": ["query_wandb_tool"],
+            }
+        ],
+        repo_root=root,
+        env={
+            "ANTHROPIC_API_KEY": "secret-example-value",
+            "FUGUE_WANDB_INFERENCE_PROJECT": "wandb/test",
+        },
+        judge_request=anchored_request,
+    )
+
+    review = rows[0]["comparison_judges"]["maintainer-review"]["review"]
+    assert review == {
+        "schema_version": 1,
+        "label": "strong",
+        "reason": (
+            "The answer names a concrete next action and states its evidence limit."
+        ),
+        "missing_evidence": False,
+    }
+    assert rows[0]["comparison_judges"]["maintainer-review"]["route_receipt"][
+        "response_contract"
+    ] == "anchored_review_v1"
+    projection = local_result_row_projection_v1(rows[0])
+    assert projection["judge_reviews"] == {
+        "maintainer-review": {
+            "label": "strong",
+            "reason": (
+                "The answer names a concrete next action and states its evidence "
+                "limit."
+            ),
+            "missing_evidence": False,
+            "observed_cost_usd": 0.04,
+            "cost_status": "observed",
+        }
+    }
+    attempt = _paired_attempt_view_v3(rows[0])
+    assert attempt is not None
+    assert attempt.judge_reviews["maintainer-review"].label == "strong"
+    assert attempt.judge_reviews["maintainer-review"].missing_evidence is False
+    assert "concrete next action" not in json.dumps(attempt.score_explanations)
+
+
+def test_anchored_judge_fails_closed_without_an_anchored_review() -> None:
+    root = Path.cwd()
+    spec = load_comparison(EXAMPLE / "comparison.yaml", repo_root=root)
+    judge = ComparisonEvaluatorV1(
+        id="maintainer-review",
+        type="llm_judge",
+        required=False,
+        profile="wandb/anthropic/claude-opus-4-8",
+        rubric="Assess whether the response is useful and actionable.",
+        dimensions=("maintenance_actionability",),
+        reserve_cost_usd=0.1,
+        response_contract="anchored_review_v1",
+    )
+
+    def numeric_only_request(**_kwargs: object):
+        return (
+            {
+                "scores": {"maintenance_actionability": 0.8},
+                "overall_assessment": "strong",
+                "uncertainty": 0.1,
+                "rationale": "The response is useful.",
+            },
+            {"cost_usd": 0.04},
+            {},
+        )
+
+    rows = score_comparison_rows(
+        replace(spec, evaluators=(*spec.evaluators, judge)),
+        [
+            {
+                "answer": {"amount": 125, "source": "expense-policy-v4.md"},
+                "task_id": "expense-limit",
+                "trial_index": 1,
+                "variant_id": "candidate",
+                "harness": "claude-code",
+            }
+        ],
+        repo_root=root,
+        env={
+            "ANTHROPIC_API_KEY": "secret-example-value",
+            "FUGUE_WANDB_INFERENCE_PROJECT": "wandb/test",
+        },
+        judge_request=numeric_only_request,
+    )
+
+    result = rows[0]["comparison_judges"]["maintainer-review"]
+    assert result["status"] == "unavailable"
+    assert result["failure"]["stage"] == "rubric_validation"
+    assert "review" not in result
+    assert "judge_reviews" not in local_result_row_projection_v1(rows[0])
 
 
 def test_checkpoint_records_advisory_judge_without_gating_execution() -> None:
