@@ -2565,6 +2565,117 @@ def test_live_evaluation_graph_resolves_immutable_evaluation_object_ref() -> Non
     assert row["evaluation_prediction_graph_verified"] is True
 
 
+def test_evaluation_evidence_uses_hydrated_weave_object_without_resolving() -> None:
+    project = "entity/project"
+    dataset = SimpleNamespace(
+        ref=SimpleNamespace(uri="weave:///entity/project/object/tasks:dataset-v1")
+    )
+
+    class HydratedEvaluation:
+        ref = SimpleNamespace(uri="weave:///entity/project/object/eval:v1")
+
+        def __init__(self, owned_dataset) -> None:
+            self.dataset = owned_dataset
+
+        @staticmethod
+        def get():
+            raise AssertionError("a hydrated Evaluation must not resolve itself")
+
+    evaluation_call = SimpleNamespace(
+        id="evaluation-root",
+        project_id=project,
+        inputs={"self": HydratedEvaluation(dataset)},
+    )
+
+    def reject_resolution(_value):
+        raise AssertionError("a hydrated Evaluation must not use the resolver")
+
+    row: dict[str, object] = {}
+    export._apply_evaluation_evidence(
+        row,
+        evaluation_call=evaluation_call,
+        dataset=dataset,
+        project=project,
+        object_resolver=reject_resolution,
+    )
+
+    assert "evaluation_root_resolution_error" not in row
+    assert row["evaluation_root_object_verified"] is True
+    assert row["evaluation_root_dataset_relationship_verified"] is True
+
+
+def test_evaluation_evidence_resolves_ref_only_input_with_public_resolver() -> None:
+    project = "entity/project"
+    dataset = SimpleNamespace(
+        ref=SimpleNamespace(uri="weave:///entity/project/object/tasks:dataset-v1")
+    )
+    evaluation = SimpleNamespace(
+        ref=SimpleNamespace(uri="weave:///entity/project/object/eval:v1"),
+        dataset=dataset,
+    )
+
+    class EvaluationRef:
+        ref = SimpleNamespace(uri="weave:///entity/project/object/eval:v1")
+
+        @staticmethod
+        def get():
+            raise AssertionError("the configured public resolver must take precedence")
+
+    evaluation_ref = EvaluationRef()
+    resolved: list[object] = []
+
+    def resolve(value):
+        resolved.append(value)
+        return evaluation
+
+    row: dict[str, object] = {}
+    export._apply_evaluation_evidence(
+        row,
+        evaluation_call=SimpleNamespace(
+            id="evaluation-root",
+            project_id=project,
+            inputs={"self": evaluation_ref},
+        ),
+        dataset=dataset,
+        project=project,
+        object_resolver=resolve,
+    )
+
+    assert resolved == [evaluation_ref]
+    assert row["evaluation_root_object_verified"] is True
+    assert row["evaluation_root_dataset_relationship_verified"] is True
+
+
+def test_evaluation_evidence_fails_closed_for_broken_ref_only_resolver() -> None:
+    project = "entity/project"
+    dataset = SimpleNamespace(
+        ref=SimpleNamespace(uri="weave:///entity/project/object/tasks:dataset-v1")
+    )
+    evaluation_ref = SimpleNamespace(
+        uri=lambda: "weave:///entity/project/object/eval:v1"
+    )
+    row: dict[str, object] = {}
+
+    def broken_resolver(_value):
+        raise RuntimeError("object unavailable")
+
+    export._apply_evaluation_evidence(
+        row,
+        evaluation_call=SimpleNamespace(
+            id="evaluation-root",
+            project_id=project,
+            inputs={"self": evaluation_ref},
+        ),
+        dataset=dataset,
+        project=project,
+        object_resolver=broken_resolver,
+    )
+
+    assert row["evaluation_root_resolution_error"] == "RuntimeError"
+    assert row["evaluation_root_object_verified"] is False
+    assert row["evaluation_root_dataset_relationship_verified"] is False
+
+
 def test_live_evaluation_graph_fails_closed_when_object_ref_resolution_fails() -> None:
     project = "entity/project"
     dataset = SimpleNamespace(

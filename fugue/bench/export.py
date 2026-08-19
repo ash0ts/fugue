@@ -7020,14 +7020,23 @@ def _apply_evaluation_evidence(
     evaluation_input_ref = _ref_uri(evaluation_input)
     evaluation = evaluation_input
     evaluation_get = getattr(evaluation_input, "get", None)
+    hydrated_evaluation_input = bool(
+        evaluation_input is not None
+        and _canonical_object_ref(evaluation_input_ref, project=project)
+        and getattr(evaluation_input, "dataset", None) is not None
+    )
     row.pop("evaluation_root_resolution_error", None)
-    if callable(object_resolver) and evaluation_input is not None:
+    if (
+        not hydrated_evaluation_input
+        and callable(object_resolver)
+        and evaluation_input is not None
+    ):
         try:
             evaluation = object_resolver(evaluation_input)
         except Exception as exc:
             evaluation = None
             row["evaluation_root_resolution_error"] = type(exc).__name__
-    elif callable(evaluation_get):
+    elif not hydrated_evaluation_input and callable(evaluation_get):
         try:
             evaluation = evaluation_get()
         except Exception as exc:
