@@ -29,7 +29,11 @@ from fugue.bench.export import (
 )
 from fugue.bench.local_evidence import local_attempt_refs
 from fugue.bench.operator import OperatorService
-from fugue.bench.task_presentation import PublicPromptPartV1, TaskPresentationV1
+from fugue.bench.task_presentation import (
+    PublicPromptPartV1,
+    TaskPresentationV1,
+    task_presentation_from_public_case,
+)
 from fugue.mcp_evidence import safe_graphql_event_arguments
 
 
@@ -602,6 +606,82 @@ def test_live_evaluation_rejects_exact_env_secret_before_remote_write(
             env=cell.env,
             weave_module=SimpleNamespace(),
         )
+
+
+def test_live_evaluation_dataset_excludes_future_scripted_turns(
+    tmp_path: Path,
+) -> None:
+    datasets = []
+
+    class FakeDataset:
+        def __init__(self, *, name, rows) -> None:
+            self.name = name
+            self.rows = rows
+            self.ref = SimpleNamespace(
+                uri="weave:///entity/project/object/tasks:dataset-v1"
+            )
+            datasets.append(self)
+
+    class FakeLogger:
+        def __init__(self, **_kwargs) -> None:
+            pass
+
+    presentation = task_presentation_from_public_case(
+        task_id="scripted-task",
+        public_case={
+            "id": "scripted-task",
+            "prompt": "Inspect the repository and report the current finding.",
+            "interaction": {
+                "type": "scripted",
+                "scripted_turns": [
+                    "Now revise the finding after reading the hidden follow-up."
+                ],
+            },
+        },
+    )
+    assert presentation is not None
+    cell = PlannedCell(
+        id="cell-scripted",
+        run_id="run-scripted",
+        run_name="scripted-turn-boundary",
+        workload_id="coding",
+        task_id="scripted-task",
+        harness="codex",
+        context_system_id="none",
+        variant_id="baseline",
+        model_provider="anthropic",
+        model="anthropic/test-model",
+        trial_index=1,
+        comparison_example_id="example-scripted",
+        candidate_id="candidate-scripted",
+        execution_fingerprint="runtime-scripted",
+        config_path=Path("config.json"),
+        result_path=Path("jobs/result.json"),
+        command=("harbor", "run"),
+        env={
+            "WANDB_API_KEY": "test-only-wandb-key",
+            "WANDB_ENTITY": "entity",
+            "WANDB_PROJECT": "project",
+        },
+        n_attempts=1,
+        task_presentation=presentation,
+    )
+
+    LiveEvaluationCoordinator(
+        [cell],
+        repo_root=tmp_path,
+        project="entity/project",
+        env=cell.env,
+        weave_module=SimpleNamespace(
+            Dataset=FakeDataset,
+            EvaluationLogger=FakeLogger,
+        ),
+    )
+
+    assert len(datasets) == 1
+    serialized = json.dumps(datasets[0].rows, sort_keys=True)
+    assert "Inspect the repository and report the current finding." in serialized
+    assert "hidden follow-up" not in serialized
 
 
 def test_posthoc_publication_rejects_exact_env_secret_before_remote_write(
