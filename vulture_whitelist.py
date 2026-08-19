@@ -73,6 +73,9 @@ aggregation
 evidence_inputs
 rubric_summary
 observation
+# ``ScoreExplanationV1`` serializes this field through ``dataclasses.asdict``;
+# V3 readers require it as the public reason for a deterministic score.
+why
 
 # `events.jsonl` is an explicitly non-authoritative diagnostic journal. This
 # supported inspection hook is exercised directly by integrity tests but is
