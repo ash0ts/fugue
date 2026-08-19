@@ -2306,7 +2306,13 @@ def test_v3_natural_maintainer_spec_requires_a_locked_role_per_dimension() -> No
     raw = yaml.safe_load(path.read_text(encoding="utf-8"))
     del raw["evaluators"][0]["dimension_roles"]["answer_correct"]
 
-    with pytest.raises(ValueError, match="typed role for every dimension"):
+    with pytest.raises(
+        ValueError,
+        match=(
+            "dimension roles must cover every declared dimension; "
+            "missing: answer_correct"
+        ),
+    ):
         comparison_from_dict(raw, repo_root=Path.cwd(), source=path)
 
 
