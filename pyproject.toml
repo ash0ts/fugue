@@ -30,7 +30,7 @@ dev = [
     "setuptools>=69",
     "skills-ref==0.1.1",
     "vulture==2.16",
-    "weave==0.53.1",
+    "weave==0.53.6",
     "wheel",
 ]
 local-runner = [
@@ -40,7 +40,7 @@ mcp = [
     "mcp==1.28.1",
 ]
 weave = [
-    "weave==0.53.1",
+    "weave==0.53.6",
 ]
 wandb-index = [
     "wandb==0.28.1",
@@ -66,7 +66,7 @@ serve = [
     "lancedb==0.34.0",
     "mcp==1.28.1",
     "uvicorn>=0.34,<1",
-    "weave==0.53.1",
+    "weave==0.53.6",
 ]
 research = [
     "fastapi>=0.115,<1",
@@ -84,7 +84,7 @@ research-worker = [
     "pydantic>=2.10,<3",
     "uvicorn>=0.34,<1",
     "wandb==0.28.1; python_version >= '3.13'",
-    "weave==0.53.1",
+    "weave==0.53.6",
 ]
 
 [tool.uv]

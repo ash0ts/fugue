@@ -29,6 +29,7 @@ from fugue.redaction import redact_text, secrets_from_env
 
 if TYPE_CHECKING:
     from fugue.bench.job_config import RenderedJob
+    from fugue.bench.task_presentation import TaskPresentationV1
 
 CellStatus = Literal[
     "pending",
@@ -112,6 +113,9 @@ class PlannedCell:
     integration_provenance: tuple[dict[str, Any], ...] = ()
     physical_execution_id: str = ""
     retry_ordinal: int = 0
+    arm_label: str = ""
+    treatment_summary: str = ""
+    task_presentation: TaskPresentationV1 | None = None
 
     @property
     def attempt_identity(self) -> dict[str, Any]:
@@ -142,6 +146,13 @@ class PlannedCell:
             "context_system_id": self.context_system_id,
             "context_delivery": self.context_delivery,
             "variant_id": self.variant_id,
+            "arm_label": self.arm_label or self.variant_id,
+            "treatment_summary": self.treatment_summary or None,
+            "task_presentation": (
+                self.task_presentation.to_dict()
+                if self.task_presentation is not None
+                else None
+            ),
             "model_provider": self.model_provider,
             "model": self.model,
             "trial_index": self.trial_index,
@@ -309,6 +320,9 @@ def plan_cells(
                 ),
                 approved_comparison=dict(approved_comparison or {}),
                 integration_provenance=job.integration_provenance,
+                arm_label=job.arm_label or job.variant_label or job.variant_id,
+                treatment_summary=job.treatment_summary,
+                task_presentation=job.task_presentation,
             )
         )
     return schedule_cells(cells, scheduling_seed)

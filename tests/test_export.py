@@ -29,7 +29,107 @@ from fugue.bench.export import (
 )
 from fugue.bench.local_evidence import local_attempt_refs
 from fugue.bench.operator import OperatorService
+from fugue.bench.task_presentation import PublicPromptPartV1, TaskPresentationV1
 from fugue.mcp_evidence import safe_graphql_event_arguments
+
+
+class _PublicPrediction:
+    """Small public EvaluationLogger stand-in used by post-hoc tests."""
+
+    def __init__(self, logger, inputs, output=None, **metadata) -> None:
+        index = getattr(logger, "_public_prediction_count", 0) + 1
+        logger._public_prediction_count = index
+        self.evaluate_call = getattr(logger, "_public_evaluate_call", None)
+        if self.evaluate_call is None:
+            evaluation = SimpleNamespace(
+                dataset=getattr(logger, "dataset", None),
+                ref=SimpleNamespace(
+                    uri="weave:///entity/project/object/evaluation:test"
+                ),
+            )
+            self.evaluate_call = SimpleNamespace(
+                id="evaluation-root",
+                project_id="entity/project",
+                inputs={"self": evaluation},
+                ref=SimpleNamespace(uri="weave:///entity/project/call/evaluation-root"),
+            )
+            logger._public_evaluate_call = self.evaluate_call
+        self.predict_and_score_call = SimpleNamespace(
+            id=f"predict-and-score-{index}",
+            project_id="entity/project",
+            ref=SimpleNamespace(
+                uri=f"weave:///entity/project/call/predict-and-score-{index}"
+            ),
+        )
+        self.predict_call = SimpleNamespace(
+            id=f"prediction-{index}",
+            project_id="entity/project",
+            ref=SimpleNamespace(uri=f"weave:///entity/project/call/prediction-{index}"),
+        )
+        self._logger = logger
+        self._inputs = inputs
+        self.output = output
+        self.metadata = metadata
+        self.scores = {}
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, _exc_type, _exc, _traceback) -> None:
+        self.finish()
+
+    def log_score(self, name, value) -> None:
+        self.scores[name] = value
+
+    def finish(self) -> None:
+        log_example = getattr(self._logger, "log_example", None)
+        if callable(log_example):
+            log_example(self._inputs, self.output, self.scores)
+
+
+class _PublicEvaluationLoggerMixin:
+    def log_prediction(self, inputs, output=None, **metadata):
+        return _PublicPrediction(self, inputs, output, **metadata)
+
+
+def _attach_public_call_handles(
+    prediction,
+    *,
+    dataset=None,
+    project: str = "entity/project",
+    trace_id: str = "a" * 32,
+):
+    evaluation = SimpleNamespace(
+        dataset=dataset,
+        ref=SimpleNamespace(uri=f"weave:///{project}/object/evaluation:test"),
+    )
+    prediction.evaluate_call = SimpleNamespace(
+        id="evaluation-root",
+        project_id=project,
+        parent_id=None,
+        trace_id=trace_id,
+        inputs={"self": evaluation},
+        ref=SimpleNamespace(uri=f"weave:///{project}/call/evaluation-root"),
+    )
+    prediction.predict_and_score_call.parent_id = "evaluation-root"
+    prediction.predict_and_score_call.trace_id = trace_id
+    prediction.predict_and_score_call.ref = SimpleNamespace(
+        uri=(f"weave:///{project}/call/{prediction.predict_and_score_call.id}")
+    )
+    if not hasattr(prediction, "predict_call"):
+        prediction.predict_call = SimpleNamespace(
+            id=f"{prediction.predict_and_score_call.id}-prediction",
+            project_id=project,
+            parent_id=prediction.predict_and_score_call.id,
+            trace_id=trace_id,
+            ref=SimpleNamespace(
+                uri=(
+                    f"weave:///{project}/call/"
+                    f"{prediction.predict_and_score_call.id}-prediction"
+                )
+            ),
+        )
+    return prediction
 
 
 def _write_export_fixture(tmp_path: Path) -> Path:
@@ -252,7 +352,7 @@ def test_weave_publication_uses_current_signature_and_local_ledger(
             self.name = name
             self.rows = rows
 
-    class FakeLogger:
+    class FakeLogger(_PublicEvaluationLoggerMixin):
         def __init__(self, **kwargs) -> None:
             self.__dict__.update(kwargs)
             self.examples = []
@@ -271,9 +371,9 @@ def test_weave_publication_uses_current_signature_and_local_ledger(
             self.failed = exception
 
     fake_weave = SimpleNamespace(
-            init=lambda project, **kwargs: calls.append(
-                ("init", project, __import__("os").environ.get("WANDB_BASE_URL"))
-            ),
+        init=lambda project, **kwargs: calls.append(
+            ("init", project, __import__("os").environ.get("WANDB_BASE_URL"))
+        ),
         Dataset=FakeDataset,
         EvaluationLogger=FakeLogger,
     )
@@ -323,7 +423,7 @@ def test_weave_publication_uses_current_signature_and_local_ledger(
     assert first.evaluations[0].url == "https://wandb.test/evaluations/eval-1"
     assert len(loggers) == 2
     for logger in loggers:
-        assert logger.name.startswith("memory-ab | coding |")
+        assert logger.name.startswith("memory ab · Legacy arm ·")
         assert logger.model["name"] == "codex__rag-bm25__test-model"
         assert logger.model["candidate_id"] == "candidate-1"
         assert logger.eval_attributes == {
@@ -334,6 +434,10 @@ def test_weave_publication_uses_current_signature_and_local_ledger(
             "fugue.workload_id": "coding",
             "fugue.record_type": "trial",
             "fugue.variant_id": "rag-bm25",
+            "fugue.arm_label": "Legacy arm",
+            "fugue.treatment_summary": (
+                "This legacy row did not publish a canonical treatment summary."
+            ),
             "fugue.candidate_id": "candidate-1",
         }
         assert logger.dataset.rows == [
@@ -349,7 +453,11 @@ def test_weave_publication_uses_current_signature_and_local_ledger(
         assert "variant_id" not in inputs
         assert output["status"] == "passed"
         assert output["trace_link_status"] == "post_hoc_unlinked"
-        assert scores == {"reward": 1.0, "passed": True}
+        assert scores == {
+            "reward": 1.0,
+            "passed": True,
+            "task_passed": True,
+        }
         assert logger.summary is True
         assert logger.failed is None
     markers = [
@@ -365,13 +473,186 @@ def test_weave_publication_uses_current_signature_and_local_ledger(
     assert ("init", project, "https://api.wandb.ai") in calls
 
 
+def test_evaluation_row_digest_matches_weave_0536_dataset_digest() -> None:
+    inputs = {
+        "comparison_example_id": "example-1",
+        "workload_id": "coding",
+        "task_id": "task",
+    }
+
+    assert export._evaluation_row_digest({}, inputs) == (
+        "VaryYLwyY4qgi9n3SBZ2FWzHLXYqEMIpgiwLX6FyrwA"
+    )
+
+
+def test_task_result_never_promotes_mechanism_failure_to_task_blocker() -> None:
+    row = {
+        "pass": False,
+        "trace_link_status": "linked",
+        "agent_runtime_completed": True,
+        "comparison_deterministic_scores": {
+            "assigned_skill_opened": False,
+        },
+        "comparison_dimension_roles": {
+            "assigned_skill_opened": "mechanism",
+        },
+    }
+
+    result = export._task_result(row)
+
+    assert result["agent_execution_status"] == "completed"
+    assert result["task_passed"] is False
+    assert result["failed_required_checks"] == [
+        {
+            "id": "task_outcome_not_satisfied",
+            "label": "Required Task Outcome",
+            "explanation": (
+                "The terminal task verdict did not pass, but the legacy scorer "
+                "did not publish a more specific failed check."
+            ),
+            "critical": True,
+        }
+    ]
+    assert (
+        export._weave_score_descriptors(row)["mechanism__assigned_skill_opened"]["role"]
+        == "mechanism"
+    )
+
+
+def test_task_result_lists_critical_and_noncritical_required_failures() -> None:
+    row = {
+        "pass": False,
+        "trace_link_status": "linked",
+        "agent_runtime_completed": True,
+        "comparison_deterministic_scores": {
+            "answer_correct": False,
+            "coverage_honest": False,
+        },
+        "comparison_dimension_roles": {
+            "answer_correct": "outcome",
+            "coverage_honest": "safety_gate",
+        },
+        "comparison_deterministic_criticality": {
+            "answer_correct": True,
+            "coverage_honest": False,
+        },
+    }
+
+    result = export._task_result(row)
+
+    assert [item["id"] for item in result["failed_required_checks"]] == [
+        "answer_correct",
+        "coverage_honest",
+    ]
+    assert [item["critical"] for item in result["failed_required_checks"]] == [
+        True,
+        False,
+    ]
+
+
+def test_live_evaluation_rejects_exact_env_secret_before_remote_write(
+    tmp_path: Path,
+) -> None:
+    secret = "opaque-value-123456789"
+    presentation = TaskPresentationV1(
+        task_id="task-secret",
+        title="Inspect a public fixture",
+        public_prompt=(
+            PublicPromptPartV1(
+                order=1,
+                text=f"Inspect the fixture value {secret}.",
+            ),
+        ),
+        required_output="Return one bounded JSON object.",
+        public_acceptance_criteria=("The JSON object is syntactically valid.",),
+    )
+    cell = PlannedCell(
+        id="cell-secret",
+        run_id="run-secret",
+        run_name="secret-boundary",
+        workload_id="coding",
+        task_id="task-secret",
+        harness="codex",
+        context_system_id="none",
+        variant_id="baseline",
+        model_provider="anthropic",
+        model="anthropic/test-model",
+        trial_index=1,
+        comparison_example_id="example-secret",
+        candidate_id="candidate-secret",
+        execution_fingerprint="runtime-secret",
+        config_path=Path("config.json"),
+        result_path=Path("jobs/result.json"),
+        command=("harbor", "run"),
+        env={
+            "WANDB_API_KEY": "test-only-wandb-key",
+            "ANTHROPIC_API_KEY": secret,
+            "WANDB_ENTITY": "entity",
+            "WANDB_PROJECT": "project",
+        },
+        n_attempts=1,
+        task_presentation=presentation,
+    )
+
+    with pytest.raises(ValueError, match="contain sensitive text"):
+        LiveEvaluationCoordinator(
+            [cell],
+            repo_root=tmp_path,
+            project="entity/project",
+            env=cell.env,
+            weave_module=SimpleNamespace(),
+        )
+
+
+def test_posthoc_publication_rejects_exact_env_secret_before_remote_write(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    secret = "opaque-value-987654321"
+    presentation = TaskPresentationV1(
+        task_id="task-secret",
+        title="Inspect a public fixture",
+        public_prompt=(
+            PublicPromptPartV1(
+                order=1,
+                text=f"Inspect the fixture value {secret}.",
+            ),
+        ),
+        required_output="Return one bounded JSON object.",
+        public_acceptance_criteria=("The JSON object is syntactically valid.",),
+    )
+
+    def unexpected_remote_write(*_args, **_kwargs):
+        raise AssertionError("Weave initialized before the secret preflight")
+
+    monkeypatch.setattr(export, "initialize_weave", unexpected_remote_write)
+
+    with pytest.raises(ValueError, match="contain sensitive text"):
+        publish_to_weave(
+            [
+                {
+                    "record_type": "trial",
+                    "run_id": "run-secret",
+                    "task_id": "task-secret",
+                    "candidate_id": "candidate-secret",
+                    "comparison_example_id": "example-secret",
+                    "trial_index": 1,
+                    "task_presentation": presentation.to_dict(),
+                }
+            ],
+            "entity/project",
+            ledger_root=tmp_path,
+            env={"ANTHROPIC_API_KEY": secret},
+        )
+
+
 def test_weave_publication_keeps_direct_outcomes_and_skips_admin_rows(
     tmp_path: Path, monkeypatch
 ) -> None:
     logged = []
     summaries = []
 
-    class FakeLogger:
+    class FakeLogger(_PublicEvaluationLoggerMixin):
         def __init__(self, **kwargs) -> None:
             pass
 
@@ -450,7 +731,7 @@ def test_weave_publication_counts_one_prediction_per_sequence_cell(
     declared_scorers = []
     logged_scores = []
 
-    class FakeLogger:
+    class FakeLogger(_PublicEvaluationLoggerMixin):
         ui_url = "https://wandb.test/evaluations/direct"
 
         def __init__(self, **kwargs) -> None:
@@ -751,7 +1032,7 @@ def test_compile_export_normalizes_before_publication(
 def test_export_recovers_direct_evaluation_after_marker_only_crash(
     tmp_path: Path, monkeypatch
 ) -> None:
-    class FakeLogger:
+    class FakeLogger(_PublicEvaluationLoggerMixin):
         ui_url = "https://wandb.test/evaluations/recovered"
 
         def __init__(self, **kwargs) -> None:
@@ -941,7 +1222,7 @@ def test_weave_publication_shares_dataset_across_candidates(
             self.rows = rows
             datasets.append(self)
 
-    class FakeLogger:
+    class FakeLogger(_PublicEvaluationLoggerMixin):
         def __init__(self, **kwargs) -> None:
             self.__dict__.update(kwargs)
             self.ui_url = None
@@ -1013,18 +1294,17 @@ def test_weave_publication_shares_dataset_across_candidates(
         }
     ]
     assert {logger.name for logger in loggers} == {
-        "memory-ab | coding | codex | none",
-        "memory-ab | coding | codex | rag-bm25",
+        "memory ab · Legacy arm · candidate-no",
+        "memory ab · Legacy arm · candidate-ra",
     }
-    assert len(
-        {
-            logger.eval_attributes["fugue.evaluation_scope_id"]
-            for logger in loggers
-        }
-    ) == 1
-    assert {
-        logger.eval_attributes["fugue.candidate_id"] for logger in loggers
-    } == {"candidate-none", "candidate-rag"}
+    assert (
+        len({logger.eval_attributes["fugue.evaluation_scope_id"] for logger in loggers})
+        == 1
+    )
+    assert {logger.eval_attributes["fugue.candidate_id"] for logger in loggers} == {
+        "candidate-none",
+        "candidate-rag",
+    }
     assert loggers[0].scorers == loggers[1].scorers
     assert {logger.model["name"] for logger in loggers} == {
         "codex__none__test-model",
@@ -1060,7 +1340,7 @@ def test_weave_publication_groups_repeated_trials_under_one_example(
             self.name = name
             self.rows = rows
 
-    class FakeLogger:
+    class FakeLogger(_PublicEvaluationLoggerMixin):
         ui_url = None
 
         def __init__(self, **kwargs) -> None:
@@ -1138,9 +1418,7 @@ def test_live_evaluation_links_native_root_and_finalizes_cleanly(
                 parent_id=evaluate_call.id,
                 trace_id=evaluate_call.trace_id,
                 summary=None,
-                ref=SimpleNamespace(
-                    uri=f"weave:///entity/project/call/{call_id}"
-                ),
+                ref=SimpleNamespace(uri=f"weave:///entity/project/call/{call_id}"),
                 ui_url=f"https://wandb.test/calls/{call_id}",
             )
             self.predict_call = SimpleNamespace(
@@ -1166,15 +1444,13 @@ def test_live_evaluation_links_native_root_and_finalizes_cleanly(
         def __exit__(self, exc_type, exc, traceback) -> None:
             self.finished = True
 
-    class FakeLogger:
+    class FakeLogger(_PublicEvaluationLoggerMixin):
         def __init__(self, **kwargs) -> None:
             self.__dict__.update(kwargs)
             self.ui_url = None
             self._pseudo_evaluation = SimpleNamespace(
                 dataset=self.dataset,
-                ref=SimpleNamespace(
-                    uri="weave:///entity/project/object/eval:shared"
-                ),
+                ref=SimpleNamespace(uri="weave:///entity/project/object/eval:shared"),
             )
             self._evaluate_call = SimpleNamespace(
                 id="evaluation-root-1",
@@ -1189,7 +1465,7 @@ def test_live_evaluation_links_native_root_and_finalizes_cleanly(
             self.summarized = False
             loggers.append(self)
 
-        def log_prediction(self, inputs):
+        def log_prediction(self, inputs, **_metadata):
             prediction = FakePrediction(
                 f"predict-{len(predictions) + 1}",
                 self._evaluate_call,
@@ -1273,6 +1549,7 @@ def test_live_evaluation_links_native_root_and_finalizes_cleanly(
             "execution_fingerprint": "execution-a",
             "comparison_example_id": "example-a",
             "trial_index": 1,
+            "eval_run_id": "evaluation-root-1",
             "eval_predict_and_score_call_id": call_id,
         }
         if agent_call_id:
@@ -1318,11 +1595,33 @@ def test_live_evaluation_links_native_root_and_finalizes_cleanly(
                 "weave_trace_ids": ["a" * 32],
                 "weave_root_span_ids": ["b" * 16],
                 "weave_root_spans": [root],
+                "weave_eval_span_link_status": "complete",
+                "weave_eval_span_link_failures": [],
                 "weave_authoritative_call_graph": graph,
                 "weave_authoritative_missing_call_ids": [],
             }
         }
 
+    def host_evaluator(row):
+        row.update(
+            {
+                "comparison_evaluation_status": "scored",
+                "comparison_required_evaluation_complete": True,
+                "comparison_deterministic_scores": {
+                    "fact-correct": True,
+                    "citation-quality": 0.75,
+                },
+                "comparison_dimension_roles": {
+                    "fact-correct": "outcome",
+                    "citation-quality": "outcome",
+                },
+            }
+        )
+
+    host_evaluator.fugue_dimension_roles = {
+        "fact-correct": "outcome",
+        "citation-quality": "outcome",
+    }
     coordinator = LiveEvaluationCoordinator(
         [cell],
         repo_root=tmp_path,
@@ -1331,16 +1630,7 @@ def test_live_evaluation_links_native_root_and_finalizes_cleanly(
         weave_module=fake_weave,
         summary_fetcher=summaries,
         trace_timeout_sec=0,
-        host_evaluator=lambda row: row.update(
-            {
-                "comparison_evaluation_status": "scored",
-                "comparison_required_evaluation_complete": True,
-                "comparison_deterministic_scores": {
-                    "fact-correct": True,
-                    "citation-quality": 0.75,
-                },
-            }
-        ),
+        host_evaluator=host_evaluator,
         host_scorer_names=(
             "comparison.deterministic.fact-correct",
             "comparison.deterministic.citation-quality",
@@ -1353,8 +1643,16 @@ def test_live_evaluation_links_native_root_and_finalizes_cleanly(
     assert traceparent.endswith("-01")
     assert overlay == {
         "FUGUE_ATTEMPT_ID": cell.attempt_id,
+        "FUGUE_WEAVE_EVAL_RUN_ID": "evaluation-root-1",
         "FUGUE_WEAVE_EVAL_PREDICT_AND_SCORE_CALL_ID": "predict-1",
         "FUGUE_WEAVE_EVAL_PROJECT_ID": "entity/project",
+        "FUGUE_WEAVE_EVAL_KIND": "agent",
+        "FUGUE_WEAVE_EVAL_ROW_DIGEST": export._evaluation_row_digest(
+            export._planned_evaluation_row(cell),
+            export._evaluation_inputs(export._planned_evaluation_row(cell)),
+        ),
+        "FUGUE_WEAVE_EVAL_EXAMPLE_ID": "task-a",
+        "FUGUE_WEAVE_EVAL_TRIAL_INDEX": "0",
         "FUGUE_WEAVE_EVAL_NAME": loggers[0].name,
         "FUGUE_EVALUATION_SCOPE_ID": loggers[0].eval_attributes[
             "fugue.evaluation_scope_id"
@@ -1421,11 +1719,14 @@ def test_live_evaluation_links_native_root_and_finalizes_cleanly(
     assert live_row["evaluation_prediction_graph_verified"] is True
     assert live_row["agent_graph_verified"] is True
     assert live_row["evaluation_judge_status"] == "not_requested"
-    assert predictions[0].scores["comparison.deterministic.fact-correct"] is True
-    assert (
-        predictions[0].scores["comparison.deterministic.citation-quality"]
-        == 0.75
-    )
+    assert predictions[0].output["judge_evidence"] == {
+        "status": "unavailable",
+        "advisory": True,
+        "reason": "This attempt has no published judge review.",
+        "calibration_status": "unavailable",
+    }
+    assert predictions[0].scores["outcome__fact_correct"] is True
+    assert predictions[0].scores["outcome__citation_quality"] == 0.75
     assert live_row["adapter_outcome"]["rubric_evaluation"]["state"] == (
         "not_requested"
     )
@@ -1458,9 +1759,7 @@ def test_live_evaluation_graph_rejects_navigation_only_or_wrong_ancestry(
 ) -> None:
     project = "entity/project"
     dataset = SimpleNamespace(
-        ref=SimpleNamespace(
-            uri="weave:///entity/project/object/tasks:dataset-v1"
-        )
+        ref=SimpleNamespace(uri="weave:///entity/project/object/tasks:dataset-v1")
     )
     evaluation = SimpleNamespace(
         dataset=dataset,
@@ -1472,18 +1771,14 @@ def test_live_evaluation_graph_rejects_navigation_only_or_wrong_ancestry(
         parent_id=None,
         trace_id="weave-trace",
         inputs={"self": evaluation},
-        ref=SimpleNamespace(
-            uri="weave:///entity/project/call/evaluation-root"
-        ),
+        ref=SimpleNamespace(uri="weave:///entity/project/call/evaluation-root"),
     )
     predict_and_score = SimpleNamespace(
         id="predict-and-score",
         project_id=project,
         parent_id=evaluation_call.id,
         trace_id=evaluation_call.trace_id,
-        ref=SimpleNamespace(
-            uri="weave:///entity/project/call/predict-and-score"
-        ),
+        ref=SimpleNamespace(uri="weave:///entity/project/call/predict-and-score"),
         ui_url="https://wandb.test/calls/predict-and-score",
     )
     predict = SimpleNamespace(
@@ -1494,11 +1789,6 @@ def test_live_evaluation_graph_rejects_navigation_only_or_wrong_ancestry(
         ref=SimpleNamespace(uri="weave:///entity/project/call/prediction"),
         ui_url="https://wandb.test/calls/prediction",
     )
-    logger = SimpleNamespace(
-        _pseudo_evaluation=evaluation,
-        _evaluate_call=evaluation_call,
-        ui_url="https://wandb.test/calls/evaluation-root",
-    )
     prediction = SimpleNamespace(
         evaluate_call=evaluation_call,
         predict_and_score_call=predict_and_score,
@@ -1508,9 +1798,7 @@ def test_live_evaluation_graph_rejects_navigation_only_or_wrong_ancestry(
         evaluation_call.inputs = {"self": SimpleNamespace(dataset=dataset)}
     elif drift == "dataset_owner":
         evaluation.dataset = SimpleNamespace(
-            ref=SimpleNamespace(
-                uri="weave:///entity/project/object/other-dataset:v1"
-            )
+            ref=SimpleNamespace(uri="weave:///entity/project/object/other-dataset:v1")
         )
     elif drift == "predict_and_score_parent":
         predict_and_score.parent_id = "other-evaluation"
@@ -1536,7 +1824,6 @@ def test_live_evaluation_graph_rejects_navigation_only_or_wrong_ancestry(
     )
     export._verify_live_evaluation_graph(
         row,
-        logger=logger,
         dataset=dataset,
         prediction=prediction,
         project=project,
@@ -1658,7 +1945,7 @@ def test_claude_live_evaluation_opens_real_otel_parent_bridge() -> None:
         status="linked",
         terminal_row=terminal_row,
     )
-    assert finished == [(bridge, {"status": "linked"})]
+    assert finished == [(bridge, {"agent_execution_status": "completed"})]
     assert row["weave_agent_bridge_close_status"] == "linked"
     assert row["weave_agent_bridge_closed_verified"] is True
     assert terminal_row["weave_agent_bridge_close_status"] == "linked"
@@ -1871,6 +2158,7 @@ def test_claude_call_lifecycle_flushes_start_before_end_across_a_b_a(
         "comparison_example_id": "example-a",
         "trial_index": 1,
         "eval_predict_and_score_call_id": "predict-and-score",
+        "weave_evaluation_root_call_id": "evaluation",
         "trace_project": project_a,
         "status": "passed",
         "agent_response_sha256": "f" * 64,
@@ -1960,6 +2248,7 @@ def test_claude_native_call_rejects_a_missing_remote_terminal_end() -> None:
         "comparison_example_id": "example-a",
         "trial_index": 1,
         "eval_predict_and_score_call_id": "predict-and-score",
+        "weave_evaluation_root_call_id": "evaluation",
         "trace_project": project,
         "status": "passed",
     }
@@ -2021,9 +2310,7 @@ def test_claude_live_evaluation_normalizes_weave_uuid_traceparent() -> None:
                 parent_id=parent.id,
                 project_id=project,
                 trace_id=parent.trace_id,
-                ref=SimpleNamespace(
-                    uri=f"weave:///{project}/call/{_call_id_override}"
-                ),
+                ref=SimpleNamespace(uri=f"weave:///{project}/call/{_call_id_override}"),
             )
 
         @staticmethod
@@ -2137,6 +2424,7 @@ def test_claude_materializes_real_call_from_verified_native_otel_root() -> None:
         "comparison_example_id": "example-a",
         "trial_index": 1,
         "eval_predict_and_score_call_id": "predict-and-score",
+        "weave_evaluation_root_call_id": "evaluation",
         "trace_project": project,
         "status": "passed",
         "agent_response_sha256": "f" * 64,
@@ -2269,16 +2557,14 @@ def test_agent_trace_is_remotely_verified_before_evaluation_output(
     coordinator.project = "entity/project"
     coordinator._wait_for_trace = lambda row, **kwargs: {}
     coordinator._append_event = lambda *args, **kwargs: None
-    coordinator._record_verified_agent_root = (
-        lambda **kwargs: (
-            events.append("verified"),
-            kwargs["row"].update(
-                {
-                    "trace_link_status": "linked",
-                    "trace_link_error": None,
-                }
-            ),
-        )
+    coordinator._record_verified_agent_root = lambda **kwargs: (
+        events.append("verified"),
+        kwargs["row"].update(
+            {
+                "trace_link_status": "linked",
+                "trace_link_error": None,
+            }
+        ),
     )
     monkeypatch.setattr(
         export,
@@ -2293,9 +2579,7 @@ def test_agent_trace_is_remotely_verified_before_evaluation_output(
     monkeypatch.setattr(
         export,
         "_verify_authoritative_agent_graph",
-        lambda row: row.update(
-            {"weave_authoritative_call_graph_verified": True}
-        ),
+        lambda row: row.update({"weave_authoritative_call_graph_verified": True}),
     )
     cell = SimpleNamespace(
         harness=harness,
@@ -2309,9 +2593,7 @@ def test_agent_trace_is_remotely_verified_before_evaluation_output(
     }
     active = export._LivePrediction(
         session=SimpleNamespace(),
-        prediction=SimpleNamespace(
-            predict_and_score_call=SimpleNamespace(summary={})
-        ),
+        prediction=SimpleNamespace(predict_and_score_call=SimpleNamespace(summary={})),
         bridge_call=SimpleNamespace(
             id="bridge",
             project_id="entity/project",
@@ -2333,36 +2615,12 @@ def test_agent_trace_is_remotely_verified_before_evaluation_output(
     assert "remote_verification_pending" not in json.dumps(row)
 
 
-def test_live_evaluation_marks_exact_prediction_ops_eager() -> None:
-    def predict_and_score() -> None:
-        return None
+def test_live_evaluation_uses_only_public_prediction_call_handles() -> None:
+    source = Path(export.__file__).read_text(encoding="utf-8")
 
-    def predict() -> None:
-        return None
-
-    predict_and_score.eager_call_start = False
-    predict.eager_call_start = False
-    logger_type = type("EvaluationLogger", (), {})
-    logger_type.__module__ = "weave.evaluation.eval_imperative"
-    logger = logger_type()
-    logger._pseudo_evaluation = SimpleNamespace(
-        predict_and_score=predict_and_score
-    )
-    logger._context_predict_method = predict
-
-    assert export._enable_eager_evaluation_starts(logger) is True
-    assert predict_and_score.eager_call_start is True
-    assert predict.eager_call_start is True
-
-
-def test_real_live_evaluation_fails_closed_without_eager_ops() -> None:
-    logger_type = type("EvaluationLogger", (), {})
-    logger_type.__module__ = "weave.evaluation.eval_imperative"
-    logger = logger_type()
-    logger._pseudo_evaluation = SimpleNamespace()
-    logger._context_predict_method = None
-
-    assert export._enable_eager_evaluation_starts(logger) is False
+    assert "_pseudo_evaluation" not in source
+    assert "prediction.evaluate_call" in source
+    assert "prediction.predict_and_score_call" in source
 
 
 def test_claude_begin_failure_closes_entered_prediction(
@@ -2390,11 +2648,11 @@ def test_claude_begin_failure_closes_entered_prediction(
 
     prediction = FakePrediction()
 
-    class FakeLogger:
+    class FakeLogger(_PublicEvaluationLoggerMixin):
         def __init__(self, **kwargs) -> None:
             self.__dict__.update(kwargs)
 
-        def log_prediction(self, inputs):
+        def log_prediction(self, inputs, **_metadata):
             return prediction
 
     cell = PlannedCell(
@@ -2431,7 +2689,7 @@ def test_claude_begin_failure_closes_entered_prediction(
 
     with pytest.raises(
         RuntimeError,
-        match="Evaluation graph is unresolved before Agent execution",
+        match="did not return its public Evaluation Call",
     ):
         coordinator.begin_cell(cell)
 
@@ -2441,8 +2699,7 @@ def test_claude_begin_failure_closes_entered_prediction(
     statuses = [
         json.loads(line)["status"]
         for line in (
-            tmp_path
-            / ".fugue/runtime/run-claude-start-failure/evaluations.jsonl"
+            tmp_path / ".fugue/runtime/run-claude-start-failure/evaluations.jsonl"
         )
         .read_text()
         .splitlines()
@@ -2509,16 +2766,19 @@ def test_live_cancellation_closes_open_prediction_once_without_trace_polling(
         def __exit__(self, exc_type, exc, traceback) -> None:
             self.exit_count += 1
 
-    class FakeLogger:
+    class FakeLogger(_PublicEvaluationLoggerMixin):
         def __init__(self, **kwargs) -> None:
             self.__dict__.update(kwargs)
             self.failed = None
             loggers.append(self)
 
-        def log_prediction(self, inputs):
+        def log_prediction(self, inputs, **_metadata):
             prediction = FakePrediction(f"call-{len(predictions) + 1}")
             predictions.append(prediction)
-            return prediction
+            return _attach_public_call_handles(
+                prediction,
+                dataset=getattr(self, "dataset", None),
+            )
 
         def fail(self, exception) -> None:
             self.failed = exception
@@ -2611,12 +2871,12 @@ def test_live_cancellation_during_trace_fetch_closes_prediction_once(
 
     prediction = FakePrediction()
 
-    class FakeLogger:
+    class FakeLogger(_PublicEvaluationLoggerMixin):
         def __init__(self, **kwargs) -> None:
             self.failed = None
 
-        def log_prediction(self, inputs):
-            return prediction
+        def log_prediction(self, inputs, **_metadata):
+            return _attach_public_call_handles(prediction)
 
         def fail(self, exception) -> None:
             self.failed = exception
@@ -2722,14 +2982,17 @@ def test_pre_agent_setup_failure_skips_trace_poll_and_reports_observability_fail
 
     prediction = FakePrediction()
 
-    class FakeLogger:
+    class FakeLogger(_PublicEvaluationLoggerMixin):
         ui_url = None
 
         def __init__(self, **kwargs) -> None:
             self.__dict__.update(kwargs)
 
-        def log_prediction(self, inputs):
-            return prediction
+        def log_prediction(self, inputs, **_metadata):
+            return _attach_public_call_handles(
+                prediction,
+                dataset=getattr(self, "dataset", None),
+            )
 
         def log_summary(self) -> None:
             pass
@@ -3113,17 +3376,17 @@ def test_mcp_proxy_events_export_exact_tool_and_project_scope(
                         "max_evals": 20,
                         "run_id": "maint-r18-06",
                         "keys": ["_step", "latency_ms"],
-                            "samples": 5,
-                            "parent_filter_digest": "a" * 64,
-                            "parent_filter_count": 1,
-                            "columns": [
+                        "samples": 5,
+                        "parent_filter_digest": "a" * 64,
+                        "parent_filter_count": 1,
+                        "columns": [
                             "id",
                             "config.attempt_label",
                             "summary.latency_ms",
                         ],
-                            "filters": {
-                                "limit": 6,
-                                "op_name_contains": "predict_and_score",
+                        "filters": {
+                            "limit": 6,
+                            "op_name_contains": "predict_and_score",
                             "private_query": "must-not-be-exported",
                         },
                     },
@@ -3136,9 +3399,7 @@ def test_mcp_proxy_events_export_exact_tool_and_project_scope(
                     "request_id": "summary-1",
                     "arguments": {
                         "scope": {
-                            "project_ref": (
-                                "wandb/fugue-mcp-release-qualification-v1"
-                            )
+                            "project_ref": ("wandb/fugue-mcp-release-qualification-v1")
                         }
                     },
                 },
@@ -3191,9 +3452,7 @@ def test_mcp_proxy_events_export_exact_tool_and_project_scope(
         "query_wandb_tool",
         "summarize_evaluation_tool",
     ]
-    assert calls[0]["queried_project"] == (
-        "wandb/fugue-mcp-release-qualification-v1"
-    )
+    assert calls[0]["queried_project"] == ("wandb/fugue-mcp-release-qualification-v1")
     assert calls[0]["resource"] == "run"
     assert calls[0]["response_mode"] == "items"
     assert calls[0]["target_x"] == 3
@@ -3212,9 +3471,7 @@ def test_mcp_proxy_events_export_exact_tool_and_project_scope(
     ]
     assert calls[0]["limit"] == 6
     assert calls[0]["parent_filter_count"] == 1
-    assert calls[0]["op_name_filter"] == {
-        "op_name_contains": ["predict_and_score"]
-    }
+    assert calls[0]["op_name_filter"] == {"op_name_contains": ["predict_and_score"]}
     assert calls[0]["terminal_status"] == "succeeded"
     assert calls[0]["successful"] is True
     assert calls[0]["response_metadata_verified"] is True
@@ -3734,6 +3991,7 @@ def test_agent_hierarchy_ignores_auxiliary_span_conversation_identity() -> None:
                     "fugue.execution_fingerprint": "e" * 64,
                     "fugue.comparison_example_id": "example-a",
                     "fugue.trial_index": 1,
+                    "weave.eval.run_id": "evaluation-root",
                     "weave.eval.predict_and_score_call_id": "prediction-1",
                 },
             },
@@ -3744,6 +4002,8 @@ def test_agent_hierarchy_ignores_auxiliary_span_conversation_identity() -> None:
                 "attributes": {
                     "gen_ai.operation.name": "chat",
                     "gen_ai.conversation.id": "native-conversation",
+                    "weave.eval.run_id": "evaluation-root",
+                    "weave.eval.predict_and_score_call_id": "prediction-1",
                 },
             },
             {
@@ -3773,6 +4033,7 @@ def test_agent_hierarchy_ignores_auxiliary_span_conversation_identity() -> None:
                     "fugue.execution_fingerprint": "e" * 64,
                     "fugue.comparison_example_id": "example-a",
                     "fugue.trial_index": 1,
+                    "weave.eval.run_id": "evaluation-root",
                     "weave.eval.predict_and_score_call_id": "prediction-1",
                 },
             },
@@ -3806,6 +4067,7 @@ def test_agent_evidence_keeps_otel_span_and_weave_call_identities_separate() -> 
         "fugue.execution_fingerprint": "e" * 64,
         "fugue.comparison_example_id": "example-a",
         "fugue.trial_index": 1,
+        "weave.eval.run_id": "evaluation-root",
         "weave.eval.predict_and_score_call_id": "prediction-and-score-1",
     }
     otel_root = {
@@ -3861,6 +4123,7 @@ def test_agent_evidence_joins_cross_transport_receipt_without_call_impersonation
         "fugue.execution_fingerprint": "e" * 64,
         "fugue.comparison_example_id": "example-a",
         "fugue.trial_index": 1,
+        "weave.eval.run_id": "evaluation-root",
         "weave.eval.predict_and_score_call_id": "prediction-and-score-1",
     }
     otel_root = {
@@ -4028,11 +4291,7 @@ def _verified_checkpoint_links(destination: Mapping[str, object]) -> dict[str, o
 
 def test_first_cell_evidence_checkpoint_requires_real_graph_and_host_scorer() -> None:
     destination = export.trace_destination_identity(
-        {
-            "FUGUE_WEAVE_PROJECT": (
-                "wandb/fugue-mcp-release-qualification-v1"
-            )
-        }
+        {"FUGUE_WEAVE_PROJECT": ("wandb/fugue-mcp-release-qualification-v1")}
     )
     valid = {
         **_verified_checkpoint_links(destination),
@@ -4045,6 +4304,7 @@ def test_first_cell_evidence_checkpoint_requires_real_graph_and_host_scorer() ->
         "agent_graph_verified": True,
         "conversation_correlation_verified": True,
         "trace_link_status": "linked",
+        "weave_eval_span_link_status": "complete",
         "weave_agent_root_call_id": "agent-call",
         "otel_root_span_id": "b" * 16,
         "host_evaluator_status": "passed",
@@ -4077,9 +4337,7 @@ def test_first_cell_evidence_checkpoint_requires_real_graph_and_host_scorer() ->
     advisory_judge_unavailable = {
         **valid,
         "comparison_judge_checkpoint_status": "advisory_unavailable",
-        "comparison_judge_checkpoint_unavailable": [
-            "maintainer-actionability"
-        ],
+        "comparison_judge_checkpoint_unavailable": ["maintainer-actionability"],
     }
     assert (
         export._live_evidence_checkpoint_failures(
@@ -4092,9 +4350,7 @@ def test_first_cell_evidence_checkpoint_requires_real_graph_and_host_scorer() ->
     required_judge_unavailable = {
         **valid,
         "comparison_judge_checkpoint_status": "failed",
-        "comparison_judge_checkpoint_unavailable": [
-            "maintainer-actionability"
-        ],
+        "comparison_judge_checkpoint_unavailable": ["maintainer-actionability"],
         "comparison_judge_checkpoint_required_unavailable": [
             "maintainer-actionability"
         ],
@@ -4109,8 +4365,9 @@ def test_first_cell_evidence_checkpoint_requires_real_graph_and_host_scorer() ->
     )
 
 
-def test_evidence_checkpoint_covers_every_planned_cell_and_cancels_after_late_failure(
-) -> None:
+def test_evidence_checkpoint_covers_every_planned_cell_and_cancels_after_late_failure() -> (
+    None
+):
     destination = export.trace_destination_identity(
         {"FUGUE_WEAVE_PROJECT": "wandb/qualification"}
     )
@@ -4128,9 +4385,7 @@ def test_evidence_checkpoint_covers_every_planned_cell_and_cancels_after_late_fa
     }
     coordinator._negative_routing_receipt = lambda row: {"status": "passed"}
     events: list[tuple[str, dict[str, object]]] = []
-    coordinator._append_event = (
-        lambda status, **values: events.append((status, values))
-    )
+    coordinator._append_event = lambda status, **values: events.append((status, values))
     cell = SimpleNamespace(id="cell-a")
     valid = {
         **_verified_checkpoint_links(destination),
@@ -4145,6 +4400,7 @@ def test_evidence_checkpoint_covers_every_planned_cell_and_cancels_after_late_fa
         "agent_graph_verified": True,
         "conversation_correlation_verified": True,
         "trace_link_status": "linked",
+        "weave_eval_span_link_status": "complete",
         "weave_agent_root_call_id": "agent-call",
         "otel_root_span_id": "b" * 16,
     }
@@ -4179,7 +4435,9 @@ def test_evidence_checkpoint_covers_every_planned_cell_and_cancels_after_late_fa
     assert "evidence_checkpoint_status" not in after_limit
 
 
-def test_evaluation_evidence_accepts_canonical_object_refs_not_python_identity() -> None:
+def test_evaluation_evidence_accepts_canonical_object_refs_not_python_identity() -> (
+    None
+):
     class Ref:
         def __init__(self, uri: str) -> None:
             self._uri = uri
@@ -4200,19 +4458,14 @@ def test_evaluation_evidence_accepts_canonical_object_refs_not_python_identity()
     evaluation_call = SimpleNamespace(
         id="evaluation-call",
         project_id=project,
-        inputs={"self": Ref(evaluation_uri)},
+        inputs={"self": evaluation},
         ref=Ref(f"weave:///{project}/call/evaluation-call"),
-    )
-    logger = SimpleNamespace(
-        _pseudo_evaluation=evaluation,
-        _evaluate_call=evaluation_call,
-        ui_url=f"https://wandb.ai/{project}/r/call/evaluation-call",
     )
     row: dict[str, object] = {}
 
     export._apply_evaluation_evidence(
         row,
-        logger=logger,
+        evaluation_call=evaluation_call,
         dataset=dataset,
         project=project,
     )
@@ -4341,6 +4594,7 @@ def test_claude_native_agent_call_requires_verified_bridge_ancestry() -> None:
                 "span_id": "b" * 16,
                 "otel_parent_span_id": "f" * 16,
                 "eval_predict_and_score_call_id": "predict-and-score",
+                "eval_run_id": "evaluation",
                 "weave_call_id": agent_call_id,
                 "weave_call_parent_id": bridge_id,
                 "weave_call_project_id": "entity/project",
@@ -5133,9 +5387,7 @@ def _write_realistic_local_harness_transcript(
                 }
             )
             + "\n"
-            + json.dumps(
-                {"type": "tool_call", "name": "read_file", "arguments": {}}
-            )
+            + json.dumps({"type": "tool_call", "name": "read_file", "arguments": {}})
             + "\n"
         )
         return path.name
@@ -5163,9 +5415,7 @@ def _write_realistic_local_harness_transcript(
                     "type": "assistant",
                     "sessionId": session_id,
                     "message": {
-                        "content": [
-                            {"type": "tool_use", "name": "Read", "input": {}}
-                        ]
+                        "content": [{"type": "tool_use", "name": "Read", "input": {}}]
                     },
                 }
             )
@@ -5340,9 +5590,7 @@ def test_each_local_harness_finalizes_one_complete_five_link_manifest(
     receipt = json.loads(agent_receipt_path.read_text())
     assert receipt["status"] == "resolved"
     assert receipt["native_weave_call"] is False
-    assert receipt["transcript_artifact"]["path"].endswith(
-        expected_transcript_name
-    )
+    assert receipt["transcript_artifact"]["path"].endswith(expected_transcript_name)
 
 
 def _local_agent_receipt_fixture(
@@ -5594,9 +5842,7 @@ def test_local_agent_receipt_rejects_response_digest_mismatch(
         response_sha256="f" * 64,
     )
     (Path(str(row["trial_dir"])) / "agent" / "trajectory.json").write_text(
-        json.dumps(
-            {"steps": [{"source": "assistant", "message": "bounded answer"}]}
-        )
+        json.dumps({"steps": [{"source": "assistant", "message": "bounded answer"}]})
     )
 
     receipt = export._local_agent_receipt(tmp_path, cell, row)
@@ -5711,7 +5957,7 @@ def test_weave_publication_never_republishes_finalized_live_predictions(
 def test_weave_publication_fails_transactionally(tmp_path: Path, monkeypatch) -> None:
     failed = []
 
-    class FakeLogger:
+    class FakeLogger(_PublicEvaluationLoggerMixin):
         ui_url = None
 
         def __init__(self, **kwargs) -> None:
@@ -5788,7 +6034,7 @@ def test_publication_ledger_rejects_prediction_overlap_across_evaluations(
 ) -> None:
     published: list[str] = []
 
-    class FakeLogger:
+    class FakeLogger(_PublicEvaluationLoggerMixin):
         ui_url = "https://wandb.invalid/evaluation"
 
         def __init__(self, **kwargs) -> None:
@@ -6070,9 +6316,7 @@ def test_agent_root_accepts_external_bridge_parent_but_excludes_nested_agent() -
     )
 
     assert summary["otel_root_span_ids"] == ["a" * 16]
-    assert [root["span_id"] for root in summary["weave_root_spans"]] == [
-        "a" * 16
-    ]
+    assert [root["span_id"] for root in summary["weave_root_spans"]] == ["a" * 16]
 
 
 def test_observed_identity_accepts_benchmark_task_namespace() -> None:
@@ -6565,28 +6809,28 @@ def test_agent_spans_are_authoritative_when_calls_repeat_same_activity() -> None
     }
     summary = _summarize_spans(
         [
-                {
-                    **shared_tool,
-                    "span_id": "otel-tool",
-                    "_fugue_evidence_source": export._WEAVE_AGENT_SPAN_SOURCE,
-                },
-                {
-                    **shared_tool,
-                    "id": "weave-call",
-                    "_fugue_evidence_source": export._WEAVE_CALL_SOURCE,
-                },
-                {
-                    **shared_chat,
-                    "span_id": "otel-chat",
-                    "_fugue_evidence_source": export._WEAVE_AGENT_SPAN_SOURCE,
-                },
-                {
-                    **shared_chat,
-                    "id": "weave-chat-call",
-                    "_fugue_evidence_source": export._WEAVE_CALL_SOURCE,
-                },
-            ]
-        )
+            {
+                **shared_tool,
+                "span_id": "otel-tool",
+                "_fugue_evidence_source": export._WEAVE_AGENT_SPAN_SOURCE,
+            },
+            {
+                **shared_tool,
+                "id": "weave-call",
+                "_fugue_evidence_source": export._WEAVE_CALL_SOURCE,
+            },
+            {
+                **shared_chat,
+                "span_id": "otel-chat",
+                "_fugue_evidence_source": export._WEAVE_AGENT_SPAN_SOURCE,
+            },
+            {
+                **shared_chat,
+                "id": "weave-chat-call",
+                "_fugue_evidence_source": export._WEAVE_CALL_SOURCE,
+            },
+        ]
+    )
 
     assert summary["weave_span_count"] == 2
     assert summary["weave_tool_call_count"] == 1

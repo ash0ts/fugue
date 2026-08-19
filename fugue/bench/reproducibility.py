@@ -324,6 +324,13 @@ def build_run_snapshot(
             "task_id": cell.task_id,
             "harness": cell.harness,
             "variant_id": cell.variant_id,
+            "arm_label": cell.arm_label or cell.variant_id,
+            "treatment_summary": cell.treatment_summary or None,
+            "task_presentation": (
+                cell.task_presentation.to_dict()
+                if cell.task_presentation is not None
+                else None
+            ),
             "context_system_id": cell.context_system_id,
             "applicable": cell.applicable,
             "skip_reason": cell.skip_reason,

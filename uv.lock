@@ -710,10 +710,10 @@ requires-dist = [
     { name = "wandb", marker = "extra == 'wandb-index'", specifier = "==0.28.1" },
     { name = "wandb", marker = "extra == 'wandb-report'", specifier = "==0.28.1" },
     { name = "wandb-workspaces", marker = "extra == 'wandb-report'", specifier = "==0.4.5" },
-    { name = "weave", marker = "extra == 'dev'", specifier = "==0.53.1" },
-    { name = "weave", marker = "extra == 'research-worker'", specifier = "==0.53.1" },
-    { name = "weave", marker = "extra == 'serve'", specifier = "==0.53.1" },
-    { name = "weave", marker = "extra == 'weave'", specifier = "==0.53.1" },
+    { name = "weave", marker = "extra == 'dev'", specifier = "==0.53.6" },
+    { name = "weave", marker = "extra == 'research-worker'", specifier = "==0.53.6" },
+    { name = "weave", marker = "extra == 'serve'", specifier = "==0.53.6" },
+    { name = "weave", marker = "extra == 'weave'", specifier = "==0.53.6" },
     { name = "wheel", marker = "extra == 'dev'" },
 ]
 provides-extras = ["dev", "local-runner", "mcp", "weave", "wandb-index", "wandb-report", "context", "serve", "research", "research-worker"]
@@ -2882,7 +2882,7 @@ wheels = [
 
 [[package]]
 name = "weave"
-version = "0.53.1"
+version = "0.53.6"
 source = { registry = "https://pypi.org/simple" }
 dependencies = [
     { name = "cachetools" },
@@ -2896,13 +2896,14 @@ dependencies = [
     { name = "packaging" },
     { name = "polyfile-weave" },
     { name = "pydantic" },
+    { name = "pyyaml" },
     { name = "sentry-sdk" },
     { name = "tenacity" },
     { name = "tzdata", marker = "sys_platform == 'win32' or (extra == 'extra-5-fugue-context' and extra == 'extra-5-fugue-local-runner') or (extra == 'extra-5-fugue-context' and extra == 'extra-5-fugue-research-worker') or (extra == 'extra-5-fugue-context' and extra == 'extra-5-fugue-serve')" },
 ]
-sdist = { url = "https://files.pythonhosted.org/packages/a3/34/c9ddb250e27708b581f52fd75f94ca04edbe7ed287560fe13995e042521d/weave-0.53.1.tar.gz", hash = "sha256:623c1918394e8493a3344fb89ffc71b3e1e96c3bd247a77309aa2b6e78475cb9", size = 1113042, upload-time = "2026-07-02T21:17:45.087Z" }
+sdist = { url = "https://files.pythonhosted.org/packages/a4/4a/5a016b2bf6bd177ffa92f24a915eaf7f642d7e5e32e17021e57f2b138ddc/weave-0.53.6.tar.gz", hash = "sha256:f91b54a3bd5abbb455d4f047f53ba93deb9940819d7278107559ca9f71235742", size = 1193939, upload-time = "2026-08-13T22:41:19.127Z" }
 wheels = [
-    { url = "https://files.pythonhosted.org/packages/bf/87/99d77ddb9f1008a92e36e6d72b0ff63e17fbe22abe6b383bbfb80001d70b/weave-0.53.1-py3-none-any.whl", hash = "sha256:95c45e22fe38cf241f4ff26d120c86bcff3652e4c813e0bcf5950ec26e7f5db8", size = 1349841, upload-time = "2026-07-02T21:17:42.969Z" },
+    { url = "https://files.pythonhosted.org/packages/2a/4f/9aecfc3b456294ed371bc6484b404aece22d2a3f096a60c0ae956b23f5f6/weave-0.53.6-py3-none-any.whl", hash = "sha256:284de065a738f5620bf0d4f060b2bef4257f1afa8008685fd3b4f006012e9806", size = 1447894, upload-time = "2026-08-13T22:41:17.108Z" },
 ]
 
 [[package]]

@@ -38,6 +38,12 @@ from fugue.bench.comparison import (
     scaffold_comparison,
     score_comparison_rows,
 )
+from fugue.bench.task_presentation import (
+    FailedRequiredCheckV1,
+    PublicPromptPartV1,
+    TaskPresentationV1,
+    TaskResultV1,
+)
 from fugue.bench.tasksets import (
     PrivateTaskLabelV1,
     SimpleTasksetBuilder,
@@ -71,11 +77,15 @@ __all__ = [
     "DecisionPolicyV1",
     "DecisionSummaryV1",
     "EvidenceTopologyV1",
+    "FailedRequiredCheckV1",
+    "PublicPromptPartV1",
     "ScoreExplanationV1",
     "PrivateTaskLabelV1",
     "SimpleTaskV1",
     "SimpleTasksetBuilder",
     "TaskValidityV1",
+    "TaskPresentationV1",
+    "TaskResultV1",
     "WeaveTasksetImportV1",
     "analyze_comparison_rows",
     "attest_comparison_decision",

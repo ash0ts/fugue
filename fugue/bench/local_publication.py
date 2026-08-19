@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import base64
 import hashlib
 import importlib
 import json
@@ -21,6 +22,10 @@ from fugue.bench.local_evidence import (
     LocalEvidenceManifestV1,
     LocalEvidenceStore,
     local_result_attempt_projection_v1,
+)
+from fugue.bench.task_presentation import (
+    task_presentation_from_dict,
+    task_result_from_dict,
 )
 from fugue.model_plane import (
     EvidenceDestinationV1,
@@ -104,6 +109,160 @@ def _attempt_judge_reviews(attempt: Any) -> dict[str, dict[str, Any]]:
             )
         reviews[str(judge_id)] = value
     return reviews
+
+
+def _attempt_task_presentation(
+    result: Any,
+    pair: Any,
+    attempt: Any,
+) -> dict[str, Any] | None:
+    """Return the exact public task contract without reconstructing it."""
+
+    direct = getattr(attempt, "task_presentation", None)
+    if direct is not None:
+        value = (
+            direct.to_dict() if callable(getattr(direct, "to_dict", None)) else direct
+        )
+        if not isinstance(value, Mapping):
+            raise LocalResultPublicationError(
+                "comparison task presentation must be an object"
+            )
+        return task_presentation_from_dict(value).to_dict()
+    for item in getattr(result, "task_catalogue", ()) or ():
+        task_id = str(getattr(item, "task_id", "") or "")
+        if task_id != str(pair.task_id):
+            continue
+        value = item.to_dict() if callable(getattr(item, "to_dict", None)) else item
+        if not isinstance(value, Mapping):
+            raise LocalResultPublicationError(
+                "comparison task catalogue entry must be an object"
+            )
+        return task_presentation_from_dict(value).to_dict()
+    return None
+
+
+def _attempt_task_result(attempt: Any) -> dict[str, Any]:
+    raw = getattr(attempt, "task_result", None)
+    if raw is not None:
+        value = raw.to_dict() if callable(getattr(raw, "to_dict", None)) else raw
+        if not isinstance(value, Mapping):
+            raise LocalResultPublicationError(
+                "comparison task result must be an object"
+            )
+        return task_result_from_dict(value).to_dict()
+    passed = getattr(attempt, "passed", None)
+    failed = (
+        []
+        if passed is not False
+        else [
+            {
+                "id": "task_outcome_not_satisfied",
+                "label": "Required task outcome",
+                "explanation": (
+                    "This legacy result did not publish a more specific failed check."
+                ),
+                "critical": True,
+            }
+        ]
+    )
+    execution_status = str(
+        getattr(attempt, "execution_status", "not_applicable") or "not_applicable"
+    ).lower()
+    execution_status = {
+        "passed": "completed",
+        "success": "completed",
+        "succeeded": "completed",
+        "completed": "completed",
+        "timeout": "timed_out",
+        "timed_out": "timed_out",
+        "error": "failed",
+        "failed": "failed",
+        "infrastructure_failed": "failed",
+        "unknown": "not_started",
+    }.get(execution_status, execution_status)
+    return task_result_from_dict(
+        {
+            "schema_version": 1,
+            "task_passed": passed if isinstance(passed, bool) else None,
+            "outcome_summary": (
+                "The Agent satisfied the required task outcome."
+                if passed is True
+                else "The Agent did not satisfy the required task outcome."
+                if passed is False
+                else "This legacy result does not contain a task verdict."
+            ),
+            "failed_required_checks": failed,
+            "answer_digest": None,
+            "agent_execution_status": execution_status,
+            "evidence_integrity_status": (
+                "verified"
+                if str(getattr(attempt, "evidence_status", ""))
+                in {"resolved", "reconciled"}
+                else "incomplete"
+            ),
+        }
+    ).to_dict()
+
+
+def _attempt_arm_label(arm: str, attempt: Any) -> str:
+    explicit = str(getattr(attempt, "arm_label", "") or "").strip()
+    return explicit or arm.title()
+
+
+def _attempt_treatment_summary(arm: str, attempt: Any) -> str:
+    explicit = str(getattr(attempt, "treatment_summary", "") or "").strip()
+    if explicit:
+        return explicit
+    candidate_id = str(getattr(attempt, "identity", {}).get("candidate") or "")
+    return f"Exact {arm} candidate {candidate_id[:8] or 'unknown'}."
+
+
+def _score_key(value: str) -> str:
+    key = re.sub(r"[^A-Za-z0-9]+", "_", value).strip("_").lower()
+    return key or "score"
+
+
+def _published_scores(
+    attempt: Any,
+    dimension_roles: Mapping[str, str],
+) -> dict[str, Any]:
+    result: dict[str, Any] = {
+        "task_passed": getattr(attempt, "passed", None),
+    }
+    for name, value in dict(getattr(attempt, "scores", {})).items():
+        role = str(dimension_roles.get(str(name)) or "")
+        prefix = {
+            "outcome": "outcome",
+            "safety_gate": "safety",
+            "mechanism": "mechanism",
+            "infrastructure": "infrastructure",
+            "efficiency": "efficiency",
+        }.get(role, "score")
+        result[f"{prefix}__{_score_key(str(name).rsplit('.', 1)[-1])}"] = value
+    return {key: value for key, value in result.items() if value is not None}
+
+
+def _weave_row_digest(row: Mapping[str, Any]) -> str:
+    """Compute Weave 0.53.6's canonical Dataset-row digest."""
+
+    payload = json.dumps(dict(row), sort_keys=True).encode()
+    encoded = base64.urlsafe_b64encode(hashlib.sha256(payload).digest()).decode()
+    return encoded.replace("-", "X").replace("_", "Y").rstrip("=")
+
+
+def _published_judge_evidence(attempt: Any) -> dict[str, Any]:
+    reviews = _attempt_judge_reviews(attempt)
+    if not reviews:
+        return {
+            "status": "unavailable",
+            "advisory": True,
+            "reason": "This attempt has no published judge review.",
+        }
+    return {
+        "status": "available",
+        "advisory": True,
+        "reviews": reviews,
+    }
 
 
 @dataclass(frozen=True)
@@ -702,51 +861,70 @@ def _publish_with_active_weave_sdk(
         }
     )
     objects: list[WeaveHostedObjectRefV1] = []
+    dataset_rows_by_task: dict[str, dict[str, Any]] = {}
+    for pair, _arm, attempt in attempts.values():
+        task_presentation = _attempt_task_presentation(result, pair, attempt)
+        public_row = {
+            "example_id": str(pair.task_id),
+            "task_id": str(pair.task_id),
+            "task_title": str((task_presentation or {}).get("title") or pair.task_id),
+            "task_presentation": task_presentation,
+        }
+        public_row["row_payload_digest"] = _weave_row_digest(public_row)
+        existing = dataset_rows_by_task.get(str(pair.task_id))
+        if existing is not None and existing != public_row:
+            raise LocalResultPublicationError(
+                "comparison result contains conflicting public task definitions"
+            )
+        dataset_rows_by_task[str(pair.task_id)] = public_row
+    dataset_payload = {
+        "schema_version": 1,
+        "publication_id": publication_id,
+        "evidence_destination_digest": (
+            _require_current_publication_destination(target).destination_digest
+        ),
+        **(
+            {
+                "fugue_research_id": target.study_scope.research_id,
+                "fugue_study_key": target.study_scope.study_id,
+            }
+            if target.study_scope is not None
+            else {}
+        ),
+        "result_digest": result.result_digest,
+        "qualification_digest": result.qualification_digest,
+        "local_manifest_digest": manifest.manifest_digest,
+        "rows": [dataset_rows_by_task[key] for key in sorted(dataset_rows_by_task)],
+    }
+    dataset_name = f"fugue-local-{stable_digest(dataset_payload)}"
+    published_dataset = publish_object(dataset_payload, name=dataset_name)
+    dataset_ref = _weave_ref_uri(published_dataset)
+    dataset_object_id = _weave_object_id(
+        dataset_ref,
+        target=target,
+        object_type="object",
+    )
+    _verify_weave_dataset_readback(
+        client,
+        ref_factory=ref_factory,
+        target=target,
+        dataset_ref=dataset_ref,
+        expected=dataset_payload,
+    )
     for attempt_id in manifest.planned_attempt_ids:
         pair, arm, attempt = attempts[attempt_id]
-        dataset_payload = {
-            "schema_version": 1,
-            "publication_id": publication_id,
-            "evidence_destination_digest": (
-                _require_current_publication_destination(target).destination_digest
-            ),
-            **(
-                {
-                    "fugue_research_id": target.study_scope.research_id,
-                    "fugue_study_key": target.study_scope.study_id,
-                }
-                if target.study_scope is not None
-                else {}
-            ),
-            "attempt_id": attempt_id,
-            "task_id": pair.task_id,
-            "harness": pair.harness,
-            "attempt": pair.attempt,
-            "arm": arm,
-            "result_digest": result.result_digest,
-            "qualification_digest": result.qualification_digest,
-            "local_manifest_digest": manifest.manifest_digest,
-            "candidate_id": str(attempt.identity["candidate"]),
-            "execution_fingerprint": str(attempt.identity["runtime"]),
+        task_presentation = _attempt_task_presentation(result, pair, attempt)
+        task_title = str((task_presentation or {}).get("title") or pair.task_id)
+        arm_label = _attempt_arm_label(arm, attempt)
+        treatment_summary = _attempt_treatment_summary(arm, attempt)
+        task_result = _attempt_task_result(attempt)
+        dimension_roles = {
+            str(change.id): str(change.role)
+            for change in getattr(pair, "dimension_changes", ())
         }
-        dataset_name = f"fugue-local-{stable_digest(dataset_payload)}"
-        published_dataset = publish_object(
-            dataset_payload,
-            name=dataset_name,
-        )
-        dataset_ref = _weave_ref_uri(published_dataset)
-        dataset_object_id = _weave_object_id(
-            dataset_ref,
-            target=target,
-            object_type="object",
-        )
-        _verify_weave_dataset_readback(
-            client,
-            ref_factory=ref_factory,
-            target=target,
-            dataset_ref=dataset_ref,
-            expected=dataset_payload,
-        )
+        published_scores = _published_scores(attempt, dimension_roles)
+        score_details = _attempt_score_details(attempt)
+        judge_evidence = _published_judge_evidence(attempt)
         objects.append(
             WeaveHostedObjectRefV1(
                 attempt_id=attempt_id,
@@ -764,13 +942,25 @@ def _publish_with_active_weave_sdk(
                 _require_current_publication_destination(target).destination_digest
             ),
             "fugue.evidence.source": "canonical_local_result",
+            "fugue.evidence.kind": "immutable_local_result_replay_v1",
+            "fugue.native_evaluation_call": False,
             "fugue.comparison_id": result.comparison_id,
             "fugue.result_digest": result.result_digest,
             "fugue.qualification_digest": result.qualification_digest,
             "fugue.local_manifest_digest": manifest.manifest_digest,
             "fugue.attempt_id": attempt_id,
             "fugue.task_id": pair.task_id,
+            "fugue.task_title": task_title,
             "fugue.arm": arm,
+            "fugue.arm_label": arm_label,
+            "fugue.treatment_summary": treatment_summary,
+            "fugue.task_verdict": (
+                "passed"
+                if task_result["task_passed"] is True
+                else "did_not_pass"
+                if task_result["task_passed"] is False
+                else "invalid"
+            ),
             "fugue.harness": pair.harness,
             "fugue.trial_index": pair.attempt,
             "fugue.candidate_id": str(attempt.identity["candidate"]),
@@ -784,25 +974,46 @@ def _publish_with_active_weave_sdk(
                 else {}
             ),
         }
-        root_inputs = {"dataset_ref": dataset_ref, "task_id": pair.task_id}
+        root_inputs = {
+            "dataset_ref": dataset_ref,
+            "task_id": pair.task_id,
+            "task_title": task_title,
+            "task_presentation": task_presentation,
+        }
         root_output = {
             "status": "published",
+            "publication_semantics": "immutable_local_result_replay_v1",
+            "native_evaluation_call": False,
             "publication_id": publication_id,
             "result_digest": result.result_digest,
             "local_manifest_digest": manifest.manifest_digest,
         }
-        predict_and_score_inputs = {"attempt_id": attempt_id, "arm": arm}
+        predict_and_score_inputs = {
+            "attempt_id": attempt_id,
+            "arm": arm,
+            "arm_label": arm_label,
+            "treatment_summary": treatment_summary,
+            "task_presentation": task_presentation,
+        }
         predict_and_score_output = {
-            "passed": attempt.passed,
-            "scores": dict(attempt.scores),
+            "task_result": task_result,
+            "scores": published_scores,
+            "score_details": score_details,
+            "judge_evidence": judge_evidence,
             "evidence_status": attempt.evidence_status,
         }
-        prediction_inputs = {"attempt_id": attempt_id}
+        prediction_inputs = {
+            "attempt_id": attempt_id,
+            "task_title": task_title,
+            "arm_label": arm_label,
+            "treatment_summary": treatment_summary,
+        }
         prediction_output = {
-            "passed": attempt.passed,
-            "scores": dict(attempt.scores),
+            "task_result": task_result,
+            "scores": published_scores,
             "score_explanations": dict(attempt.score_explanations),
-            "score_details": _attempt_score_details(attempt),
+            "score_details": score_details,
+            "judge_evidence": judge_evidence,
             "sanitized_answer_excerpt": attempt.sanitized_answer_excerpt,
         }
         agent_inputs = {
@@ -811,8 +1022,8 @@ def _publish_with_active_weave_sdk(
             "local_manifest_digest": manifest.manifest_digest,
         }
         agent_output = {
-            "status": attempt.execution_status,
-            "evidence_status": attempt.evidence_status,
+            "agent_execution_status": task_result["agent_execution_status"],
+            "evidence_integrity_status": task_result["evidence_integrity_status"],
             "native_agent_call": False,
         }
         root = _ensure_weave_call_started(
@@ -824,7 +1035,9 @@ def _publish_with_active_weave_sdk(
             op="fugue.local_evaluation",
             inputs=root_inputs,
             attributes=attributes,
-            display_name=f"Fugue local evaluation · {pair.task_id}",
+            display_name=(
+                f"Published evaluation record: {result.comparison_id} · {arm_label}"
+            ),
         )
         predict_and_score = _ensure_weave_call_started(
             client,
@@ -835,7 +1048,11 @@ def _publish_with_active_weave_sdk(
             op="fugue.local_predict_and_score",
             inputs=predict_and_score_inputs,
             attributes=attributes,
-            display_name=f"Fugue predict and score · {pair.task_id}",
+            display_name=(
+                f"Published scored attempt: "
+                f"{'PASSED' if task_result['task_passed'] is True else 'DID NOT PASS' if task_result['task_passed'] is False else 'INVALID'}"
+                f" · {task_title} · {arm_label} · Attempt {pair.attempt}"
+            ),
             parent=root,
         )
         prediction = _ensure_weave_call_started(
@@ -847,7 +1064,10 @@ def _publish_with_active_weave_sdk(
             op="fugue.local_prediction",
             inputs=prediction_inputs,
             attributes=attributes,
-            display_name=f"Fugue prediction · {pair.task_id}",
+            display_name=(
+                f"Published prediction record: Agent answer · {task_title} · "
+                f"{arm_label} · Attempt {pair.attempt}"
+            ),
             parent=predict_and_score,
         )
         agent_receipt = _ensure_weave_call_started(
@@ -863,7 +1083,10 @@ def _publish_with_active_weave_sdk(
                 "fugue.evidence.kind": "local_agent_cross_transport_receipt_v1",
                 "fugue.native_agent_call": False,
             },
-            display_name=f"Fugue Agent evidence receipt · {pair.task_id}",
+            display_name=(
+                f"Receipt: Agent execution · {task_title} · "
+                f"{arm_label} · Attempt {pair.attempt}"
+            ),
             parent=prediction,
         )
         call_specs = (

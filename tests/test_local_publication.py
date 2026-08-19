@@ -36,6 +36,10 @@ from fugue.bench.local_publication import (
     weave_publication_receipt_from_dict,
     weave_publisher_from_environment,
 )
+from fugue.bench.task_presentation import (
+    PublicPromptPartV1,
+    TaskPresentationV1,
+)
 
 
 class _FakeComparisonResultV3:
@@ -43,9 +47,7 @@ class _FakeComparisonResultV3:
         self.schema_version = 3
         self.source = manifest.run_id
         self.result_digest = stable_digest({"result": manifest.run_id})
-        self.qualification_digest = stable_digest(
-            {"qualification": manifest.run_id}
-        )
+        self.qualification_digest = stable_digest({"qualification": manifest.run_id})
         self.evidence_backend = "local"
         self.publication_status = "not_requested"
         self.local_chain_integrity = "reconciled"
@@ -299,9 +301,7 @@ def _outcome(
                     kind=kind,
                     target=target,
                     object_id=object_id,
-                    ref=(
-                        f"weave:///{target.project_slug}/{object_type}/{object_id}"
-                    ),
+                    ref=(f"weave:///{target.project_slug}/{object_type}/{object_id}"),
                 )
             )
     return WeavePublicationOutcomeV1(
@@ -381,14 +381,15 @@ def test_publication_is_digest_bound_idempotent_and_does_not_rewrite_result(
     assert receipt.target.project_slug == "wandb/local-result"
     assert len(receipt.hosted_objects) == 5
     agent = next(
-        item
-        for item in receipt.hosted_objects
-        if item.kind == "agent_evidence_receipt"
+        item for item in receipt.hosted_objects if item.kind == "agent_evidence_receipt"
     )
     assert agent.native_agent_call is False
-    assert read_weave_publication_receipt(
-        result_path.with_name("weave-publication-receipt.json")
-    ) == receipt
+    assert (
+        read_weave_publication_receipt(
+            result_path.with_name("weave-publication-receipt.json")
+        )
+        == receipt
+    )
 
 
 def test_publication_rejects_incomplete_local_chain_before_publisher(
@@ -647,9 +648,7 @@ def test_publication_rejects_wrong_project_refs_and_secret_values(
             )
         return raw
 
-    expected = (
-        "destination disagree" if failure == "wrong_project" else "secret"
-    )
+    expected = "destination disagree" if failure == "wrong_project" else "secret"
     with pytest.raises(ValueError, match=expected):
         publish_local_result_to_weave(
             result_path,
@@ -986,7 +985,7 @@ def test_weave_publisher_is_lazy_and_has_actionable_missing_extra(
 
     monkeypatch.setattr(publication.importlib, "import_module", missing)
 
-    with pytest.raises(MissingWeaveExtraError, match=r'fugue\[weave\]'):
+    with pytest.raises(MissingWeaveExtraError, match=r"fugue\[weave\]"):
         weave_publisher_from_environment({})
 
 
@@ -1045,17 +1044,16 @@ class _FakeWeaveClient:
         use_stack=True,
         _call_id_override=None,
     ):
-        del display_name, use_stack
+        del use_stack
         assert _call_id_override not in self.calls
         call = SimpleNamespace(
             id=_call_id_override,
             parent_id=getattr(parent, "id", None),
             project_id=self.target.project_slug,
-            trace_id=(
-                getattr(parent, "trace_id", None) or _call_id_override
-            ),
+            trace_id=(getattr(parent, "trace_id", None) or _call_id_override),
             inputs=dict(inputs),
             attributes=dict(attributes or {}),
+            display_name=display_name,
             output=None,
             ended_at=None,
             exception=None,
@@ -1167,11 +1165,7 @@ def test_weave_call_input_comparison_uses_raw_immutable_ref_identity(
     )
     assert not publication._canonical_values_equal(
         observed,
-        {
-            "dataset_ref": (
-                "weave:///wandb/local-result/object/other-dataset:sha256"
-            )
-        },
+        {"dataset_ref": ("weave:///wandb/local-result/object/other-dataset:sha256")},
     )
 
 
@@ -1185,9 +1179,7 @@ def _install_fake_weave(
     def parse_ref(uri: str):
         prefix = "weave:///"
         assert uri.startswith(prefix)
-        entity, project, _kind, _object_id = uri.removeprefix(prefix).split(
-            "/", 3
-        )
+        entity, project, _kind, _object_id = uri.removeprefix(prefix).split("/", 3)
         return SimpleNamespace(entity=entity, project=project, uri=uri)
 
     fake_weave = SimpleNamespace(
@@ -1201,6 +1193,7 @@ def _install_fake_weave(
         "import_module",
         lambda name: fake_weave if name == "weave" else None,
     )
+
     @contextmanager
     def destination_session(_project, _env):
         yield fake_weave
@@ -1234,16 +1227,121 @@ def test_real_weave_adapter_emits_nested_five_object_chain(
     agent_call = next(
         call
         for call in client.calls.values()
-        if call.attributes["fugue.evidence.object_kind"]
-        == "agent_evidence_receipt"
+        if call.attributes["fugue.evidence.object_kind"] == "agent_evidence_receipt"
     )
     assert agent_call.output["native_agent_call"] is False
     by_kind = {item.kind: item for item in outcome.objects}
     assert by_kind["agent_evidence_receipt"].native_agent_call is False
-    assert by_kind["dataset"].ref.startswith(
-        f"weave:///{target.project_slug}/object/"
-    )
+    assert by_kind["dataset"].ref.startswith(f"weave:///{target.project_slug}/object/")
     assert outcome.publisher_revision == "v2-readback+weave-test-sdk"
+
+
+def test_real_weave_adapter_publishes_human_task_and_result_contracts(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _manifest_path, manifest = _canonical_manifest(tmp_path)
+    _result_path, result = _result_fixture(tmp_path, manifest)
+    pair = result.paired_cases[0]
+    attempt = pair.baseline
+    presentation = TaskPresentationV1(
+        task_id="task-1",
+        title="Create a platform-bound Skill",
+        public_prompt=(
+            PublicPromptPartV1(
+                order=1,
+                text="Create a Skill package for the declared platform.",
+            ),
+        ),
+        required_output="Return a valid packaged Skill.",
+        public_acceptance_criteria=(
+            "The package preserves the required compatibility metadata.",
+        ),
+        tags=("skill-package",),
+        partition="development",
+    )
+    attempt.task_presentation = presentation
+    attempt.arm_label = "Baseline a5bcdd7"
+    attempt.treatment_summary = "Exact upstream Skill Creator at a5bcdd7."
+    attempt.passed = False
+    attempt.scores = {
+        "package_contract_valid": False,
+        "assigned_skill_opened": True,
+    }
+    attempt.score_details = {
+        "package_contract_valid": {
+            "what": "The package must satisfy the public package contract.",
+            "observed": "The required compatibility metadata was absent.",
+            "why": "A consumer cannot select the Skill safely.",
+            "evidence": "scorer:package-contract-v1",
+        }
+    }
+    attempt.judge_reviews = {
+        "usefulness": {
+            "label": "adequate",
+            "reason": "The instructions are readable, but compatibility is missing.",
+            "missing_evidence": False,
+        }
+    }
+    attempt.task_result = {
+        "schema_version": 1,
+        "task_passed": False,
+        "outcome_summary": "The package omitted required compatibility metadata.",
+        "failed_required_checks": [
+            {
+                "id": "package_contract_valid",
+                "label": "Package contract valid",
+                "explanation": "The required compatibility metadata was absent.",
+                "critical": True,
+            }
+        ],
+        "answer_digest": None,
+        "agent_execution_status": "completed",
+        "evidence_integrity_status": "verified",
+    }
+    pair.dimension_changes = (
+        SimpleNamespace(id="package_contract_valid", role="safety_gate"),
+        SimpleNamespace(id="assigned_skill_opened", role="mechanism"),
+    )
+    target = _target()
+    client = _FakeWeaveClient(target)
+    _install_fake_weave(monkeypatch, target, client)
+
+    publisher = weave_publisher_from_environment({"WANDB_API_KEY": "test-only-key"})
+    publisher(result, manifest, target)
+
+    assert len(client.published_object_refs) == 1
+    dataset = next(iter(client.objects.values()))
+    assert dataset["rows"][0]["task_presentation"] == presentation.to_dict()
+    assert (
+        dataset["rows"][0]["row_payload_digest"] != presentation.task_definition_digest
+    )
+    replay_row = dict(dataset["rows"][0])
+    payload_digest = replay_row.pop("row_payload_digest")
+    assert payload_digest == publication._weave_row_digest(replay_row)
+    by_kind = {
+        call.attributes["fugue.evidence.object_kind"]: call
+        for call in client.calls.values()
+    }
+    scored = by_kind["prediction_and_score"]
+    assert scored.display_name.startswith(
+        "Published scored attempt: DID NOT PASS · Create a platform-bound Skill"
+    )
+    assert scored.output["task_result"] == attempt.task_result
+    assert scored.output["scores"] == {
+        "task_passed": False,
+        "safety__package_contract_valid": False,
+        "mechanism__assigned_skill_opened": True,
+    }
+    assert scored.output["score_details"] == attempt.score_details
+    assert scored.output["judge_evidence"] == {
+        "status": "available",
+        "advisory": True,
+        "reviews": attempt.judge_reviews,
+    }
+    agent = by_kind["agent_evidence_receipt"]
+    assert agent.output["agent_execution_status"] == "completed"
+    assert agent.output["native_agent_call"] is False
 
 
 @pytest.mark.parametrize(

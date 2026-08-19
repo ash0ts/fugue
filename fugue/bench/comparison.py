@@ -65,6 +65,12 @@ from fugue.bench.operator import (
     PreviewSummary,
 )
 from fugue.bench.reproducibility import INPUT_LOCK_NAME, verify_snapshot
+from fugue.bench.task_presentation import (
+    TaskPresentationV1,
+    TaskResultV1,
+    task_presentation_from_dict,
+    task_result_from_dict,
+)
 from fugue.model_plane import (
     EvidenceDestinationV1,
     EvidenceMode,
@@ -120,6 +126,10 @@ _PUBLIC_TASK_FIELDS = frozenset(
         "partition",
         "critical_dimensions",
         "repository",
+        "title",
+        "required_output",
+        "public_acceptance_criteria",
+        "scenario",
     }
 )
 _PRIVATE_LABEL_FIELDS = frozenset(
@@ -571,6 +581,10 @@ class PairedAttemptV3:
     usage_reconciliation_status: ReconciliationStatus | None = None
     score_details: dict[str, ScoreExplanationV1] = field(default_factory=dict)
     judge_reviews: dict[str, JudgeReviewV1] = field(default_factory=dict)
+    arm_label: str | None = None
+    treatment_summary: str | None = None
+    task_presentation: TaskPresentationV1 | None = None
+    task_result: TaskResultV1 | None = None
 
     def __post_init__(self) -> None:
         if set(self.score_details) - set(self.scores):
@@ -582,6 +596,35 @@ class PairedAttemptV3:
             for judge_id in self.judge_reviews
         ):
             raise ValueError("V3 judge review ID is invalid")
+        for label, value in (
+            ("V3 arm label", self.arm_label),
+            ("V3 treatment summary", self.treatment_summary),
+        ):
+            if value is not None:
+                _safe_public_text(value, label=label, maximum=2_000)
+        if self.task_presentation is not None and self.task_presentation.task_id != str(
+            self.identity.get("task_id") or ""
+        ):
+            raise ValueError("V3 task presentation disagrees with attempt identity")
+        if self.task_result is not None:
+            if self.task_result.task_passed is None and self.passed:
+                raise ValueError("V3 unresolved task result cannot pass")
+            if (
+                self.task_result.task_passed is not None
+                and self.task_result.task_passed != self.passed
+            ):
+                raise ValueError("V3 task result disagrees with attempt pass status")
+            if self.task_result.agent_execution_status != self.execution_status:
+                raise ValueError(
+                    "V3 task result disagrees with Agent execution status"
+                )
+            if (
+                self.task_result.evidence_integrity_status == "verified"
+                and self.evidence_status != "resolved"
+            ):
+                raise ValueError(
+                    "V3 verified task result requires resolved attempt evidence"
+                )
         for field_name in (
             "cost_reconciliation_status",
             "latency_reconciliation_status",
@@ -647,6 +690,18 @@ class PairedAttemptV3:
                 judge_reviews={
                     key: item.to_dict() for key, item in self.judge_reviews.items()
                 },
+                task_presentation=(
+                    self.task_presentation.to_dict()
+                    if self.task_presentation is not None
+                    else None
+                ),
+                arm_label=self.arm_label,
+                treatment_summary=self.treatment_summary,
+                task_result=(
+                    self.task_result.to_dict()
+                    if self.task_result is not None
+                    else None
+                ),
             )
             if stable_digest(projection) != self.local_result_row_projection_digest:
                 raise ValueError(
@@ -978,6 +1033,7 @@ class ComparisonResultV3:
     runtime_locks: tuple[LockDescriptorV1, ...]
     cohort_lineage: dict[str, Any]
     candidate_definitions: dict[str, dict[str, Any]] = field(default_factory=dict)
+    task_catalogue: tuple[TaskPresentationV1, ...] = ()
     local_evidence: dict[str, Any] | None = None
     execution_schedule: dict[str, Any] = field(default_factory=dict)
     evidence_backend: EvidenceBackend = "weave"
@@ -1019,6 +1075,15 @@ class ComparisonResultV3:
             if stable_digest(definition) != candidate_id:
                 raise ValueError(
                     "ComparisonResultV3 candidate definition digest does not match"
+                )
+        if self.task_catalogue:
+            catalogue_ids = [item.task_id for item in self.task_catalogue]
+            if len(set(catalogue_ids)) != len(catalogue_ids):
+                raise ValueError("ComparisonResultV3 task catalogue IDs must be unique")
+            paired_task_ids = {item.task_id for item in self.paired_cases}
+            if set(catalogue_ids) != paired_task_ids:
+                raise ValueError(
+                    "ComparisonResultV3 task catalogue does not cover paired tasks"
                 )
         if self.local_evidence is not None:
             _verify_local_evidence_binding(self.local_evidence)
@@ -2545,7 +2610,11 @@ def preview_comparison(
     manifest_path = Path(experiment.manifest)
     overlay = {
         manifest_path.as_posix(): yaml.safe_dump(manifest, sort_keys=False),
+        str((manifest.get("dataset") or {}).get("source", {}).get("path") or ""): (
+            _jsonl(public_rows)
+        ),
     }
+    overlay.pop("", None)
     service = operator or OperatorService(repo_root)
     matrix = service.preview_experiment(
         experiment,
@@ -4153,6 +4222,7 @@ def analyze_comparison_rows(
                 )
             ),
             candidate_definitions=resolved_candidate_definitions,
+            task_catalogue=_result_task_catalogue(normalized),
             local_evidence=local_evidence_binding,
             execution_schedule=(
                 dict(execution_lock.get("execution_schedule") or {})
@@ -4260,8 +4330,15 @@ def _analyze_aligned_pairs(
                 "attempt": attempt,
             }
         )
+        presented_task = _row_task_presentation(candidate) or _row_task_presentation(
+            base
+        )
         task_label = (
-            _row_text(candidate, "task_name") or _row_text(base, "task_name") or task
+            presented_task.title
+            if presented_task is not None
+            else _row_text(candidate, "task_name")
+            or _row_text(base, "task_name")
+            or task
         )
         if result_schema_version == 3:
             paired_cases_v3.append(
@@ -5857,6 +5934,12 @@ def comparison_result_from_json(payload: str | bytes) -> ComparisonResult:
                 value.get("candidate_definitions")
             ).items()
         }
+        value["task_catalogue"] = tuple(
+            task_presentation_from_dict(
+                _mapping(item, "comparison result task presentation")
+            )
+            for item in value.get("task_catalogue") or ()
+        )
         value["local_evidence"] = (
             dict(_mapping(value.get("local_evidence"), "local evidence binding"))
             if value.get("local_evidence") is not None
@@ -5955,6 +6038,16 @@ def _row_text(row: Mapping[str, Any] | None, key: str) -> str | None:
         return None
     value = str(row.get(key) or "")
     return value or None
+
+
+def _row_task_presentation(
+    row: Mapping[str, Any] | None,
+) -> TaskPresentationV1 | None:
+    if row is None or row.get("task_presentation") is None:
+        return None
+    return task_presentation_from_dict(
+        _mapping(row.get("task_presentation"), "row task presentation")
+    )
 
 
 def _terminal_execution_status(
@@ -6402,6 +6495,33 @@ def _paired_attempt_view_v3(
                 projection.get("judge_reviews")
             ).items()
         },
+        arm_label=(
+            str(projection["arm_label"])
+            if projection.get("arm_label") is not None
+            else None
+        ),
+        treatment_summary=(
+            str(projection["treatment_summary"])
+            if projection.get("treatment_summary") is not None
+            else None
+        ),
+        task_presentation=(
+            task_presentation_from_dict(
+                _mapping(
+                    projection.get("task_presentation"),
+                    "V3 task presentation",
+                )
+            )
+            if projection.get("task_presentation") is not None
+            else None
+        ),
+        task_result=(
+            task_result_from_dict(
+                _mapping(projection.get("task_result"), "V3 task result")
+            )
+            if projection.get("task_result") is not None
+            else None
+        ),
     )
 
 
@@ -8083,6 +8203,26 @@ def _paired_attempt_v3(raw: Any) -> PairedAttemptV3 | None:
         ),
         score_details=score_details,
         judge_reviews=judge_reviews,
+        arm_label=_optional_text(value.get("arm_label"), "V3 arm label", 2_000),
+        treatment_summary=_optional_text(
+            value.get("treatment_summary"),
+            "V3 treatment summary",
+            2_000,
+        ),
+        task_presentation=(
+            task_presentation_from_dict(
+                _mapping(value.get("task_presentation"), "V3 task presentation")
+            )
+            if value.get("task_presentation") is not None
+            else None
+        ),
+        task_result=(
+            task_result_from_dict(
+                _mapping(value.get("task_result"), "V3 task result")
+            )
+            if value.get("task_result") is not None
+            else None
+        ),
     )
 
 
@@ -8343,6 +8483,43 @@ def _result_candidate_definitions(
         if candidate_id in observed and observed[candidate_id] != definition:
             raise ValueError("attempt candidate definition changed after approval")
     return dict(sorted(result.items()))
+
+
+def _result_task_catalogue(
+    rows: Sequence[Mapping[str, Any]],
+) -> tuple[TaskPresentationV1, ...]:
+    """Return the exact public task card once per logical task.
+
+    Historical V3 rows may not have task presentation metadata. If any row in
+    a new result supplies it, every task and arm must supply the same card.
+    """
+
+    presentations: dict[str, TaskPresentationV1] = {}
+    rows_with_presentations = 0
+    for row in rows:
+        raw = row.get("task_presentation")
+        if raw is None:
+            continue
+        rows_with_presentations += 1
+        presentation = task_presentation_from_dict(
+            _mapping(raw, "result task presentation")
+        )
+        task_id = str(row.get("task_id") or row.get("task_name") or "")
+        if presentation.task_id != task_id:
+            raise ValueError("result task presentation disagrees with its row")
+        existing = presentations.setdefault(task_id, presentation)
+        if existing != presentation:
+            raise ValueError("result task presentation changed across attempts")
+    if not rows_with_presentations:
+        return ()
+    expected_task_ids = {
+        str(row.get("task_id") or row.get("task_name") or "") for row in rows
+    }
+    if "" in expected_task_ids or set(presentations) != expected_task_ids:
+        raise ValueError("result task catalogue does not cover every task")
+    if rows_with_presentations != len(rows):
+        raise ValueError("result attempts do not all carry task presentation")
+    return tuple(presentations[key] for key in sorted(presentations))
 
 
 def _local_evidence_binding_from_rows(
@@ -10114,6 +10291,37 @@ def _verify_v3_result_shape(result: ComparisonResultV3) -> None:  # noqa: C901
         for attempt in (pair.baseline, pair.candidate)
         if attempt is not None
     )
+    if result.task_catalogue:
+        task_catalogue = {item.task_id: item for item in result.task_catalogue}
+        for pair in result.paired_cases:
+            presentation = task_catalogue[pair.task_id]
+            if pair.task_label != presentation.title:
+                raise ValueError(
+                    "ComparisonResultV3 task label disagrees with task catalogue"
+                )
+            for attempt in (pair.baseline, pair.candidate):
+                if attempt is None:
+                    continue
+                if attempt.task_presentation != presentation:
+                    raise ValueError(
+                        "ComparisonResultV3 attempt task presentation disagrees "
+                        "with its catalogue"
+                    )
+                if attempt.task_result is None:
+                    raise ValueError(
+                        "ComparisonResultV3 presented attempt requires task result"
+                    )
+                if not attempt.arm_label or not attempt.treatment_summary:
+                    raise ValueError(
+                        "ComparisonResultV3 presented attempt requires arm copy"
+                    )
+    arm_copy: dict[str, tuple[str | None, str | None]] = {}
+    for attempt in attempts:
+        arm = str(attempt.identity.get("arm") or "")
+        current = (attempt.arm_label, attempt.treatment_summary)
+        previous = arm_copy.setdefault(arm, current)
+        if previous != current:
+            raise ValueError("ComparisonResultV3 arm presentation changed across tasks")
     result_candidate_ids = {
         str(attempt.identity.get("candidate") or "") for attempt in attempts
     }
@@ -12358,6 +12566,28 @@ def _comparison_scorer_names(spec: ComparisonSpecV1) -> tuple[str, ...]:
     return tuple(sorted(names))
 
 
+def _comparison_dimension_roles(
+    spec: ComparisonSpecV1,
+) -> dict[str, DimensionRole]:
+    """Return the locked semantic role for every deterministic score key."""
+
+    roles: dict[str, DimensionRole] = {}
+    for evaluator in spec.evaluators:
+        if evaluator.type != "deterministic":
+            continue
+        if evaluator.scorer:
+            for dimension, role in evaluator.dimension_roles.items():
+                roles[f"{evaluator.id}.{dimension}"] = role
+            continue
+        for check in evaluator.checks:
+            if check not in {"answer_present", "expected_values"}:
+                raise ValueError(
+                    f"unsupported deterministic check role: {check}"
+                )
+            roles[check] = "outcome"
+    return dict(sorted(roles.items()))
+
+
 def _project_comparison_start(
     *,
     spec: ComparisonSpecV1,
@@ -12762,6 +12992,10 @@ def execute_comparison(  # noqa: C901 - one governed execution transaction
             row["source_pre_run_drift"] = source_pre_run_drift.to_dict()
         if source_checkpoint_drift is not None:
             row["source_checkpoint_drift"] = source_checkpoint_drift.to_dict()
+
+    evaluate_attempt.fugue_dimension_roles = _comparison_dimension_roles(  # type: ignore[attr-defined]
+        spec
+    )
 
     def finalize_checkpoint_wave(_outcomes: tuple[Any, ...]) -> None:
         """Close the pair-complete gate after local evidence is immutable."""
@@ -14135,11 +14369,28 @@ def _public_case(
     }
     interaction["controller_digest"] = stable_digest(interaction)
     repository = _public_task_repository(task, repo_root)
+    presentation_contract = {
+        **(
+            {"required_output": str(task["required_output"])}
+            if task.get("required_output")
+            else {}
+        ),
+        **(
+            {
+                "public_acceptance_criteria": list(
+                    task["public_acceptance_criteria"]
+                )
+            }
+            if task.get("public_acceptance_criteria")
+            else {}
+        ),
+    }
     return {
         "schema_version": 1,
         "id": task_id,
-        "title": task_id.replace("-", " ").title(),
+        "title": str(task.get("title") or task_id.replace("-", " ").title()),
         "instruction": instruction,
+        **presentation_contract,
         "attachments": _task_attachments(task, repo_root),
         "environment": {
             "profile_id": "artifact-python-v1",
@@ -14167,7 +14418,7 @@ def _public_case(
         "interaction": interaction,
         "harness_applicability": applicability,
         "profile_digests": {},
-        "scenario_id": "comparison",
+        "scenario_id": str(task.get("scenario") or "comparison"),
         "tags": list(task.get("tags") or []),
         "partition": str(task.get("partition") or "holdout"),
         "source_index": index,
@@ -14443,6 +14694,7 @@ def _load_public_tasks(path: Path) -> list[dict[str, Any]]:
             isinstance(item, str) for item in tags
         ):
             raise ValueError(f"public task {task_id} tags must be strings")
+        _validate_public_task_presentation_fields(row, task_id=task_id)
         critical_dimensions = row.get("critical_dimensions") or []
         if not isinstance(critical_dimensions, list) or not all(
             isinstance(item, str) and item.strip() for item in critical_dimensions
@@ -14497,6 +14749,41 @@ def _load_public_tasks(path: Path) -> list[dict[str, Any]]:
             row.pop("critical_dimensions", None)
         row["resources"] = resources
     return rows
+
+
+def _validate_public_task_presentation_fields(
+    row: Mapping[str, Any], *, task_id: str
+) -> None:
+    for field_name in ("title", "required_output", "scenario"):
+        if field_name not in row:
+            continue
+        value = row[field_name]
+        if not isinstance(value, str) or not value.strip():
+            raise ValueError(
+                f"public task {task_id} {field_name} must be non-empty text"
+            )
+        if redact_value(value) != value:
+            raise ValueError(
+                f"public task {task_id} {field_name} contains sensitive text"
+            )
+    public_criteria = row.get("public_acceptance_criteria")
+    if public_criteria is None:
+        return
+    if not isinstance(public_criteria, list) or not public_criteria or not all(
+        isinstance(item, str) and item.strip() for item in public_criteria
+    ):
+        raise ValueError(
+            f"public task {task_id} public_acceptance_criteria must be non-empty "
+            "strings"
+        )
+    if len(public_criteria) != len(set(public_criteria)):
+        raise ValueError(
+            f"public task {task_id} public_acceptance_criteria must be unique"
+        )
+    if redact_value(public_criteria) != public_criteria:
+        raise ValueError(
+            f"public task {task_id} public_acceptance_criteria contain sensitive text"
+        )
 
 
 def _load_private_labels(path: Path) -> list[dict[str, Any]]:
@@ -15768,6 +16055,13 @@ def _optional_text(value: Any, label: str, limit: int) -> str | None:
         return None
     if len(text.encode()) > limit:
         raise ValueError(f"{label} exceeds {limit} bytes")
+    return text
+
+
+def _safe_public_text(value: Any, *, label: str, maximum: int) -> str:
+    text = _text(value, label, maximum)
+    if redact_value(text) != text:
+        raise ValueError(f"{label} contains sensitive text")
     return text
 
 

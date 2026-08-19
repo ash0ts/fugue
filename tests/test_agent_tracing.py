@@ -453,9 +453,15 @@ def test_trial_trace_attributes_are_flat_and_comparable() -> None:
         "fugue.model_upstream_host",
         "fugue.model_bridge_required",
         "fugue.tool_result_modalities",
+        "weave.eval.run_id",
         "weave.eval.predict_and_score_call_id",
         "weave.eval.project_id",
+        "weave.eval.kind",
+        "weave.eval.row_digest",
+        "weave.eval.example_id",
+        "weave.eval.trial_index",
         "weave.eval.evaluation_name",
+        "wandb.thread_id",
     ):
         assert f'"{attribute}"' in source
     assert "FUGUE_TRACE_ATTRIBUTES_JSON" in source
@@ -479,6 +485,31 @@ def test_hermes_runtime_patch_promotes_resource_attributes_to_spans() -> None:
     assert "set_span_in_context(NonRecordingSpan(parent))" in patch
     assert "_finalize_fugue_single_turns" in patch
     assert "hermes-otel turn-end patch target mismatch" in patch
+
+
+def test_every_harness_promotes_evaluation_ids_to_each_span() -> None:
+    hermes = (REPO_ROOT / "configs/fugue/runtime/hermes/patch-plugin.py").read_text()
+    openclaw = (
+        REPO_ROOT / "configs/fugue/runtime/openclaw/patch-runtime.mjs"
+    ).read_text()
+    claude = (
+        REPO_ROOT / "configs/fugue/runtime/claude-code/patch-runtime.mjs"
+    ).read_text()
+    codex = (REPO_ROOT / "configs/fugue/runtime/codex/patch-runtime.mjs").read_text()
+
+    # Hermes merges the resource attributes into both tracer span constructors.
+    assert "tracer_source.count(attribute_needle) != 2" in hermes
+    assert "self.config.resource_attributes or {}" in hermes
+    # OpenClaw applies the complete trial attribute map to every spanBase span.
+    assert "this.span.setAttributes" in openclaw
+    assert "FUGUE_TRACE_ATTRIBUTES_JSON" in openclaw
+    # Claude attaches the map to the daemon metadata and preserves weave.eval.*
+    # as first-class span attributes in genaiSpans.
+    assert "...JSON.parse(process.env.FUGUE_TRACE_ATTRIBUTES_JSON" in claude
+    assert "key.startsWith('weave.eval.')" in claude
+    # Codex spreads the map into each of the three emitted span attribute maps.
+    assert "source.split(attributesNeedle).length - 1 !== 3" in codex
+    assert "const spanAttributes = { ...FUGUE_TRACE_ATTRIBUTES," in codex
 
 
 def test_native_plugin_patches_are_pinned_and_integrity_checked() -> None:

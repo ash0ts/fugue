@@ -1229,12 +1229,28 @@ done
                     "weave.eval.predict_and_score_call_id": os.environ.get(
                         "FUGUE_WEAVE_EVAL_PREDICT_AND_SCORE_CALL_ID"
                     ),
+                    "weave.eval.run_id": os.environ.get(
+                        "FUGUE_WEAVE_EVAL_RUN_ID"
+                    ),
                     "weave.eval.project_id": os.environ.get(
                         "FUGUE_WEAVE_EVAL_PROJECT_ID"
+                    ),
+                    "weave.eval.kind": os.environ.get(
+                        "FUGUE_WEAVE_EVAL_KIND"
+                    ),
+                    "weave.eval.row_digest": os.environ.get(
+                        "FUGUE_WEAVE_EVAL_ROW_DIGEST"
+                    ),
+                    "weave.eval.example_id": os.environ.get(
+                        "FUGUE_WEAVE_EVAL_EXAMPLE_ID"
+                    ),
+                    "weave.eval.trial_index": os.environ.get(
+                        "FUGUE_WEAVE_EVAL_TRIAL_INDEX"
                     ),
                     "weave.eval.evaluation_name": os.environ.get(
                         "FUGUE_WEAVE_EVAL_NAME"
                     ),
+                    "wandb.thread_id": self.trace_conversation_id,
                 }.items()
                 if value
             }

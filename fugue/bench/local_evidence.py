@@ -16,6 +16,11 @@ from filelock import FileLock
 from fugue.bench.candidates import attempt_id as canonical_attempt_id
 from fugue.bench.candidates import stable_digest
 from fugue.bench.files import atomic_write_json
+from fugue.bench.task_presentation import (
+    TaskPresentationV1,
+    task_presentation_from_dict,
+    task_result_from_dict,
+)
 from fugue.redaction import redact_text
 
 LOCAL_EVIDENCE_SCHEMA_VERSION = 1
@@ -170,6 +175,26 @@ def local_result_row_projection_v1(row: Mapping[str, Any]) -> dict[str, Any]:
     judge_reviews = _projection_judge_reviews(row)
     if judge_reviews:
         projection["judge_reviews"] = judge_reviews
+    task_presentation = row.get("task_presentation")
+    if task_presentation is not None:
+        presentation = task_presentation_from_dict(
+            _projection_mapping(task_presentation)
+        )
+        projection["task_presentation"] = presentation.to_dict()
+    arm_label = str(row.get("arm_label") or "").strip()
+    if arm_label:
+        projection["arm_label"] = _projection_public_text(arm_label, "arm label")
+    treatment_summary = str(row.get("treatment_summary") or "").strip()
+    if treatment_summary:
+        projection["treatment_summary"] = _projection_public_text(
+            treatment_summary,
+            "treatment summary",
+        )
+    task_result = row.get("task_result")
+    if task_result is not None:
+        projection["task_result"] = task_result_from_dict(
+            _projection_mapping(task_result)
+        ).to_dict()
     for field_name in (
         "cost_reconciliation_status",
         "latency_reconciliation_status",
@@ -207,6 +232,10 @@ def local_result_attempt_projection_v1(
     usage_reconciliation_status: ReconciliationStatus | None = None,
     score_details: Mapping[str, Mapping[str, str]] | None = None,
     judge_reviews: Mapping[str, Mapping[str, Any]] | None = None,
+    task_presentation: Mapping[str, Any] | None = None,
+    arm_label: str | None = None,
+    treatment_summary: str | None = None,
+    task_result: Mapping[str, Any] | None = None,
 ) -> dict[str, Any]:
     """Project an already-normalized V3 attempt using the canonical shape."""
 
@@ -252,6 +281,19 @@ def local_result_attempt_projection_v1(
             )
             for judge_id, review in sorted(judge_reviews.items())
         }
+    if task_presentation is not None:
+        projection["task_presentation"] = task_presentation_from_dict(
+            task_presentation
+        ).to_dict()
+    if arm_label:
+        projection["arm_label"] = _projection_public_text(arm_label, "arm label")
+    if treatment_summary:
+        projection["treatment_summary"] = _projection_public_text(
+            treatment_summary,
+            "treatment summary",
+        )
+    if task_result is not None:
+        projection["task_result"] = task_result_from_dict(task_result).to_dict()
     return projection
 
 
@@ -422,6 +464,15 @@ def _projection_mapping(value: Any) -> dict[str, Any]:
     return dict(value) if isinstance(value, Mapping) else {}
 
 
+def _projection_public_text(value: str, label: str) -> str:
+    text = " ".join(value.split())
+    if not text or len(text) > 2_000:
+        raise ValueError(f"{label} must be 1..2000 characters")
+    if redact_text(value) != value:
+        raise ValueError(f"{label} contains credential-like content")
+    return value
+
+
 def _projection_number(value: Any) -> float | None:
     if isinstance(value, int | float) and not isinstance(value, bool):
         number = float(value)
@@ -460,6 +511,19 @@ def _projection_bool(value: Any) -> bool | None:
 
 
 def _projection_execution_status(row: Mapping[str, Any]) -> str:
+    task_result = row.get("task_result")
+    if isinstance(task_result, Mapping):
+        explicit = str(task_result.get("agent_execution_status") or "")
+        if explicit in {
+            "completed",
+            "timed_out",
+            "failed",
+            "cancelled",
+            "interrupted",
+            "not_started",
+            "not_applicable",
+        }:
+            return explicit
     status = str(row.get("status") or row.get("execution_status") or "").lower()
     if status in {"passed", "success", "succeeded", "completed"}:
         return "completed"
@@ -901,6 +965,9 @@ class LocalAttemptPlanV1:
     prediction_id: str
     evaluation_scope_id: str
     dataset_id: str
+    arm_label: str = ""
+    treatment_summary: str = ""
+    task_presentation: TaskPresentationV1 | None = None
 
     def __post_init__(self) -> None:
         _run_id(self.run_id)
@@ -914,6 +981,20 @@ class LocalAttemptPlanV1:
             raise ValueError("local evidence attempt identity is not canonical")
         if canonical_attempt_id(**expected_identity) != self.attempt_id:
             raise ValueError("local evidence attempt id disagrees with its identity")
+        if self.arm_label:
+            _projection_public_text(self.arm_label, "local evidence arm label")
+        if self.treatment_summary:
+            _projection_public_text(
+                self.treatment_summary,
+                "local evidence treatment summary",
+            )
+        if (
+            self.task_presentation is not None
+            and self.task_presentation.task_id != expected_identity["task_id"]
+        ):
+            raise ValueError(
+                "local evidence task presentation disagrees with attempt identity"
+            )
 
     @property
     def candidate_id(self) -> str:
@@ -931,7 +1012,7 @@ class LocalAttemptPlanV1:
         )
 
     def to_dict(self) -> dict[str, Any]:
-        return {
+        value = {
             "run_id": self.run_id,
             "cell_id": self.cell_id,
             "attempt_id": self.attempt_id,
@@ -940,6 +1021,13 @@ class LocalAttemptPlanV1:
             "evaluation_scope_id": self.evaluation_scope_id,
             "dataset_id": self.dataset_id,
         }
+        if self.arm_label:
+            value["arm_label"] = self.arm_label
+        if self.treatment_summary:
+            value["treatment_summary"] = self.treatment_summary
+        if self.task_presentation is not None:
+            value["task_presentation"] = self.task_presentation.to_dict()
+        return value
 
 
 @dataclass(frozen=True)
@@ -2057,17 +2145,48 @@ class LocalEvidenceCoordinator:
                     "evaluation_asset_lock_sha256": (
                         self.plan.evaluation_asset_lock_sha256
                     ),
+                    **(
+                        {
+                            "task_presentation": (
+                                attempt.task_presentation.to_dict()
+                            )
+                        }
+                        if attempt.task_presentation is not None
+                        else {}
+                    ),
                 },
                 "local Dataset manifest",
             ),
             secret_values=self.secret_values,
         )
         safe_attempt = _public_payload(
-            attempt_payload
-            or {
-                "attempt_id": attempt.attempt_id,
-                "terminal_status": terminal_status,
-            },
+            _bind_local_record_identity(
+                attempt_payload,
+                {
+                    "attempt_id": attempt.attempt_id,
+                    "terminal_status": terminal_status,
+                    **(
+                        {"arm_label": attempt.arm_label}
+                        if attempt.arm_label
+                        else {}
+                    ),
+                    **(
+                        {"treatment_summary": attempt.treatment_summary}
+                        if attempt.treatment_summary
+                        else {}
+                    ),
+                    **(
+                        {
+                            "task_presentation": (
+                                attempt.task_presentation.to_dict()
+                            )
+                        }
+                        if attempt.task_presentation is not None
+                        else {}
+                    ),
+                },
+                "local prediction-and-score record",
+            ),
             secret_values=self.secret_values,
         )
         receipts_raw = safe_attempt.get("receipts")
@@ -2261,6 +2380,15 @@ def local_evidence_destination_from_dict(
 
 
 def local_attempt_plan_from_dict(raw: Mapping[str, Any]) -> LocalAttemptPlanV1:
+    for field_name in ("arm_label", "treatment_summary"):
+        if field_name in raw and not isinstance(raw.get(field_name), str):
+            raise ValueError(f"local attempt plan {field_name} must be text")
+    raw = {
+        **raw,
+        "arm_label": raw.get("arm_label", ""),
+        "treatment_summary": raw.get("treatment_summary", ""),
+        "task_presentation": raw.get("task_presentation"),
+    }
     value = _strict_mapping(
         raw,
         {
@@ -2271,6 +2399,9 @@ def local_attempt_plan_from_dict(raw: Mapping[str, Any]) -> LocalAttemptPlanV1:
             "prediction_id",
             "evaluation_scope_id",
             "dataset_id",
+            "arm_label",
+            "treatment_summary",
+            "task_presentation",
         },
         "local attempt plan",
     )
@@ -2285,6 +2416,31 @@ def local_attempt_plan_from_dict(raw: Mapping[str, Any]) -> LocalAttemptPlanV1:
         prediction_id=str(value.get("prediction_id") or ""),
         evaluation_scope_id=str(value.get("evaluation_scope_id") or ""),
         dataset_id=str(value.get("dataset_id") or ""),
+        arm_label=str(value.get("arm_label") or ""),
+        treatment_summary=str(value.get("treatment_summary") or ""),
+        task_presentation=(
+            task_presentation_from_dict(
+                _strict_mapping(
+                    value.get("task_presentation"),
+                    {
+                        "schema_version",
+                        "task_id",
+                        "title",
+                        "public_prompt",
+                        "required_output",
+                        "public_acceptance_criteria",
+                        "scenario",
+                        "tags",
+                        "partition",
+                        "safe_resource_references",
+                        "task_definition_digest",
+                    },
+                    "local task presentation",
+                )
+            )
+            if value.get("task_presentation") is not None
+            else None
+        ),
     )
 
 
@@ -2863,6 +3019,24 @@ def _verify_prediction_identity(
         not isinstance(identity, Mapping) or dict(identity) != attempt.attempt_identity
     ):
         raise ValueError("prediction row attempt identity disagrees with its plan")
+    for key, expected in (
+        ("arm_label", attempt.arm_label),
+        ("treatment_summary", attempt.treatment_summary),
+    ):
+        observed = str(row.get(key) or "")
+        if expected and observed != expected:
+            raise ValueError(f"prediction row {key} disagrees with its run plan")
+    presentation = row.get("task_presentation")
+    if attempt.task_presentation is not None:
+        if not isinstance(presentation, Mapping):
+            raise ValueError("prediction row is missing its task presentation")
+        if (
+            task_presentation_from_dict(presentation)
+            != attempt.task_presentation
+        ):
+            raise ValueError(
+                "prediction row task presentation disagrees with its run plan"
+            )
 
 
 def _bind_local_record_identity(
