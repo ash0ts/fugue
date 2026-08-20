@@ -153,8 +153,8 @@
     },
     {
       "path": "reference-studies/wandb-mcp/tasks.jsonl",
-      "sha256": "09a7ef7a4aea81f5f051e691452df625fa31b7784ff8300d64c00a2e788b7966",
-      "size_bytes": 7616
+      "sha256": "2ce78324f06ece756692732386428b32ba21f5e5331031edcbcd767046067757",
+      "size_bytes": 9099
     },
     {
       "path": "reference-studies/wandb-mcp/tool_surface_scorer_v7.py",
