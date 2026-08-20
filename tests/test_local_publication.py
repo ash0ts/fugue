@@ -1368,6 +1368,7 @@ class _FakeWeaveClient:
         self.tamper_call_field = "output"
         self.tamper_dataset = False
         self.call_queries: list[dict[str, Any]] = []
+        self.flush_count = 0
 
     def create_call(
         self,
@@ -1406,6 +1407,7 @@ class _FakeWeaveClient:
                 **{
                     **vars(call),
                     "id": duplicate_id,
+                    "ended_at": "2026-08-17T12:00:00+00:00",
                 }
             )
             self.duplicate_after_create_kind = None
@@ -1422,9 +1424,10 @@ class _FakeWeaveClient:
             self.fail_after_finish = None
             raise RuntimeError("simulated controller interruption")
 
-    @staticmethod
-    def flush() -> None:
-        return None
+    def flush(self) -> None:
+        self.flush_count += 1
+        if any(call.ended_at is None for call in self.calls.values()):
+            raise AssertionError("flush called while a Weave Call is open")
 
     def get_call(self, call_id):
         if call_id not in self.calls:
@@ -1592,6 +1595,7 @@ def test_real_weave_adapter_emits_nested_five_object_chain(
     assert len(outcome.objects) == 5
     assert len(client.finished_call_ids) == 4
     assert len(set(client.created_call_ids)) == 4
+    assert client.flush_count == 1
     assert all(call.ended_at is not None for call in client.calls.values())
     agent_call = next(
         call
@@ -1831,7 +1835,7 @@ def test_real_weave_adapter_requires_authoritative_matching_readback(
         publisher(result, manifest, target)
 
 
-def test_real_weave_adapter_resumes_partial_deterministic_publication(
+def test_real_weave_adapter_resumes_fully_terminal_publication(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -1839,7 +1843,7 @@ def test_real_weave_adapter_resumes_partial_deterministic_publication(
     _result_path, result = _result_fixture(tmp_path, manifest)
     target = _target()
     client = _FakeWeaveClient(target)
-    client.fail_after_finish = 2
+    client.fail_after_finish = 4
     _install_fake_weave(monkeypatch, target, client)
     publisher = weave_publisher_from_environment({"WANDB_API_KEY": "test-only-key"})
 
@@ -1856,7 +1860,7 @@ def test_real_weave_adapter_resumes_partial_deterministic_publication(
     assert len({(item.attempt_id, item.kind) for item in outcome.objects}) == 5
 
 
-def test_real_weave_adapter_recovers_call_creation_interruption_without_duplicates(
+def test_real_weave_adapter_retries_dataset_only_after_unflushed_call_interruption(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -1874,6 +1878,9 @@ def test_real_weave_adapter_recovers_call_creation_interruption_without_duplicat
     ):
         publisher(result, manifest, target)
     assert tuple(client.created_call_ids) == ("call-0001", "call-0002")
+    # Model process loss under calls-complete: unmatched local Starts never
+    # became authoritative Calls, while the content-addressed Dataset remains.
+    client.calls.clear()
 
     outcome = publisher(result, manifest, target)
 
@@ -1882,9 +1889,42 @@ def test_real_weave_adapter_recovers_call_creation_interruption_without_duplicat
         "call-0002",
         "call-0003",
         "call-0004",
+        "call-0005",
+        "call-0006",
     )
+    assert len(set(client.published_object_refs)) == 1
     assert len(outcome.objects) == 5
     assert len({(item.attempt_id, item.kind) for item in outcome.objects}) == 5
+
+
+def test_real_weave_adapter_rejects_unfinished_authoritative_call(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _manifest_path, manifest = _canonical_manifest(tmp_path)
+    _result_path, result = _result_fixture(tmp_path, manifest)
+    target = _target()
+    client = _FakeWeaveClient(target)
+    _install_fake_weave(monkeypatch, target, client)
+    publisher = weave_publisher_from_environment({"WANDB_API_KEY": "test-only-key"})
+    publisher(result, manifest, target)
+    prediction = next(
+        call
+        for call in client.calls.values()
+        if call.attributes["fugue.evidence.object_kind"] == "prediction"
+    )
+    prediction.output = None
+    prediction.ended_at = None
+    created_before_retry = tuple(client.created_call_ids)
+    finished_before_retry = tuple(client.finished_call_ids)
+    flushes_before_retry = client.flush_count
+
+    with pytest.raises(RuntimeError, match="unfinished remote Call"):
+        publisher(result, manifest, target)
+
+    assert tuple(client.created_call_ids) == created_before_retry
+    assert tuple(client.finished_call_ids) == finished_before_retry
+    assert client.flush_count == flushes_before_retry
 
 
 def test_real_weave_adapter_fails_closed_on_duplicate_call_race(
@@ -1908,7 +1948,7 @@ def test_real_weave_adapter_fails_closed_on_duplicate_call_race(
         if call.attributes["fugue.evidence.object_kind"] == "prediction"
     ]
     assert len(predictions) == 2
-    assert all(call.ended_at is None for call in predictions)
+    assert all(call.ended_at is not None for call in predictions)
 
 
 def test_real_weave_adapter_rejects_conflicting_existing_call_identity(

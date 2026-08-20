@@ -1217,6 +1217,10 @@ def _publish_with_active_weave_sdk(
                 attributes,
             ),
         )
+        # Weave 0.53.6 uses calls-complete batching by default.  An open Call
+        # exists only in the local batch processor until its matching end is
+        # queued, and flush() waits for that end.  Build and close the complete
+        # chain first, then flush it once as paired start/end records.
         for _kind, call, _inputs, output, _parent, _attributes in call_specs:
             _finish_or_verify_weave_call(client, call, output)
         client.flush()
@@ -1227,6 +1231,26 @@ def _publish_with_active_weave_sdk(
         readback: dict[str, Any] = {}
         for kind, call, inputs, output, parent, expected_attributes in call_specs:
             call_id = str(getattr(call, "id", "") or "")
+            matches = _read_back_weave_publication_calls(
+                client,
+                publication_id=publication_id,
+                attempt_id=attempt_id,
+                kind=kind,
+            )
+            if len(matches) > 1:
+                raise RuntimeError(
+                    "Weave publication found a duplicate Call race for one "
+                    "immutable evidence identity"
+                )
+            if not matches:
+                raise RuntimeError(
+                    "authoritative Weave readback could not resolve a created Call"
+                )
+            if str(getattr(matches[0], "id", "") or "") != call_id:
+                raise RuntimeError(
+                    "authoritative Weave readback returned another Call for a "
+                    "created evidence identity"
+                )
             observed = _read_back_weave_call(client, call_id)
             _verify_weave_call(
                 observed,
@@ -1309,6 +1333,12 @@ def _ensure_weave_call_started(
         )
     if matches:
         call = matches[0]
+        if getattr(call, "ended_at", None) is None:
+            raise RuntimeError(
+                "Weave publication found an unfinished remote Call that cannot "
+                "be resumed safely with the public calls-complete API; inspect "
+                "the partial publication and select a clean target"
+            )
     else:
         created = client.create_call(
             op,
@@ -1321,28 +1351,7 @@ def _ensure_weave_call_started(
         created_id = str(getattr(created, "id", "") or "")
         if not created_id:
             raise RuntimeError("Weave did not return an identity for a created Call")
-        client.flush()
-        matches = _read_back_weave_publication_calls(
-            client,
-            publication_id=publication_id,
-            attempt_id=attempt_id,
-            kind=kind,
-        )
-        if len(matches) > 1:
-            raise RuntimeError(
-                "Weave publication created a duplicate Call race for one "
-                "immutable evidence identity"
-            )
-        if not matches:
-            raise RuntimeError(
-                "authoritative Weave readback could not resolve a created Call"
-            )
-        call = matches[0]
-        if str(getattr(call, "id", "") or "") != created_id:
-            raise RuntimeError(
-                "authoritative Weave readback returned another Call for a "
-                "created evidence identity"
-            )
+        call = created
     call_id = str(getattr(call, "id", "") or "")
     if not call_id:
         raise RuntimeError("published Weave Call has no identity")
