@@ -1,0 +1,75 @@
+{
+  "slug": "fugue-3-api-compatibility-is-not-agent-compatibility",
+  "title": "API Compatibility Is Not Agent Compatibility",
+  "width": 1280,
+  "height": 720,
+  "duration": 110,
+  "fps": 15,
+  "posterScene": "staged-study",
+  "reducedMotionScene": "staged-study",
+  "posterTime": 51.8,
+  "reducedMotionTime": 51.8,
+  "transitionSeconds": 0.35,
+  "safeArea": {
+    "left": 54,
+    "top": 40,
+    "right": 54,
+    "bottom": 100
+  },
+  "typeScale": {
+    "essential": 28,
+    "supporting": 24,
+    "compact": 18
+  },
+  "sourceHeadingIds": [
+    "lock-the-two-mcp-candidates",
+    "the-interface-an-agent-experiences",
+    "genuine-evidence-deliberately-seeded",
+    "the-staged-local-sequence",
+    "judge-calibration-before-paid-work",
+    "four-outcome-layers",
+    "the-maintainer-memo"
+  ],
+  "silent": true,
+  "placement": {
+    "after_heading": "the-maintainer-memo",
+    "after_label": "The maintainer memo",
+    "bridge_to_heading": "try-this-in-15-minutes",
+    "bridge_to_label": "Try this in 15 minutes",
+    "what_to_watch": "Track exact main and final staging through observed zero-model reconciliation, an unrun 8-cell canary, a conditional 16-cell confirmation, and the package HOLD."
+  },
+  "checkpoints": [
+    {
+      "name": "exact-revisions",
+      "time": 7.92
+    },
+    {
+      "name": "manifest-contract",
+      "time": 21.799999999999997
+    },
+    {
+      "name": "prepared-evidence",
+      "time": 36.8
+    },
+    {
+      "name": "staged-study",
+      "time": 51.8
+    },
+    {
+      "name": "judge-gate",
+      "time": 66.8
+    },
+    {
+      "name": "four-outcomes",
+      "time": 81.08
+    },
+    {
+      "name": "blocked-status",
+      "time": 94.36
+    },
+    {
+      "name": "series-context",
+      "time": 106.64
+    }
+  ]
+}

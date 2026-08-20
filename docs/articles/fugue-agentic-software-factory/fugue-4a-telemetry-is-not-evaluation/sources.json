@@ -1,0 +1,50 @@
+{
+  "schema_version": 1,
+  "sources": [
+    {
+      "id": "weng-harness",
+      "author": "Lilian Weng",
+      "title": "Harness Engineering for Self-Improvement",
+      "publication": "Lil’Log",
+      "date": "2026-07-04",
+      "url": "https://lilianweng.github.io/posts/2026-07-04-harness/",
+      "supports": "Propose–evaluate–accept patterns and recursive-improvement risks."
+    },
+    {
+      "id": "dudycz-ooda",
+      "author": "Oskar Dudycz",
+      "title": "Vibing, Harness and OODA Loop",
+      "publication": "Event-Driven.io",
+      "date": "2026",
+      "url": "https://event-driven.io/en/vibing_harness_and_ooda_loops/",
+      "supports": "Operational distinction between observation and authorized action."
+    },
+    {
+      "id": "hamel-field-guide",
+      "author": "Hamel Husain",
+      "title": "A Field Guide to Rapidly Improving AI Products",
+      "publication": "Hamel’s Blog",
+      "date": "2025",
+      "url": "https://hamel.dev/blog/posts/field-guide/",
+      "supports": "Human-guided error analysis before evaluator automation."
+    },
+    {
+      "id": "auto-evals",
+      "author": "Shreya Shankar and Hamel Husain",
+      "title": "Do Automated Evals Work?",
+      "publication": "Parlance Labs",
+      "date": "2025",
+      "url": "https://parlance-labs.com/blog/posts/auto-evals/index.html",
+      "supports": "Limits of automated evaluation and need for human validation."
+    },
+    {
+      "id": "fugue-research",
+      "author": "Fugue maintainers",
+      "title": "Research comparison control and authority boundary",
+      "publication": "GitHub pull request #43 head",
+      "date": "2026-07-28",
+      "url": "https://github.com/ash0ts/fugue/blob/397b918713520ac484281a95591bed3aad5e66e4/docs/research.md",
+      "supports": "Accessible implementation documentation for proposal, approval, and execution authority."
+    }
+  ]
+}

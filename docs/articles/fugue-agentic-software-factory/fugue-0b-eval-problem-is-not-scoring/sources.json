@@ -1,0 +1,68 @@
+{
+  "schema_version": 1,
+  "sources": [
+    {
+      "id": "anthropic-demystifying",
+      "author": "Anthropic",
+      "title": "Demystifying evals for AI agents",
+      "publication": "Anthropic Engineering",
+      "date": "2025",
+      "url": "https://www.anthropic.com/engineering/demystifying-evals-for-ai-agents",
+      "supports": "Grader taxonomy, task design, and human calibration guidance."
+    },
+    {
+      "id": "anthropic-noise",
+      "author": "Anthropic",
+      "title": "Infrastructure noise in agent evals",
+      "publication": "Anthropic Engineering",
+      "date": "2025",
+      "url": "https://www.anthropic.com/engineering/infrastructure-noise",
+      "supports": "Measured score sensitivity to infrastructure configuration."
+    },
+    {
+      "id": "validators-paper",
+      "author": "Shreya Shankar, J.D. Zamfirescu-Pereira, Björn Hartmann, Aditya G. Parameswaran, and Ian Arawjo",
+      "title": "Who Validates the Validators? Aligning LLM-Assisted Evaluation of LLM Outputs with Human Preferences",
+      "publication": "arXiv",
+      "date": "2024-04-18",
+      "url": "https://arxiv.org/abs/2404.12272",
+      "supports": "Limits and validation requirements for LLM evaluators."
+    },
+    {
+      "id": "hamel-judge",
+      "author": "Hamel Husain",
+      "title": "Using LLM-as-a-Judge for Open-Ended Question Evaluation",
+      "publication": "Hamel’s Blog",
+      "date": "2024",
+      "url": "https://hamel.dev/blog/posts/llm-judge/",
+      "supports": "Criterion-specific judge design and error analysis."
+    },
+    {
+      "id": "auto-evals",
+      "author": "Shreya Shankar and Hamel Husain",
+      "title": "Do Automated Evals Work?",
+      "publication": "Parlance Labs",
+      "date": "2025",
+      "url": "https://parlance-labs.com/blog/posts/auto-evals/index.html",
+      "supports": "Empirical and practical limits of automated evaluators."
+    },
+    {
+      "id": "weng-hallucination",
+      "author": "Lilian Weng",
+      "title": "Extrinsic Hallucinations in LLMs",
+      "publication": "Lil’Log",
+      "date": "2024-07-07",
+      "url": "https://lilianweng.github.io/posts/2024-07-07-hallucination/",
+      "supports": "Measurement taxonomy and scope-sensitive interpretation."
+    },
+    {
+      "id": "hamel-field-guide",
+      "author": "Hamel Husain",
+      "title": "A Field Guide to Rapidly Improving AI Products",
+      "publication": "Hamel’s Blog",
+      "date": "2025",
+      "url": "https://hamel.dev/blog/posts/field-guide/",
+      "supports": "Trace-first progression from failure analysis to automated evaluation."
+    }
+  ]
+}

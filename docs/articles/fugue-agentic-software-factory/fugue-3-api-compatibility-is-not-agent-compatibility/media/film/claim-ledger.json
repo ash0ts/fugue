@@ -1,0 +1,161 @@
+{
+  "schema_version": 2,
+  "slug": "fugue-3-api-compatibility-is-not-agent-compatibility",
+  "audience": "MCP maintainers and Agent-integration teams",
+  "question": "What must be locked before an MCP release can receive a behavioral recommendation?",
+  "intended_takeaway": "Qualify exact MCP revisions as whole Agent-facing releases.",
+  "out_of_scope": "Zero-model conformance is not an Agent behavioral result or a package release decision.",
+  "placement": {
+    "after_heading": "the-maintainer-memo",
+    "after_label": "The maintainer memo",
+    "bridge_to_heading": "try-this-in-15-minutes",
+    "bridge_to_label": "Try this in 15 minutes",
+    "what_to_watch": "Track exact main and final staging through observed zero-model reconciliation, an unrun 8-cell canary, a conditional 16-cell confirmation, and the package HOLD."
+  },
+  "poster_scene": "staged-study",
+  "reduced_motion_scene": "staged-study",
+  "source_heading_ids": [
+    "lock-the-two-mcp-candidates",
+    "the-interface-an-agent-experiences",
+    "genuine-evidence-deliberately-seeded",
+    "the-staged-local-sequence",
+    "judge-calibration-before-paid-work",
+    "four-outcome-layers",
+    "the-maintainer-memo"
+  ],
+  "safe_area": {
+    "left": 54,
+    "top": 40,
+    "right": 54,
+    "bottom": 100
+  },
+  "type_scale": {
+    "essential": 28,
+    "supporting": 24,
+    "compact": 18
+  },
+  "claims": [
+    {
+      "id": "exact-revisions",
+      "scene": "exact-revisions",
+      "claim": "Zero-model preparation locked the two reviewed revisions.",
+      "support": [
+        "Baseline: main at 53b199a.",
+        "Candidate: staging at 29cc1b5."
+      ],
+      "kind": "audited Fugue observation",
+      "source": "article.md#lock-the-two-mcp-candidates",
+      "visual_relationship": "revision_compare",
+      "displayed_values": [
+        "53b199a",
+        "29cc1b5"
+      ],
+      "caveat": "Zero-model conformance is not an Agent behavioral result or a package release decision."
+    },
+    {
+      "id": "manifest-contract",
+      "scene": "manifest-contract",
+      "claim": "Descriptions, projections, pagination, and errors are behavioral inputs.",
+      "support": [
+        "Target-platform probes record the exact tool manifest.",
+        "Protocol compatibility alone cannot establish Agent compatibility."
+      ],
+      "kind": "preregistered design",
+      "source": "article.md#the-interface-an-agent-experiences",
+      "visual_relationship": "ledgers",
+      "displayed_values": [],
+      "caveat": "Zero-model conformance is not an Agent behavioral result or a package release decision."
+    },
+    {
+      "id": "prepared-evidence",
+      "scene": "prepared-evidence",
+      "claim": "Immutable source evidence stays separate from Study output.",
+      "support": [
+        "Receipt passed: 2 roots, 18 direct children, 16 prediction rows.",
+        "No model ran and no result Calls were published."
+      ],
+      "kind": "audited Fugue observation",
+      "source": "article.md#genuine-evidence-deliberately-seeded",
+      "visual_relationship": "evidence_graph",
+      "displayed_values": [],
+      "caveat": "Zero-model conformance is not an Agent behavioral result or a package release decision."
+    },
+    {
+      "id": "staged-study",
+      "scene": "staged-study",
+      "claim": "An 8-cell canary gates a separate 16-cell confirmation.",
+      "support": [
+        "Claude Code and the locked route stay fixed.",
+        "The confirmation needs its own preview, approval, budget, and result."
+      ],
+      "kind": "preregistered design",
+      "source": "article.md#the-staged-local-sequence",
+      "visual_relationship": "staged_study",
+      "displayed_values": [
+        "8",
+        "16",
+        "24 MAXIMUM PLANNED CELLS"
+      ],
+      "caveat": "Zero-model conformance is not an Agent behavioral result or a package release decision."
+    },
+    {
+      "id": "judge-gate",
+      "scene": "judge-gate",
+      "claim": "Behavioral evidence cannot issue package GO.",
+      "support": [
+        "The Study supports a bounded local behavior summary.",
+        "Package release still needs independent checks and human sign-off."
+      ],
+      "kind": "preregistered design",
+      "source": "article.md#judge-calibration-before-paid-work",
+      "visual_relationship": "boundary",
+      "displayed_values": [
+        "8-cell canary",
+        "16-cell confirmation"
+      ],
+      "caveat": "Zero-model conformance is not an Agent behavioral result or a package release decision."
+    },
+    {
+      "id": "four-outcomes",
+      "scene": "four-outcomes",
+      "claim": "Four outcome layers remain independently inspectable.",
+      "support": [
+        "Conformance, deterministic, judgment, and mechanism answer different questions.",
+        "A release memo cannot hide failure in an aggregate."
+      ],
+      "kind": "preregistered design",
+      "source": "article.md#four-outcome-layers",
+      "visual_relationship": "reconciliation",
+      "displayed_values": [],
+      "caveat": "Zero-model conformance is not an Agent behavioral result or a package release decision."
+    },
+    {
+      "id": "blocked-status",
+      "scene": "blocked-status",
+      "claim": "A real mechanism fix still leaves the package on HOLD.",
+      "support": [
+        "Main reported 18 rows; staging reported the correct 16.",
+        "No Agent canary, confirmation, or package sign-off is reported."
+      ],
+      "kind": "pending result",
+      "source": "article.md#the-maintainer-memo",
+      "visual_relationship": "state_machine",
+      "displayed_values": [],
+      "caveat": "Required evidence is not yet observed."
+    },
+    {
+      "id": "series-context",
+      "scene": "series-context",
+      "claim": "An MCP release spans design, execution, evidence, and decision.",
+      "support": [
+        "The whole locked release is the treatment.",
+        "No individual staging feature receives causal credit."
+      ],
+      "kind": "preregistered design",
+      "source": "article.md#the-maintainer-memo",
+      "visual_relationship": "series_map",
+      "displayed_values": [],
+      "caveat": "Zero-model conformance is not an Agent behavioral result or a package release decision."
+    }
+  ]
+}

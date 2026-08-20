@@ -1,0 +1,74 @@
+{
+  "slug": "fugue-2a-model-is-not-the-agent",
+  "title": "The Model Is Not the Agent",
+  "width": 1280,
+  "height": 720,
+  "duration": 98,
+  "fps": 15,
+  "posterScene": "candidate-lattice",
+  "reducedMotionScene": "candidate-lattice",
+  "posterTime": 7.199999999999999,
+  "reducedMotionTime": 7.199999999999999,
+  "transitionSeconds": 0.35,
+  "safeArea": {
+    "left": 54,
+    "top": 40,
+    "right": 54,
+    "bottom": 100
+  },
+  "typeScale": {
+    "essential": 28,
+    "supporting": 24,
+    "compact": 18
+  },
+  "sourceHeadingIds": [
+    "the-candidate-lattice",
+    "assignment-ordering-and-attempts",
+    "the-bounded-question",
+    "reversals-and-the-no-pooling-rule",
+    "threats-we-will-check-before-interpretation",
+    "valid-results-including-nulls"
+  ],
+  "silent": true,
+  "placement": {
+    "after_heading": "valid-results-including-nulls",
+    "after_label": "Valid results, including nulls",
+    "bridge_to_heading": "try-this-in-15-minutes",
+    "bridge_to_label": "Try this in 15 minutes",
+    "what_to_watch": "See how candidate identity, paired assignment, ordering, and reporting rules prevent a harness comparison from becoming a model leaderboard."
+  },
+  "checkpoints": [
+    {
+      "name": "candidate-lattice",
+      "time": 7.199999999999999
+    },
+    {
+      "name": "paired-assignment",
+      "time": 19.36
+    },
+    {
+      "name": "balanced-order",
+      "time": 33.08
+    },
+    {
+      "name": "estimand",
+      "time": 46.36
+    },
+    {
+      "name": "harness-reversal",
+      "time": 58.64
+    },
+    {
+      "name": "invalid-claims",
+      "time": 70.64
+    },
+    {
+      "name": "valid-null",
+      "time": 82.64
+    },
+    {
+      "name": "series-context",
+      "time": 94.64
+    }
+  ]
+}

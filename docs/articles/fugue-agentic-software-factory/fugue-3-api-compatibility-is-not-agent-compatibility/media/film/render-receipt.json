@@ -1,0 +1,30 @@
+{
+  "schema_version": 1,
+  "slug": "fugue-3-api-compatibility-is-not-agent-compatibility",
+  "html_digest": "sha256:7a9467b2bf1dece24ef7b6818ce151ef9f1957586d3c5547db4f916b328ea63d",
+  "mp4_digest": "sha256:bd1f61d37480ae6b2acd1964f139f6f5ea56a5f53df3b443d2b9f5ad8b5446e2",
+  "poster_digest": "sha256:9fa82a8801dabd6e5ab14ef76772b98b8f6a9b23afc4d17434deecc5be6055f0",
+  "contact_sheet_digest": "sha256:44dca23c9fc5c5a2728c637be5e3fbb8075ea072105c97e75f5d2c105e741289",
+  "checkpoint_frame_digests": {
+    "exact-revisions": "sha256:6d65fc2b8db77b15761eb6b857f6b3b83a7cab89cd95af9e17d48be0114d3566",
+    "manifest-contract": "sha256:ae58e553aec01f72779be3e6bc8eba82128b878ff3a4984c895e8f68ca6e34b3",
+    "prepared-evidence": "sha256:1a2ac6fa234990d08c13c9f13305a04b90195b826f3e9a799ad28cf306a76fc2",
+    "staged-study": "sha256:9fa82a8801dabd6e5ab14ef76772b98b8f6a9b23afc4d17434deecc5be6055f0",
+    "judge-gate": "sha256:2634a009afa3eb77f39cc160003fef44cf76741795e7d5572831f60782718324",
+    "four-outcomes": "sha256:a37baf5f12b4aa2610efc79a297a9bd9618db18ca663efe33a13178a57b2c42b",
+    "blocked-status": "sha256:bc24fdba4bc0bbe6d9389f1d70d2f3c8373da9f64b8bcca04eb1bde21068d56e",
+    "series-context": "sha256:b616f26cf56c73b1cb829339f2af612d1dc71abcbb90ed39045cf92ec57b9fb0"
+  },
+  "video": {
+    "codec_name": "h264",
+    "profile": "High",
+    "width": 1280,
+    "height": 720,
+    "pix_fmt": "yuv420p",
+    "color_range": "tv",
+    "r_frame_rate": "15/1",
+    "side_data_list": [
+      {}
+    ]
+  }
+}

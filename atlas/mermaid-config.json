@@ -1,0 +1,21 @@
+{
+  "securityLevel": "strict",
+  "theme": "base",
+  "fontFamily": "IBM Plex Sans Condensed, Arial, sans-serif",
+  "themeVariables": {
+    "background": "#f1f5f3",
+    "primaryColor": "#e4ece8",
+    "primaryTextColor": "#14262d",
+    "primaryBorderColor": "#23677e",
+    "lineColor": "#5a696d",
+    "secondaryColor": "#dce8e1",
+    "tertiaryColor": "#efe2cf",
+    "noteBkgColor": "#efe2cf",
+    "noteTextColor": "#14262d",
+    "noteBorderColor": "#9c6729"
+  },
+  "flowchart": {
+    "htmlLabels": false,
+    "curve": "basis"
+  }
+}

@@ -1,0 +1,41 @@
+{
+  "schema_version": 1,
+  "sources": [
+    {
+      "id": "weng-agent",
+      "author": "Lilian Weng",
+      "title": "LLM Powered Autonomous Agents",
+      "publication": "Lil’Log",
+      "date": "2023-06-23",
+      "url": "https://lilianweng.github.io/posts/2023-06-23-agent/",
+      "supports": "Agent memory taxonomy and retrieval-mediated context."
+    },
+    {
+      "id": "weng-harness",
+      "author": "Lilian Weng",
+      "title": "Harness Engineering for Self-Improvement",
+      "publication": "Lil’Log",
+      "date": "2026-07-04",
+      "url": "https://lilianweng.github.io/posts/2026-07-04-harness/",
+      "supports": "Harness delivery mechanisms and mechanism-aware evaluation."
+    },
+    {
+      "id": "hamel-evals-skills",
+      "author": "Hamel Husain",
+      "title": "Evals Skills for Coding Agents",
+      "publication": "Hamel’s Blog",
+      "date": "2025",
+      "url": "https://hamel.dev/blog/posts/evals-skills/",
+      "supports": "Raw-trace inspection before automated evaluation."
+    },
+    {
+      "id": "lost-in-middle",
+      "author": "Nelson F. Liu, Kevin Lin, John Hewitt, Ashwin Paranjape, Michele Bevilacqua, Fabio Petroni, and Percy Liang",
+      "title": "Lost in the Middle: How Language Models Use Long Contexts",
+      "publication": "arXiv",
+      "date": "2023-07-06",
+      "url": "https://arxiv.org/abs/2307.03172",
+      "supports": "Evidence that information presence and effective use can diverge with context position."
+    }
+  ]
+}

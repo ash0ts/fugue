@@ -1,0 +1,542 @@
+# Fugue 3 — API Compatibility Is Not Agent Compatibility: Qualifying an MCP Release
+
+> **Fugue: Evals for the Agentic Software Factory · Part 3**  
+> A standalone design-and-result review for MCP maintainers and
+> Agent-integration teams. **Status:** reviewed V10 behavioral result; package
+> release is `HOLD`. Exact `main` versus exact 0.4 completed 16/16 local-Harbor
+> cells; the verdict was `REGRESSED`. Independent package sign-off remains
+> separate.
+> **Reading time:** about 11 minutes.
+
+This article defines the current evidence boundary, candidates, staged local
+Study, and release gate in one place. You do not need to know Fugue, W&B MCP,
+or the earlier essays to evaluate the design.
+
+The failure that motivated it was subtler than a broken method. Two MCP
+revisions could both initialize and answer a human query, yet lead an Agent
+through different investigations. A changed description altered tool
+selection. A projection made a useful field easier to see. A structured
+partial-evidence error discouraged an unsupported completeness claim. No API
+call had “broken.” The behavioral product had changed.
+
+The claim this preregistration freezes:
+
+> An MCP server changes what an Agent can perceive and do; its releases need
+> behavioral qualification, not only protocol and unit tests.
+
+The current package decision is deliberately `HOLD`. Historical 0.3.7 and
+early 0.4 candidate commits remain useful source evidence, but they are not
+the active comparison and cannot authorize a current release. [@mcp-baseline]
+[@mcp-candidate] The active design compares exact reviewed `main` revision
+`53b199a5f4af29aa82077e2c7f1e2c5e5e0c2ca0` with exact 0.4 revision
+`5c6cc1c9a1079296daf6613ea6d12daebdd8bcba`. [@mcp-main-final]
+[@mcp-final-staging] V10 locked those identities and completed its approved
+Agent matrix. A source change still requires new locks, preview, approval,
+and Study identity.
+
+No behavioral result is carried forward from a deterministic replay, a
+direct MCP probe, an earlier mixed-project canary, or a future remote-runtime
+plan. V10 is the source-isolated local-Harbor result. The release stays `HOLD`
+because V10 regressed and because package authority remains independent.
+Release PR #117 therefore remains a draft.
+[@mcp-release-pr]
+
+## Scope and terms
+
+The **Model Context Protocol (MCP)** exposes tools and resources to an Agent.
+**Protocol compatibility** means the server initializes and answers valid
+requests. **Agent compatibility** asks whether changed descriptions, schemas,
+projections, pagination, and errors preserve safe downstream behavior. A
+**release candidate** here is one exact server revision plus its initialized,
+target-platform runtime lock.
+
+The behavioral Study uses a basic Claude Code harness. It has one W&B MCP
+integration per arm and no reviewed Skill, memory component, Aria, WBAF, loop
+controller, or second harness. Model route, tasks, evidence source, prompt,
+attempt policy, and local Harbor policy remain fixed. Only the locked MCP
+revision changes.
+
+The official MCP lifecycle orders initialization, capability negotiation, and
+normal operation; passing that contract is the protocol gate, not the
+behavioral conclusion. [@mcp-lifecycle]
+
+## The interface an Agent experiences
+
+Protocol conformance is necessary: initialization must succeed, schemas must
+be valid, and calls must return legal responses. But an Agent also experiences
+the names and descriptions competing for tool selection; parameter schemas;
+default limits and pagination; projected versus broad payloads; error wording;
+whether missing data looks empty, partial, or failed; latency and truncation;
+and the relationship between one call and the evidence needed next.
+
+An endpoint can stay callable while a description steers the Agent away from
+it. A broad result can be semantically complete and practically unreadable in
+the context window. An empty list can mean “there are no records,” “the query
+timed out,” or “the caller lacks scope.” A human notices these distinctions
+through deliberate inspection. An Agent may build a release recommendation
+from whichever shape it receives.
+
+```mermaid
+flowchart LR
+    R["Locked MCP revision"] --> M["Initialized tool manifest"]
+    M --> S["Agent tool selection"]
+    S --> Q["Bounded query shape"]
+    Q --> E["Evidence or structured error"]
+    E --> I["Agent interpretation"]
+    I --> O["Maintenance outcome"]
+```
+
+The release affects every arrow. A unit test usually covers the first and
+part of the fourth.
+
+## The bounded release question
+
+The active question is:
+
+> Does the exact final reviewed W&B MCP staging head preserve or improve a
+> maintainer’s bounded investigation of an immutable W&B and Weave source
+> cohort relative to the exact reviewed `main` head?
+
+Friendly labels are not identities. Each preview must show both source
+commits, prepared runtime and tool-manifest digests, the Claude Code and model
+route identity, task and private-label digests, source and result projects,
+attempts, and local Harbor execution fingerprint.
+
+Fugue imports ordinary MCP declarations, prepares target-platform package code
+outside Agent execution, initializes each server, captures its exact manifest,
+and locks the result. Agent cells never clone an MCP repository or install
+dependencies.
+
+The Fugue provider, V3 evidence, and source-isolated MCP qualification pull
+requests are merged implementation history. They made V10 possible; the
+approved V10 Study, not merge state, supplies the behavioral evidence.
+[@fugue-provider-draft] [@fugue-mcp-draft]
+[@fugue-mcp-qualification-draft]
+
+## Genuine evidence, deliberately seeded
+
+The current plan separates immutable task evidence from experiment output:
+
+```text
+source:  wandb/fugue-mcp-release-source-v2
+results: wandb/fugue-mcp-release-qualification-v1
+```
+
+The source project contains the non-sensitive Runs, trace trees, Dataset, and
+Evaluations the tasks ask the Agent to investigate. W&B Runs carry
+configuration, metrics, and artifacts [@wandb-runs]; Weave Calls form trace
+trees [@weave-tracing]; Datasets version evaluation examples
+[@weave-datasets]; and Evaluations link predictions to scorers
+[@weave-evaluations].
+
+The result project receives Agent traces, Evaluation rows, and Fugue result
+projections. A release candidate must not write its own output into the source
+project and then rediscover that output as task evidence. The source lock and
+source-conformance receipt make that contamination detectable.
+
+These objects are seeded prior evidence, not customer data and not comparison
+outcomes. A genuine hosted object can still be a controlled fixture. The
+claim is that the Agent investigated the locked source graph—not that the
+graph represents every production project.
+
+## What has actually run
+
+Two no-spend checks ran on 2026-07-30. They are useful preparation evidence,
+not an Agent result.
+
+The source-conformance receipt passed against the private source project with
+zero model invocations and zero published Calls. It resolved two exact
+Evaluation roots, 18 direct children, 16
+`Evaluation.predict_and_score` children, and two summary children. Its
+receipt digest is
+`9c770379c09d1b65370ed7af7f213cf5b688e28842a04bca301d8e3e0d6074a4`.
+
+The exact-revision mechanism probe then reproduced the bug: `main` reported
+nine rows for each root because it included one summary child, while final
+staging reported the intended eight prediction rows for each root. Across
+both roots that is `18` versus `16`. Both initialized manifests matched their
+locks and both revisions read the locked source project. The mechanism
+receipt digest is
+`d91a6ae7a513f9015fd52db6443bd42f44a5c9fa2481190049a1a842a75abc19`.
+
+These receipts supported one narrow statement at the time: the repaired
+staging revision fixed the direct-child reconciliation mechanism on this
+immutable source graph. They did not show how Claude Code used the change,
+whether another task regressed, or whether the Python package should ship.
+V10 subsequently answered the bounded behavioral question below; the article
+remains a draft and `noindex` pending editorial review.
+
+### Result update — 2026-07-31
+
+The governed Study `mcp-main-vs-0-4-tool-surface-confirmation-v10` compared
+exact `main` at `53b199a5f4af29aa82077e2c7f1e2c5e5e0c2ca0` with exact 0.4 at
+`5c6cc1c9a1079296daf6613ea6d12daebdd8bcba`. Claude Code ran four locked
+maintenance tasks for two attempts per revision through local Docker and
+Harbor: 16/16 planned cells completed for `$7.331252`.
+
+The four ledgers disagreed in a useful way. Evidence integrity passed: all 16
+attempts and 80 required links reconciled with grade A lineage and privacy
+integrity. Mechanism and behavioral dimensions were mixed: direct Evaluation
+reconciliation improved from 0/2 to 2/2 and bounded inventory from 0/2 to 2/2,
+but exact-history behavior did not improve and one candidate attempt lost
+factual correctness. Deterministically, the candidate passed every required
+dimension in only 1/8 attempts, retained seven critical failures, and produced
+one regressed plus seven unchanged aligned pairs. The blind maintainer judge
+remained advisory pending calibration and could not rescue those failures.
+
+The behavioral verdict was `REGRESSED`; the package decision remained `HOLD`.
+The exact result digest is
+`e062f5b392a36d9ebd97adc3ab58b6e253cdd9dd943381342d51d76303bbcf38`.
+This is a whole-release result on the locked tasks, not evidence that one 0.4
+feature caused the outcome. [@fugue-mcp-qualification-draft]
+
+## Tasks that need investigation
+
+The natural-maintainer tasks ask for bounded source inventory, Evaluation
+child reconciliation, an observed history hotspot, a release-risk summary,
+collection coverage, projected Run tables, incomplete evidence, and a
+source-use gap.
+
+Public briefs identify the immutable source project and required output
+schema. Expected values and critical failure conditions remain host-private.
+They never enter Agent prompts, MCP responses, runtime images, traces, W&B
+configuration, or Study events.
+
+Incomplete evidence is intentional. A useful maintainer Agent must sometimes
+say “I cannot establish that.” A candidate that makes broad claims easy can
+improve superficial fluency while regressing evidence honesty.
+
+## One task, end to end
+
+Consider a task that asks whether two locked Evaluation roots reconcile.
+
+The Agent reads the source locator lock, initializes its assigned MCP
+revision, lists the exact roots, requests their direct children with an
+explicit bound, counts `Evaluation.predict_and_score` children separately
+from summaries, and returns one schema-constrained answer. The host-private
+scorer checks the expected counts, exclusions, boundedness, and source
+project. Mechanism evidence records the initialized manifest and exact MCP
+calls. Infrastructure evidence binds the cell to the accepted local Harbor
+runtime and cleanup receipt.
+
+Now imagine a candidate reaches the expected number by reading the result
+project or counting unrelated children. The numeric answer may look right,
+but the source and evidence-relation gates fail. That is why source isolation
+is part of the estimand rather than a cleanup detail.
+
+The walkthrough constrains the final claim. Even if the candidate improves a
+task, the Study cannot say whether descriptions, projections, pagination, or
+error shape was causal. Those features moved as one locked revision.
+
+## Four outcome layers
+
+The release decision reads four independent ledgers.
+
+### 1. MCP and infrastructure conformance
+
+Did each exact server initialize with its locked manifest? Did the zero-model
+source receipt establish the immutable source shape? Did every approved local
+Harbor cell start from the prepared image, preserve the private-label
+boundary, terminate, publish its policy receipt, and leave zero run-scoped
+containers?
+
+### 2. Deterministic task outcome
+
+Did the answer satisfy the declared schema and expected source facts? Did it
+remain inside the immutable source project and preserve boundedness and honest
+missingness? Deterministic checks do not grade prose style.
+
+### 3. Calibrated maintainer judgment
+
+Human maintainer review may assess usefulness, prioritization, and uncertainty
+after deterministic and evidence-integrity gates reconcile. An automated
+judge is optional and cannot become release truth without a separately
+accepted calibration receipt.
+
+### 4. Mechanism and evidence integrity
+
+We record initialization, tool inventory, selected tools, call counts,
+projected and broad reads, truncations, timeouts, structured errors, sources
+returned and opened, latency, observed usage and cost, and Weave
+trace/Evaluation reconciliation.
+
+An improved task outcome with missing native evidence is incomplete. A
+reduction in broad reads is a mechanism observation, not proof of better
+maintenance. The ledgers meet only in the bounded interpretation.
+
+## The staged local sequence
+
+The former 80-cell Claude/OpenClaw/Serverless sequence is retired as the
+active decision plan. It mixed a larger replication story with gates that
+were not ready and obscured the smallest source-isolated comparison that
+could answer the current question.
+
+The active sequence is:
+
+| Stage | Fixed harness and route | Tasks × revisions × attempts | Cells |
+| --- | --- | ---: | ---: |
+| Canary | Claude Code + locked Anthropic route | 2 × 2 × 2 | 8 |
+| Confirmation | Claude Code + the same locked route | 4 × 2 × 2 | 16 |
+
+The canary and confirmation have separate previews, approvals, run
+identities, budgets, and results. The confirmation is not admitted unless the
+canary has complete source, Agent, Evaluation, Harbor, privacy, and cleanup
+evidence. A canary result is not silently pooled into the confirmation.
+
+```mermaid
+flowchart LR
+    S["Verify immutable<br/>source"] --> M["Lock main and<br/>final staging"]
+    M --> C["8-cell local<br/>Harbor canary"]
+    C --> G{"Complete and<br/>informative?"}
+    G -->|no| H["HOLD with blocker"]
+    G -->|yes| F["16-cell separately<br/>approved confirmation"]
+    F --> D["Bounded behavior summary<br/>+ human package decision"]
+```
+
+## Judge calibration before paid work
+
+The corrected package decision is deterministic plus human release sign-off.
+An automated maintainer judge is not required for the local canary or
+confirmation.
+
+If a later plan adds one, authored examples are not calibration. The judge
+must have two independent human reviews per case, adjudication of
+disagreements, declared true-positive and true-negative thresholds, and zero
+false passes on critical unsupported-completeness cases. Changing cases,
+rubric, labels, or judge profile changes the calibration identity and requires
+a new preview.
+
+## Lock the two MCP candidates
+
+The completed V10 candidates are the reviewed `main` head
+`53b199a5f4af29aa82077e2c7f1e2c5e5e0c2ca0` and exact 0.4 head
+`5c6cc1c9a1079296daf6613ea6d12daebdd8bcba`. [@mcp-main-final]
+[@mcp-final-staging] Those exact sources, their runtime locks, the taskset,
+scorer, source project, result project, preview, and approval belong to V10's
+immutable identity. A later source change requires a new Study; it cannot
+inherit V10's result.
+
+The trusted operator sequence is:
+
+```bash
+uv run fugue mcp import \
+  --config examples/comparisons/wandb-mcp-maintenance/mcp.json \
+  --server wandb-main \
+  --as wandb-mcp-main
+
+uv run fugue mcp import \
+  --config examples/comparisons/wandb-mcp-maintenance/mcp.json \
+  --server wandb-0-4-staging \
+  --as wandb-mcp-0-4-staging
+
+uv run fugue mcp inspect wandb-mcp-main
+uv run fugue mcp inspect wandb-mcp-0-4-staging
+
+uv run fugue mcp lock wandb-mcp-main \
+  --acknowledge-package-code \
+  --platform linux/amd64
+
+uv run fugue mcp lock wandb-mcp-0-4-staging \
+  --acknowledge-package-code \
+  --platform linux/amd64
+```
+
+The explicit acknowledgment is not decorative. Importing package code means
+reviewing code that will enter a privileged preparation boundary. Runtime
+cells receive prepared assets read-only and cannot mutate the accepted
+candidate.
+
+## Keep remote qualification separate
+
+Serverless is not the active execution requirement and no Serverless
+execution is claimed. The current behavioral decision uses prepared local
+Docker through Harbor because that is the supported, inspectable boundary for
+the canary and confirmation.
+
+A future remote package qualification may retain separate, fail-closed
+Serverless definitions. It must not inherit a local behavior result as proof
+of remote isolation, lifecycle, privacy, or deletion. Conversely, the absence
+of remote receipts does not turn a completed local Study into a replay; it
+narrows the supported claim to local Harbor behavior.
+
+## Leakage and hostile-result checks
+
+Qualification scans Agent inputs, rendered jobs, runtime receipts, MCP
+stdout/stderr, Weave projections, and result bundles for credential values,
+private expected facts, local paths, and unapproved environment values.
+
+The taskset includes ambiguous evidence shapes: bounded pages, summary
+children mixed with prediction children, unavailable cost, a latency hotspot,
+and returned sources that were not opened. These cases qualify the
+evidence-integrity behaviors the release claim depends on. They are not a
+complete MCP security audit.
+
+The active cell cannot install another MCP revision, change project scope, or
+read host-private labels. A credential leak, private-label exposure, result
+write into the source project, or unresolved Harbor cleanup receipt is an
+immediate no-go regardless of task scores.
+
+## Preview, approve, execute
+
+Source preparation and direct MCP mechanism checks happen before the final
+preview. They do not run a model and did not supply V10's behavioral result.
+
+The active local canary then follows Fugue’s normal immutable path:
+
+```bash
+SPEC=examples/comparisons/wandb-mcp-maintenance/tool-surface-confirmation-local-v10.yaml
+
+uv run fugue compare "$SPEC" --prepare --json
+uv run fugue check "$SPEC" --json
+uv run fugue compare "$SPEC" --preview --json
+
+uv run fugue approve PREVIEW_DIGEST \
+  --max-cells 16 \
+  --max-usd APPROVED_CAP \
+  --approved-by HUMAN_OPERATOR
+
+uv run fugue compare "$SPEC" \
+  --run \
+  --approval APPROVAL_ID
+```
+
+These commands show the governed lifecycle V10 used; its approval and result
+must not be reused. Do not execute a similarly named draft or substitute an
+older preview. A repair requires a new accepted spec, preview, approval, and
+budget.
+
+## Reconciliation and decision rules
+
+A behavioral summary requires:
+
+- nonzero planned cells and complete aligned rows;
+- exact source and result project separation;
+- final reviewed candidate identities and initialized manifests;
+- no critical regression in boundedness, missing-data handling, or source
+  honesty;
+- complete deterministic task evidence;
+- one native Agent conversation, root, prediction row, and Evaluation row per
+  cell;
+- complete local Harbor policy, privacy, cleanup, and zero-orphan receipts;
+- no hidden retry or cross-Study pooling.
+
+The Study may report `improved`, `regressed`, `mixed`, `unchanged`,
+`incomplete`, or `invalid` behavior. `Incomplete` and `invalid` suppress a
+behavioral recommendation.
+
+The Python-package decision remains `HOLD`: V10 reconciled and regressed, and
+a separate human-signed package receipt must still prove the final identity,
+CI, security, compatibility, and release requirements. Local behavioral
+evidence cannot issue package `GO` by itself.
+
+The supported behavioral claim is whole-release and local:
+
+> Under the named Claude Code candidate, tasks, immutable source cohort,
+> attempts, local Harbor policy, and dates, the exact staging candidate did—or
+> did not—preserve the bounded maintenance behavior declared by the Study.
+
+Feature-level causality requires a separate ablation.
+
+## The maintainer memo
+
+The final memo is a human-authored interpretation of immutable results, not a
+fifth scorer. It must include:
+
+1. the bounded release question;
+2. source and result project identities;
+3. exact main and final-staging candidate locks;
+4. improved, regressed, unchanged, missing, and invalid aligned cases;
+5. mechanism observations separated from outcomes;
+6. local Harbor and evidence limitations;
+7. the separate package `HOLD`, `GO`, or `NO-GO` receipt.
+
+An optional Aria shell may read safe result projections and help navigate
+references after the Study. It is not part of either candidate, cannot issue
+approval or start execution, and cannot turn a behavioral summary into package
+authority.
+
+Prepared source evidence, a no-key replay, a direct MCP receipt, or a planned
+matrix does not unlock a release recommendation.
+
+## Try this in 15 minutes
+
+Write four evidence labels on a page:
+
+1. deterministic no-key replay;
+2. zero-model source-conformance receipt;
+3. live locked-MCP mechanism receipt;
+4. live Claude Code behavioral Study.
+
+For each, write one claim it supports and one it cannot support. If any label
+can be swapped for another without changing your release memo, the evidence
+boundary is still too vague.
+
+Then sketch the source and result projects as two boxes. Reject any plan in
+which an experiment output can appear inside the immutable source cohort.
+
+## When behavioral qualification is unnecessary or insufficient
+
+Protocol conformance, schema validation, and deterministic integration tests
+remain the right tools for known MCP contracts. Behavioral qualification is
+needed when a release changes what an Agent perceives or how it investigates.
+
+It remains insufficient when source and results are mixed, the task brief
+reveals expected answers, either revision lacks an exact initialized lock, the
+local runtime receipt is missing, or the package decision lacks independent
+release evidence.
+
+## What this does not show
+
+The seeded source cohort does not represent every customer project. A
+two-task canary and four-task confirmation are bounded maintenance Studies,
+not broad population estimates.
+
+Local Harbor receipts establish the declared local execution policy, not
+Serverless isolation or complete security. A basic Claude Code comparison
+does not establish behavior for OpenClaw, Codex, Hermes, Aria, or another
+model. No Skill or memory effect is in scope.
+
+Most importantly, a real Agent behavioral result now exists, and it is not a
+win. V10 supports a bounded regression on the locked maintenance tasks despite
+clean evidence and two improved dimensions. The package decision remains
+`HOLD`; infrastructure release gates and final package sign-off remain
+separate.
+
+## Behavioral results appendix — V10
+
+The dated V10 appendix contains:
+
+```text
+observed: 2026-07-31
+study: mcp-main-vs-0-4-tool-surface-confirmation-v10
+baseline: 53b199a5f4af29aa82077e2c7f1e2c5e5e0c2ca0
+candidate: 5c6cc1c9a1079296daf6613ea6d12daebdd8bcba
+matrix: 4 tasks × 2 revisions × 2 attempts = 16/16 terminal
+result digest: e062f5b392a36d9ebd97adc3ab58b6e253cdd9dd943381342d51d76303bbcf38
+deterministic: candidate 1/8 full passes; 7 critical failures
+aligned pairs: 0 improved; 1 regressed; 7 unchanged
+mechanism: evaluation reconciliation and bounded inventory improved
+evidence: 80/80 required links; grade A lineage/privacy integrity
+judge: advisory pending human calibration
+behavioral verdict: REGRESSED
+package decision: HOLD
+limitation: exact V3 task rows were unavailable to this article build, so the Atlas publishes the reviewed aggregate without reconstructing rows
+```
+
+The final tree and candidate heads must be the qualified identities. If review
+or merge changes them, qualification runs again.
+
+## Next: a result is not a learning loop
+
+The MCP Study can produce bounded evidence about a release. It does not decide
+which engineering change should be authored next.
+
+In **Fugue 4A**, we place controlled Studies inside an outer loop whose active
+flagship is Claude Code plus Fugue through local Harbor. Aria remains an
+optional read-only presentation shell, not a runtime dependency or release
+authority.
+
+## References
+
+Complete source metadata and numbered citations are generated from this
+article package’s `sources.json`.

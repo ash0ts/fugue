@@ -1,0 +1,75 @@
+{
+  "slug": "fugue-extra-building-the-evaluator-with-the-evaluated",
+  "title": "Building the Evaluator with the Evaluated",
+  "width": 1280,
+  "height": 720,
+  "duration": 100,
+  "fps": 15,
+  "posterScene": "public-stack",
+  "reducedMotionScene": "public-stack",
+  "posterTime": 7.199999999999999,
+  "reducedMotionTime": 7.199999999999999,
+  "transitionSeconds": 0.35,
+  "safeArea": {
+    "left": 54,
+    "top": 40,
+    "right": 54,
+    "bottom": 100
+  },
+  "typeScale": {
+    "essential": 28,
+    "supporting": 24,
+    "compact": 18
+  },
+  "sourceHeadingIds": [
+    "the-stack-as-research-evidence",
+    "case-study-1-identity-became-code",
+    "case-study-2-exact-tree-preparation-found-a-real-runtime-defect",
+    "case-study-3-garbage-collection-needed-judgment",
+    "separation-despite-shared-agents",
+    "what-we-can-quantify",
+    "rejected-work-is-durable-input"
+  ],
+  "silent": true,
+  "placement": {
+    "after_heading": "rejected-work-is-durable-input",
+    "after_label": "Rejected work is durable input",
+    "bridge_to_heading": "a-copyable-co-development-ledger",
+    "bridge_to_label": "A copyable co-development ledger",
+    "what_to_watch": "Inspect the public PR stack, the defects and cleanup decisions it records, and the external boundaries that prevent the evaluator from grading its own homework."
+  },
+  "checkpoints": [
+    {
+      "name": "public-stack",
+      "time": 7.199999999999999
+    },
+    {
+      "name": "identity-case",
+      "time": 19.36
+    },
+    {
+      "name": "qualification-defect",
+      "time": 33.08
+    },
+    {
+      "name": "cleanup-case",
+      "time": 46.36
+    },
+    {
+      "name": "division-of-labor",
+      "time": 59.36
+    },
+    {
+      "name": "recursion-boundary",
+      "time": 71.64
+    },
+    {
+      "name": "evidence-boundary",
+      "time": 84.36
+    },
+    {
+      "name": "series-context",
+      "time": 96.64
+    }
+  ]
+}

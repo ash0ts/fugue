@@ -1,0 +1,51 @@
+schema_version: 1
+id: claude-loop-skill-mcp-v1
+title: Claude Code Skill × MCP loop
+summary: A planned local-Harbor Study that compares four reviewed Skill and MCP arms on two discovery failures, locks one intervention, and then compares it with production on four private holdout tasks.
+question: Can a reviewed Skill change, MCP change, or their combination repair a locked Claude Code evidence failure and retain the gain on independent private tasks?
+hypothesis: At least one mechanism-backed intervention will produce a paired deterministic discovery gain without a critical private-holdout regression.
+why_it_matters: The flagship Fugue loop should demonstrate that Claude Code can engineer a bounded Agent improvement while Fugue keeps approval, execution, evaluation, selection, and evidence authority outside the Agent.
+task_selection: Two reviewed failures form the discovery cohort; four independent private tasks form the holdout. Exact task identities and digests are not public until a preview is frozen and separately approved.
+evidence_tier: active
+decision_value: 0
+status: planned_unrun
+matrix:
+  experiment_id: claude-loop-skill-mcp
+  workload_id: discovery-and-holdout
+  expected_predictions: 16
+  attempts: 1
+  models: [anthropic/claude-sonnet-5]
+  harnesses: [claude-code]
+  treatments: [production, skill-only, mcp-only, combined]
+  tasks: [reviewed-discovery-cohort, private-holdout-cohort]
+  cohorts:
+    - id: discovery
+      label: Reviewed failure discovery
+      models: [anthropic/claude-sonnet-5]
+      harnesses: [claude-code]
+      treatments: [production, skill-only, mcp-only, combined]
+      tasks: [reviewed-discovery-cohort]
+      expected_predictions: 8
+    - id: private-holdout
+      label: Separately approved private holdout
+      models: [anthropic/claude-sonnet-5]
+      harnesses: [claude-code]
+      treatments: [production, skill-only, mcp-only, combined]
+      tasks: [private-holdout-cohort]
+      expected_predictions: 8
+provenance:
+  source_commit: pending
+  source_url: https://github.com/ash0ts/fugue
+  dataset_id: pending-reviewed-discovery-and-private-holdout
+  dataset_digest: pending
+  snapshot_digest: pending
+  run_ids: []
+links:
+  project: https://wandb.ai/wandb/fugue-claude-loop-engineering-v1/weave
+  evaluations: []
+findings: []
+caveats:
+  - This is a planned lane with zero published cells; it reports no winner, lift, mechanism success, or release decision.
+  - The cohort labels are public plan boundaries, not frozen task IDs. Exact task, source, route, runtime, Skill, and integration locks remain pending.
+  - Discovery and private holdout require separate approvals, and only a discovery-selected arm may enter the holdout.
+  - The active execution backend is local Harbor; no Serverless behavior is claimed.

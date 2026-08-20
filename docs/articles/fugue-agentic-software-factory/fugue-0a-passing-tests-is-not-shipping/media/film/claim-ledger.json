@@ -1,0 +1,144 @@
+{
+  "schema_version": 2,
+  "slug": "fugue-0a-passing-tests-is-not-shipping",
+  "audience": "Staff engineers and maintainers",
+  "question": "What does a green task verifier leave unanswered about a patch?",
+  "intended_takeaway": "A passing patch can still make the next change harder.",
+  "out_of_scope": "This does not argue that tests are weak or that every patch needs a study.",
+  "placement": {
+    "after_heading": "garbage-collection-belongs-in-done",
+    "after_label": "Garbage collection belongs in “done”",
+    "bridge_to_heading": "try-this-in-15-minutes",
+    "bridge_to_label": "Try this in 15 minutes",
+    "what_to_watch": "Track one passing patch as local success turns into repository ownership and removal cost."
+  },
+  "poster_scene": "ownership-cost",
+  "reduced_motion_scene": "ownership-cost",
+  "source_heading_ids": [
+    "the-patch-and-the-trajectory",
+    "a-review-burden-is-an-output",
+    "necessary-tests-insufficient-evidence",
+    "garbage-collection-belongs-in-done"
+  ],
+  "safe_area": {
+    "left": 54,
+    "top": 40,
+    "right": 54,
+    "bottom": 100
+  },
+  "type_scale": {
+    "essential": 28,
+    "supporting": 24,
+    "compact": 18
+  },
+  "claims": [
+    {
+      "id": "passing-patch",
+      "scene": "passing-patch",
+      "claim": "The verifier sees the outcome, not the trajectory.",
+      "support": [
+        "The bounded task passes.",
+        "Three repository costs remain outside that verdict."
+      ],
+      "kind": "illustrative example",
+      "source": "article.md#the-patch-and-the-trajectory",
+      "visual_relationship": "patch",
+      "displayed_values": [],
+      "caveat": "This does not argue that tests are weak or that every patch needs a study."
+    },
+    {
+      "id": "ownership-cost",
+      "scene": "ownership-cost",
+      "claim": "Every surviving surface creates another ownership obligation.",
+      "support": [
+        "The patch is cheap to generate.",
+        "Understanding, correcting, owning, and removing it are not."
+      ],
+      "kind": "illustrative example",
+      "source": "article.md#a-review-burden-is-an-output",
+      "visual_relationship": "trajectory",
+      "displayed_values": [
+        "1",
+        "1.2",
+        "1.4",
+        "1.6",
+        "1.8",
+        "2",
+        "3.4",
+        "5.2",
+        "7.4"
+      ],
+      "caveat": "This does not argue that tests are weak or that every patch needs a study."
+    },
+    {
+      "id": "quality-ladder",
+      "scene": "quality-ladder",
+      "claim": "Generated, correct, mergeable, and maintainable are not synonyms.",
+      "support": [
+        "Each rung needs additional evidence.",
+        "A lower rung cannot stand in for a higher one."
+      ],
+      "kind": "cited background",
+      "source": "article.md#the-patch-and-the-trajectory",
+      "visual_relationship": "stack",
+      "displayed_values": [],
+      "caveat": "This does not argue that tests are weak or that every patch needs a study."
+    },
+    {
+      "id": "review-output",
+      "scene": "review-output",
+      "claim": "Review burden is part of the patch’s output.",
+      "support": [
+        "Two candidates may solve the same tasks.",
+        "The one requiring less repair leaves more capacity for the next change."
+      ],
+      "kind": "cited background",
+      "source": "article.md#a-review-burden-is-an-output",
+      "visual_relationship": "ledgers",
+      "displayed_values": [],
+      "caveat": "This does not argue that tests are weak or that every patch needs a study."
+    },
+    {
+      "id": "acceptance-gates",
+      "scene": "acceptance-gates",
+      "claim": "Different gates answer different acceptance questions.",
+      "support": [
+        "Compiler and tests reject known deterministic defects.",
+        "Review and cleanup examine ownership and trajectory."
+      ],
+      "kind": "cited background",
+      "source": "article.md#necessary-tests-insufficient-evidence",
+      "visual_relationship": "pipeline",
+      "displayed_values": [],
+      "caveat": "This does not argue that tests are weak or that every patch needs a study."
+    },
+    {
+      "id": "ci-boundary",
+      "scene": "ci-boundary",
+      "claim": "Known defects belong in CI; disagreement belongs in review.",
+      "support": [
+        "Do not experimentalize a compiler error.",
+        "Do not pretend a green check settled architectural ownership."
+      ],
+      "kind": "cited background",
+      "source": "article.md#necessary-tests-insufficient-evidence",
+      "visual_relationship": "boundary",
+      "displayed_values": [],
+      "caveat": "This does not argue that tests are weak or that every patch needs a study."
+    },
+    {
+      "id": "series-context",
+      "scene": "series-context",
+      "claim": "Maintainability frames both the question and the final decision.",
+      "support": [
+        "The workflow begins with a repository problem.",
+        "It ends only when evidence supports a bounded acceptance decision."
+      ],
+      "kind": "cited background",
+      "source": "article.md#garbage-collection-belongs-in-done",
+      "visual_relationship": "series_map",
+      "displayed_values": [],
+      "caveat": "This does not argue that tests are weak or that every patch needs a study."
+    }
+  ]
+}

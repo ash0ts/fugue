@@ -1,0 +1,50 @@
+{
+  "schema_version": 2,
+  "slug": "fugue-4b-v10-diagnosis-coda",
+  "audience": "Maintainers turning reviewed failures into governed evaluations",
+  "question": "Where does completed diagnosis stop and the unrun repair begin?",
+  "intended_takeaway": "The V10 failure is reviewed evidence; the Skill × MCP repair remains a human-gated proposal.",
+  "out_of_scope": "The coda does not claim that the proposed repair improves behavior.",
+  "claims": [
+    {
+      "id": "observed-failure",
+      "scene": "observed-failure",
+      "claim": "V10 produced one reviewed exact-history regression.",
+      "support": ["One aligned pair regressed", "The candidate answer became factually worse"],
+      "kind": "audited Fugue observation",
+      "source": "article.md#results-appendix-diagnosis-only",
+      "visual_relationship": "result to failure",
+      "displayed_values": ["16/16", "1 regressed", "7 unchanged"]
+    },
+    {
+      "id": "reviewed-lock",
+      "scene": "reviewed-lock",
+      "claim": "Failure authoring binds a reviewed trace, audit, task, and existing-eval coverage decision.",
+      "support": ["Trace content remains untrusted evidence", "Private task truth remains host-only"],
+      "kind": "audited Fugue observation",
+      "source": "article.md#qualification-checklist",
+      "visual_relationship": "evidence lock",
+      "displayed_values": []
+    },
+    {
+      "id": "authority-boundary",
+      "scene": "authority-boundary",
+      "claim": "Aria may propose a repair but cannot approve or select its own winner.",
+      "support": ["Approval binds exact cells, cost, and runtime", "The accepted preview cannot be mutated"],
+      "kind": "preregistered design",
+      "source": "article.md#the-approval-card",
+      "visual_relationship": "authority boundary",
+      "displayed_values": []
+    },
+    {
+      "id": "unrun-repair",
+      "scene": "unrun-repair",
+      "claim": "The Skill × MCP repair Study is prepared but unrun.",
+      "support": ["Zero approved cells", "Zero model attempts", "Zero selected winner"],
+      "kind": "pending result",
+      "source": "article.md#results-appendix-diagnosis-only",
+      "visual_relationship": "state boundary",
+      "displayed_values": ["planned_unrun", "0 cells", "0 attempts"]
+    }
+  ]
+}

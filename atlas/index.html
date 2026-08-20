@@ -3,35 +3,185 @@
   <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <meta name="description" content="Fugue's public, controlled experiment evidence.">
-    <title>Fugue Experiment Atlas</title>
+    <meta name="description" content="Fugue turns trace-backed Agent suspicions into locked, approved, isolated, evidence-linked comparisons.">
+    <title>Fugue · Controlled evidence for Agent changes</title>
   </head>
-  <body data-page="home">
-    <a class="skip-link" href="#main">Skip to evidence</a>
+  <body data-page="product">
+    <a class="skip-link" href="#main">Skip to product</a>
     <header class="site-header">
-      <a class="wordmark" href="./">Fugue <span>Experiment Atlas</span></a>
+      <a class="wordmark" href="./">Fugue <span>Evidence Atlas</span></a>
       <nav aria-label="Primary navigation">
-        <a aria-current="page" href="./">Experiments</a>
-        <a href="./compare.html">Compare</a>
-        <a href="./methods.html">Methods</a>
+        <a aria-current="page" href="./">Product</a>
+        <a href="./experiments.html">Studies</a>
+        <a href="./inventory.html">Inventory</a>
+        <a href="./articles/">Articles</a>
+        <a href="https://github.com/ash0ts/fugue" target="_blank" rel="noreferrer">GitHub</a>
       </nav>
     </header>
     <main id="main">
-      <section class="hero ruled">
-        <p class="eyebrow">Public evidence / private traces</p>
-        <h1>Experiments as scores,<br>not scoreboards.</h1>
-        <p class="lede">Each study starts with a question, freezes what may vary, and publishes only the evidence needed to inspect the decision. Raw Agent conversations stay in authenticated Weave.</p>
-        <div class="hero-facts" aria-label="Atlas principles">
-          <span>No composite score</span><span>Missing stays missing</span><span>Links are verified</span>
+      <section class="product-hero ruled">
+        <div class="product-hero-copy">
+          <p class="status-pill">Open-source preview</p>
+          <h1>Did this Agent change actually help?</h1>
+          <p class="lede">Fugue turns a trace-backed suspicion into a locked, approved, isolated, evidence-linked comparison—so the next engineering decision is based on more than a score or a vibe.</p>
+          <div class="button-row">
+            <a class="button-link primary" href="#try-fugue">Try the no-key replay</a>
+            <a class="button-link secondary" href="./experiments.html">Explore the studies</a>
+          </div>
+        </div>
+        <aside class="hero-question" aria-label="Fugue's operating question">
+          <p class="eyebrow">The operating question</p>
+          <p>What changed, under which fixed conditions, across which exact attempts—and what evidence makes the conclusion safe to act on?</p>
+        </aside>
+      </section>
+
+      <section class="product-section receipt-section" aria-labelledby="receipt-title">
+        <div class="section-heading">
+          <div>
+            <p class="eyebrow">Illustrative comparison receipt</p>
+            <h2 id="receipt-title">The decision is inspectable before the first cell runs.</h2>
+          </div>
+          <p>This example shows the contract Fugue creates. It is product anatomy, not an observed study result.</p>
+        </div>
+        <div class="comparison-receipt" role="img" aria-label="Illustrative comparison receipt. An observed tool-selection failure leads to a proposed MCP description change. Tasks, model route, budget and runtime stay fixed; the MCP revision varies. Thirty-two cells require human approval before isolated execution, followed by evidence reconciliation and a bounded decision.">
+          <div class="receipt-mast">
+            <span>Comparison / mcp-description-review</span>
+            <span class="receipt-state">ILLUSTRATIVE</span>
+          </div>
+          <div class="receipt-ledger">
+            <div class="receipt-row observed">
+              <span class="receipt-step">01 / Observe</span>
+              <strong>Agent repeatedly chooses a broad read</strong>
+              <span>Trace-backed suspicion</span>
+            </div>
+            <div class="receipt-row proposed">
+              <span class="receipt-step">02 / Propose</span>
+              <strong>Clarify MCP tool descriptions</strong>
+              <span>One bounded change</span>
+            </div>
+            <div class="receipt-row split">
+              <div>
+                <span class="receipt-step">Fixed</span>
+                <strong>Tasks · route · harness · runtime · attempts</strong>
+              </div>
+              <div>
+                <span class="receipt-step">Varied</span>
+                <strong>MCP revision only</strong>
+              </div>
+            </div>
+            <div class="receipt-row measured">
+              <span class="receipt-step">03 / Measure</span>
+              <strong>Task outcome · tool choice · evidence use</strong>
+              <span>Separate ledgers</span>
+            </div>
+            <div class="receipt-row approval">
+              <span class="receipt-step">04 / Admit</span>
+              <strong>32 exact cells · $18 cap</strong>
+              <span>Human approves one digest</span>
+            </div>
+            <div class="receipt-row result">
+              <span class="receipt-step">05 / Decide</span>
+              <strong>Reconcile every terminal coordinate</strong>
+              <span>Evidence-linked result</span>
+            </div>
+          </div>
+          <div class="receipt-spine" aria-hidden="true"><i></i><i></i><i></i><i></i><i></i></div>
         </div>
       </section>
-      <section class="section-heading">
-        <div><p class="eyebrow">Evidence register</p><h2>Ordered by decision value</h2></div>
-        <p>Tier first, then an explicit editorial assessment of what the experiment can decide. Active and blocked work never receives a winner.</p>
+
+      <section class="product-section why-section" aria-labelledby="why-title">
+        <div class="section-heading">
+          <div>
+            <p class="eyebrow">Why Fugue exists</p>
+            <h2 id="why-title">Agent behavior has more moving parts than the model name.</h2>
+          </div>
+          <p>A change can look better because the prompt, tools, retrieval, memory, harness, model route, retry policy, runtime, tasks, or evaluator moved with it.</p>
+        </div>
+        <div class="boundary-map">
+          <article>
+            <span class="boundary-index">01</span>
+            <h3>Production evidence</h3>
+            <p>Runs, traces, failures, and reviewer observations reveal a bounded problem worth testing.</p>
+          </article>
+          <article>
+            <span class="boundary-index">02</span>
+            <h3>Fugue control</h3>
+            <p>Identity, matrix expansion, preview, approval, execution policy, and reconciliation stay in one experiment contract.</p>
+          </article>
+          <article>
+            <span class="boundary-index">03</span>
+            <h3>Existing systems</h3>
+            <p>Your Agent harnesses, eval tasks, graders, sandboxes, W&amp;B evidence, and human judgment keep their native responsibilities.</p>
+          </article>
+        </div>
+        <div class="not-replace">
+          <strong>Fugue does not replace</strong>
+          <span>observability</span><span>task authoring</span><span>Agent harnesses</span><span>human review</span><span>release authority</span>
+        </div>
       </section>
-      <div id="experiment-list" class="score-list" aria-live="polite"></div>
+
+      <section class="product-section workflow-section" aria-labelledby="workflow-title">
+        <div class="section-heading">
+          <div><p class="eyebrow">One governed path</p><h2 id="workflow-title">From an observation to a bounded decision.</h2></div>
+          <details class="repro-detail">
+            <summary>What Fugue locks</summary>
+            <p>Candidate, taskset, runtime, route, attempt coordinates, evaluator identities, evidence sources, matrix digest, budget, and terminal receipts.</p>
+          </details>
+        </div>
+        <ol class="workflow-rail">
+          <li><span>01</span><strong>Observe</strong><small>Inspect real failures</small></li>
+          <li><span>02</span><strong>Hypothesize</strong><small>Bound one change</small></li>
+          <li><span>03</span><strong>Preview</strong><small>Expand exact cells</small></li>
+          <li><span>04</span><strong>Approve</strong><small>Bind digest + spend</small></li>
+          <li><span>05</span><strong>Execute</strong><small>Run isolated attempts</small></li>
+          <li><span>06</span><strong>Reconcile</strong><small>Account for evidence</small></li>
+          <li><span>07</span><strong>Decide</strong><small>State a bounded claim</small></li>
+        </ol>
+      </section>
+
+      <section class="product-section trust-section" aria-labelledby="trust-title">
+        <div class="section-heading">
+          <div><p class="eyebrow">The trust contract</p><h2 id="trust-title">Five rules that scores cannot carry.</h2></div>
+          <p><a class="text-link" href="./methods.html">Read the complete Evidence policy →</a></p>
+        </div>
+        <div class="trust-grid">
+          <article><span>Matrix</span><h3>Know the full denominator first.</h3><p>The complete comparison matrix exists before execution begins.</p></article>
+          <article><span>Authority</span><h3>Approve one immutable plan.</h3><p>Human approval binds the exact digest and spend cap.</p></article>
+          <article><span>Semantics</span><h3>Keep evidence lanes separate.</h3><p>Infrastructure, deterministic success, judgment, and mechanism evidence do not collapse into one score.</p></article>
+          <article><span>Absence</span><h3>Missing remains missing.</h3><p>Unavailable evidence is never silently converted to a zero or a failure.</p></article>
+          <article><span>Reconciliation</span><h3>Link every public result.</h3><p>Claims publish only after terminal coordinates reconcile to authoritative evidence.</p></article>
+        </div>
+      </section>
+
+      <section id="featured-proof" class="product-section proof-section" aria-labelledby="proof-title">
+        <div class="section-heading">
+          <div><p class="eyebrow">Proof, not promises</p><h2 id="proof-title">A completed study, with its limitation attached.</h2></div>
+          <p>The Atlas renders this receipt from the same public study data as its detail page.</p>
+        </div>
+        <div id="featured-study" aria-live="polite"></div>
+      </section>
+
+      <section id="try-fugue" class="product-section quickstart-section" aria-labelledby="quickstart-title">
+        <div class="section-heading">
+          <div><p class="eyebrow">Try Fugue</p><h2 id="quickstart-title">Replay a complete result without an API key.</h2></div>
+          <p id="quickstart-status"></p>
+        </div>
+        <div id="quickstart-content"></div>
+      </section>
+
+      <section class="product-section references-section" aria-labelledby="references-title">
+        <div class="section-heading">
+          <div><p class="eyebrow">Research and references</p><h2 id="references-title">The problem has a lineage. Fugue’s claims still need Fugue evidence.</h2></div>
+          <p>These sources motivate the design. Only locked studies in this Atlas support Fugue-specific findings.</p>
+        </div>
+        <div id="research-references" class="reference-grid"></div>
+        <p class="series-cta"><a class="button-link secondary" href="./articles/">Read the nine-part field guide</a></p>
+      </section>
     </main>
-    <footer><span>Fugue Experiment Atlas</span><span>Reviewed snapshots only</span></footer>
+    <footer>
+      <span>Fugue · open-source preview</span>
+      <span><a href="./methods.html">Evidence policy</a> · <a href="https://github.com/ash0ts/fugue">GitHub</a></span>
+    </footer>
     <script type="module" src="/src/home.js"></script>
   </body>
 </html>

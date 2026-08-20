@@ -11,7 +11,11 @@ from fugue.bench.candidates import stable_digest
 from tools.experiment_atlas import (
     build_index,
     build_public_experiment,
+    build_public_experiment_v2,
+    import_reviewed_evidence,
+    inventory_publication,
     load_editorial,
+    load_inventory,
     validate_public_experiment,
     validate_publication,
     write_publication,
@@ -226,6 +230,165 @@ def _snapshot(rows):
 
 def _build(editorial, rows):
     return build_public_experiment(editorial, rows, [_run_summary(rows)])
+
+
+def _v2_editorial(**overrides):
+    value = {
+        **_editorial(),
+        "schema_version": 2,
+        "study_kind": "safety",
+        "publication_level": "full",
+        "primary_outcome": {
+            "id": "safe_and_useful",
+            "label": "Safe and useful",
+            "success_label": "Safe and useful",
+            "failure_label": "Did not meet the rule",
+        },
+        "ledgers": {
+            name: {"status": "passed", "summary": f"{name} reconciled."}
+            for name in (
+                "infrastructure",
+                "deterministic",
+                "authored_judge",
+                "mechanism",
+                "evidence_integrity",
+                "decision",
+            )
+        },
+        "metrics": {
+            "expected_cells": 1,
+            "published_cells": 1,
+            "outcome_observed_cells": 1,
+            "outcome_successes": 1,
+            "outcome_rate": 1.0,
+            "total_cost_usd": None,
+            "aligned_pairs": None,
+            "improved_pairs": None,
+            "regressed_pairs": None,
+            "unchanged_pairs": None,
+            "critical_failures": 0,
+        },
+        "groups": [],
+        "cells": [
+            {
+                "cell_id": "cell-1",
+                "run_id": "run-1",
+                "candidate_id": "candidate",
+                "task_id": "task-1",
+                "harness": "codex",
+                "treatment": "action-gate",
+                "attempt": 1,
+                "status": "terminal",
+                "outcome": True,
+                "outcome_label": "safe_and_useful",
+                "cost_usd": None,
+                "evidence_link": "https://wandb.ai/example/project/weave/calls/cell-1",
+            }
+        ],
+    }
+    value["matrix"] = {
+        **value["matrix"],
+        "expected_predictions": 1,
+        "treatments": ["action-gate"],
+        "cohorts": [
+            {
+                **value["matrix"]["cohorts"][0],
+                "treatments": ["action-gate"],
+                "expected_predictions": 1,
+            }
+        ],
+    }
+    value.update(overrides)
+    return value
+
+
+def test_v2_supports_named_outcomes_and_keeps_v1_compatible() -> None:
+    v1 = _build(
+        _editorial(),
+        [_row(1, treatment="none", passed=False), _row(2, treatment="rag-dense", passed=True)],
+    )
+    v2 = build_public_experiment_v2(_v2_editorial())
+
+    validate_public_experiment(v1.to_dict())
+    validate_public_experiment(v2.to_dict())
+    assert v2.primary_outcome["label"] == "Safe and useful"
+    assert v2.metrics["outcome_successes"] == 1
+
+
+def test_v2_rejects_digest_drift_incomplete_denominators_and_summary_promotion() -> None:
+    public = build_public_experiment_v2(_v2_editorial()).to_dict()
+    public["findings"] = ["Changed after review."]
+    with pytest.raises(ValueError, match="content digest"):
+        validate_public_experiment(public)
+
+    incomplete = _v2_editorial()
+    incomplete["metrics"] = {**incomplete["metrics"], "published_cells": 0}
+    with pytest.raises(ValueError, match="invalid denominator"):
+        build_public_experiment_v2(incomplete)
+
+    promoted = _v2_editorial(publication_level="summary")
+    with pytest.raises(ValueError, match="cannot be promoted"):
+        build_public_experiment_v2(promoted)
+
+
+def test_reviewed_public_export_and_v3_summary_imports_fail_closed() -> None:
+    export = json.loads(
+        next(Path("configs/fugue/public-exports").glob("*.json")).read_text()
+    )
+    imported = import_reviewed_evidence(
+        export,
+        outcome_key="prompt_injection_safe_and_useful",
+    )
+    assert imported["kind"] == "public_export_v1"
+    assert len(imported["cells"]) == 6
+    assert sum(cell["outcome"] is True for cell in imported["cells"]) == 2
+
+    projection = {
+        "schema_version": 3,
+        "kind": "ComparisonResultV3",
+        "result_digest": "e" * 64,
+        "summary": {"planned_cells": 16, "terminal_cells": 16},
+    }
+    summary = import_reviewed_evidence(projection, publication_level="summary")
+    assert summary["cells"] == []
+    with pytest.raises(ValueError, match="cannot be promoted"):
+        import_reviewed_evidence(projection, publication_level="full")
+    with pytest.raises(ValueError, match="inventory-only"):
+        import_reviewed_evidence(export, publication_level="inventory_only")
+
+
+def test_inventory_contains_every_canonical_run_once_and_maps_every_study() -> None:
+    inventory = load_inventory(Path("atlas/inventory.yaml"))
+    run_ids = [run_id for entry in inventory["entries"] for run_id in entry["run_ids"]]
+    expected = {
+        "20260715T104414-5303745cbc",
+        "20260715T111045-a01b23ef65",
+        "20260715T121732-7e631821f9",
+        "20260715T122152-d560d559e8",
+        "20260715T131242-18f1f066af",
+        "20260715T132650-f360b63908",
+        "20260716T230402-2af3e4e7cd",
+        "20260717T074244-1f613bd948",
+        "20260717T092057-3b6f0eba4d",
+        "20260721T165054-b3901c8ced",
+        "20260723T153449-dd8eaaee65",
+        "20260731T055251-1e8d9fff4b",
+        "20260731T063856-2fe747cab6",
+    }
+    assert set(run_ids) == expected
+    assert len(run_ids) == len(set(run_ids)) == 13
+
+    detailed = {path.stem for path in Path("atlas/public/data/experiments").glob("*.json")}
+    public = inventory_publication(inventory, detailed)
+    assert len(public["content_sha256"]) == 64
+
+
+def test_v2_rejects_malformed_or_local_evidence_links() -> None:
+    for link in ("not-a-url", "file:///Users/alice/private.json"):
+        editorial = _v2_editorial()
+        editorial["cells"][0]["evidence_link"] = link
+        with pytest.raises(ValueError, match="URL|local path|host"):
+            build_public_experiment_v2(editorial)
 
 
 def test_public_experiment_recomputes_metrics_and_orders_index() -> None:

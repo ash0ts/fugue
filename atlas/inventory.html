@@ -1,0 +1,51 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <meta name="description" content="Reviewed inventory of Fugue experiments, canaries, campaigns, cancellations, and planned lanes.">
+    <title>Evidence inventory · Fugue</title>
+  </head>
+  <body data-page="inventory">
+    <a class="skip-link" href="#main">Skip to evidence inventory</a>
+    <header class="site-header">
+      <a class="wordmark" href="./">Fugue <span>Evidence Atlas</span></a>
+      <nav aria-label="Primary navigation">
+        <a href="./">Product</a>
+        <a href="./experiments.html">Studies</a>
+        <a aria-current="page" href="./inventory.html">Inventory</a>
+        <a href="./articles/">Articles</a>
+        <a href="https://github.com/ash0ts/fugue" target="_blank" rel="noreferrer">GitHub</a>
+      </nav>
+    </header>
+    <main id="main">
+      <section class="page-intro ruled inventory-intro">
+        <p class="eyebrow">The denominator before the story</p>
+        <h1>Every reviewed run has a place—even when it has no result page.</h1>
+        <p class="lede">This ledger separates detailed public results from contracts, historical evidence, cancelled work, and planned lanes. An inventory entry is not automatically a behavioral claim.</p>
+      </section>
+      <section class="inventory-filters" aria-labelledby="inventory-filter-title">
+        <div>
+          <p class="eyebrow">Publication ledger</p>
+          <h2 id="inventory-filter-title">Filter the reviewed inventory</h2>
+        </div>
+        <label><span>Search</span><input id="inventory-search" type="search" placeholder="MCP, memory, support…" autocomplete="off"></label>
+        <div id="inventory-filter-buttons" class="inventory-filter-buttons" role="group" aria-label="Inventory category">
+          <button type="button" data-category="all" aria-pressed="true">All</button>
+          <button type="button" data-category="result" aria-pressed="false">Results</button>
+          <button type="button" data-category="contract" aria-pressed="false">Contracts</button>
+          <button type="button" data-category="historical" aria-pressed="false">Historical</button>
+          <button type="button" data-category="cancelled_partial" aria-pressed="false">Cancelled / partial</button>
+          <button type="button" data-category="planned" aria-pressed="false">Planned</button>
+        </div>
+      </section>
+      <p id="inventory-summary" class="filter-summary" aria-live="polite"></p>
+      <div id="inventory-ledger" class="inventory-ledger"></div>
+    </main>
+    <footer>
+      <span>Fugue Evidence Atlas</span>
+      <span><a href="./methods.html">Evidence policy</a> · <a href="https://github.com/ash0ts/fugue">GitHub</a></span>
+    </footer>
+    <script type="module" src="/src/inventory.js"></script>
+  </body>
+</html>

@@ -1,0 +1,157 @@
+{
+  "schema_version": 2,
+  "slug": "fugue-4b-trace-to-release-decision",
+  "audience": "Teams evaluating the flagship Claude Code–Fugue workflow",
+  "question": "What receipts must exist before a Claude Code-engineered Agent change supports a decision?",
+  "intended_takeaway": "A credible loop links one reviewed failure, exact approval, local Harbor work, selection, private holdout, and reconciled evidence.",
+  "out_of_scope": "No completed discovery, selected intervention, private holdout, release memo, or Serverless run is claimed.",
+  "placement": {
+    "after_heading": "qualification-checklist",
+    "after_label": "Qualification checklist",
+    "bridge_to_heading": "try-this-in-15-minutes",
+    "bridge_to_label": "Try this in 15 minutes",
+    "what_to_watch": "Treat the loop as a qualification contract: 8 discovery cells, a frozen selection, and 8 separately approved private-holdout cells through local Harbor."
+  },
+  "poster_scene": "qualification-gates",
+  "reduced_motion_scene": "qualification-gates",
+  "source_heading_ids": [
+    "the-evidence-scene",
+    "the-approval-card",
+    "what-the-audience-sees-while-cells-run",
+    "failure-is-part-of-the-runbook",
+    "build-the-evidence-wall-first-required-not-yet-observed",
+    "qualification-checklist",
+    "presentation-sequence"
+  ],
+  "safe_area": {
+    "left": 54,
+    "top": 40,
+    "right": 54,
+    "bottom": 100
+  },
+  "type_scale": {
+    "essential": 28,
+    "supporting": 24,
+    "compact": 18
+  },
+  "claims": [
+    {
+      "id": "evidence-scene",
+      "scene": "evidence-scene",
+      "claim": "The loop begins by locking one reviewed failure.",
+      "support": [
+        "The baseline must reproduce before an intervention is credited.",
+        "Skill and MCP changes become separately identifiable arms."
+      ],
+      "kind": "preregistered design",
+      "source": "article.md#the-evidence-scene",
+      "visual_relationship": "evidence_graph",
+      "displayed_values": [
+        "4"
+      ],
+      "caveat": "No completed discovery, selected intervention, private holdout, release memo, or Serverless run is claimed."
+    },
+    {
+      "id": "approval-card",
+      "scene": "approval-card",
+      "claim": "The approval card binds exact meaning and spend.",
+      "support": [
+        "Two tasks × four Skill/MCP arms = 8 discovery cells.",
+        "Route, source, runtime, budget, and mechanism locks are visible."
+      ],
+      "kind": "preregistered design",
+      "source": "article.md#the-approval-card",
+      "visual_relationship": "state_machine",
+      "displayed_values": [],
+      "caveat": "No completed discovery, selected intervention, private holdout, release memo, or Serverless run is claimed."
+    },
+    {
+      "id": "attempt-lifecycle",
+      "scene": "attempt-lifecycle",
+      "claim": "Each approved cell needs one complete local Harbor lifecycle.",
+      "support": [
+        "Prepare, attest, execute, publish, and clean up.",
+        "One conversation, root, prediction, Evaluation row, and policy receipt must reconcile."
+      ],
+      "kind": "pending result",
+      "source": "article.md#what-the-audience-sees-while-cells-run",
+      "visual_relationship": "attempt_lifecycle",
+      "displayed_values": [],
+      "caveat": "Required evidence is not yet observed."
+    },
+    {
+      "id": "failure-branches",
+      "scene": "failure-branches",
+      "claim": "Mismatch, missing evidence, null outcome, and orphan cleanup stop the story.",
+      "support": [
+        "None becomes an improvised success.",
+        "The audience sees the blocked state and its receipt."
+      ],
+      "kind": "pending result",
+      "source": "article.md#failure-is-part-of-the-runbook",
+      "visual_relationship": "state_machine",
+      "displayed_values": [],
+      "caveat": "Required evidence is not yet observed."
+    },
+    {
+      "id": "evidence-reconcile",
+      "scene": "evidence-reconcile",
+      "claim": "Weave and Study rows must agree before interpretation.",
+      "support": [
+        "Every aggregate opens aligned baseline and candidate evidence.",
+        "Missing trace, Evaluation, usage, or cleanup evidence blocks eligibility."
+      ],
+      "kind": "pending result",
+      "source": "article.md#build-the-evidence-wall-first-required-not-yet-observed",
+      "visual_relationship": "reconciliation",
+      "displayed_values": [],
+      "caveat": "Required evidence is not yet observed."
+    },
+    {
+      "id": "qualification-gates",
+      "scene": "qualification-gates",
+      "claim": "The flagship exists only after every qualification gate passes.",
+      "support": [
+        "Eight discovery cells precede a frozen intervention lock.",
+        "Eight private-holdout cells require a separate preview and approval."
+      ],
+      "kind": "pending result",
+      "source": "article.md#qualification-checklist",
+      "visual_relationship": "ledgers",
+      "displayed_values": [
+        "8 cells"
+      ],
+      "caveat": "Required evidence is not yet observed."
+    },
+    {
+      "id": "bounded-memo",
+      "scene": "bounded-memo",
+      "claim": "A maintainer memo is the last artifact, not the first narrative.",
+      "support": [
+        "It needs improved, regressed, and unchanged cases plus direct evidence links.",
+        "It must state limitations and leave the next question unexecuted."
+      ],
+      "kind": "pending result",
+      "source": "article.md#presentation-sequence",
+      "visual_relationship": "boundary",
+      "displayed_values": [
+        "8+8 cells absent"
+      ],
+      "caveat": "Required evidence is not yet observed."
+    },
+    {
+      "id": "series-context",
+      "scene": "series-context",
+      "claim": "The flagship is the whole evidence chain—or it is not ready.",
+      "support": [
+        "Claude Code engineers; Fugue governs local approval, execution, and evidence.",
+        "Optional Aria stays read-only and outside the execution path."
+      ],
+      "kind": "preregistered design",
+      "source": "article.md#qualification-checklist",
+      "visual_relationship": "series_map",
+      "displayed_values": [],
+      "caveat": "No completed discovery, selected intervention, private holdout, release memo, or Serverless run is claimed."
+    }
+  ]
+}

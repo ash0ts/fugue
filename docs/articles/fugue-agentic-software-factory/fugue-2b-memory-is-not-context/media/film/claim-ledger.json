@@ -1,0 +1,166 @@
+{
+  "schema_version": 2,
+  "slug": "fugue-2b-memory-is-not-context",
+  "audience": "Context, retrieval, MCP, and developer-tool teams",
+  "question": "What can a retrieval trace honestly establish about evidence use?",
+  "intended_takeaway": "Returned, opened, used, and successful are separate events with separate denominators.",
+  "out_of_scope": "Mechanism evidence does not by itself prove that memory caused task success.",
+  "placement": {
+    "after_heading": "privacy-and-leakage",
+    "after_label": "Privacy and leakage",
+    "bridge_to_heading": "try-this-in-15-minutes",
+    "bridge_to_label": "Try this in 15 minutes",
+    "what_to_watch": "Follow evidence through the mechanism funnel, inspect one aligned row, then place those observations inside the planned 2×2 intervention."
+  },
+  "poster_scene": "mechanism-funnel",
+  "reduced_motion_scene": "mechanism-funnel",
+  "source_heading_ids": [
+    "primary-and-secondary-outcomes",
+    "what-used-can-honestly-mean",
+    "the-22-intervention",
+    "failure-and-fallback-semantics",
+    "context-budget-and-displacement",
+    "analysis-and-useful-nulls",
+    "privacy-and-leakage"
+  ],
+  "safe_area": {
+    "left": 54,
+    "top": 40,
+    "right": 54,
+    "bottom": 100
+  },
+  "type_scale": {
+    "essential": 28,
+    "supporting": 24,
+    "compact": 18
+  },
+  "claims": [
+    {
+      "id": "mechanism-funnel",
+      "scene": "mechanism-funnel",
+      "claim": "Most returned evidence never becomes used evidence.",
+      "support": [
+        "Illustration: 12 sources returned; 3 opened; 1 used.",
+        "Across four illustrative arm cells, 0 tasks passed."
+      ],
+      "kind": "illustrative example",
+      "source": "article.md#primary-and-secondary-outcomes",
+      "visual_relationship": "mechanism_funnel",
+      "displayed_values": [
+        "12",
+        "3",
+        "1",
+        "0",
+        "4"
+      ],
+      "caveat": "Mechanism evidence does not by itself prove that memory caused task success."
+    },
+    {
+      "id": "aligned-row",
+      "scene": "aligned-row",
+      "claim": "The Agent opened the evidence but did not satisfy the declared use relation.",
+      "support": [
+        "Assigned 1/1; returned 1/1; opened 1/1; used 0/1.",
+        "The official task still passed."
+      ],
+      "kind": "illustrative example",
+      "source": "article.md#what-used-can-honestly-mean",
+      "visual_relationship": "paired_row",
+      "displayed_values": [
+        "locked-task / claude-code / attempt-1 / combined",
+        "1/1",
+        "0/1"
+      ],
+      "caveat": "Mechanism evidence does not by itself prove that memory caused task success."
+    },
+    {
+      "id": "causal-boundary",
+      "scene": "causal-boundary",
+      "claim": "The row supports an audit statement, not a causal story.",
+      "support": [
+        "Supported: the locked source was returned and opened.",
+        "Unsupported: memory caused the pass."
+      ],
+      "kind": "preregistered design",
+      "source": "article.md#what-used-can-honestly-mean",
+      "visual_relationship": "boundary",
+      "displayed_values": [],
+      "caveat": "Mechanism evidence does not by itself prove that memory caused task success."
+    },
+    {
+      "id": "factorial-design",
+      "scene": "factorial-design",
+      "claim": "Separate memory from the evidence-use policy.",
+      "support": [
+        "Two interventions produce four legal arms.",
+        "Their interaction is estimated rather than assumed."
+      ],
+      "kind": "preregistered design",
+      "source": "article.md#the-22-intervention",
+      "visual_relationship": "matrix",
+      "displayed_values": [],
+      "caveat": "Mechanism evidence does not by itself prove that memory caused task success."
+    },
+    {
+      "id": "fallback-detection",
+      "scene": "fallback-detection",
+      "claim": "A dense failure blocks instead of silently becoming BM25.",
+      "support": [
+        "Both memory-bearing arms require the prepared dense artifact.",
+        "Missing, corrupt, or unqueryable dense state blocks admission."
+      ],
+      "kind": "preregistered design",
+      "source": "article.md#failure-and-fallback-semantics",
+      "visual_relationship": "state_machine",
+      "displayed_values": [
+        "DENSE FAILED → SILENT BM25 → DENSE SUCCESS"
+      ],
+      "caveat": "Mechanism evidence does not by itself prove that memory caused task success."
+    },
+    {
+      "id": "context-displacement",
+      "scene": "context-displacement",
+      "claim": "More retrieved text can displace instructions or task evidence.",
+      "support": [
+        "Delivery policy belongs in candidate identity.",
+        "Usage and latency are secondary outcomes, not free capacity."
+      ],
+      "kind": "preregistered design",
+      "source": "article.md#context-budget-and-displacement",
+      "visual_relationship": "budget_bar",
+      "displayed_values": [
+        "30",
+        "10"
+      ],
+      "caveat": "Mechanism evidence does not by itself prove that memory caused task success."
+    },
+    {
+      "id": "decision-policy",
+      "scene": "decision-policy",
+      "claim": "Localization can improve without completion improving.",
+      "support": [
+        "Policy may help without memory helping.",
+        "Cost can rise without any evidence uptake."
+      ],
+      "kind": "preregistered design",
+      "source": "article.md#analysis-and-useful-nulls",
+      "visual_relationship": "ledgers",
+      "displayed_values": [],
+      "caveat": "Mechanism evidence does not by itself prove that memory caused task success."
+    },
+    {
+      "id": "series-context",
+      "scene": "series-context",
+      "claim": "Mechanism evidence explains where a treatment reached—not why it won.",
+      "support": [
+        "The funnel strengthens evidence integrity.",
+        "The controlled comparison still determines the outcome claim."
+      ],
+      "kind": "preregistered design",
+      "source": "article.md#privacy-and-leakage",
+      "visual_relationship": "series_map",
+      "displayed_values": [],
+      "caveat": "Mechanism evidence does not by itself prove that memory caused task success."
+    }
+  ]
+}

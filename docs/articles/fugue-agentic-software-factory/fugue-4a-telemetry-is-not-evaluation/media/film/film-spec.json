@@ -1,0 +1,75 @@
+{
+  "slug": "fugue-4a-telemetry-is-not-evaluation",
+  "title": "Telemetry Is Not Evaluation",
+  "width": 1280,
+  "height": 720,
+  "duration": 98,
+  "fps": 15,
+  "posterScene": "authority-lanes",
+  "reducedMotionScene": "authority-lanes",
+  "posterTime": 33.08,
+  "reducedMotionTime": 33.08,
+  "transitionSeconds": 0.35,
+  "safeArea": {
+    "left": 54,
+    "top": 40,
+    "right": 54,
+    "bottom": 100
+  },
+  "typeScale": {
+    "essential": 28,
+    "supporting": 24,
+    "compact": 18
+  },
+  "sourceHeadingIds": [
+    "why-telemetry-alone-cannot-drive-the-loop",
+    "the-governed-cycle",
+    "the-division-of-labor",
+    "immutable-study-state",
+    "reversibility-is-part-of-the-hypothesis",
+    "failure-drills-before-autonomy",
+    "accept-reject-or-learn"
+  ],
+  "silent": true,
+  "placement": {
+    "after_heading": "accept-reject-or-learn",
+    "after_label": "Accept, reject, or learn?",
+    "bridge_to_heading": "try-this-in-15-minutes",
+    "bridge_to_label": "Try this in 15 minutes",
+    "what_to_watch": "Follow an authority failure into a governed Study state machine with separate proposal, approval, execution, evaluation, retry, and rollback powers."
+  },
+  "checkpoints": [
+    {
+      "name": "authority-failure",
+      "time": 7.199999999999999
+    },
+    {
+      "name": "governed-cycle",
+      "time": 19.36
+    },
+    {
+      "name": "authority-lanes",
+      "time": 33.08
+    },
+    {
+      "name": "study-state",
+      "time": 46.36
+    },
+    {
+      "name": "retry-rollback",
+      "time": 58.64
+    },
+    {
+      "name": "failure-drills",
+      "time": 70.64
+    },
+    {
+      "name": "null-memory",
+      "time": 82.64
+    },
+    {
+      "name": "series-context",
+      "time": 94.64
+    }
+  ]
+}

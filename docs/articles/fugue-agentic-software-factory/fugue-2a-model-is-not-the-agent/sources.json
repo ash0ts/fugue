@@ -1,0 +1,50 @@
+{
+  "schema_version": 1,
+  "sources": [
+    {
+      "id": "harness-bench",
+      "author": "Yilun Yao, Xinyu Tan, Chao-Hsuan Liu, Yaoming Li, Zhengyang Wang, Wenhan Yu, Zhewen Tan, Yuxuan Tian, Guangxiang Zhao, Lin Sun, Xiangzheng Zhang, and Tong Yang",
+      "title": "Harness-Bench: Measuring Harness Effects across Models in Realistic Agent Workflows",
+      "publication": "arXiv",
+      "date": "2026-05-27",
+      "url": "https://arxiv.org/abs/2605.27922",
+      "supports": "Controlled empirical study of agent harness behavior."
+    },
+    {
+      "id": "scaffold-effect",
+      "author": "Naman Vats and Oleg Golev",
+      "title": "The Scaffold Effect in Coding Agents: Harness Choice as a Hidden Variable in Coding-Agent Evaluation",
+      "publication": "arXiv",
+      "date": "2026-06-08",
+      "url": "https://arxiv.org/abs/2607.22585",
+      "supports": "Evidence that scaffold choices can alter apparent model performance."
+    },
+    {
+      "id": "weng-harness",
+      "author": "Lilian Weng",
+      "title": "Harness Engineering for Self-Improvement",
+      "publication": "Lil’Log",
+      "date": "2026-07-04",
+      "url": "https://lilianweng.github.io/posts/2026-07-04-harness/",
+      "supports": "Harness taxonomy, research lineage, and self-improvement limitations."
+    },
+    {
+      "id": "dudycz-ooda",
+      "author": "Oskar Dudycz",
+      "title": "Vibing, Harness and OODA Loop",
+      "publication": "Event-Driven.io",
+      "date": "2026",
+      "url": "https://event-driven.io/en/vibing_harness_and_ooda_loops/",
+      "supports": "Operational OODA framing and socio-technical limits."
+    },
+    {
+      "id": "anthropic-noise",
+      "author": "Anthropic",
+      "title": "Infrastructure noise in agent evals",
+      "publication": "Anthropic Engineering",
+      "date": "2025",
+      "url": "https://www.anthropic.com/engineering/infrastructure-noise",
+      "supports": "Infrastructure as a measured confounder in coding-agent evaluation."
+    }
+  ]
+}

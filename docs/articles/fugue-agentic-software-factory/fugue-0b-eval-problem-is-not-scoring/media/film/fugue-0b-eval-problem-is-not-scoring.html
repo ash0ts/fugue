@@ -1,0 +1,661 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>The Eval Problem Is Not Scoring</title>
+  <style>
+    @font-face{font-family:"Source Serif Pro";src:url("fonts/source-serif-pro-latin-400-normal.woff2") format("woff2");font-weight:400;font-display:block}
+    @font-face{font-family:"Source Sans 3";src:url("fonts/source-sans-3-latin-400-normal.woff2") format("woff2");font-weight:400;font-display:block}
+    @font-face{font-family:"Source Sans 3";src:url("fonts/source-sans-3-latin-600-normal.woff2") format("woff2");font-weight:600;font-display:block}
+    @font-face{font-family:"IBM Plex Mono";src:url("fonts/ibm-plex-mono-latin-400-normal.woff2") format("woff2");font-weight:400;font-display:block}
+    @font-face{font-family:"IBM Plex Mono";src:url("fonts/ibm-plex-mono-latin-600-normal.woff2") format("woff2");font-weight:600;font-display:block}
+    :root{color-scheme:light;--paper:#F3F6F4;--ink:#13272F;--focus:#005F82}
+    *{box-sizing:border-box}html,body{height:100%}body{margin:0;display:grid;place-items:center;overflow:hidden;background:var(--ink);color:var(--paper);font-family:"Source Sans 3",sans-serif}
+    main{width:min(100vw,177.777vh);aspect-ratio:16/9;position:relative;background:var(--paper);box-shadow:0 32px 90px rgb(0 0 0 / 42%)}
+    canvas{display:block;width:100%;height:100%;image-rendering:auto}
+    .controls{position:absolute;z-index:2;left:3.4%;right:3.4%;bottom:2.2%;display:grid;grid-template-columns:auto 1fr auto;align-items:center;gap:14px;opacity:0;transform:translateY(8px);transition:opacity .18s ease,transform .18s ease}
+    main:hover .controls,main:focus-within .controls{opacity:1;transform:none}
+    button{min-width:54px;height:30px;padding:0 10px;border:1px solid var(--ink);color:var(--ink);background:var(--paper);font:600 11px/1 "Source Sans 3",sans-serif;text-transform:uppercase;letter-spacing:.06em;cursor:pointer}
+    button:focus-visible,input:focus-visible{outline:3px solid var(--focus);outline-offset:2px}
+    input[type="range"]{width:100%;accent-color:var(--focus);cursor:pointer}
+    output{min-width:112px;padding:7px 9px;color:var(--ink);background:var(--paper);font:10px/1 "IBM Plex Mono",monospace;text-align:center}
+    @media(prefers-reduced-motion:reduce){.controls{transition:none}}
+  </style>
+</head>
+<body>
+  <main aria-label="Interactive analytical film: The Eval Problem Is Not Scoring">
+    <canvas id="film" width="1280" height="720" role="img" aria-label="The Eval Problem Is Not Scoring. Denominators and independent evidence gates come before a winner."></canvas>
+    <div class="controls">
+      <button id="toggle" type="button" aria-label="Pause animation">Pause</button>
+      <input id="scrub" type="range" min="0" max="96" step="0.01" value="0" aria-label="Animation timeline">
+      <output id="clock" for="scrub">00:00 / 01:36</output>
+    </div>
+  </main>
+  <script>
+    const STORY=Object.freeze({"slug":"fugue-0b-eval-problem-is-not-scoring","title":"The Eval Problem Is Not Scoring","part":"FUGUE 0B","status":"WORKING DRAFT / NUMERICAL EXAMPLE","audience":"AI product engineers and eval owners","question":"How can an aggregate winner be an artifact of missing coordinates?","takeaway":"Denominators and independent evidence gates come before a winner.","out_of_scope":"This does not combine incompatible evidence into a new synthetic score.","duration":96,"poster_scene":"pooled-reversal","reduced_motion_scene":"pooled-reversal","placement":{"after_heading":"the-artifact-a-four-ledger-result","after_label":"The artifact: a four-ledger result","bridge_to_heading":"try-this-in-15-minutes","bridge_to_label":"Try this in 15 minutes","what_to_watch":"Watch unequal completion reverse the pooled result, then see how missing cells and four separate gates restore the planned decision."},"scenes":[{"id":"within-strata","duration":10,"eyebrow":"VISUAL SYNTHESIS / ILLUSTRATIVE","headline":"Candidate B wins inside both task strata.","support":["Easy: 95% versus 90%.","Hard: 20% versus 10%."],"kind":"illustrative example","source":"article.md#how-a-treatment-wins-without-improving","visual":{"type":"denominator_bars","groups":[{"label":"EASIER","left":{"n":90,"d":100},"right":{"n":19,"d":20}},{"label":"HARDER","left":{"n":1,"d":10},"right":{"n":8,"d":40}}],"columns":["BASELINE","CANDIDATE B"],"unit":"PASS / PLANNED"},"start":0,"end":10},{"id":"pooled-reversal","duration":14,"eyebrow":"THE POOL CHANGES THE QUESTION","headline":"Unequal denominators make the baseline appear to win.","support":["Baseline: 91/110 = 82.7%.","Candidate B: 27/60 = 45%."],"kind":"illustrative example","source":"article.md#how-a-treatment-wins-without-improving","visual":{"type":"denominator_bars","groups":[{"label":"NAIVE POOLED TOTAL","left":{"n":91,"d":110},"right":{"n":27,"d":60}}],"columns":["BASELINE","CANDIDATE B"],"unit":"OBSERVED PASS / OBSERVED ROWS","warning":"DIFFERENT TASK MIXTURES"},"start":10,"end":24},{"id":"missing-coordinates","duration":14,"eyebrow":"RESTORE THE PLAN","headline":"Fifty missing easy-task coordinates stay visible.","support":["They are missing behavioral evidence.","They are neither failures nor permission to shrink the denominator."],"kind":"illustrative example","source":"article.md#how-a-treatment-wins-without-improving","visual":{"type":"matrix","rows":["BASELINE","CANDIDATE B"],"columns":["EASY OBSERVED","HARD OBSERVED","EASY MISSING"],"cells":[["100","10","0"],["20","40","50 MISSING"]],"legend":["OBSERVED","MISSING"],"unit":"TASK COORDINATES"},"start":24,"end":38},{"id":"missing-not-zero","duration":12,"eyebrow":"PRESERVE THE FAILURE TYPE","headline":"Infrastructure failure is not a low-quality answer.","support":["A failed Sandbox yields no behavioral observation.","Scoring it zero silently changes the estimand."],"kind":"cited background","source":"article.md#missing-is-not-zero","visual":{"type":"state_machine","states":[{"label":"PLANNED CELL","state":"evidence"},{"label":"ANSWER OBSERVED","state":"verified"},{"label":"TASK FAIL","state":"failure"},{"label":"INFRA FAILURE","state":"missing"}],"edges":[[0,1,"runtime worked"],[1,2,"task verdict"],[0,3,"no answer"]],"forbidden":"INFRA FAILURE → SCORE 0"},"start":38,"end":50},{"id":"four-gates","duration":12,"eyebrow":"NO FIFTH SCORE","headline":"Four ledgers must each support the bounded decision.","support":["Infrastructure, task outcome, judgment, and mechanism can disagree.","Their values remain separate."],"kind":"cited background","source":"article.md#four-ledgers-no-synthetic-winner","visual":{"type":"ledgers","rows":[{"label":"INFRASTRUCTURE","left":"complete?","right":"gate"},{"label":"DETERMINISTIC","left":"regression bound?","right":"gate"},{"label":"JUDGMENT","left":"validated?","right":"gate"},{"label":"MECHANISM","left":"reconciled?","right":"gate"}],"columns":["QUESTION","DECISION ROLE"]},"start":50,"end":62},{"id":"confounder-map","duration":12,"eyebrow":"A WIN CAN BE BORROWED","headline":"Task drift, retries, runtime, and judge leakage move results.","support":["These variables belong in the comparison lock.","They do not belong in an interpretive footnote."],"kind":"cited background","source":"article.md#a-confounder-map-before-a-scorecard","visual":{"type":"dependency_stack","target":"APPARENT WINNER","inputs":[{"label":"TASK MIX","state":"failure"},{"label":"RETRIES","state":"failure"},{"label":"RUNTIME","state":"failure"},{"label":"JUDGE VIEW","state":"failure"}],"lock":"CANDIDATE + TASKSET + RUNTIME + EVIDENCE + EVALUATOR"},"start":62,"end":74},{"id":"bounded-decision","duration":12,"eyebrow":"THE DECISION SHAPE","headline":"Passing all gates authorizes one bounded statement.","support":["Discordance remains visible.","Missing or invalid evidence blocks interpretation rather than lowering a score."],"kind":"cited background","source":"article.md#the-artifact-a-four-ledger-result","visual":{"type":"reconciliation","inputs":["INFRASTRUCTURE","DETERMINISTIC","JUDGMENT","MECHANISM"],"output":"BOUNDED DECISION","blocked":["MISSING","INVALID","DISCORDANT"]},"start":74,"end":86},{"id":"series-context","duration":10,"eyebrow":"THE BIGGER PICTURE","headline":"Experimental design protects the path from evidence to decision.","support":["Arithmetic summarizes observations.","Locks and ledgers determine what those observations can support."],"kind":"cited background","source":"article.md#the-artifact-a-four-ledger-result","visual":{"type":"series_map","highlight":[1,4,5],"avoid":"One aggregate score is the evaluation."},"start":86,"end":96}],"spine":["MAINTENANCE PROBLEM","EXPERIMENTAL DESIGN","IMMUTABLE APPROVAL","ISOLATED EXECUTION","RECONCILED EVIDENCE","BOUNDED DECISION","GOVERNED IMPROVEMENT"]});
+    const FILM=Object.freeze({"slug":"fugue-0b-eval-problem-is-not-scoring","title":"The Eval Problem Is Not Scoring","width":1280,"height":720,"duration":96,"fps":15,"posterScene":"pooled-reversal","reducedMotionScene":"pooled-reversal","posterTime":20.08,"reducedMotionTime":20.08,"transitionSeconds":0.35,"safeArea":{"left":54,"top":40,"right":54,"bottom":100},"typeScale":{"essential":28,"supporting":24,"compact":18},"sourceHeadingIds":["how-a-treatment-wins-without-improving","missing-is-not-zero","four-ledgers-no-synthetic-winner","a-confounder-map-before-a-scorecard","the-artifact-a-four-ledger-result"],"silent":true,"placement":{"after_heading":"the-artifact-a-four-ledger-result","after_label":"The artifact: a four-ledger result","bridge_to_heading":"try-this-in-15-minutes","bridge_to_label":"Try this in 15 minutes","what_to_watch":"Watch unequal completion reverse the pooled result, then see how missing cells and four separate gates restore the planned decision."},"checkpoints":[{"name":"within-strata","time":7.199999999999999},{"name":"pooled-reversal","time":20.08},{"name":"missing-coordinates","time":34.08},{"name":"missing-not-zero","time":46.64},{"name":"four-gates","time":58.64},{"name":"confounder-map","time":70.64},{"name":"bounded-decision","time":82.64},{"name":"series-context","time":93.2}]});
+    window.__filmSpec=FILM;
+    const canvas=document.querySelector("#film");
+    const ctx=canvas.getContext("2d",{alpha:false});
+    const toggle=document.querySelector("#toggle");
+    const scrub=document.querySelector("#scrub");
+    const clock=document.querySelector("#clock");
+    const C=Object.freeze({
+      paper:"#F3F6F4",paperDeep:"#E4ECE8",white:"#FFFFFF",ink:"#13272F",muted:"#556A70",line:"#AEBFBA",
+      blue:"#176D89",blueSoft:"#C8E4EB",green:"#3F7457",greenSoft:"#CFE3D6",
+      amber:"#98601D",amberSoft:"#F2DCB8",coral:"#A8423D",coralSoft:"#F2CBC8",
+      violet:"#66517E",violetSoft:"#DDD4E9",slate:"#31515C",slateSoft:"#D5E0E1"
+    });
+    const KIND=Object.freeze({
+      "cited background":{label:"BACKGROUND",background:C.slateSoft,foreground:C.slate,accent:C.slate,border:C.slate},
+      "audited Fugue observation":{label:"OBSERVED",background:C.greenSoft,foreground:C.green,accent:C.green,border:C.green},
+      "illustrative example":{label:"ILLUSTRATIVE",background:C.violetSoft,foreground:C.violet,accent:C.violet,border:C.violet},
+      "preregistered design":{label:"PLANNED",background:C.amberSoft,foreground:C.amber,accent:C.amber,border:C.amber},
+      "pending result":{label:"REQUIRED / UNOBSERVED",background:C.amberSoft,foreground:C.amber,accent:C.amber,border:C.amber}
+    });
+    const STATE=Object.freeze({
+      evidence:{background:C.blueSoft,foreground:C.ink,accent:C.blue,border:C.blue},
+      verified:{background:C.greenSoft,foreground:C.ink,accent:C.green,border:C.green},
+      failure:{background:C.coralSoft,foreground:C.ink,accent:C.coral,border:C.coral},
+      missing:{background:C.amberSoft,foreground:C.ink,accent:C.amber,border:C.amber},
+      approval:{background:C.amberSoft,foreground:C.ink,accent:C.amber,border:C.amber},
+      execution:{background:C.slateSoft,foreground:C.ink,accent:C.slate,border:C.slate},
+      decision:{background:C.violetSoft,foreground:C.ink,accent:C.violet,border:C.violet},
+      variable:{background:C.blue,foreground:C.white,accent:C.blue,border:C.blue}
+    });
+    const TYPE=Object.freeze({essential:28,supporting:24,compact:18});
+    let playing=true,manualTime=0,anchorTime=performance.now(),anchorFilm=0,renderMode=false;
+    const clamp=(value,min=0,max=1)=>Math.max(min,Math.min(max,value));
+    const ease=value=>1-Math.pow(1-clamp(value),3);
+    const formatTime=seconds=>{const value=Math.max(0,Math.floor(seconds));return `${String(Math.floor(value/60)).padStart(2,"0")}:${String(value%60).padStart(2,"0")}`};
+    const role=state=>STATE[state]||STATE.evidence;
+    function font(size,family="sans",weight=400){const face=family==="serif"?'"Source Serif Pro"':family==="mono"?'"IBM Plex Mono"':'"Source Sans 3"';return `${weight} ${size}px ${face}`}
+    function text(value,x,y,size=20,color=C.ink,family="sans",weight=400,align="left"){ctx.fillStyle=color;ctx.font=font(size,family,weight);ctx.textAlign=align;ctx.textBaseline="alphabetic";ctx.fillText(String(value),x,y)}
+    function wrap(value,x,y,maxWidth,lineHeight,size=20,color=C.ink,family="sans",weight=400,maxLines=3,align="left"){ctx.font=font(size,family,weight);const words=String(value).split(/\s+/);const lines=[];let line="";for(const word of words){const test=line?`${line} ${word}`:word;if(ctx.measureText(test).width>maxWidth&&line){lines.push(line);line=word}else line=test}if(line)lines.push(line);const shown=lines.slice(0,maxLines);if(lines.length>maxLines)shown[maxLines-1]=shown[maxLines-1].replace(/[.…]?$/,"…");shown.forEach((item,index)=>text(item,x,y+index*lineHeight,size,color,family,weight,align));return shown.length}
+    function rect(x,y,width,height,fill,stroke=null,lineWidth=1){ctx.fillStyle=fill;ctx.fillRect(x,y,width,height);if(stroke){ctx.strokeStyle=stroke;ctx.lineWidth=lineWidth;ctx.strokeRect(x,y,width,height)}}
+    function line(x1,y1,x2,y2,color=C.line,width=1,dash=[]){ctx.save();ctx.setLineDash(dash);ctx.beginPath();ctx.moveTo(x1,y1);ctx.lineTo(x2,y2);ctx.strokeStyle=color;ctx.lineWidth=width;ctx.stroke();ctx.restore()}
+    function arrow(x1,y1,x2,y2,color=C.ink,width=2){line(x1,y1,x2,y2,color,width);const angle=Math.atan2(y2-y1,x2-x1);ctx.beginPath();ctx.moveTo(x2,y2);ctx.lineTo(x2-9*Math.cos(angle-.5),y2-9*Math.sin(angle-.5));ctx.lineTo(x2-9*Math.cos(angle+.5),y2-9*Math.sin(angle+.5));ctx.closePath();ctx.fillStyle=color;ctx.fill()}
+    function withAlpha(alpha,draw){if(alpha<=0)return;ctx.save();ctx.globalAlpha*=clamp(alpha);draw();ctx.restore()}
+    function background(){rect(0,0,FILM.width,FILM.height,C.paper);for(let x=0;x<=FILM.width;x+=32)line(x,0,x,FILM.height,"#DDE6E2");for(let y=0;y<=FILM.height;y+=32)line(0,y,FILM.width,y,"#DDE6E2");rect(0,0,FILM.width,9,C.ink)}
+    function pill(value,x,y,fill=C.ink,color=C.paper,align="left"){ctx.font=font(16,"mono",600);const width=Math.max(112,ctx.measureText(String(value)).width+30);const left=align==="right"?x-width:x;rect(left,y-24,width,34,fill);text(value,left+15,y,16,color,"mono",600);return width}
+    function card(x,y,width,height,state="evidence"){const value=role(state);rect(x,y,width,height,value.background,value.border,2);return value}
+    function staged(index,p,step=.075){return ease((p-index*step)/.62)}
+    function visualTitle(value){pill(value,54,316,C.ink,C.paper)}
+    function drawPatch(v,p){
+      visualTitle("PATCH DELTA");
+      const columns=[{x:54,title:"BEFORE / OWNED",rows:v.before,state:"verified"},{x:652,title:"AFTER / PASSING",rows:v.after,state:"failure"}];
+      columns.forEach((column,cIndex)=>withAlpha(staged(cIndex,p,.14),()=>{
+        const colors=card(column.x,344,574,202,column.state);
+        text(column.title,column.x+22,379,TYPE.compact,colors.foreground,"mono",600);
+        column.rows.forEach((item,index)=>{
+          const y=420+index*43;
+          rect(column.x+20,y-28,534,35,C.white,C.line);
+          text(cIndex?"＋":"·",column.x+34,y-5,TYPE.compact,cIndex?C.coral:C.green,"mono",600);
+          text(item,column.x+66,y-5,TYPE.supporting,C.ink,"sans",600);
+        });
+      }));
+      v.flags.forEach((item,index)=>withAlpha(staged(index+2,p,.09),()=>pill(item,652+index*190,588,C.coral,C.white)));
+    }
+    function drawTrajectory(v,p){
+      visualTitle("REPOSITORY TRAJECTORY");
+      const x=118,y=552,w=1034,h=190;
+      line(x,y,x+w,y,C.ink,2);line(x,y,x,y-h,C.ink,2);
+      text(v.x_label,x+w,y+30,TYPE.compact,C.muted,"mono",600,"right");
+      text(v.y_label,x,y-h-10,TYPE.compact,C.muted,"mono",600);
+      const values=v.series.flatMap(item=>item.values);const max=Math.max(...values);
+      v.series.forEach((series,sIndex)=>{
+        const color=sIndex?C.coral:C.green;
+        const points=series.values.map((value,index)=>[x+index*w/(series.values.length-1),y-(value/max)*(h-24)]);
+        ctx.save();ctx.beginPath();
+        points.forEach(([px,py],index)=>index?ctx.lineTo(px,py):ctx.moveTo(px,py));
+        ctx.strokeStyle=color;ctx.lineWidth=5;ctx.setLineDash(sIndex?[12,8]:[]);ctx.stroke();ctx.restore();
+        points.forEach(([px,py],index)=>withAlpha(staged(index+sIndex,p,.06),()=>{
+          ctx.beginPath();ctx.arc(px,py,7,0,Math.PI*2);ctx.fillStyle=color;ctx.fill();
+        }));
+        pill(series.label,1195,372+sIndex*43,color,C.white,"right");
+      });
+    }
+    function drawStack(v,p){
+      visualTitle("QUALITY LADDER");
+      const x=150,w=980,h=54,gap=10;
+      v.layers.forEach((layer,index)=>withAlpha(staged(index,p),()=>{
+        const y=544-index*(h+gap),width=w-index*72;
+        const state=index<2?"evidence":index===2?"approval":"decision";
+        const colors=card(x,y,width,h,state);
+        text(layer.label,x+20,y+35,TYPE.compact,colors.foreground,"mono",600);
+        text(layer.detail,x+width-20,y+35,TYPE.supporting,C.ink,"sans",600,"right");
+      }));
+    }
+    function drawLedgers(v,p){
+      visualTitle("SEPARATE LEDGERS");
+      const x=70,y=348,w=1140,rowH=51,labelW=300,colW=(w-labelW)/2;
+      rect(x,y,w,42,C.ink);
+      text("LAYER",x+18,y+28,TYPE.compact,C.paper,"mono",600);
+      text(v.columns?.[0]||"LEFT",x+labelW+18,y+28,TYPE.compact,C.paper,"mono",600);
+      text(v.columns?.[1]||"RIGHT",x+labelW+colW+18,y+28,TYPE.compact,C.paper,"mono",600);
+      v.rows.forEach((row,index)=>withAlpha(staged(index,p),()=>{
+        const top=y+42+index*rowH;
+        rect(x,top,w,rowH,index%2?C.paperDeep:C.white,C.line);
+        rect(x,top,9,rowH,[C.blue,C.green,C.violet,C.amber][index%4]);
+        text(row.label,x+22,top+33,TYPE.compact,C.ink,"mono",600);
+        text(row.left,x+labelW+18,top+33,TYPE.supporting,C.ink,"sans",600);
+        text(row.right,x+labelW+colW+18,top+33,TYPE.compact,C.muted,"mono",600);
+      }));
+    }
+    function drawPipeline(v,p){
+      visualTitle("IDENTITY-PRESERVING FLOW");
+      const count=v.nodes.length,gap=14,w=(1172-gap*(count-1))/count,y=390,h=128;
+      v.nodes.forEach((node,index)=>{
+        const x=54+index*(w+gap);
+        withAlpha(staged(index,p),()=>{
+          const colors=card(x,y,w,h,node.state);
+          wrap(node.label,x+w/2,y+47,w-26,23,TYPE.compact,colors.foreground,"mono",600,2,"center");
+          wrap(node.detail,x+w/2,y+94,w-26,24,TYPE.supporting,C.ink,"sans",600,2,"center");
+        });
+        if(index<count-1)withAlpha(staged(index+1,p),()=>arrow(x+w+2,y+64,x+w+gap-2,y+64,C.ink,2));
+      });
+    }
+    function drawBoundary(v,p){
+      visualTitle("EVIDENCE BOUNDARY");
+      const panels=[{...v.left,x:54},{...v.right,x:652}];
+      panels.forEach((panel,index)=>withAlpha(staged(index,p,.15),()=>{
+        const colors=card(panel.x,348,574,192,panel.state);
+        text(panel.label,panel.x+24,383,TYPE.compact,colors.foreground,"mono",600);
+        panel.items.forEach((item,itemIndex)=>{
+          text("—",panel.x+26,427+itemIndex*38,TYPE.compact,colors.accent,"mono",600);
+          text(item,panel.x+62,427+itemIndex*38,TYPE.supporting,C.ink,"sans",600);
+        });
+      }));
+      withAlpha(staged(2,p,.14),()=>{
+        rect(245,564,790,45,C.ink);
+        text(v.rule,640,594,TYPE.compact,C.paper,"mono",600,"center");
+      });
+    }
+    function drawDenominatorBars(v,p){
+      visualTitle(v.unit||"DENOMINATORS");
+      const rowLabel=170,gap=24,colW=476,barW=300,startX=54;
+      v.columns.forEach((column,index)=>{
+        text(column,startX+rowLabel+index*(colW+gap),352,TYPE.compact,index?C.blue:C.slate,"mono",600);
+      });
+      const rowGap=v.groups.length===1?0:112;
+      const firstY=v.groups.length===1?408:380;
+      v.groups.forEach((group,gIndex)=>{
+        const y=firstY+gIndex*rowGap;
+        text(group.label,startX,y+29,TYPE.compact,C.ink,"mono",600);
+        [group.left,group.right].forEach((item,index)=>{
+          const percent=item.d?item.n/item.d:0;
+          const x=startX+rowLabel+index*(colW+gap);
+          withAlpha(staged(gIndex*2+index,p,.06),()=>{
+            rect(x,y,barW,38,C.paperDeep,C.line);
+            if(percent>0)rect(x,y,barW*percent,38,index?C.blue:C.slate);
+            text(
+              `${item.n}/${item.d} = ${(percent*100).toFixed(percent*100%1?1:0)}%`,
+              x+barW+18,y+27,TYPE.compact,C.ink,"mono",600
+            );
+          });
+        });
+      });
+      if(v.warning)withAlpha(staged(5,p),()=>pill(v.warning,1226,568,C.coral,C.white,"right"));
+    }
+    function drawMatrix(v,p){
+      visualTitle(v.unit||"ALIGNED MATRIX");
+      const x=54,y=382,rowLabel=206,w=1172-rowLabel;
+      const colW=w/v.columns.length,rowH=Math.min(72,186/v.rows.length);
+      v.columns.forEach((column,index)=>{
+        wrap(column,x+rowLabel+index*colW+colW/2,y-22,colW-14,20,TYPE.compact,C.muted,"mono",600,2,"center");
+      });
+      v.rows.forEach((row,rIndex)=>{
+        const top=y+rIndex*(rowH+10);
+        withAlpha(staged(rIndex,p,.12),()=>{
+          rect(x,top,rowLabel-10,rowH,C.ink);
+          wrap(row,x+14,top+rowH/2+7,rowLabel-34,22,TYPE.compact,C.paper,"mono",600,2);
+          v.cells[rIndex].forEach((value,cIndex)=>{
+            const normalized=String(value).toLowerCase();
+            const missing=normalized.includes("missing");
+            const state=missing?"missing":normalized.includes("planned")?"approval":"evidence";
+            const colors=card(x+rowLabel+cIndex*colW,top,colW-10,rowH,state);
+            wrap(
+              value,x+rowLabel+cIndex*colW+(colW-10)/2,top+rowH/2+7,
+              colW-24,22,TYPE.compact,colors.foreground,"mono",600,2,"center"
+            );
+          });
+        });
+      });
+      (v.legend||[]).forEach((item,index)=>withAlpha(staged(index+3,p),()=>pill(item,54+index*236,594,index===2?C.coral:C.slate,C.white)));
+    }
+    function drawStateMachine(v,p){
+      visualTitle("STATE AND AUTHORITY");
+      const count=v.states.length,cols=Math.min(count,5),gap=16,w=(1172-gap*(cols-1))/cols,y=390,h=104;
+      v.edges.forEach((edge,index)=>{
+        const [from,to,label]=edge;
+        const x1=54+from*(w+gap)+w/2,x2=54+to*(w+gap)+w/2;
+        withAlpha(staged(index,p,.05),()=>{
+          arrow(x1,y+h/2,x2,y+h/2,C.ink,2);
+          text(label,(x1+x2)/2,y+h/2-16,TYPE.compact,C.muted,"mono",600,"center");
+        });
+      });
+      v.states.forEach((state,index)=>withAlpha(staged(index+1,p,.06),()=>{
+        const x=54+index*(w+gap);const colors=card(x,y,w,h,state.state);
+        wrap(state.label,x+w/2,y+57,w-24,22,TYPE.compact,colors.foreground,"mono",600,3,"center");
+      }));
+      if(v.forbidden)withAlpha(staged(5,p),()=>{
+        rect(120,546,1040,50,C.coral);
+        const label=String(v.forbidden).startsWith("FORBIDDEN:")?v.forbidden:`FORBIDDEN: ${v.forbidden}`;
+        text(label,640,579,TYPE.compact,C.white,"mono",600,"center");
+      });
+    }
+    function drawDependencyStack(v,p){
+      visualTitle("DEPENDENCY MAP");
+      const count=v.inputs.length,gap=14,w=(1172-gap*(count-1))/count,y=356,h=84;
+      v.inputs.forEach((item,index)=>{
+        const x=54+index*(w+gap);
+        withAlpha(staged(index,p),()=>{
+          const colors=card(x,y,w,h,item.state);
+          wrap(item.label,x+w/2,y+49,w-20,21,TYPE.compact,colors.foreground,"mono",600,2,"center");
+          arrow(x+w/2,y+h,640,510,C.ink,1.5);
+        });
+      });
+      withAlpha(staged(4,p),()=>{
+        rect(370,510,540,66,C.ink);
+        text(v.target,640,552,TYPE.supporting,C.paper,"mono",600,"center");
+      });
+      withAlpha(staged(5,p),()=>pill(v.lock,1226,610,C.blue,C.white,"right"));
+    }
+    function drawReconciliation(v,p){
+      visualTitle("EVIDENCE RECONCILIATION");
+      const count=v.inputs.length,gap=12,w=(1172-gap*(count-1))/count,y=350,h=84;
+      v.inputs.forEach((item,index)=>{
+        const x=54+index*(w+gap);
+        withAlpha(staged(index,p,.05),()=>{
+          const colors=card(x,y,w,h,index%2?"verified":"evidence");
+          wrap(item,x+w/2,y+49,w-20,21,TYPE.compact,colors.foreground,"mono",600,2,"center");
+          arrow(x+w/2,y+h,640,502,C.ink,1.5);
+        });
+      });
+      withAlpha(staged(count,p,.05),()=>{
+        rect(350,502,580,66,C.ink);
+        text(v.output,640,544,TYPE.supporting,C.paper,"mono",600,"center");
+      });
+      (v.blocked||[]).forEach((item,index)=>withAlpha(staged(count+1+index,p,.04),()=>pill(item,54+index*330,610,C.coral,C.white)));
+    }
+    function drawPairedRows(v,p){
+      visualTitle(v.unit||"PAIRED ROWS");
+      v.summary.forEach((item,index)=>withAlpha(staged(index,p,.12),()=>pill(item,index?1226:54,359,index?C.blue:C.slate,C.white,index?"right":"left")));
+      const max=Math.max(1,...v.rows.map(row=>Math.abs(Number(row.value)||0)));
+      v.rows.forEach((row,index)=>{
+        const y=420+index*62;
+        withAlpha(staged(index+2,p,.08),()=>{
+          const colors=role(row.state);
+          text(row.label,54,y+24,TYPE.compact,colors.accent,"mono",600);
+          rect(260,y,780,34,C.paperDeep,C.line);
+          const raw=Number(row.value)||0;
+          const width=Math.abs(raw)/max*780;
+          if(width>0)rect(raw<0?1040-width:260,y,width,34,colors.accent);
+          text(raw<0?"←":"→",1080,y+25,TYPE.supporting,colors.accent,"mono",600);
+          text(Math.abs(raw),1200,y+25,TYPE.compact,C.ink,"mono",600,"right");
+        });
+      });
+    }
+    function drawCandidateAssembly(v,p){
+      visualTitle(v.unit||"BEHAVIORAL CANDIDATES");
+      const fixedX=54,fixedY=358,fixedW=270,fixedH=212;
+      withAlpha(staged(0,p),()=>{
+        const colors=card(fixedX,fixedY,fixedW,fixedH,"evidence");
+        text("FIXED IN BOTH",fixedX+22,fixedY+34,TYPE.compact,colors.accent,"mono",600);
+        v.fixed.forEach((item,index)=>{
+          rect(fixedX+20,fixedY+54+index*45,fixedW-40,34,C.white,C.line);
+          text(item,fixedX+36,fixedY+78+index*45,TYPE.compact,C.ink,"mono",600);
+        });
+      });
+      v.lanes.forEach((lane,index)=>{
+        const y=370+index*104;
+        withAlpha(staged(index+1,p,.12),()=>{
+          arrow(fixedX+fixedW,y+40,376,y+40,C.ink,2);
+          const harness=card(376,y,230,80,index?"decision":"variable");
+          text(lane.varied,491,y+47,TYPE.compact,harness.foreground,"mono",600,"center");
+          arrow(606,y+40,640,y+40,C.ink,2);
+          const policy=card(640,y,220,80,"execution");
+          text(lane.policy,750,y+47,TYPE.compact,policy.foreground,"mono",600,"center");
+          arrow(860,y+40,894,y+40,C.ink,2);
+          const candidate=card(894,y,332,80,index?"decision":"variable");
+          text(lane.label,1060,y+47,TYPE.supporting,candidate.foreground,"mono",600,"center");
+        });
+      });
+    }
+    function drawInteractionPlot(v,p){
+      visualTitle(v.unit||"INTERACTION");
+      const x=190,y=558,w=900,h=190;
+      line(x,y,x+w,y,C.ink,2);
+      line(x,y,x,y-h,C.ink,2);
+      text("HIGHER",x-26,y-h+30,TYPE.compact,C.muted,"mono",600,"right");
+      text("LOWER",x-26,y-4,TYPE.compact,C.muted,"mono",600,"right");
+      v.families.forEach((family,index)=>{
+        const px=x+index*w;
+        line(px,y,px,y-h,C.line,1,[5,6]);
+        wrap(family,px,y+34,260,21,TYPE.compact,C.ink,"mono",600,2,"center");
+      });
+      v.series.forEach((series,index)=>{
+        const colors=role(series.state);
+        const points=series.values.map((value,familyIndex)=>[
+          x+familyIndex*w,
+          y-26-value*(h-50),
+        ]);
+        withAlpha(staged(index,p,.12),()=>{
+          line(points[0][0],points[0][1],points[1][0],points[1][1],colors.accent,6,index?[12,8]:[]);
+          points.forEach(([px,py])=>{
+            if(index===0){
+              ctx.beginPath();ctx.arc(px,py,10,0,Math.PI*2);ctx.fillStyle=colors.accent;ctx.fill();
+            }else{
+              rect(px-10,py-10,20,20,colors.accent);
+            }
+          });
+          pill(series.label,index?1226:54,354,colors.accent,C.white,index?"right":"left");
+        });
+      });
+    }
+    function drawMechanismFunnel(v,p){
+      visualTitle(v.unit||"MECHANISM FUNNEL");
+      const trackX=220,trackW=600,max=Math.max(...v.sources.map(stage=>stage.value),1);
+      text("SOURCE DENOMINATOR /12",54,350,TYPE.compact,C.blue,"mono",600);
+      v.sources.forEach((stage,index)=>{
+        const y=376+index*64;
+        withAlpha(staged(index,p,.12),()=>{
+          text(stage.label,54,y+28,TYPE.compact,C.ink,"mono",600);
+          rect(trackX,y,trackW,38,C.paperDeep,C.line);
+          const width=trackW*(stage.value/max);
+          if(width>0)rect(trackX,y,width,38,index===0?C.blue:index===1?C.violet:C.green);
+          text(`${stage.value}/${stage.denominator}`,trackX+trackW+22,y+29,TYPE.supporting,C.ink,"mono",600);
+        });
+      });
+      withAlpha(staged(3,p,.12),()=>{
+        line(874,352,874,570,C.coral,2,[8,7]);
+        text("DENOMINATOR RESET",900,350,TYPE.compact,C.coral,"mono",600);
+        const colors=card(900,376,326,174,"missing");
+        text(v.outcome.label,1063,418,TYPE.compact,colors.accent,"mono",600,"center");
+        text(`${v.outcome.value}/${v.outcome.denominator}`,1063,486,48,C.ink,"mono",600,"center");
+        rect(948,520,230,20,C.paperDeep,C.line);
+        if(v.outcome.value>0)rect(948,520,230*(v.outcome.value/v.outcome.denominator),20,colors.accent);
+        text("TASK ATTEMPTS",1063,568,TYPE.compact,C.muted,"mono",600,"center");
+      });
+    }
+    function drawStagedStudy(v,p){
+      visualTitle(v.unit||"STAGED STUDY");
+      const total=v.stages.reduce((sum,stage)=>sum+stage.cells,0);
+      const x=54,y=402,w=1172,h=112;
+      let cursor=x;
+      v.stages.forEach((stage,index)=>{
+        const width=w*stage.cells/total;
+        withAlpha(staged(index,p,.12),()=>{
+          const colors=role(stage.state);
+          rect(cursor,y,width,h,colors.background,colors.border,2);
+          rect(cursor,y,width,12,colors.accent);
+          text(String(index+1).padStart(2,"0"),cursor+16,y+38,TYPE.compact,colors.accent,"mono",600);
+          wrap(stage.label,cursor+width/2,y+58,width-20,20,TYPE.compact,colors.foreground,"mono",600,2,"center");
+          text(`${stage.cells} CELLS`,cursor+width/2,y+102,TYPE.compact,C.ink,"mono",600,"center");
+          if(index<v.stages.length-1)arrow(cursor+width-14,y-24,cursor+width+14,y-24,C.ink,2);
+        });
+        cursor+=width;
+      });
+      pill(`TOTAL ${total}`,54,570,C.ink,C.white);
+      pill(v.status,1226,570,C.amber,C.white,"right");
+    }
+    function drawReviewGate(v,p){
+      visualTitle(`${v.cases} BALANCED CASES`);
+      withAlpha(staged(0,p),()=>{
+        const cases=card(54,368,286,156,"evidence");
+        text(`${v.cases} CASES`,197,407,TYPE.essential,cases.accent,"mono",600,"center");
+        v.balance.forEach((item,index)=>text(item,197,452+index*34,TYPE.compact,C.ink,"mono",600,"center"));
+      });
+      v.reviewers.forEach((reviewer,index)=>withAlpha(staged(index+1,p,.12),()=>{
+        arrow(340,414+index*54,410,414+index*54,C.ink,2);
+        const reviewerCard=card(410,378+index*74,250,58,index?"decision":"variable");
+        text(reviewer,535,415+index*74,TYPE.compact,reviewerCard.foreground,"mono",600,"center");
+      }));
+      withAlpha(staged(3,p),()=>{
+        arrow(660,407,744,446,C.ink,2);arrow(660,481,744,446,C.ink,2);
+        const adjudication=card(744,390,250,112,"approval");
+        text("DISAGREEMENTS",869,430,TYPE.compact,adjudication.accent,"mono",600,"center");
+        text("ADJUDICATE",869,471,TYPE.supporting,C.ink,"mono",600,"center");
+      });
+      withAlpha(staged(4,p),()=>{
+        arrow(994,446,1040,446,C.ink,2);
+        const gate=card(1040,368,186,156,"missing");
+        text("GATES",1133,405,TYPE.compact,gate.accent,"mono",600,"center");
+        v.gates.forEach((item,index)=>text(item,1133,444+index*31,TYPE.compact,C.ink,"mono",600,"center"));
+      });
+      pill(v.status,1226,580,C.amber,C.white,"right");
+    }
+    function drawAttemptLifecycle(v,p){
+      visualTitle(v.unit||"ATTEMPT LIFECYCLE");
+      const gap=12,w=(1172-gap*(v.lifecycle.length-1))/v.lifecycle.length,y=360,h=74;
+      const centers=[];
+      v.lifecycle.forEach((event,index)=>{
+        const x=54+index*(w+gap);centers.push(x+w/2);
+        withAlpha(staged(index,p,.08),()=>{
+          const colors=card(x,y,w,h,event==="DELETE"?"missing":"execution");
+          text(event,x+w/2,y+44,TYPE.compact,colors.foreground,"mono",600,"center");
+          if(index<v.lifecycle.length-1)arrow(x+w+2,y+h/2,x+w+gap-2,y+h/2,C.ink,2);
+        });
+      });
+      withAlpha(staged(5,p),()=>{
+        const execution=(centers[2]+centers[3])/2;
+        arrow(execution,y+h,execution,480,C.ink,2);
+        text("PUBLISHED EVIDENCE BUNDLE",54,506,TYPE.compact,C.blue,"mono",600);
+        const evidenceGap=10,evidenceW=(850-evidenceGap*(v.evidence.length-1))/v.evidence.length;
+        v.evidence.forEach((item,index)=>{
+          const x=54+index*(evidenceW+evidenceGap);
+          const colors=card(x,524,evidenceW,68,"evidence");
+          wrap(item,x+evidenceW/2,566,evidenceW-18,20,TYPE.compact,colors.foreground,"mono",600,2,"center");
+        });
+        arrow(centers.at(-1),y+h,centers.at(-1),524,C.ink,2);
+        const cleanup=card(940,524,286,68,"missing");
+        wrap(v.cleanup,1083,566,250,20,TYPE.compact,cleanup.foreground,"mono",600,2,"center");
+      });
+      pill(v.status,1226,608,C.amber,C.white,"right");
+    }
+    function drawPairedRow(v,p){
+      visualTitle("ALIGNED MECHANISM ROW");
+      pill(v.identity,1226,316,C.slate,C.white,"right");
+      const count=v.stages.length,gap=12,w=(1172-gap*(count-1))/count,y=405,h=122;
+      v.stages.forEach((stage,index)=>{
+        const x=54+index*(w+gap);
+        withAlpha(staged(index,p),()=>{
+          const colors=card(x,y,w,h,stage.state);
+          text(stage.label,x+w/2,y+40,TYPE.compact,colors.accent,"mono",600,"center");
+          text(stage.value,x+w/2,y+91,TYPE.essential,C.ink,"mono",600,"center");
+        });
+        if(index<count-1)withAlpha(staged(index+1,p),()=>arrow(x+w+1,y+h/2,x+w+gap-1,y+h/2,C.ink,2));
+      });
+    }
+    function drawBudgetBar(v,p){
+      visualTitle(v.label);
+      const x=80,y=416,w=1120,h=96;let cursor=x;
+      const total=v.segments.reduce((sum,item)=>sum+item.value,0);
+      v.segments.forEach((segment,index)=>{
+        const width=w*segment.value/total;
+        withAlpha(staged(index,p),()=>{
+          const colors=role(segment.state);
+          rect(cursor,y,width,h,colors.background,colors.border,2);
+          rect(cursor,y,width,10,colors.accent);
+          wrap(segment.label,cursor+width/2,y+43,width-20,20,TYPE.compact,colors.foreground,"mono",600,2,"center");
+          text(`${segment.value}%`,cursor+width/2,y+79,TYPE.supporting,C.ink,"mono",600,"center");
+        });
+        cursor+=width;
+      });
+      withAlpha(staged(5,p),()=>pill(v.warning,1226,574,C.coral,C.white,"right"));
+    }
+    function drawRevisionCompare(v,p){
+      visualTitle("EXACT CANDIDATE IDENTITIES");
+      const panels=[{...v.left,x:54,state:"evidence"},{...v.right,x:652,state:"variable"}];
+      panels.forEach((item,index)=>withAlpha(staged(index,p,.15),()=>{
+        const colors=card(item.x,350,574,142,item.state);
+        text(item.label,item.x+24,390,TYPE.supporting,colors.foreground,"mono",600);
+        wrap(item.revision,item.x+24,441,526,25,TYPE.compact,colors.foreground,"mono",600,2);
+      }));
+      v.fixed.forEach((item,index)=>withAlpha(staged(index+2,p,.06),()=>pill(item,54+index*290,558,C.slate,C.white)));
+    }
+    function drawEvidenceGraph(v,p){
+      visualTitle(v.status||"EVIDENCE GRAPH");
+      const count=v.nodes.length,cols=Math.min(3,count),gap=14,w=(900-gap*(cols-1))/cols,h=78,x=54;
+      v.nodes.forEach((node,index)=>{
+        const top=348+Math.floor(index/cols)*(h+14),left=x+(index%cols)*(w+gap);
+        withAlpha(staged(index,p,.06),()=>{
+          const colors=card(left,top,w,h,"evidence");
+          text(node.label,left+18,top+31,TYPE.compact,colors.accent,"mono",600);
+          text(node.value,left+w-20,top+58,TYPE.essential,C.ink,"mono",600,"right");
+          arrow(left+w,top+h/2,1090,461,C.ink,1.3);
+        });
+      });
+      withAlpha(staged(count,p,.05),()=>{
+        const colors=card(1000,402,226,118,"approval");
+        wrap(v.output,1113,451,190,25,TYPE.compact,colors.foreground,"mono",600,3,"center");
+      });
+    }
+    function drawTimeline(v,p){
+      visualTitle(v.unit||"TIMELINE");
+      const x=250,w=910;
+      v.lanes.forEach((lane,lIndex)=>{
+        const y=370+lIndex*84;
+        text(lane.label,54,y+35,TYPE.compact,C.ink,"mono",600);
+        line(x,y+30,x+w,y+30,C.line,3);
+        const gap=w/lane.events.length;
+        lane.events.forEach((event,eIndex)=>{
+          const cx=x+gap*(eIndex+.5);
+          withAlpha(staged(lIndex*3+eIndex,p,.05),()=>{
+            ctx.beginPath();ctx.arc(cx,y+30,10,0,Math.PI*2);
+            ctx.fillStyle=lIndex===0?C.blue:C.violet;ctx.fill();
+            pill(event,cx-66,y+3,lIndex===0?C.blue:C.violet,C.white);
+          });
+        });
+      });
+      if(v.status)withAlpha(staged(6,p),()=>pill(v.status,1226,588,v.status.includes("NO")||v.status.includes("REQUIRED")?C.amber:C.slate,C.white,"right"));
+    }
+    function drawSwimlane(v,p){
+      visualTitle("AUTHORITY SWIMLANES");
+      const x=220,w=1006,rowH=58,y=342;
+      v.lanes.forEach((lane,index)=>{
+        const top=y+index*rowH;
+        rect(54,top,156,rowH,index%2?C.paperDeep:C.white,C.line);
+        text(lane,70,top+37,TYPE.compact,C.ink,"mono",600);
+        rect(x,top,w,rowH,index%2?C.paperDeep:C.white,C.line);
+      });
+      const maxStep=Math.max(1,...v.events.map(event=>event.step));
+      v.events.forEach((event,index)=>{
+        const cx=x+92+event.step*(w-184)/maxStep,cy=y+event.lane*rowH+rowH/2;
+        withAlpha(staged(index,p,.08),()=>{
+          const colors=role(event.state);
+          rect(cx-92,cy-21,184,42,colors.background,colors.border,2);
+          wrap(event.label,cx,cy+7,164,19,TYPE.compact,colors.foreground,"mono",600,2,"center");
+          if(index<v.events.length-1){
+            const next=v.events[index+1],nx=x+92+next.step*(w-184)/maxStep,ny=y+next.lane*rowH+rowH/2;
+            arrow(cx+92,cy,nx-92,ny,C.ink,1.5);
+          }
+        });
+      });
+      if(v.forbidden)withAlpha(staged(6,p),()=>{
+        const label=String(v.forbidden).startsWith("FORBIDDEN:")?v.forbidden:`FORBIDDEN: ${v.forbidden}`;
+        pill(label,1226,604,C.coral,C.white,"right");
+      });
+    }
+    function drawPrStack(v,p){
+      visualTitle("AUDITED PUBLIC STACK");
+      const x=60,w=1160,rowH=54,y=344;
+      v.prs.forEach((pr,index)=>withAlpha(staged(index,p,.1),()=>{
+        const top=y+index*(rowH+10),left=x+index*24,width=w-index*48;
+        rect(left,top,width,rowH,index%2?C.slateSoft:C.blueSoft,C.ink,2);
+        text(`${pr.pr}  ${pr.label}`,left+20,top+35,TYPE.compact,C.ink,"mono",600);
+        text(pr.sha,left+410,top+35,TYPE.compact,C.blue,"mono",600);
+        text(`${pr.files} FILES`,left+635,top+35,TYPE.compact,C.ink,"mono",600);
+        text(`+${pr.plus} / −${pr.minus}`,left+width-22,top+35,TYPE.compact,C.ink,"mono",600,"right");
+      }));
+    }
+    function drawSeriesMap(v,p){
+      visualTitle("FUGUE EVIDENCE SPINE");
+      const gap=10,w=(1172-gap*(STORY.spine.length-1))/STORY.spine.length,y=382,h=116;
+      STORY.spine.forEach((item,index)=>{
+        const active=v.highlight.includes(index),x=54+index*(w+gap);
+        withAlpha(staged(index,p,.05),()=>{
+          const state=active?"variable":"execution";const colors=card(x,y,w,h,state);
+          wrap(item,x+w/2,y+50,w-20,19,TYPE.compact,colors.foreground,"mono",600,3,"center");
+          text(String(index+1).padStart(2,"0"),x+w/2,y+94,TYPE.compact,active?C.white:C.muted,"mono",600,"center");
+        });
+        if(index<STORY.spine.length-1)withAlpha(staged(index+1,p),()=>arrow(x+w+1,y+h/2,x+w+gap-1,y+h/2,C.ink,1.4));
+      });
+      withAlpha(staged(7,p),()=>{
+        rect(80,542,1120,54,C.coral);
+        wrap(`DO NOT CLAIM: ${v.avoid}`,640,576,1080,22,TYPE.compact,C.white,"mono",600,2,"center");
+      });
+    }
+    function drawVisual(scene,p){
+      const v=scene.visual;
+      if(v.type==="attempt_lifecycle")drawAttemptLifecycle(v,p);
+      else if(v.type==="candidate_assembly")drawCandidateAssembly(v,p);
+      else if(v.type==="interaction_plot")drawInteractionPlot(v,p);
+      else if(v.type==="mechanism_funnel")drawMechanismFunnel(v,p);
+      else if(v.type==="review_gate")drawReviewGate(v,p);
+      else if(v.type==="staged_study")drawStagedStudy(v,p);
+      else if(v.type==="patch")drawPatch(v,p);
+      else if(v.type==="trajectory")drawTrajectory(v,p);
+      else if(v.type==="stack")drawStack(v,p);
+      else if(v.type==="ledgers")drawLedgers(v,p);
+      else if(v.type==="pipeline")drawPipeline(v,p);
+      else if(v.type==="boundary")drawBoundary(v,p);
+      else if(v.type==="denominator_bars")drawDenominatorBars(v,p);
+      else if(v.type==="matrix")drawMatrix(v,p);
+      else if(v.type==="state_machine")drawStateMachine(v,p);
+      else if(v.type==="dependency_stack")drawDependencyStack(v,p);
+      else if(v.type==="reconciliation")drawReconciliation(v,p);
+      else if(v.type==="paired_rows")drawPairedRows(v,p);
+      else if(v.type==="paired_row")drawPairedRow(v,p);
+      else if(v.type==="budget_bar")drawBudgetBar(v,p);
+      else if(v.type==="revision_compare")drawRevisionCompare(v,p);
+      else if(v.type==="evidence_graph")drawEvidenceGraph(v,p);
+      else if(v.type==="timeline")drawTimeline(v,p);
+      else if(v.type==="swimlane")drawSwimlane(v,p);
+      else if(v.type==="pr_stack")drawPrStack(v,p);
+      else if(v.type==="series_map")drawSeriesMap(v,p);
+    }
+    function drawScene(scene,index,local,alpha){
+      withAlpha(alpha,()=>{
+        text(STORY.part,54,53,TYPE.compact,C.muted,"mono",600);
+        text(STORY.status,1226,53,TYPE.compact,STORY.status.includes("NO RESULT")?C.amber:C.blue,"mono",600,"right");
+        pill(`PLACED AFTER: ${STORY.placement.after_label}`,54,87,C.slate,C.white);
+        const evidence=KIND[scene.kind];pill(evidence.label,1226,87,evidence.accent,C.white,"right");
+        text(scene.eyebrow,54,130,TYPE.compact,evidence.accent,"mono",600);
+        const headlineSize=scene.headline.length>62?38:scene.headline.length>48?42:46;
+        wrap(scene.headline,54,183,1120,45,headlineSize,C.ink,"serif",400,2);
+        scene.support.forEach((item,sIndex)=>wrap(
+          item,54,260+sIndex*31,1120,29,TYPE.supporting,
+          sIndex?C.muted:C.ink,"sans",sIndex?400:600,1
+        ));
+        drawVisual(scene,ease(local));
+        text(`${String(index+1).padStart(2,"0")} / ${String(STORY.scenes.length).padStart(2,"0")}`,54,630,TYPE.compact,C.muted,"mono",600);
+        text(`${formatTime(scene.start)}–${formatTime(scene.end)}`,190,630,TYPE.compact,C.muted,"mono",600);
+      });
+    }
+    function render(time){
+      const t=clamp(Number(time)||0,0,FILM.duration-.0001);background();
+      const index=Math.max(0,STORY.scenes.findIndex(scene=>t>=scene.start&&t<scene.end));
+      const scene=STORY.scenes[index],localSeconds=t-scene.start,local=localSeconds/scene.duration;
+      if(index>0&&localSeconds<FILM.transitionSeconds){
+        const blend=ease(localSeconds/FILM.transitionSeconds);
+        const previous=STORY.scenes[index-1];
+        drawScene(previous,index-1,1,1-blend);
+        drawScene(scene,index,Math.max(local,.08),blend);
+      }else{
+        drawScene(scene,index,local,1);
+      }
+      rect(54,682,1172,4,C.line);rect(54,682,1172*(t/FILM.duration),4,C.blue);
+      clock.value=`${formatTime(t)} / ${formatTime(FILM.duration)}`;if(!renderMode)scrub.value=String(t);
+    }
+    function currentTime(now=performance.now()){return playing?(anchorFilm+(now-anchorTime)/1000)%FILM.duration:manualTime}
+    function loop(now){if(!renderMode)render(currentTime(now));requestAnimationFrame(loop)}
+    toggle.addEventListener("click",()=>{if(playing){manualTime=currentTime();playing=false;toggle.textContent="Play";toggle.setAttribute("aria-label","Play animation")}else{anchorFilm=manualTime;anchorTime=performance.now();playing=true;toggle.textContent="Pause";toggle.setAttribute("aria-label","Pause animation")}});
+    scrub.addEventListener("input",()=>{manualTime=Number(scrub.value);anchorFilm=manualTime;anchorTime=performance.now();render(manualTime)});
+    window.setAnimationTime=seconds=>{renderMode=true;playing=false;manualTime=Number(seconds)||0;render(manualTime);return true};
+    window.releaseAnimation=()=>{renderMode=false;anchorFilm=manualTime;anchorTime=performance.now();playing=true;toggle.textContent="Pause";toggle.setAttribute("aria-label","Pause animation");return true};
+    Promise.all([document.fonts.load('400 46px "Source Serif Pro"'),document.fonts.load('600 24px "Source Sans 3"'),document.fonts.load('600 18px "IBM Plex Mono"')]).then(()=>{const requestedValue=new URLSearchParams(location.hash.replace(/^#/,"")).get("t");const requested=requestedValue===null?Number.NaN:Number(requestedValue);const reduced=matchMedia("(prefers-reduced-motion: reduce)").matches;if(reduced||Number.isFinite(requested)){playing=false;manualTime=Number.isFinite(requested)?clamp(requested,0,FILM.duration-.01):FILM.reducedMotionTime;toggle.textContent="Play";toggle.setAttribute("aria-label","Play animation")}render(playing?0:manualTime);window.__animationReady=true;requestAnimationFrame(loop)});
+  </script>
+</body>
+</html>

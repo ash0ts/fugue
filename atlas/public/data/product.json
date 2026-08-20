@@ -1,0 +1,79 @@
+{
+  "schema_version": 1,
+  "maturity": "open_source_preview",
+  "featured_study_id": "kimi-k2-7-code-baseline",
+  "quickstart": {
+    "availability": "preview_checkout",
+    "revision": "a9d1a0ef6b3172d06f7a55a2bb9b55a81f1df4d0",
+    "source_url": "https://github.com/ash0ts/fugue/commit/a9d1a0ef6b3172d06f7a55a2bb9b55a81f1df4d0",
+    "pr_url": "https://github.com/ash0ts/fugue/pull/36",
+    "commands": [
+      "git clone https://github.com/ash0ts/fugue.git",
+      "cd fugue",
+      "git checkout a9d1a0ef6b3172d06f7a55a2bb9b55a81f1df4d0",
+      "uv sync --python 3.13 --frozen",
+      "uv run fugue demo source-use --out .fugue/demo --json"
+    ],
+    "proves": [
+      "The preview checkout installs with its locked dependencies.",
+      "The deterministic replay expands and reconciles 16 aligned result rows.",
+      "The public result projection preserves improved, regressed, and unchanged cases."
+    ],
+    "does_not_prove": [
+      "Live Agent behavior, live MCP server behavior, or model quality.",
+      "W&B Serverless isolation or remote execution.",
+      "That the treatment caused the replayed difference."
+    ]
+  },
+  "references": [
+    {
+      "id": "metr-maintainer-acceptance",
+      "author": "METR",
+      "title": "Many SWE-bench-Passing PRs Would Not Be Merged into Main",
+      "url": "https://metr.org/notes/2026-03-10-many-swe-bench-passing-prs-would-not-be-merged-into-main/",
+      "relevance": "Passing a benchmark verifier and earning maintainer acceptance are different outcomes."
+    },
+    {
+      "id": "anthropic-agent-evals",
+      "author": "Anthropic",
+      "title": "Demystifying evals for AI agents",
+      "url": "https://www.anthropic.com/engineering/demystifying-evals-for-ai-agents",
+      "relevance": "Agent evaluation needs realistic harnesses, stable environments, multiple grader types, and transcript inspection."
+    },
+    {
+      "id": "anthropic-infrastructure-noise",
+      "author": "Anthropic",
+      "title": "Quantifying infrastructure noise in agentic coding evals",
+      "url": "https://www.anthropic.com/engineering/infrastructure-noise",
+      "relevance": "Runtime resources can change measured outcomes and must be part of a locked candidate environment."
+    },
+    {
+      "id": "harness-bench",
+      "author": "Yao et al.",
+      "title": "Harness-Bench: Measuring Harness Effects across Models in Realistic Agent Workflows",
+      "url": "https://arxiv.org/abs/2605.27922",
+      "relevance": "Harness configuration is a measurable part of Agent behavior, not transparent plumbing."
+    },
+    {
+      "id": "scaffold-effect",
+      "author": "The Scaffold Effect authors",
+      "title": "The Scaffold Effect in Coding Agents: Harness Choice as a Hidden Variable in Coding-Agent Evaluation",
+      "url": "https://arxiv.org/abs/2607.22585",
+      "relevance": "Harness choice can confound comparisons that are reported as model-only results."
+    },
+    {
+      "id": "weng-harness",
+      "author": "Lilian Weng",
+      "title": "Harness Engineering for Self-Improvement",
+      "url": "https://lilianweng.github.io/posts/2026-07-04-harness/",
+      "relevance": "Controlled propose–evaluate–accept loops need explicit evidence and authority boundaries."
+    },
+    {
+      "id": "husain-field-guide",
+      "author": "Hamel Husain",
+      "title": "A Field Guide to Rapidly Improving AI Products",
+      "url": "https://hamel.dev/blog/posts/field-guide/",
+      "relevance": "Trace-first error analysis should precede broad evaluation automation."
+    }
+  ]
+}

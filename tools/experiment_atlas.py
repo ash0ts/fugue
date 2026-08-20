@@ -28,7 +28,9 @@ from fugue.model_plane import (
 )
 
 PUBLIC_EXPERIMENT_SCHEMA_VERSION = 1
+PUBLIC_EXPERIMENT_V2_SCHEMA_VERSION = 2
 EXPERIMENT_INDEX_SCHEMA_VERSION = 1
+INVENTORY_SCHEMA_VERSION = 1
 EVIDENCE_TIERS = {
     "confirmed": 1,
     "directional": 2,
@@ -67,6 +69,15 @@ EDITORIAL_FIELDS = {
     "links",
     "caveats",
     "findings",
+}
+V2_EDITORIAL_FIELDS = EDITORIAL_FIELDS | {
+    "study_kind",
+    "publication_level",
+    "primary_outcome",
+    "ledgers",
+    "metrics",
+    "groups",
+    "cells",
 }
 MATRIX_FIELDS = {
     "experiment_id",
@@ -135,6 +146,62 @@ PUBLIC_CELL_FIELDS = {
     "mrr",
     "agent_link",
 }
+V2_PUBLIC_CELL_FIELDS = {
+    "cell_id",
+    "run_id",
+    "candidate_id",
+    "task_id",
+    "harness",
+    "treatment",
+    "attempt",
+    "status",
+    "outcome",
+    "outcome_label",
+    "cost_usd",
+    "evidence_link",
+}
+V2_METRIC_FIELDS = {
+    "expected_cells",
+    "published_cells",
+    "outcome_observed_cells",
+    "outcome_successes",
+    "outcome_rate",
+    "total_cost_usd",
+    "aligned_pairs",
+    "improved_pairs",
+    "regressed_pairs",
+    "unchanged_pairs",
+    "critical_failures",
+}
+PRIMARY_OUTCOME_FIELDS = {"id", "label", "success_label", "failure_label"}
+LEDGER_NAMES = {
+    "infrastructure",
+    "deterministic",
+    "authored_judge",
+    "mechanism",
+    "evidence_integrity",
+    "decision",
+}
+LEDGER_STATUSES = {
+    "passed",
+    "failed",
+    "mixed",
+    "advisory",
+    "unavailable",
+    "hold",
+    "not_applicable",
+}
+INVENTORY_ENTRY_FIELDS = {
+    "id",
+    "label",
+    "category",
+    "lifecycle_state",
+    "publication_level",
+    "run_ids",
+    "study_ids",
+    "source_reference",
+    "claim_boundary",
+}
 FORBIDDEN_KEY = re.compile(
     r"(?:prompt|response|reasoning|message|tool_(?:argument|result|output)|"
     r"gold|expected_path|environment|env_|secret|credential|api_?key|exception)",
@@ -174,6 +241,40 @@ class PublicExperimentV1:
 
 
 @dataclass(frozen=True)
+class PublicExperimentV2:
+    schema_version: int
+    id: str
+    title: str
+    summary: str
+    question: str
+    hypothesis: str
+    why_it_matters: str
+    task_selection: str
+    evidence_tier: str
+    decision_value: int
+    status: str
+    study_kind: str
+    publication_level: str
+    primary_outcome: dict[str, str]
+    ledgers: dict[str, dict[str, str]]
+    matrix: dict[str, Any]
+    provenance: dict[str, Any]
+    links: dict[str, Any]
+    findings: tuple[str, ...]
+    caveats: tuple[str, ...]
+    metrics: dict[str, Any]
+    groups: tuple[dict[str, Any], ...]
+    cells: tuple[dict[str, Any], ...]
+    content_sha256: str
+
+    def to_dict(self) -> dict[str, Any]:
+        return asdict(self)
+
+
+PublicExperiment = PublicExperimentV1 | PublicExperimentV2
+
+
+@dataclass(frozen=True)
 class ExperimentIndexV1:
     schema_version: int
     experiments: tuple[dict[str, Any], ...]
@@ -187,9 +288,14 @@ def load_editorial(path: Path) -> dict[str, Any]:
     raw = yaml.safe_load(path.read_text(encoding="utf-8"))
     if not isinstance(raw, dict):
         raise ValueError("editorial record must be a mapping")
-    _exact_fields(raw, EDITORIAL_FIELDS, "editorial record")
-    if raw.get("schema_version") != 1:
-        raise ValueError("editorial schema_version must be 1")
+    schema_version = raw.get("schema_version")
+    if schema_version not in {1, 2}:
+        raise ValueError("editorial schema_version must be 1 or 2")
+    _exact_fields(
+        raw,
+        EDITORIAL_FIELDS if schema_version == 1 else V2_EDITORIAL_FIELDS,
+        "editorial record",
+    )
     for field in (
         "id",
         "title",
@@ -236,8 +342,72 @@ def load_editorial(path: Path) -> dict[str, Any]:
         raise ValueError("matrix cohort prediction counts do not match the matrix")
     for url in _all_urls(links) | _all_urls(provenance):
         _validate_url(url)
+    if schema_version == 2:
+        _validate_v2_contract(raw, editorial=True)
     _reject_sensitive(raw)
     return raw
+
+
+def _validate_v2_contract(value: Mapping[str, Any], *, editorial: bool) -> None:
+    if value.get("study_kind") not in {
+        "benchmark",
+        "comparison",
+        "safety",
+        "contract",
+    }:
+        raise ValueError("V2 study_kind is unsupported")
+    publication_level = value.get("publication_level")
+    if publication_level not in {"full", "summary"}:
+        raise ValueError("V2 publication_level must be full or summary")
+    outcome = _mapping(value.get("primary_outcome"), "V2 primary outcome")
+    _exact_fields(outcome, PRIMARY_OUTCOME_FIELDS, "V2 primary outcome")
+    if any(not isinstance(outcome.get(field), str) or not outcome[field] for field in PRIMARY_OUTCOME_FIELDS):
+        raise ValueError("V2 primary outcome fields must be non-empty text")
+    ledgers = _mapping(value.get("ledgers"), "V2 ledgers")
+    _exact_fields(ledgers, LEDGER_NAMES, "V2 ledgers")
+    for name, raw_ledger in ledgers.items():
+        ledger = _mapping(raw_ledger, f"V2 {name} ledger")
+        _exact_fields(ledger, {"status", "summary"}, f"V2 {name} ledger")
+        if ledger.get("status") not in LEDGER_STATUSES:
+            raise ValueError(f"V2 {name} ledger status is unsupported")
+        if not isinstance(ledger.get("summary"), str) or not ledger["summary"]:
+            raise ValueError(f"V2 {name} ledger summary must be non-empty")
+    metrics = _mapping(value.get("metrics"), "V2 metrics")
+    _exact_fields(metrics, V2_METRIC_FIELDS, "V2 metrics")
+    expected = int(metrics.get("expected_cells") or 0)
+    published = int(metrics.get("published_cells") or 0)
+    observed = int(metrics.get("outcome_observed_cells") or 0)
+    successes = int(metrics.get("outcome_successes") or 0)
+    if expected < 1 or not 0 <= successes <= observed <= published <= expected:
+        raise ValueError("V2 metrics contain an invalid denominator")
+    rate = metrics.get("outcome_rate")
+    expected_rate = successes / observed if observed else None
+    if rate != expected_rate:
+        raise ValueError("V2 outcome rate does not match its denominator")
+    cells = value.get("cells")
+    if not isinstance(cells, (list, tuple)):
+        raise ValueError("V2 cells must be a list")
+    if publication_level == "summary" and cells:
+        raise ValueError("summary-only evidence cannot be promoted to task-level cells")
+    if publication_level == "full" and len(cells) != published:
+        raise ValueError("full V2 evidence must publish every declared cell")
+    for cell in cells:
+        cell_value = _mapping(cell, "V2 public cell")
+        _exact_fields(cell_value, V2_PUBLIC_CELL_FIELDS, "V2 public cell")
+        if cell_value.get("outcome") not in {True, False, None}:
+            raise ValueError("V2 cell outcome must be true, false, or unavailable")
+        evidence_link = cell_value.get("evidence_link")
+        if evidence_link:
+            _validate_url(str(evidence_link))
+    if publication_level == "full":
+        cell_outcomes = [cell["outcome"] for cell in cells if cell["outcome"] is not None]
+        if len(cell_outcomes) != observed or sum(item is True for item in cell_outcomes) != successes:
+            raise ValueError("V2 metrics do not match published cells")
+    groups = value.get("groups")
+    if not isinstance(groups, (list, tuple)):
+        raise ValueError("V2 groups must be a list")
+    if editorial and value.get("schema_version") != 2:
+        raise ValueError("V2 editorial contract requires schema 2")
 
 
 def load_rows(path: Path) -> list[dict[str, Any]]:
@@ -315,7 +485,30 @@ def build_public_experiment(
     return public
 
 
-def build_index(experiments: Iterable[PublicExperimentV1]) -> ExperimentIndexV1:
+def build_public_experiment_v2(
+    editorial: Mapping[str, Any],
+) -> PublicExperimentV2:
+    """Build a public V2 record from an already reviewed public-safe projection."""
+    if editorial.get("schema_version") != PUBLIC_EXPERIMENT_V2_SCHEMA_VERSION:
+        raise ValueError("PublicExperimentV2 requires editorial schema 2")
+    _validate_v2_contract(editorial, editorial=True)
+    body = {
+        key: (
+            tuple(value)
+            if key in {"findings", "caveats", "groups", "cells"}
+            else value
+        )
+        for key, value in editorial.items()
+    }
+    public = PublicExperimentV2(
+        **body,
+        content_sha256=_digest(body),
+    )
+    validate_public_experiment(public.to_dict())
+    return public
+
+
+def build_index(experiments: Iterable[PublicExperiment]) -> ExperimentIndexV1:
     ordered = sorted(
         experiments,
         key=lambda item: (
@@ -359,7 +552,7 @@ def write_publication(
     repo_root: Path,
 ) -> ExperimentIndexV1:
     output.mkdir(parents=True, exist_ok=True)
-    experiments: list[PublicExperimentV1] = []
+    experiments: list[PublicExperiment] = []
     for path in sorted(editorial_paths):
         editorial = load_editorial(path)
         experiment_id = str(editorial["id"])
@@ -388,11 +581,33 @@ def write_publication(
             raise ValueError(
                 "planned or blocked experiments cannot attach run snapshots"
             )
-        public = build_public_experiment(editorial, rows, summaries)
+        if editorial["schema_version"] == 2:
+            if rows or summaries or snapshots:
+                raise ValueError(
+                    "V2 editorial consumes reviewed public projections, not private inputs"
+                )
+            public = build_public_experiment_v2(editorial)
+        elif not rows and (output / "experiments" / f"{experiment_id}.json").exists():
+            existing = json.loads(
+                (output / "experiments" / f"{experiment_id}.json").read_text(
+                    encoding="utf-8"
+                )
+            )
+            validate_public_experiment(existing)
+            _validate_editorial_projection(editorial, existing)
+            public = PublicExperimentV1(**existing)
+        else:
+            public = build_public_experiment(editorial, rows, summaries)
         _write_json(output / "experiments" / f"{experiment_id}.json", public.to_dict())
         experiments.append(public)
     index = build_index(experiments)
     _write_json(output / "index.json", index.to_dict())
+    _write_or_validate_inventory(
+        editorial_paths[0].parent,
+        output,
+        {item.id for item in experiments},
+        write=True,
+    )
     return index
 
 
@@ -409,14 +624,17 @@ def validate_publication(
         raise ValueError(
             "reviewed public snapshots do not match the editorial registry"
         )
-    experiments: list[PublicExperimentV1] = []
+    experiments: list[PublicExperiment] = []
     for path in published_paths:
         value = json.loads(path.read_text(encoding="utf-8"))
         if not isinstance(value, dict):
             raise ValueError("reviewed public snapshot must be an object")
         validate_public_experiment(value)
         _validate_editorial_projection(editorials[path.stem], value)
-        experiments.append(PublicExperimentV1(**value))
+        if value.get("schema_version") == 1:
+            experiments.append(PublicExperimentV1(**value))
+        else:
+            experiments.append(PublicExperimentV2(**value))
     expected = build_index(experiments)
     index_value = json.loads((output / "index.json").read_text(encoding="utf-8"))
     if not isinstance(index_value, dict):
@@ -426,13 +644,19 @@ def validate_publication(
         raise ValueError(
             "reviewed public index does not match its experiment snapshots"
         )
+    _write_or_validate_inventory(
+        editorial_paths[0].parent,
+        output,
+        set(editorials),
+        write=False,
+    )
     return expected
 
 
 def _validate_editorial_projection(
     editorial: Mapping[str, Any], public: Mapping[str, Any]
 ) -> None:
-    fields = (
+    fields: tuple[str, ...] = (
         "schema_version",
         "id",
         "title",
@@ -449,6 +673,16 @@ def _validate_editorial_projection(
         "findings",
         "caveats",
     )
+    if editorial.get("schema_version") == 2:
+        fields += (
+            "study_kind",
+            "publication_level",
+            "primary_outcome",
+            "ledgers",
+            "metrics",
+            "groups",
+            "cells",
+        )
     for field in fields:
         if _canonical_json(editorial[field]) != _canonical_json(public[field]):
             raise ValueError(
@@ -885,6 +1119,9 @@ def _evaluation_links(
 
 
 def validate_public_experiment(value: Mapping[str, Any]) -> None:
+    if value.get("schema_version") == PUBLIC_EXPERIMENT_V2_SCHEMA_VERSION:
+        _validate_public_experiment_v2(value)
+        return
     allowed = {field.name for field in PublicExperimentV1.__dataclass_fields__.values()}
     _exact_fields(value, allowed, "public experiment")
     if value.get("schema_version") != PUBLIC_EXPERIMENT_SCHEMA_VERSION:
@@ -933,6 +1170,22 @@ def validate_public_experiment(value: Mapping[str, Any]) -> None:
         {key: nested for key, nested in value.items() if key != "content_sha256"}
     ):
         raise ValueError("public experiment content digest does not match")
+
+
+def _validate_public_experiment_v2(value: Mapping[str, Any]) -> None:
+    allowed = {field.name for field in PublicExperimentV2.__dataclass_fields__.values()}
+    _exact_fields(value, allowed, "public experiment V2")
+    _validate_v2_contract(value, editorial=False)
+    links = _mapping(value.get("links"), "public links")
+    _exact_fields(links, LINK_FIELDS, "public links")
+    for url in _all_urls(links) | _all_urls(value.get("provenance")):
+        _validate_url(url)
+    _reject_sensitive(value)
+    digest = str(value.get("content_sha256") or "")
+    if digest != _digest(
+        {key: nested for key, nested in value.items() if key != "content_sha256"}
+    ):
+        raise ValueError("public experiment V2 content digest does not match")
 
 
 def validate_experiment_index(value: Mapping[str, Any]) -> None:
@@ -1315,6 +1568,183 @@ def _write_json(path: Path, value: Mapping[str, Any]) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     body = json.dumps(value, indent=2, sort_keys=True, ensure_ascii=True) + "\n"
     path.write_text(body, encoding="utf-8")
+
+
+def import_reviewed_evidence(
+    raw: Mapping[str, Any],
+    *,
+    outcome_key: str | None = None,
+    publication_level: str = "full",
+) -> dict[str, Any]:
+    """Normalize an allowed public input without upgrading its evidence level."""
+    if publication_level not in {"full", "summary", "inventory_only"}:
+        raise ValueError("unsupported reviewed evidence publication level")
+    if publication_level == "inventory_only":
+        raise ValueError("inventory-only evidence cannot be promoted into a result")
+    if raw.get("schema_version") == 1 and "rows" in raw:
+        if publication_level != "full":
+            raise ValueError("public-export rows require full publication")
+        if not outcome_key:
+            raise ValueError("public-export import requires a named outcome key")
+        rows = raw.get("rows")
+        if not isinstance(rows, list) or not rows:
+            raise ValueError("public-export rows must be non-empty")
+        source_digest = str(raw.get("source_export_sha256") or "")
+        if not re.fullmatch(r"[0-9a-f]{64}", source_digest):
+            raise ValueError("public-export source digest is invalid")
+        cells = []
+        for row in rows:
+            value = _mapping(row, "public-export row")
+            outcome = value.get(outcome_key)
+            if outcome not in {0, 1, None}:
+                raise ValueError("public-export outcome is not binary or unavailable")
+            project = str(value.get("trace_project") or "")
+            call_id = str(value.get("eval_predict_and_score_call_id") or "")
+            evidence_link = (
+                f"https://wandb.ai/{project}/weave/calls/{call_id}"
+                if project and call_id
+                else None
+            )
+            cells.append(
+                {
+                    "cell_id": str(value.get("prediction_id") or ""),
+                    "run_id": str(value.get("run_id") or ""),
+                    "candidate_id": str(value.get("candidate_id") or "")[:12],
+                    "task_id": str(value.get("task_name") or ""),
+                    "harness": str(value.get("harness") or ""),
+                    "treatment": str(value.get("variant_id") or ""),
+                    "attempt": int(value.get("trial_index") or 0),
+                    "status": "terminal",
+                    "outcome": None if outcome is None else bool(outcome),
+                    "outcome_label": outcome_key,
+                    "cost_usd": None,
+                    "evidence_link": evidence_link,
+                }
+            )
+        _reject_sensitive(cells)
+        return {
+            "kind": "public_export_v1",
+            "source_digest": source_digest,
+            "cells": cells,
+        }
+    if raw.get("schema_version") == 3 and raw.get("kind") in {
+        "ComparisonResultV3",
+        "ExperimentViewV3",
+    }:
+        result_digest = str(raw.get("result_digest") or "")
+        if not re.fullmatch(r"[0-9a-f]{64}", result_digest):
+            raise ValueError("V3 comparison projection has no exact result digest")
+        if publication_level != "summary":
+            raise ValueError("V3 aggregate projection cannot be promoted to task rows")
+        summary = _mapping(raw.get("summary"), "V3 comparison summary")
+        _reject_sensitive(summary)
+        return {
+            "kind": str(raw["kind"]),
+            "result_digest": result_digest,
+            "summary": dict(summary),
+            "cells": [],
+        }
+    raise ValueError("unsupported reviewed evidence envelope")
+
+
+def load_inventory(path: Path) -> dict[str, Any]:
+    raw = yaml.safe_load(path.read_text(encoding="utf-8"))
+    if not isinstance(raw, dict):
+        raise ValueError("inventory must be a mapping")
+    _exact_fields(raw, {"schema_version", "entries"}, "inventory")
+    if raw.get("schema_version") != INVENTORY_SCHEMA_VERSION:
+        raise ValueError("inventory schema_version must be 1")
+    entries = raw.get("entries")
+    if not isinstance(entries, list) or not entries:
+        raise ValueError("inventory entries must be non-empty")
+    entry_ids: set[str] = set()
+    run_ids: list[str] = []
+    for raw_entry in entries:
+        entry = _mapping(raw_entry, "inventory entry")
+        _exact_fields(entry, INVENTORY_ENTRY_FIELDS, "inventory entry")
+        entry_id = str(entry.get("id") or "")
+        if not entry_id or entry_id in entry_ids:
+            raise ValueError("inventory entry IDs must be non-empty and unique")
+        entry_ids.add(entry_id)
+        if entry.get("category") not in {
+            "result",
+            "contract",
+            "historical",
+            "cancelled_partial",
+            "planned",
+        }:
+            raise ValueError("inventory category is unsupported")
+        if entry.get("lifecycle_state") not in {
+            "complete",
+            "partial",
+            "cancelled",
+            "planned_unrun",
+        }:
+            raise ValueError("inventory lifecycle state is unsupported")
+        if entry.get("publication_level") not in {
+            "full",
+            "summary",
+            "inventory_only",
+            "planned",
+        }:
+            raise ValueError("inventory publication level is unsupported")
+        for field in ("label", "claim_boundary"):
+            if not isinstance(entry.get(field), str) or not entry[field]:
+                raise ValueError(f"inventory {field} must be non-empty text")
+        entry_runs = _string_list(entry.get("run_ids"), "inventory run_ids")
+        for run_id in entry_runs:
+            if not re.fullmatch(r"\d{8}T\d{6}-[0-9a-f]{10}", run_id):
+                raise ValueError("inventory run ID is malformed")
+        run_ids.extend(entry_runs)
+        _string_list(entry.get("study_ids"), "inventory study_ids")
+        source = entry.get("source_reference")
+        if source is not None:
+            if not isinstance(source, str):
+                raise ValueError("inventory source reference must be a URL")
+            _validate_url(source)
+    if len(run_ids) != len(set(run_ids)):
+        raise ValueError("inventory run IDs must appear exactly once")
+    _reject_sensitive(raw)
+    return raw
+
+
+def inventory_publication(
+    inventory: Mapping[str, Any], study_ids: set[str]
+) -> dict[str, Any]:
+    mapped = [
+        study_id
+        for entry in inventory["entries"]
+        for study_id in entry["study_ids"]
+    ]
+    if set(mapped) != study_ids or len(mapped) != len(set(mapped)):
+        raise ValueError("every detailed Atlas study must map to one inventory entry")
+    body = {
+        "schema_version": INVENTORY_SCHEMA_VERSION,
+        "entries": inventory["entries"],
+    }
+    return {**body, "content_sha256": _digest(body)}
+
+
+def _write_or_validate_inventory(
+    editorial_dir: Path,
+    output: Path,
+    study_ids: set[str],
+    *,
+    write: bool,
+) -> None:
+    path = editorial_dir.parent / "inventory.yaml"
+    public_path = output / "inventory.json"
+    if not path.exists() and not public_path.exists():
+        return
+    if not path.exists():
+        raise ValueError("public inventory has no reviewed source")
+    expected = inventory_publication(load_inventory(path), study_ids)
+    if write:
+        _write_json(public_path, expected)
+        return
+    actual = json.loads(public_path.read_text(encoding="utf-8"))
+    if _canonical_json(actual) != _canonical_json(expected):
+        raise ValueError("public inventory does not match its reviewed source")
 
 
 def _parse_paths(values: Sequence[str], label: str) -> dict[str, list[Path]]:

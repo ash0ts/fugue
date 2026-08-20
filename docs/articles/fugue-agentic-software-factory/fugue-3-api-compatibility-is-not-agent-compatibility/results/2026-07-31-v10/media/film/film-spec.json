@@ -1,0 +1,17 @@
+{
+  "slug": "fugue-3-v10-result-coda",
+  "title": "MCP V10: Clean Evidence, HOLD Decision",
+  "width": 1280,
+  "height": 720,
+  "duration": 48,
+  "fps": 15,
+  "posterTime": 39,
+  "reducedMotionTime": 39,
+  "silent": true,
+  "checkpoints": [
+    {"name": "locked-study", "time": 6},
+    {"name": "separate-ledgers", "time": 17},
+    {"name": "behavioral-regression", "time": 29},
+    {"name": "hold-decision", "time": 39}
+  ]
+}

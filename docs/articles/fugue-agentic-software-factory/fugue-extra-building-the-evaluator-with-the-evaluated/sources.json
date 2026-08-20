@@ -1,0 +1,185 @@
+{
+  "schema_version": 1,
+  "sources": [
+    {
+      "id": "dudycz-end-coding",
+      "author": "Oskar Dudycz",
+      "title": "The End of Coding? Wrong Question",
+      "publication": "Event-Driven.io",
+      "date": "2026",
+      "url": "https://event-driven.io/en/the_end_of_coding_wrong_question/",
+      "supports": "Outcome-over-output framing for agent-assisted engineering."
+    },
+    {
+      "id": "dudycz-subtraction",
+      "author": "Oskar Dudycz",
+      "title": "Addition by Subtraction in Software Design",
+      "publication": "Event-Driven.io",
+      "date": "2026",
+      "url": "https://event-driven.io/en/addition-by-subtraction-in-software-design/",
+      "supports": "Removal and conceptual compression as design outcomes."
+    },
+    {
+      "id": "weng-harness",
+      "author": "Lilian Weng",
+      "title": "Harness Engineering for Self-Improvement",
+      "publication": "Lil’Log",
+      "date": "2026-07-04",
+      "url": "https://lilianweng.github.io/posts/2026-07-04-harness/",
+      "supports": "Recursive-improvement patterns and evaluator risks."
+    },
+    {
+      "id": "auto-evals",
+      "author": "Shreya Shankar and Hamel Husain",
+      "title": "Do Automated Evals Work?",
+      "publication": "Parlance Labs",
+      "date": "2025",
+      "url": "https://parlance-labs.com/blog/posts/auto-evals/index.html",
+      "supports": "Human-guided validation limits for automated analysis."
+    },
+    {
+      "id": "fugue-pr34",
+      "author": "Fugue maintainers",
+      "title": "Make Fugue validate one Agent-system change",
+      "publication": "GitHub pull request #34, merged",
+      "date": "2026-07-30",
+      "url": "https://github.com/ash0ts/fugue/pull/34",
+      "supports": "Merged canonical comparison façade; implementation evidence is not behavioral qualification."
+    },
+    {
+      "id": "fugue-pr35",
+      "author": "Fugue maintainers",
+      "title": "Compile normal MCP servers and Agent Skills into governed locks",
+      "publication": "GitHub pull request #35, merged",
+      "date": "2026-07-30",
+      "url": "https://github.com/ash0ts/fugue/pull/35",
+      "supports": "Merged governed MCP and Skill import layer; implementation evidence is not behavioral qualification."
+    },
+    {
+      "id": "fugue-pr36",
+      "author": "Fugue maintainers",
+      "title": "Add the source-use Skill comparison and a no-key replay",
+      "publication": "GitHub pull request #36, merged",
+      "date": "2026-07-30",
+      "url": "https://github.com/ash0ts/fugue/pull/36",
+      "supports": "Review-visible source-use Study and deterministic no-key replay; replay evidence is not live Agent or MCP evidence."
+    },
+    {
+      "id": "fugue-pr37",
+      "author": "Fugue maintainers",
+      "title": "Define a W&B MCP release-maintenance comparison",
+      "publication": "GitHub pull request #37, merged",
+      "date": "2026-07-30",
+      "url": "https://github.com/ash0ts/fugue/pull/37",
+      "supports": "Review-visible initial MCP release comparison; draft source is not the final source-isolated result."
+    },
+    {
+      "id": "fugue-pr38",
+      "author": "Fugue maintainers",
+      "title": "Make tasksets and deterministic scoring easy to adapt",
+      "publication": "GitHub pull request #38, merged",
+      "date": "2026-07-30",
+      "url": "https://github.com/ash0ts/fugue/pull/38",
+      "supports": "Review-visible taskset, scorer, and Python API layer; draft source is not merged or qualified."
+    },
+    {
+      "id": "fugue-pr42",
+      "author": "Fugue maintainers",
+      "title": "Remove obsolete Fugue surfaces",
+      "publication": "GitHub pull request #42",
+      "date": "2026-07-28",
+      "url": "https://github.com/ash0ts/fugue/pull/42",
+      "supports": "Public exact-head cleanup diff and GitHub diff statistics."
+    },
+    {
+      "id": "fugue-pr43",
+      "author": "Fugue maintainers",
+      "title": "Govern registered comparisons",
+      "publication": "GitHub pull request #43",
+      "date": "2026-07-28",
+      "url": "https://github.com/ash0ts/fugue/pull/43",
+      "supports": "Public exact-head Research control diff and GitHub diff statistics."
+    },
+    {
+      "id": "fugue-pr44",
+      "author": "Fugue maintainers",
+      "title": "Add real W&B MCP evidence study",
+      "publication": "GitHub pull request #44",
+      "date": "2026-07-28",
+      "url": "https://github.com/ash0ts/fugue/pull/44",
+      "supports": "Public exact-head qualification assets and GitHub diff statistics."
+    },
+    {
+      "id": "fugue-pr45",
+      "author": "Fugue maintainers",
+      "title": "Qualify MCP studies on W&B Serverless",
+      "publication": "GitHub pull request #45",
+      "date": "2026-07-28",
+      "url": "https://github.com/ash0ts/fugue/pull/45",
+      "supports": "Public exact-head Serverless boundary and GitHub diff statistics."
+    },
+    {
+      "id": "fugue-pr48",
+      "author": "Fugue maintainers",
+      "title": "Generic Evaluation provider contract",
+      "publication": "GitHub pull request #48, merged",
+      "date": "2026-07-30",
+      "url": "https://github.com/ash0ts/fugue/pull/48",
+      "supports": "Merged generic Evaluation provider implementation; it is not a live qualification result."
+    },
+    {
+      "id": "fugue-pr49",
+      "author": "Fugue maintainers",
+      "title": "Source-aware V3 evidence and analysis",
+      "publication": "GitHub pull request #49, merged",
+      "date": "2026-07-30",
+      "url": "https://github.com/ash0ts/fugue/pull/49",
+      "supports": "Review-visible V3 evidence implementation; draft source is not a live result."
+    },
+    {
+      "id": "fugue-pr50",
+      "author": "Fugue maintainers",
+      "title": "Source-isolated MCP maintainer qualification",
+      "publication": "GitHub pull request #50, merged",
+      "date": "2026-07-30",
+      "url": "https://github.com/ash0ts/fugue/pull/50",
+      "supports": "Review-visible source-isolated qualification implementation; draft source is not a launched canary or release decision."
+    },
+    {
+      "id": "fugue-pr51",
+      "author": "Fugue maintainers",
+      "title": "Real loop, harness, and memory studies",
+      "publication": "GitHub pull request #51, merged",
+      "date": "2026-07-30",
+      "url": "https://github.com/ash0ts/fugue/pull/51",
+      "supports": "Review-visible dedicated Study definitions; draft source is not an approved preview or result."
+    },
+    {
+      "id": "fugue-pr52",
+      "author": "Fugue maintainers",
+      "title": "Remove obsolete shared demo routing",
+      "publication": "GitHub pull request #52, merged",
+      "date": "2026-07-30",
+      "url": "https://github.com/ash0ts/fugue/pull/52",
+      "supports": "Review-visible cleanup of obsolete shared-demo routing; it does not qualify replacement Studies."
+    },
+    {
+      "id": "fugue-pr54",
+      "author": "Fugue maintainers",
+      "title": "Qualify MCP judge and release decisions",
+      "publication": "GitHub pull request #54, merged",
+      "date": "2026-08-05",
+      "url": "https://github.com/ash0ts/fugue/pull/54",
+      "supports": "Merged judge and release-decision qualification layer; judge evidence remains distinct from deterministic correctness."
+    },
+    {
+      "id": "fugue-pr55",
+      "author": "Fugue maintainers",
+      "title": "Make trace demos qualification-ready",
+      "publication": "GitHub pull request #55, merged",
+      "date": "2026-08-05",
+      "url": "https://github.com/ash0ts/fugue/pull/55",
+      "supports": "Merged trace-demo readiness and real-evidence routing layer; implementation readiness is not an executed behavioral result."
+    }
+  ]
+}

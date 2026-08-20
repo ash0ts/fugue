@@ -1,0 +1,95 @@
+{
+  "schema_version": 1,
+  "sources": [
+    {
+      "id": "wandb-runs",
+      "author": "Weights & Biases",
+      "title": "Runs",
+      "publication": "W&B Documentation",
+      "date": "2026",
+      "url": "https://docs.wandb.ai/models/runs",
+      "supports": "Official Run evidence object contract."
+    },
+    {
+      "id": "weave-tracing",
+      "author": "Weights & Biases",
+      "title": "Trace your application",
+      "publication": "Weave Documentation",
+      "date": "2026",
+      "url": "https://docs.wandb.ai/weave/guides/tracking/tracing",
+      "supports": "Official Calls and trace evidence contract."
+    },
+    {
+      "id": "weave-datasets",
+      "author": "Weights & Biases",
+      "title": "Datasets",
+      "publication": "Weave Documentation",
+      "date": "2026",
+      "url": "https://docs.wandb.ai/weave/guides/core-types/datasets",
+      "supports": "Official versioned Dataset contract."
+    },
+    {
+      "id": "weave-evaluations",
+      "author": "Weights & Biases",
+      "title": "Evaluations",
+      "publication": "Weave Documentation",
+      "date": "2026",
+      "url": "https://docs.wandb.ai/weave/guides/core-types/evaluations",
+      "supports": "Official Evaluation, prediction, and scorer contract."
+    },
+    {
+      "id": "fugue-provider-draft",
+      "author": "Fugue maintainers",
+      "title": "Generic Evaluation provider contract",
+      "publication": "GitHub draft pull request #48",
+      "date": "2026-07-30",
+      "url": "https://github.com/ash0ts/fugue/pull/48",
+      "supports": "Review-visible provider implementation; it is preparation source rather than a qualified flagship run."
+    },
+    {
+      "id": "fugue-evidence-v3-draft",
+      "author": "Fugue maintainers",
+      "title": "Source-aware V3 evidence and analysis",
+      "publication": "GitHub draft pull request #49",
+      "date": "2026-07-30",
+      "url": "https://github.com/ash0ts/fugue/pull/49",
+      "supports": "Review-visible V3 evidence implementation; it does not establish live cells, a selected intervention, or a release decision."
+    },
+    {
+      "id": "mcp-final-staging",
+      "author": "Weights & Biases",
+      "title": "W&B MCP exact 0.4 V10 candidate",
+      "publication": "GitHub commit",
+      "date": "2026-07-31",
+      "url": "https://github.com/wandb/wandb-mcp-server/commit/5c6cc1c9a1079296daf6613ea6d12daebdd8bcba",
+      "supports": "Exact 0.4 candidate source identity used by the completed V10 Study and reviewed failure lock."
+    },
+    {
+      "id": "fugue-mcp-qualification-draft",
+      "author": "Fugue maintainers",
+      "title": "Source-isolated MCP maintainer qualification",
+      "publication": "GitHub pull request #50, merged",
+      "date": "2026-07-30",
+      "url": "https://github.com/ash0ts/fugue/pull/50",
+      "supports": "Merged source-isolated MCP qualification implementation, completed V10 result, and exact failure-lock boundary."
+    },
+    {
+      "id": "fugue-real-studies-draft",
+      "author": "Fugue maintainers",
+      "title": "Real loop, harness, and memory studies",
+      "publication": "GitHub draft pull request #51",
+      "date": "2026-07-30",
+      "url": "https://github.com/ash0ts/fugue/pull/51",
+      "supports": "Review-visible dedicated Study definitions; they do not establish approved previews, launched cells, or results."
+    },
+    {
+      "id": "fugue-routing-cleanup-draft",
+      "author": "Fugue maintainers",
+      "title": "Remove obsolete shared demo routing",
+      "publication": "GitHub draft pull request #52",
+      "date": "2026-07-30",
+      "url": "https://github.com/ash0ts/fugue/pull/52",
+      "supports": "Review-visible removal of obsolete shared-demo routing; it does not establish qualification of the replacement Studies."
+    }
+  ]
+}

@@ -5,7 +5,11 @@ on:
     branches: [main]
     paths:
       - "atlas/**"
+      - "docs/articles/**"
       - "tools/check_atlas_build.py"
+      - "tools/check_article_series.py"
+      - "tools/check_article_links.py"
+      - "tests/test_article_series.py"
       - ".github/workflows/pages.yml"
   workflow_dispatch:
 
@@ -42,6 +46,15 @@ jobs:
         run: npm run build
       - name: Verify static publication boundary
         run: python tools/check_atlas_build.py atlas/dist
+      - name: Verify article release contract
+        run: >-
+          python tools/check_article_series.py
+          docs/articles/fugue-agentic-software-factory
+          atlas/dist
+      - name: Verify article references
+        run: >-
+          python tools/check_article_links.py
+          docs/articles/fugue-agentic-software-factory
       - uses: actions/configure-pages@v5
       - uses: actions/upload-pages-artifact@v4
         with:

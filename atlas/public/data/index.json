@@ -1,6 +1,72 @@
 {
-  "content_sha256": "688eea23ddeb3cb2fb1f36b83e5b8c0f3454b67de9ed9bb22a5b602d9ea4d595",
+  "content_sha256": "1fe9104bbba8549757b407706947eba809fe350b222a0e6dedf16bf2fe182f8d",
   "experiments": [
+    {
+      "content_sha256": "47e90ca555d21ba115105444f9b653aec80b2d6755fa8f76dd2ce42d4c78a1f0",
+      "decision_value": 100,
+      "evidence_tier": "directional",
+      "harnesses": [
+        "claude-code"
+      ],
+      "id": "mcp-main-vs-0-4-v10",
+      "metrics": {
+        "aligned_pairs": 8,
+        "critical_failures": 7,
+        "expected_cells": 16,
+        "improved_pairs": 0,
+        "outcome_observed_cells": 8,
+        "outcome_rate": 0.125,
+        "outcome_successes": 1,
+        "published_cells": 16,
+        "regressed_pairs": 1,
+        "total_cost_usd": 7.331252,
+        "unchanged_pairs": 7
+      },
+      "models": [
+        "anthropic/claude-sonnet-5"
+      ],
+      "status": "complete_hold",
+      "summary": "A governed 16-cell maintainer comparison in which evidence integrity passed, two behavior dimensions improved, exact-history correctness regressed, and the release decision remained HOLD.",
+      "title": "W&B MCP main versus 0.4 V10",
+      "treatments": [
+        "wandb-mcp-main",
+        "wandb-mcp-0-4-current"
+      ]
+    },
+    {
+      "content_sha256": "42253fe3d0f23c336a2532f144d634039613a29696a97d815cefb2afb03807fb",
+      "decision_value": 94,
+      "evidence_tier": "directional",
+      "harnesses": [
+        "claude-code",
+        "codex"
+      ],
+      "id": "support-data-authority-v1-canary",
+      "metrics": {
+        "aligned_pairs": null,
+        "critical_failures": 4,
+        "expected_cells": 6,
+        "improved_pairs": null,
+        "outcome_observed_cells": 6,
+        "outcome_rate": 0.3333333333333333,
+        "outcome_successes": 2,
+        "published_cells": 6,
+        "regressed_pairs": null,
+        "total_cost_usd": null,
+        "unchanged_pairs": null
+      },
+      "models": [
+        "wandb/zai-org/GLM-5.2"
+      ],
+      "status": "complete",
+      "summary": "A six-cell qualification of baseline, warning-only, and action-gated support behavior across Claude Code and Codex, published from the checked public export.",
+      "title": "Support-data action-gate qualification",
+      "treatments": [
+        "baseline",
+        "warning-only",
+        "action-gate"
+      ]
+    },
     {
       "content_sha256": "ee6b6380dbc8c0262294807714a53d5e9356a58fb7eaac492dd923b130404ece",
       "decision_value": 96,
@@ -192,6 +258,147 @@
         "rag-bm25",
         "rag-dense",
         "rag-hybrid"
+      ]
+    },
+    {
+      "content_sha256": "f6d83b135b7597bb378ad8cc50f3155c48303f6e6e3eeaeb1550092c65432fca",
+      "decision_value": 0,
+      "evidence_tier": "active",
+      "harnesses": [
+        "claude-code"
+      ],
+      "id": "claude-loop-skill-mcp-v1",
+      "metrics": {
+        "agent_links": 0,
+        "completion_rate": 0.0,
+        "expected_predictions": 16,
+        "harness_errors": 0,
+        "input_tokens": null,
+        "mean_cost_usd": null,
+        "mean_mrr": null,
+        "mean_recall_at_10": null,
+        "measured_cost_predictions": 0,
+        "measured_latency_predictions": 0,
+        "measured_usage_predictions": 0,
+        "median_turns": null,
+        "median_wall_time_sec": null,
+        "output_tokens": null,
+        "paired_bootstrap": null,
+        "pass_rate": null,
+        "passed_predictions": 0,
+        "predictions": 0,
+        "provider_errors": 0,
+        "recoverable_errors": 0,
+        "refusals": 0,
+        "scored_predictions": 0,
+        "tool_calls": null,
+        "total_cost_usd": null
+      },
+      "models": [
+        "anthropic/claude-sonnet-5"
+      ],
+      "status": "planned_unrun",
+      "summary": "A planned local-Harbor Study that compares four reviewed Skill and MCP arms on two discovery failures, locks one intervention, and then compares it with production on four private holdout tasks.",
+      "title": "Claude Code Skill \u00d7 MCP loop",
+      "treatments": [
+        "production",
+        "skill-only",
+        "mcp-only",
+        "combined"
+      ]
+    },
+    {
+      "content_sha256": "34e571a9a343538e0a484b6616e492245f2567f2ece87d84280f172a68ebaa40",
+      "decision_value": 0,
+      "evidence_tier": "active",
+      "harnesses": [
+        "hermes",
+        "openclaw",
+        "claude-code",
+        "codex"
+      ],
+      "id": "real-harness-study-v1",
+      "metrics": {
+        "agent_links": 0,
+        "completion_rate": 0.0,
+        "expected_predictions": 8,
+        "harness_errors": 0,
+        "input_tokens": null,
+        "mean_cost_usd": null,
+        "mean_mrr": null,
+        "mean_recall_at_10": null,
+        "measured_cost_predictions": 0,
+        "measured_latency_predictions": 0,
+        "measured_usage_predictions": 0,
+        "median_turns": null,
+        "median_wall_time_sec": null,
+        "output_tokens": null,
+        "paired_bootstrap": null,
+        "pass_rate": null,
+        "passed_predictions": 0,
+        "predictions": 0,
+        "provider_errors": 0,
+        "recoverable_errors": 0,
+        "refusals": 0,
+        "scored_predictions": 0,
+        "tool_calls": null,
+        "total_cost_usd": null
+      },
+      "models": [
+        "wandb/zai-org/GLM-5.2"
+      ],
+      "status": "planned_unrun",
+      "summary": "A planned eight-cell local-Harbor comparison of Hermes, OpenClaw, Claude Code, and Codex on two locked SWE-bench Verified tasks with GLM-5.2 fixed.",
+      "title": "Real harness behavior canary",
+      "treatments": [
+        "baseline"
+      ]
+    },
+    {
+      "content_sha256": "856abc7cb6ce8d9fff69a274a0e40ef4d7b82f215edb580a3f548314323c8e71",
+      "decision_value": 0,
+      "evidence_tier": "active",
+      "harnesses": [
+        "claude-code"
+      ],
+      "id": "real-memory-study-v1",
+      "metrics": {
+        "agent_links": 0,
+        "completion_rate": 0.0,
+        "expected_predictions": 8,
+        "harness_errors": 0,
+        "input_tokens": null,
+        "mean_cost_usd": null,
+        "mean_mrr": null,
+        "mean_recall_at_10": null,
+        "measured_cost_predictions": 0,
+        "measured_latency_predictions": 0,
+        "measured_usage_predictions": 0,
+        "median_turns": null,
+        "median_wall_time_sec": null,
+        "output_tokens": null,
+        "paired_bootstrap": null,
+        "pass_rate": null,
+        "passed_predictions": 0,
+        "predictions": 0,
+        "provider_errors": 0,
+        "recoverable_errors": 0,
+        "refusals": 0,
+        "scored_predictions": 0,
+        "tool_calls": null,
+        "total_cost_usd": null
+      },
+      "models": [
+        "anthropic/claude-sonnet-5"
+      ],
+      "status": "planned_unrun",
+      "summary": "A planned eight-cell local-Harbor comparison of baseline, locked dense retrieval, an inspect-and-verify policy, and their combination with Claude Code and Sonnet 5 fixed.",
+      "title": "Real repository-memory intervention canary",
+      "treatments": [
+        "baseline",
+        "rag-dense",
+        "policy-only",
+        "combined"
       ]
     }
   ],

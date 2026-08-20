@@ -1,0 +1,30 @@
+{
+  "schema_version": 1,
+  "slug": "fugue-extra-building-the-evaluator-with-the-evaluated",
+  "html_digest": "sha256:c0df066bd515d9acbeaaff27804d97f4709e531fc2afc51c27d66bf25f62d696",
+  "mp4_digest": "sha256:83087404e543eb38f3264f71cdda4943818bca9b0638b46b8ad7439160269b04",
+  "poster_digest": "sha256:bcda59180365e5e9a68f33b02a87cdbb380b8eba194f4e8a87dab1ad530c8a0f",
+  "contact_sheet_digest": "sha256:ac69fb8b0b06565fe3b40c00d5f33cdc6eb27a7a196a35120bb5b0202f0e7896",
+  "checkpoint_frame_digests": {
+    "public-stack": "sha256:bcda59180365e5e9a68f33b02a87cdbb380b8eba194f4e8a87dab1ad530c8a0f",
+    "identity-case": "sha256:c3c952756560706b5ad331ada834b57109887f2cd0b6060d31b1496397959b99",
+    "qualification-defect": "sha256:c2683c4f20f659f6453063aaffbe02161e7b66a42edb70a79c28a7d9c99045e0",
+    "cleanup-case": "sha256:1bd7e18c01fb7d66fdda76f29377f27aaf747fdc7d4e9ef3ac215d5e52eccbd9",
+    "division-of-labor": "sha256:6f95a6b83162c6e5235d9f4bbd63b5b44aa9acb218e441f8d206ca86182a78e6",
+    "recursion-boundary": "sha256:c13e590ad6fbe528ae63d8ccb063404ebf6f572d0e457f75ce6c3a9f39cddd85",
+    "evidence-boundary": "sha256:57b8752318e440d7ca9884a4f3c020c4cde747568389e427b477305d3ed859bc",
+    "series-context": "sha256:b5f0647d412db984bca316156572c49f2688542a8acd699daec17fe659b1d965"
+  },
+  "video": {
+    "codec_name": "h264",
+    "profile": "High",
+    "width": 1280,
+    "height": 720,
+    "pix_fmt": "yuv420p",
+    "color_range": "tv",
+    "r_frame_rate": "15/1",
+    "side_data_list": [
+      {}
+    ]
+  }
+}

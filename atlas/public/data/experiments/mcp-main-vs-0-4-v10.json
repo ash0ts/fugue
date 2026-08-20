@@ -1,0 +1,143 @@
+{
+  "caveats": [
+    "The exact V3 task-row artifact was unavailable from the local Research store, so this page publishes the reviewed aggregate and exact digest without reconstructing task rows.",
+    "The judge is advisory, infrastructure release gates are separate, and this study cannot attribute the whole-release result to one 0.4 feature."
+  ],
+  "cells": [],
+  "content_sha256": "47e90ca555d21ba115105444f9b653aec80b2d6755fa8f76dd2ce42d4c78a1f0",
+  "decision_value": 100,
+  "evidence_tier": "directional",
+  "findings": [
+    "Evidence integrity passed and bounded inventory plus Evaluation reconciliation improved, but the candidate still regressed behaviorally and the release stayed on HOLD.",
+    "Candidate full deterministic passes were 1/8; aligned pairs were zero improved, one regressed, and seven unchanged; seven candidate attempts retained critical failures."
+  ],
+  "groups": [
+    {
+      "full_deterministic_passes": 0,
+      "id": "baseline",
+      "label": "Exact main at 53b199a5",
+      "published_cells": 8
+    },
+    {
+      "full_deterministic_passes": 1,
+      "id": "candidate",
+      "label": "Exact 0.4 at 5c6cc1c9",
+      "published_cells": 8
+    }
+  ],
+  "hypothesis": "Structured queries, projected reads, and evaluation reconciliation in 0.4 may improve bounded maintenance investigation without weakening factual correctness.",
+  "id": "mcp-main-vs-0-4-v10",
+  "ledgers": {
+    "authored_judge": {
+      "status": "advisory",
+      "summary": "The blind maintainer judge remains advisory pending human calibration and cannot rescue deterministic failures."
+    },
+    "decision": {
+      "status": "hold",
+      "summary": "Behavioral verdict REGRESSED; package release decision HOLD; no larger confirmation was run."
+    },
+    "deterministic": {
+      "status": "failed",
+      "summary": "The candidate passed every required dimension in 1/8 attempts, retained seven critical failures, and regressed one aligned pair."
+    },
+    "evidence_integrity": {
+      "status": "passed",
+      "summary": "All 16 attempts and 80 required evidence links reconciled with grade A lineage and privacy integrity."
+    },
+    "infrastructure": {
+      "status": "passed",
+      "summary": "Local Docker through Harbor completed 16/16 planned cells at an observed cost of $7.331252."
+    },
+    "mechanism": {
+      "status": "mixed",
+      "summary": "Evaluation reconciliation and bounded inventory improved to 2/2; exact history did not improve and failure triage remained unbounded."
+    }
+  },
+  "links": {
+    "evaluations": [],
+    "project": "https://wandb.ai/wandb/fugue-mcp-release-qualification-v1/weave"
+  },
+  "matrix": {
+    "attempts": 2,
+    "cohorts": [
+      {
+        "expected_predictions": 16,
+        "harnesses": [
+          "claude-code"
+        ],
+        "id": "local-harbor-confirmation",
+        "label": "Four tasks \u00d7 two revisions \u00d7 two attempts",
+        "models": [
+          "anthropic/claude-sonnet-5"
+        ],
+        "tasks": [
+          "run-inventory-projection",
+          "filtered-failure-triage",
+          "evaluation-summary-accuracy",
+          "exact-history-target"
+        ],
+        "treatments": [
+          "wandb-mcp-main",
+          "wandb-mcp-0-4-current"
+        ]
+      }
+    ],
+    "expected_predictions": 16,
+    "experiment_id": "mcp-main-vs-0-4-tool-surface-confirmation-v10",
+    "harnesses": [
+      "claude-code"
+    ],
+    "models": [
+      "anthropic/claude-sonnet-5"
+    ],
+    "tasks": [
+      "run-inventory-projection",
+      "filtered-failure-triage",
+      "evaluation-summary-accuracy",
+      "exact-history-target"
+    ],
+    "treatments": [
+      "wandb-mcp-main",
+      "wandb-mcp-0-4-current"
+    ],
+    "workload_id": "wandb-mcp-maintainer-qualification"
+  },
+  "metrics": {
+    "aligned_pairs": 8,
+    "critical_failures": 7,
+    "expected_cells": 16,
+    "improved_pairs": 0,
+    "outcome_observed_cells": 8,
+    "outcome_rate": 0.125,
+    "outcome_successes": 1,
+    "published_cells": 16,
+    "regressed_pairs": 1,
+    "total_cost_usd": 7.331252,
+    "unchanged_pairs": 7
+  },
+  "primary_outcome": {
+    "failure_label": "One or more required deterministic dimensions failed",
+    "id": "required_deterministic_pass",
+    "label": "Candidate attempts passing every required deterministic dimension",
+    "success_label": "Full deterministic pass"
+  },
+  "provenance": {
+    "dataset_digest": "0b8c613d9be1a0e7f1e8e130c33e0e951a4cb6afd7d92967d19e68885496bf0c",
+    "dataset_id": "tool-surface-confirmation-tasks-v8",
+    "run_ids": [
+      "20260731T063856-2fe747cab6"
+    ],
+    "snapshot_digest": "e062f5b392a36d9ebd97adc3ab58b6e253cdd9dd943381342d51d76303bbcf38",
+    "source_commit": "24d85d54ada2664c3da205883ee8834f5a203a06",
+    "source_url": "https://github.com/ash0ts/fugue/commit/24d85d54ada2664c3da205883ee8834f5a203a06"
+  },
+  "publication_level": "summary",
+  "question": "Does exact W&B MCP 0.4 help Claude Code answer bounded W&B and Weave maintenance questions more reliably than exact main?",
+  "schema_version": 2,
+  "status": "complete_hold",
+  "study_kind": "comparison",
+  "summary": "A governed 16-cell maintainer comparison in which evidence integrity passed, two behavior dimensions improved, exact-history correctness regressed, and the release decision remained HOLD.",
+  "task_selection": "Four release-derived tasks were locked before execution and run for two attempts on both exact MCP revisions.",
+  "title": "W&B MCP main versus 0.4 V10",
+  "why_it_matters": "A release can improve mechanisms and evidence integrity while still failing its behavioral gate; the decision must preserve all four ledgers."
+}

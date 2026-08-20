@@ -1,0 +1,75 @@
+{
+  "slug": "fugue-4b-trace-to-release-decision",
+  "title": "The Claude Code–Fugue Loop",
+  "width": 1280,
+  "height": 720,
+  "duration": 110,
+  "fps": 15,
+  "posterScene": "qualification-gates",
+  "reducedMotionScene": "qualification-gates",
+  "posterTime": 81.08,
+  "reducedMotionTime": 81.08,
+  "transitionSeconds": 0.35,
+  "safeArea": {
+    "left": 54,
+    "top": 40,
+    "right": 54,
+    "bottom": 100
+  },
+  "typeScale": {
+    "essential": 28,
+    "supporting": 24,
+    "compact": 18
+  },
+  "sourceHeadingIds": [
+    "the-evidence-scene",
+    "the-approval-card",
+    "what-the-audience-sees-while-cells-run",
+    "failure-is-part-of-the-runbook",
+    "build-the-evidence-wall-first-required-not-yet-observed",
+    "qualification-checklist",
+    "presentation-sequence"
+  ],
+  "silent": true,
+  "placement": {
+    "after_heading": "qualification-checklist",
+    "after_label": "Qualification checklist",
+    "bridge_to_heading": "try-this-in-15-minutes",
+    "bridge_to_label": "Try this in 15 minutes",
+    "what_to_watch": "Treat the loop as a qualification contract: 8 discovery cells, a frozen selection, and 8 separately approved private-holdout cells through local Harbor."
+  },
+  "checkpoints": [
+    {
+      "name": "evidence-scene",
+      "time": 7.92
+    },
+    {
+      "name": "approval-card",
+      "time": 21.799999999999997
+    },
+    {
+      "name": "attempt-lifecycle",
+      "time": 36.8
+    },
+    {
+      "name": "failure-branches",
+      "time": 51.8
+    },
+    {
+      "name": "evidence-reconcile",
+      "time": 66.8
+    },
+    {
+      "name": "qualification-gates",
+      "time": 81.08
+    },
+    {
+      "name": "bounded-memo",
+      "time": 94.36
+    },
+    {
+      "name": "series-context",
+      "time": 106.64
+    }
+  ]
+}
