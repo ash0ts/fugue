@@ -769,6 +769,85 @@ def test_resultless_runner_start_failure_is_authoritatively_recovered(
     assert not cell.result_path.exists()
 
 
+def test_started_runner_pre_agent_failure_keeps_cost_unavailable(
+    tmp_path: Path,
+) -> None:
+    base = _cell(tmp_path, "task-plugin-import", "baseline")
+    physical = PhysicalExecutionIdentityV1.create(
+        logical_attempt_id=base.attempt_id,
+        controller_id="comparison-plugin-import",
+        retry_ordinal=0,
+    )
+    cell = replace(
+        base,
+        physical_execution_id=physical.physical_execution_id,
+        retry_ordinal=0,
+        config_sha256="a" * 64,
+    )
+    observed = CellOutcome(
+        cell.id,
+        "failed",
+        returncode=1,
+        error="Harbor exited before Agent evidence",
+        benchmark_outcome="unscored",
+        runtime_outcome="not_started",
+        terminal_kind="runner_start_failure",
+    )
+    _write_physical_runner_terminal_observation(
+        repo_root=tmp_path,
+        cell=cell,
+        outcome=observed,
+    )
+
+    recovered = _physical_runner_terminal_observation(
+        repo_root=tmp_path,
+        cell=cell,
+        physical=physical,
+    )
+    cost, authoritative, source = _infrastructure_attempt_cost(
+        repo_root=tmp_path,
+        run_id=cell.run_id,
+        cell=cell,
+        physical=physical,
+        terminal_kind="runner_start_failure",
+    )
+
+    assert recovered is not None
+    assert recovered[0].terminal_kind == "runner_start_failure"
+    assert recovered[0].runtime_outcome == "not_started"
+    assert (cost, authoritative, source) == (
+        None,
+        False,
+        "physical-harbor-result",
+    )
+    receipt_path = (
+        tmp_path
+        / ".fugue"
+        / "runtime"
+        / cell.run_id
+        / "physical-executions"
+        / physical.physical_execution_id
+        / "runner-terminal.json"
+    )
+    receipt = json.loads(receipt_path.read_text(encoding="utf-8"))
+    receipt["runner_start_evidence"][
+        "observed_agent_session_or_tool_artifacts"
+    ] = ["trial/agent/trajectory.json"]
+    receipt["receipt_digest"] = stable_digest(
+        {key: value for key, value in receipt.items() if key != "receipt_digest"}
+    )
+    receipt_path.write_text(json.dumps(receipt), encoding="utf-8")
+
+    assert (
+        _physical_runner_terminal_observation(
+            repo_root=tmp_path,
+            cell=cell,
+            physical=physical,
+        )
+        is None
+    )
+
+
 @pytest.mark.parametrize(
     ("terminal_kind", "status", "runtime_outcome"),
     [

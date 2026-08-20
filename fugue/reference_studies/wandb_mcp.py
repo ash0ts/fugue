@@ -24,6 +24,12 @@ WANDB_MCP_REFERENCE_ROOT = (
 )
 SOURCE_LOCK_NAME = "source.lock.json"
 PREPARATION_RECEIPT_NAME = "preparation.receipt.json"
+HUMAN_READABLE_COMPARISON_NAME = "human-readable-evidence-canary.yaml"
+HUMAN_READABLE_TASKS_NAME = "human-readable-evidence-tasks.jsonl"
+HUMAN_READABLE_PRIVATE_LABELS_NAME = (
+    "human-readable-evidence-private-labels.jsonl"
+)
+HUMAN_READABLE_CANARY_LOCK_NAME = "human-readable-evidence-canary.lock.json"
 
 _HEX_40 = re.compile(r"^[0-9a-f]{40}$")
 _HEX_64 = re.compile(r"^[0-9a-f]{64}$")
@@ -38,6 +44,7 @@ _REFERENCE_RESOURCE_ROOT = ("resources", "reference-studies", "wandb-mcp")
 _REFERENCE_RESOURCE_NAMES = (
     "README.md",
     "comparison.yaml.template",
+    "human-readable-evidence-canary.yaml.template",
     "configs/fugue/task-authoring/profiles.yaml",
     "mcp.json.template",
     "private-labels.jsonl",
@@ -48,6 +55,10 @@ _REFERENCE_RESOURCE_NAMES = (
 )
 _BASELINE_COMMIT = "53b199a5f4af29aa82077e2c7f1e2c5e5e0c2ca0"
 _SOURCE_PROJECT = "wandb/fugue-mcp-release-source-v2"
+_HUMAN_READABLE_TASK_IDS = (
+    "run-inventory-projection",
+    "evaluation-summary-accuracy",
+)
 _PACKAGED_RELEASE_NOTE_COVERAGE = (
     {
         "release_note": "selective-server-side-fields",
@@ -980,6 +991,21 @@ def _materialize_packaged_reference_study(
             mode=0o600 if destination_name == "private-labels.jsonl" else 0o644,
         )
 
+    human_tasks, human_private_labels = _select_aligned_reference_rows(
+        public_body=resources["tasks.jsonl"],
+        private_body=resources["private-labels.jsonl"],
+        selected_ids=_HUMAN_READABLE_TASK_IDS,
+    )
+    _write_prepared_file(
+        request.staging_root / HUMAN_READABLE_TASKS_NAME,
+        human_tasks,
+    )
+    _write_prepared_file(
+        request.staging_root / HUMAN_READABLE_PRIVATE_LABELS_NAME,
+        human_private_labels,
+        mode=0o600,
+    )
+
     from fugue.bench.component_imports import import_mcp_config, lock_mcp_import
 
     import_mcp_config(
@@ -1020,6 +1046,15 @@ def _materialize_packaged_reference_study(
         name="comparison.yaml.template",
     )
     _write_prepared_file(request.staging_root / "comparison.yaml", comparison)
+    human_readable_comparison = _render_resource(
+        resources["human-readable-evidence-canary.yaml.template"],
+        replacements,
+        name="human-readable-evidence-canary.yaml.template",
+    )
+    _write_prepared_file(
+        request.staging_root / HUMAN_READABLE_COMPARISON_NAME,
+        human_readable_comparison,
+    )
     _write_prepared_file(
         request.staging_root / ".fugue-study.json",
         _json_bytes(
@@ -1032,7 +1067,11 @@ def _materialize_packaged_reference_study(
     )
     _write_prepared_file(
         request.staging_root / ".gitignore",
-        b".env\nprivate-labels.jsonl\n.fugue/results/\n",
+        (
+            b".env\nprivate-labels.jsonl\n"
+            b"human-readable-evidence-private-labels.jsonl\n"
+            b".fugue/results/\n"
+        ),
     )
 
     task_digest = hashlib.sha256(resources["tasks.jsonl"]).hexdigest()
@@ -1040,6 +1079,48 @@ def _materialize_packaged_reference_study(
     scorer_digest = hashlib.sha256(
         resources["tool_surface_scorer_v7.py"]
     ).hexdigest()
+    human_readable_canary_lock = _digest_bound_document(
+        {
+            "schema_version": 1,
+            "kind": "wandb-mcp-human-readable-evidence-canary",
+            "study_id": (
+                "mcp-main-vs-0-4-"
+                f"{candidate_sha[:7]}-human-readable-evidence-canary-v2"
+            ),
+            "source_lock_digest": request.source_lock.lock_digest,
+            "candidate_source_digest": (
+                request.source_lock.candidate_source_digest
+            ),
+            "comparison": {
+                "path": HUMAN_READABLE_COMPARISON_NAME,
+                "sha256": hashlib.sha256(
+                    human_readable_comparison
+                ).hexdigest(),
+            },
+            "tasks": {
+                "path": HUMAN_READABLE_TASKS_NAME,
+                "sha256": hashlib.sha256(human_tasks).hexdigest(),
+                "task_ids": list(_HUMAN_READABLE_TASK_IDS),
+            },
+            "private_labels": {
+                "path": HUMAN_READABLE_PRIVATE_LABELS_NAME,
+                "sha256": hashlib.sha256(human_private_labels).hexdigest(),
+                "task_ids": list(_HUMAN_READABLE_TASK_IDS),
+            },
+            "scorer": {
+                "path": "tool_surface_scorer_v7.py",
+                "sha256": scorer_digest,
+            },
+            "arm_count": 2,
+            "attempts_per_coordinate": 1,
+            "logical_cell_count": 4,
+        },
+        digest_field="lock_digest",
+    )
+    _write_prepared_file(
+        request.staging_root / HUMAN_READABLE_CANARY_LOCK_NAME,
+        _json_bytes(human_readable_canary_lock),
+    )
     release_notes = _digest_bound_document(
         {
             "schema_version": 1,
@@ -1089,6 +1170,10 @@ def _materialize_packaged_reference_study(
         f".fugue/imports/integrations/{baseline_id}.yaml",
         f".fugue/imports/integrations/{candidate_id}.yaml",
         "comparison.yaml",
+        HUMAN_READABLE_CANARY_LOCK_NAME,
+        HUMAN_READABLE_COMPARISON_NAME,
+        HUMAN_READABLE_PRIVATE_LABELS_NAME,
+        HUMAN_READABLE_TASKS_NAME,
         "mechanism-receipt.json",
         "private-labels.jsonl",
         "release-notes.lock.json",
@@ -1102,7 +1187,8 @@ def _materialize_packaged_reference_study(
         _materialized_artifact(
             request.staging_root,
             path,
-            private=path == "private-labels.jsonl",
+            private=path
+            in {"private-labels.jsonl", HUMAN_READABLE_PRIVATE_LABELS_NAME},
         )
         for path in sorted(key_paths)
     )
@@ -1122,6 +1208,9 @@ def _materialize_packaged_reference_study(
             "tasks_sha256": task_digest,
             "private_labels_sha256": private_digest,
             "scorer_sha256": scorer_digest,
+            "human_readable_canary_lock": human_readable_canary_lock[
+                "lock_digest"
+            ],
             "hosted_source_evidence_lock": source_evidence[
                 "evidence_lock_digest"
             ],
@@ -1344,6 +1433,75 @@ def _render_resource(
             f"packaged reference template {name} has unresolved markers: {remaining}"
         )
     return text.encode("utf-8")
+
+
+def _jsonl_rows_by_id(body: bytes, *, name: str) -> dict[str, bytes]:
+    try:
+        text = body.decode("utf-8", errors="strict")
+    except UnicodeDecodeError as exc:
+        raise ValueError(f"packaged reference JSONL is not UTF-8: {name}") from exc
+    rows: dict[str, bytes] = {}
+    for line_number, line in enumerate(text.splitlines(), start=1):
+        if not line.strip():
+            raise ValueError(
+                f"packaged reference JSONL has a blank row: {name}:{line_number}"
+            )
+        try:
+            value = json.loads(line)
+        except json.JSONDecodeError as exc:
+            raise ValueError(
+                f"packaged reference JSONL is invalid: {name}:{line_number}"
+            ) from exc
+        if not isinstance(value, dict):
+            raise ValueError(
+                "packaged reference JSONL row must be an object: "
+                f"{name}:{line_number}"
+            )
+        row_id = value.get("id")
+        if not isinstance(row_id, str) or not _SAFE_ID.fullmatch(row_id):
+            raise ValueError(
+                "packaged reference JSONL row id is invalid: "
+                f"{name}:{line_number}"
+            )
+        if row_id in rows:
+            raise ValueError(
+                f"packaged reference JSONL row id is duplicated: {name}:{row_id}"
+            )
+        rows[row_id] = (line + "\n").encode("utf-8")
+    if not rows:
+        raise ValueError(f"packaged reference JSONL is empty: {name}")
+    return rows
+
+
+def _select_aligned_reference_rows(
+    *,
+    public_body: bytes,
+    private_body: bytes,
+    selected_ids: Sequence[str],
+) -> tuple[bytes, bytes]:
+    """Select an exact task subset during trusted preparation.
+
+    The prepared comparison points directly at these complete files. No run,
+    preview, CLI caller, or presentation client truncates the four-task bundle
+    after preparation.
+    """
+
+    if not selected_ids or len(selected_ids) != len(set(selected_ids)):
+        raise ValueError("reference task selection must contain unique task ids")
+    public = _jsonl_rows_by_id(public_body, name="tasks.jsonl")
+    private = _jsonl_rows_by_id(private_body, name="private-labels.jsonl")
+    if set(public) != set(private):
+        raise ValueError("packaged reference tasks and private labels are not aligned")
+    missing = [task_id for task_id in selected_ids if task_id not in public]
+    if missing:
+        raise ValueError(
+            "human-readable evidence canary task ids are missing: "
+            + ", ".join(missing)
+        )
+    return (
+        b"".join(public[task_id] for task_id in selected_ids),
+        b"".join(private[task_id] for task_id in selected_ids),
+    )
 
 
 def _write_prepared_file(path: Path, body: bytes, *, mode: int = 0o644) -> None:

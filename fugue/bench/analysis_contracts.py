@@ -1002,7 +1002,7 @@ def aligned_analysis_from_dict(value: Mapping[str, Any]) -> AlignedAnalysisV1:
     arms = tuple(_aligned_arm(item) for item in _sequence(value.get("arms"), "arms"))
     contrasts = tuple(
         _aligned_contrast(item)
-        for item in _sequence(value.get("contrasts"), "contrasts")
+        for item in _optional_sequence(value.get("contrasts"), "contrasts")
     )
     aligned_attempts = tuple(
         _aligned_attempt_set(item)

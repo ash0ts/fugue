@@ -674,6 +674,40 @@ def _target(
     )
 
 
+def test_environment_target_normalizes_only_a_root_trailing_slash() -> None:
+    target = _target(
+        {
+            **_publication_env(),
+            "WANDB_BASE_URL": "https://api.wandb.example/",
+            "WANDB_APP_BASE_URL": "https://app.wandb.example/",
+        }
+    )
+
+    assert target.api_base_url == "https://api.wandb.example"
+    assert target.app_base_url == "https://app.wandb.example"
+
+
+@pytest.mark.parametrize(
+    ("field", "value"),
+    (
+        ("WANDB_BASE_URL", " https://api.wandb.example"),
+        ("WANDB_BASE_URL", "https://api.wandb.example/v1"),
+        ("WANDB_APP_BASE_URL", "https://app.wandb.example/projects"),
+    ),
+)
+def test_environment_target_rejects_nonorigin_values(
+    field: str,
+    value: str,
+) -> None:
+    env = {**_publication_env(), field: value}
+
+    with pytest.raises(
+        (ValueError, adapter.WandbResearchIndexPublicationError),
+        match="safe HTTPS origin|safe HTTPS URL",
+    ):
+        _target(env)
+
+
 def test_wandb_import_is_lazy_and_missing_extra_error_is_actionable(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

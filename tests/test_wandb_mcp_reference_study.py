@@ -9,15 +9,22 @@ from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
+import yaml
 
 from fugue.bench.candidates import stable_digest
-from fugue.bench.comparison import load_comparison
+from fugue.bench.comparison import compile_comparison, load_comparison
 from fugue.bench.component_imports import MCPImportLockV1
+from fugue.bench.manifest import load_manifest
+from fugue.bench.task_authoring import AuthoredTaskMaterializer
 from fugue.reference_studies import (
     wandb_mcp_qualification,
     wandb_mcp_qualification_core,
 )
 from fugue.reference_studies.wandb_mcp import (
+    HUMAN_READABLE_CANARY_LOCK_NAME,
+    HUMAN_READABLE_COMPARISON_NAME,
+    HUMAN_READABLE_PRIVATE_LABELS_NAME,
+    HUMAN_READABLE_TASKS_NAME,
     PREPARATION_RECEIPT_NAME,
     SOURCE_LOCK_NAME,
     WANDB_MCP_REFERENCE_ROOT,
@@ -50,6 +57,22 @@ TREE = "d" * 40
 BLOB = "e" * 40
 RELEASE_NOTES = b"# W&B MCP 0.4.0\n\nA frozen release note.\n"
 _BASELINE_FOR_TEST = "53b199a5f4af29aa82077e2c7f1e2c5e5e0c2ca0"
+# Adding host-side presentation metadata must not change the Agent-visible task
+# bytes qualified by V11 and reused unchanged by V13.
+_V11_V13_AGENT_INSTRUCTION_SHA256 = {
+    "run-inventory-projection": (
+        "7a12301f01fe739936c941c106ae5f743efb5863cb35969b59151a85757b66a9"
+    ),
+    "evaluation-summary-accuracy": (
+        "268bd30d6f693e44bd3f5291f339c3dd588bf346266d86015caa3028ce1bc668"
+    ),
+    "exact-history-target": (
+        "53b3329b6d89fdc590b12b57a6daa3cd4e4c12fa34d2cd9c3096cf6595a3a4d2"
+    ),
+    "filtered-failure-triage": (
+        "4878ea685bf18220242eae60e012303bb174c78ee7ca3b438803ad7fcaff9287"
+    ),
+}
 
 
 class FakeGit:
@@ -250,13 +273,27 @@ def test_default_materializer_builds_a_complete_check_ready_bundle(
     comparison = (destination / "comparison.yaml").read_text(encoding="utf-8")
     assert "{{" not in comparison
     assert COMMIT in comparison
-    assert f"mcp-main-vs-0-4-{COMMIT[:7]}-harbor-canary-v11" in comparison
+    assert f"mcp-main-vs-0-4-{COMMIT[:7]}-harbor-canary-v13" in comparison
     assert f"wandb-mcp-main-{_BASELINE_FOR_TEST[:12]}" in comparison
     assert f"wandb-mcp-staging-{COMMIT[:12]}" in comparison
     assert "evidence_lock: source-evidence.lock.json" in comparison
     assert "source_evidence_project: wandb/fugue-mcp-release-source-v2" in comparison
     assert "research_id: fugue-mcp-release-qualification-v1" in comparison
     assert "study_console_base_url: http://127.0.0.1:18080" in comparison
+    human_comparison = (destination / HUMAN_READABLE_COMPARISON_NAME).read_text(
+        encoding="utf-8"
+    )
+    assert "{{" not in human_comparison
+    assert COMMIT in human_comparison
+    assert (
+        f"mcp-main-vs-0-4-{COMMIT[:7]}-human-readable-evidence-canary-v2"
+        in human_comparison
+    )
+    assert "evidence_mode: weave_required" in human_comparison
+    assert (
+        "evidence_project: wandb/fugue-mcp-release-qualification-v1"
+        in human_comparison
+    )
     scorer_profiles = (
         destination / "configs/fugue/task-authoring/profiles.yaml"
     ).read_text(encoding="utf-8")
@@ -273,14 +310,144 @@ def test_default_materializer_builds_a_complete_check_ready_bundle(
         "source-conformance-receipt.json",
         "release-notes.lock.json",
         "mechanism-receipt.json",
+        HUMAN_READABLE_CANARY_LOCK_NAME,
+        HUMAN_READABLE_COMPARISON_NAME,
+        HUMAN_READABLE_PRIVATE_LABELS_NAME,
+        HUMAN_READABLE_TASKS_NAME,
         "tasks.jsonl",
         "tool_surface_scorer_v7.py",
     ):
         assert (destination / name).is_file()
     assert (destination / "private-labels.jsonl").stat().st_mode & 0o777 == 0o600
+    assert (
+        (destination / HUMAN_READABLE_PRIVATE_LABELS_NAME).stat().st_mode & 0o777
+        == 0o600
+    )
     assert receipt.materialization is not None
     assert receipt.materialization.total_files > 10
     assert "unit-test-wandb-key" not in json.dumps(receipt.to_dict())
+
+    def row_ids(name: str) -> list[str]:
+        return [
+            json.loads(line)["id"]
+            for line in (destination / name).read_text(encoding="utf-8").splitlines()
+        ]
+
+    assert row_ids("tasks.jsonl") == [
+        "run-inventory-projection",
+        "evaluation-summary-accuracy",
+        "exact-history-target",
+        "filtered-failure-triage",
+    ]
+    assert row_ids("private-labels.jsonl") == row_ids("tasks.jsonl")
+    assert row_ids(HUMAN_READABLE_TASKS_NAME) == [
+        "run-inventory-projection",
+        "evaluation-summary-accuracy",
+    ]
+    assert row_ids(HUMAN_READABLE_PRIVATE_LABELS_NAME) == row_ids(
+        HUMAN_READABLE_TASKS_NAME
+    )
+
+    human_spec = load_comparison(
+        destination / HUMAN_READABLE_COMPARISON_NAME,
+        repo_root=destination,
+    )
+    full_spec = load_comparison(destination / "comparison.yaml", repo_root=destination)
+    _, full_manifest, public_cases = compile_comparison(
+        full_spec,
+        repo_root=destination,
+    )
+    public_source = tmp_path / "v12-public-cases.jsonl"
+    public_source.write_text(
+        "\n".join(
+            json.dumps(item, sort_keys=True, separators=(",", ":"))
+            for item in public_cases
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+    rendered_tasks = tmp_path / "v12-agent-inputs"
+    AuthoredTaskMaterializer().materialize(
+        load_manifest(
+            tmp_path / "v12-manifest.yaml",
+            text=yaml.safe_dump(full_manifest, sort_keys=False),
+        ),
+        rendered_tasks,
+        public_source,
+        repo_root=destination,
+    )
+    assert {
+        task_id: hashlib.sha256(
+            (rendered_tasks / task_id / "instruction.md").read_bytes()
+        ).hexdigest()
+        for task_id in _V11_V13_AGENT_INSTRUCTION_SHA256
+    } == _V11_V13_AGENT_INSTRUCTION_SHA256
+    presented = {str(item["id"]): item for item in public_cases}
+    for task_id in _V11_V13_AGENT_INSTRUCTION_SHA256:
+        assert presented[task_id]["required_output"]
+        assert presented[task_id]["public_acceptance_criteria"]
+    added_metadata = json.dumps(
+        {
+            task_id: {
+                "required_output": presented[task_id]["required_output"],
+                "public_acceptance_criteria": presented[task_id][
+                    "public_acceptance_criteria"
+                ],
+            }
+            for task_id in ("exact-history-target", "filtered-failure-triage")
+        },
+        sort_keys=True,
+    )
+    assert "4200" not in added_metadata
+    assert "maint-r18-04" not in added_metadata
+    assert human_spec.id != full_spec.id
+    assert human_spec.taskset.tasks == HUMAN_READABLE_TASKS_NAME
+    assert human_spec.taskset.private_labels == HUMAN_READABLE_PRIVATE_LABELS_NAME
+    assert human_spec.execution.attempts == 1
+    assert (
+        len(row_ids(HUMAN_READABLE_TASKS_NAME))
+        * 2
+        * len(human_spec.execution.harnesses)
+        * human_spec.execution.attempts
+        == 4
+    )
+    gates = {gate.id: gate for gate in human_spec.decision_policy.gates}
+    assert gates["four-terminal-cells"].target == 4
+    assert gates["candidate-passes-two-tasks"].target == 2
+    assert "eight-terminal-cells" not in gates
+    assert "candidate-passes-four-tasks" not in gates
+
+    canary_lock = json.loads(
+        (destination / HUMAN_READABLE_CANARY_LOCK_NAME).read_text(encoding="utf-8")
+    )
+    supplied_lock_digest = canary_lock.pop("lock_digest")
+    assert _stable_digest(canary_lock) == supplied_lock_digest
+    assert canary_lock["study_id"] == human_spec.id
+    assert canary_lock["logical_cell_count"] == 4
+    assert canary_lock["tasks"]["task_ids"] == row_ids(HUMAN_READABLE_TASKS_NAME)
+    assert canary_lock["private_labels"]["task_ids"] == row_ids(
+        HUMAN_READABLE_PRIVATE_LABELS_NAME
+    )
+    for field in ("comparison", "tasks", "private_labels", "scorer"):
+        artifact = canary_lock[field]
+        assert hashlib.sha256(
+            (destination / artifact["path"]).read_bytes()
+        ).hexdigest() == artifact["sha256"]
+    declared = {item.path: item for item in receipt.materialization.artifacts}
+    for name in (
+        HUMAN_READABLE_CANARY_LOCK_NAME,
+        HUMAN_READABLE_COMPARISON_NAME,
+        HUMAN_READABLE_PRIVATE_LABELS_NAME,
+        HUMAN_READABLE_TASKS_NAME,
+    ):
+        assert name in declared
+        assert declared[name].sha256 == hashlib.sha256(
+            (destination / name).read_bytes()
+        ).hexdigest()
+    inventory = _materialization_inventory(destination)
+    assert inventory["inventory_digest"] == receipt.materialization.inventory_digest
+    assert inventory["total_files"] == receipt.materialization.total_files
+    assert inventory["total_bytes"] == receipt.materialization.total_bytes
 
     monkeypatch.setattr(
         wandb_mcp_qualification_core,
@@ -327,6 +494,78 @@ def test_default_materializer_builds_a_complete_check_ready_bundle(
         readiness={"qualification_input_digests": digests},
         repo_root=destination,
     ) == coverage
+
+    human_digests, human_coverage = _load_packaged_release_inputs(
+        human_spec,
+        root=destination,
+        source_lock=source_lock,
+    )
+    assert len(human_coverage) == 4
+    assert {
+        item["release_note"]
+        for item in human_coverage
+        if item["status"] == "unqualified"
+    } == {
+        "selective-server-side-fields",
+        "evaluation-prediction-reconciliation",
+    }
+    assert {
+        item["release_note"]
+        for item in human_coverage
+        if item["status"] == "not_applicable"
+    } == {"cursor-continuation-pagination", "bounded-history"}
+
+    arbitrary_subset_path = destination / "arbitrary-local-subset.yaml"
+    arbitrary_subset_path.write_text(
+        comparison.replace(
+            f"id: mcp-main-vs-0-4-{COMMIT[:7]}-harbor-canary-v13",
+            "id: arbitrary-local-subset",
+        )
+        .replace("tasks: tasks.jsonl", f"tasks: {HUMAN_READABLE_TASKS_NAME}")
+        .replace(
+            "private_labels: private-labels.jsonl",
+            f"private_labels: {HUMAN_READABLE_PRIVATE_LABELS_NAME}",
+        ),
+        encoding="utf-8",
+    )
+    arbitrary_subset = load_comparison(
+        arbitrary_subset_path,
+        repo_root=destination,
+    )
+    with pytest.raises(
+        ValueError,
+        match="release-note coverage references an unavailable task",
+    ):
+        _load_packaged_release_inputs(
+            arbitrary_subset,
+            root=destination,
+            source_lock=source_lock,
+        )
+
+    human_readiness_digests, human_readiness_blockers = (
+        qualification_input_readiness(human_spec, repo_root=destination)
+    )
+    assert human_readiness_blockers == []
+    assert human_readiness_digests["release_note_coverage"] == human_digests[
+        "release_note_coverage"
+    ]
+
+    human_tasks_path = destination / HUMAN_READABLE_TASKS_NAME
+    original_human_tasks = human_tasks_path.read_bytes()
+    human_tasks_path.chmod(0o644)
+    human_tasks_path.write_bytes(original_human_tasks.splitlines(keepends=True)[0])
+    truncated_digests, truncated_blockers = qualification_input_readiness(
+        human_spec,
+        repo_root=destination,
+    )
+    assert truncated_digests == {}
+    assert any(
+        f"prepared reference artifact changed: {HUMAN_READABLE_TASKS_NAME}"
+        in blocker
+        for blocker in truncated_blockers
+    )
+    human_tasks_path.write_bytes(original_human_tasks)
+    human_tasks_path.chmod(0o444)
 
     mechanism_path = destination / "mechanism-receipt.json"
     mechanism_path.chmod(0o644)

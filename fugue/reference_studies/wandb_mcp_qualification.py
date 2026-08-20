@@ -407,15 +407,31 @@ def _prepared_reference_source_readiness(
             validate_evidence_lock,
         )
 
-        if spec.execution.evidence_mode != "local":
-            raise ValueError(
-                "packaged W&B MCP reference results must use local evidence"
-            )
-        if spec.execution.evidence_project is not None:
-            raise ValueError(
-                "packaged W&B MCP reference results may not declare a hosted "
-                "result project"
-            )
+        hosted_human_readable_canary = (
+            spec.execution.evidence_mode == "weave_required"
+        )
+        if hosted_human_readable_canary:
+            destination = spec.execution.evidence_destination
+            if (
+                spec.execution.evidence_project
+                != "wandb/fugue-mcp-release-qualification-v1"
+                or getattr(destination, "project_slug", None)
+                != "wandb/fugue-mcp-release-qualification-v1"
+            ):
+                raise ValueError(
+                    "the human-readable W&B MCP canary must use the locked "
+                    "qualification result project"
+                )
+        else:
+            if spec.execution.evidence_mode != "local":
+                raise ValueError(
+                    "packaged W&B MCP reference results must use local evidence"
+                )
+            if spec.execution.evidence_project is not None:
+                raise ValueError(
+                    "packaged W&B MCP reference results may not declare a hosted "
+                    "result project"
+                )
         if spec.execution.source_evidence_project != _SOURCE_PROJECT:
             raise ValueError(
                 "prepared reference source project does not match the locked "
@@ -454,6 +470,13 @@ def _prepared_reference_source_readiness(
                 raise ValueError(
                     f"prepared reference artifact changed: {artifact.path}"
                 )
+        if hosted_human_readable_canary:
+            _validate_human_readable_canary_binding(
+                spec,
+                root=root,
+                source_lock=lock,
+                receipt=receipt,
+            )
         evidence_path = c._safe_input_path(
             Path(spec.execution.evidence_lock),
             repo_root,
@@ -528,6 +551,133 @@ def _prepared_reference_source_readiness(
         json.JSONDecodeError,
     ) as exc:
         return {}, [f"W&B MCP reference study is not prepared: {exc}"]
+
+
+def _validate_human_readable_canary_binding(
+    spec: Any,
+    *,
+    root: Path,
+    source_lock: Any,
+    receipt: Any,
+) -> None:
+    """Prove that the hosted four-cell canary is the prepared artifact."""
+
+    from fugue.bench import comparison as c
+    from fugue.reference_studies.wandb_mcp import (
+        _HUMAN_READABLE_TASK_IDS,
+        HUMAN_READABLE_CANARY_LOCK_NAME,
+        HUMAN_READABLE_COMPARISON_NAME,
+        HUMAN_READABLE_PRIVATE_LABELS_NAME,
+        HUMAN_READABLE_TASKS_NAME,
+        _stable_digest,
+    )
+
+    expected_study_id = (
+        "mcp-main-vs-0-4-"
+        f"{source_lock.source_commit[:7]}-human-readable-evidence-canary-v2"
+    )
+    if (
+        spec.id != expected_study_id
+        or spec.taskset.tasks != HUMAN_READABLE_TASKS_NAME
+        or spec.taskset.private_labels != HUMAN_READABLE_PRIVATE_LABELS_NAME
+        or spec.execution.attempts != 1
+        or tuple(spec.execution.harnesses) != ("claude-code",)
+    ):
+        raise ValueError(
+            "hosted W&B MCP evidence canary coordinates differ from the "
+            "prepared four-cell contract"
+        )
+    locked_spec = c.load_comparison(
+        root / HUMAN_READABLE_COMPARISON_NAME,
+        repo_root=root,
+    )
+    if locked_spec.spec_digest != spec.spec_digest:
+        raise ValueError(
+            "hosted W&B MCP evidence canary changed after preparation"
+        )
+
+    lock_path = root / HUMAN_READABLE_CANARY_LOCK_NAME
+    lock = c._load_json_object(lock_path, "human-readable evidence canary lock")
+    supplied_digest = str(lock.get("lock_digest") or "")
+    unsigned = dict(lock)
+    unsigned.pop("lock_digest", None)
+    if _stable_digest(unsigned) != supplied_digest:
+        raise ValueError("human-readable evidence canary lock digest differs")
+    expected_fields = {
+        "schema_version",
+        "kind",
+        "study_id",
+        "source_lock_digest",
+        "candidate_source_digest",
+        "comparison",
+        "tasks",
+        "private_labels",
+        "scorer",
+        "arm_count",
+        "attempts_per_coordinate",
+        "logical_cell_count",
+        "lock_digest",
+    }
+    if set(lock) != expected_fields or (
+        lock.get("schema_version") != 1
+        or lock.get("kind") != "wandb-mcp-human-readable-evidence-canary"
+        or lock.get("study_id") != expected_study_id
+        or lock.get("source_lock_digest") != source_lock.lock_digest
+        or lock.get("candidate_source_digest")
+        != source_lock.candidate_source_digest
+        or lock.get("arm_count") != 2
+        or lock.get("attempts_per_coordinate") != 1
+        or lock.get("logical_cell_count") != 4
+    ):
+        raise ValueError("human-readable evidence canary lock is invalid")
+
+    task_ids = tuple(
+        str(item["id"])
+        for item in c._load_public_tasks(root / HUMAN_READABLE_TASKS_NAME)
+    )
+    private_ids = tuple(
+        str(item["id"])
+        for item in c._load_private_labels(
+            root / HUMAN_READABLE_PRIVATE_LABELS_NAME
+        )
+    )
+    if task_ids != _HUMAN_READABLE_TASK_IDS or private_ids != task_ids:
+        raise ValueError(
+            "human-readable evidence canary tasks and private labels are not "
+            "the aligned prepared pair"
+        )
+    expected_artifacts = {
+        "comparison": HUMAN_READABLE_COMPARISON_NAME,
+        "tasks": HUMAN_READABLE_TASKS_NAME,
+        "private_labels": HUMAN_READABLE_PRIVATE_LABELS_NAME,
+        "scorer": "tool_surface_scorer_v7.py",
+    }
+    for field, expected_path in expected_artifacts.items():
+        value = lock.get(field)
+        if not isinstance(value, Mapping) or value.get("path") != expected_path:
+            raise ValueError(
+                f"human-readable evidence canary {field} binding is invalid"
+            )
+        if value.get("sha256") != c._sha256_path(root / expected_path):
+            raise ValueError(
+                f"human-readable evidence canary {field} digest differs"
+            )
+    if lock["tasks"].get("task_ids") != list(task_ids) or lock[
+        "private_labels"
+    ].get("task_ids") != list(private_ids):
+        raise ValueError(
+            "human-readable evidence canary task ids differ from its files"
+        )
+    receipt_artifacts = {
+        artifact.path: artifact.sha256
+        for artifact in receipt.materialization.artifacts
+    }
+    for path in (HUMAN_READABLE_CANARY_LOCK_NAME, *expected_artifacts.values()):
+        if receipt_artifacts.get(path) != c._sha256_path(root / path):
+            raise ValueError(
+                "human-readable evidence canary is not bound by the "
+                f"preparation receipt: {path}"
+            )
 
 
 def _load_packaged_release_inputs(
@@ -671,15 +821,50 @@ def _load_packaged_release_inputs(
         for evaluator in spec.evaluators
         for dimension in evaluator.dimensions
     }
-    if any(
-        set(item["task_ids"]) - task_ids
-        or set(item["dimensions"]) - dimension_ids
-        for item in coverage
-    ):
+    missing_task_mappings = any(
+        set(item["task_ids"]) - task_ids for item in coverage
+    )
+    human_readable_canary = _is_exact_human_readable_canary(
+        spec,
+        root=root,
+        source_lock=source_lock,
+    )
+    if missing_task_mappings and not human_readable_canary:
         raise ValueError(
             "prepared release-note coverage references an unavailable task "
             "or scorer dimension"
         )
+    if any(set(item["dimensions"]) - dimension_ids for item in coverage):
+        raise ValueError(
+            "prepared release-note coverage references an unavailable task "
+            "or scorer dimension"
+        )
+    if not human_readable_canary:
+        selected_coverage = [dict(item) for item in coverage]
+    else:
+        selected_coverage = []
+        for item in coverage:
+            selected_task_ids = [
+                task_id for task_id in item["task_ids"] if task_id in task_ids
+            ]
+            if selected_task_ids:
+                selected_coverage.append({**item, "task_ids": selected_task_ids})
+                continue
+            selected_coverage.append(
+                {
+                    **item,
+                    "status": "not_applicable",
+                    "task_ids": [],
+                    "dimensions": [],
+                    "infrastructure_gates": [],
+                    "rationale": (
+                        "This focused prepared canary does not include a task for "
+                        f"{item['release_note']}. The full four-task reference "
+                        "bundle remains the release-behavior canary."
+                    ),
+                }
+            )
+    coverage = c._release_note_coverage_v3(selected_coverage)
     return {
         "release_notes_lock": str(release["lock_digest"]),
         "release_notes_lock_file": c._sha256_path(release_path),
@@ -689,6 +874,44 @@ def _load_packaged_release_inputs(
             [dict(item) for item in coverage]
         ),
     }, coverage
+
+
+def _is_exact_human_readable_canary(
+    spec: Any,
+    *,
+    root: Path,
+    source_lock: Any,
+) -> bool:
+    """Return true only for the immutable prepared hosted canary spec."""
+
+    from fugue.bench import comparison as c
+    from fugue.reference_studies.wandb_mcp import (
+        HUMAN_READABLE_COMPARISON_NAME,
+        HUMAN_READABLE_PRIVATE_LABELS_NAME,
+        HUMAN_READABLE_TASKS_NAME,
+    )
+
+    expected_id = (
+        "mcp-main-vs-0-4-"
+        f"{source_lock.source_commit[:7]}-human-readable-evidence-canary-v2"
+    )
+    if (
+        spec.id != expected_id
+        or spec.taskset.tasks != HUMAN_READABLE_TASKS_NAME
+        or spec.taskset.private_labels != HUMAN_READABLE_PRIVATE_LABELS_NAME
+        or spec.execution.evidence_mode != "weave_required"
+        or spec.execution.evidence_project
+        != "wandb/fugue-mcp-release-qualification-v1"
+    ):
+        return False
+    try:
+        locked_spec = c.load_comparison(
+            root / HUMAN_READABLE_COMPARISON_NAME,
+            repo_root=root,
+        )
+    except (FileNotFoundError, TypeError, ValueError):
+        return False
+    return locked_spec.spec_digest == spec.spec_digest
 
 
 def _validate_packaged_mechanism_profiles(

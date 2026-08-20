@@ -2,6 +2,8 @@ from __future__ import annotations
 
 import json
 import os
+import re
+import unicodedata
 from collections.abc import Iterable, Mapping
 from dataclasses import asdict, dataclass, field, replace
 from datetime import datetime
@@ -13,6 +15,11 @@ import httpx
 from filelock import FileLock
 
 from fugue.bench.candidates import stable_digest
+from fugue.model_plane import (
+    EvidenceDestinationV1,
+    evidence_destination_from_dict,
+)
+from fugue.redaction import redact_text
 from fugue.research.contracts import (
     RESEARCH_SCHEMA_VERSION,
     AttributionV1,
@@ -128,6 +135,21 @@ _PUBLIC_SELECTOR_KEYS = {
     "run_id",
     "trace_id",
 }
+_WEAVE_HOSTED_KINDS = frozenset(
+    {
+        "evaluation_root",
+        "prediction_and_score",
+        "prediction",
+        "agent_evidence_receipt",
+        "dataset",
+    }
+)
+_WEAVE_CALL_KINDS = _WEAVE_HOSTED_KINDS - {"dataset"}
+_WEAVE_SLUG_PART = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$")
+_WEAVE_STUDY_ID = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._:-]{0,255}$")
+_WEAVE_OBJECT_ID = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._:@+-]{0,511}$")
+_WEAVE_CONTENT_HASH = re.compile(r"^(?:[A-Za-z0-9]{43}|[0-9a-f]{64})$")
+_WANDB_REPORT_ID = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_-]{0,509}={0,2}$")
 
 
 @dataclass(frozen=True)
@@ -184,6 +206,298 @@ class ResearchLogEventV1:
             key: item
             for key, item in value.items()
             if item not in (None, "", (), [], {})
+        }
+
+
+@dataclass(frozen=True)
+class WeavePublicationScopeEvidenceV1:
+    research_id: str
+    study_id: str
+    schema_version: Literal[1] = RESEARCH_SCHEMA_VERSION
+
+    def to_dict(self) -> dict[str, Any]:
+        return asdict(self)
+
+
+@dataclass(frozen=True)
+class WeavePublicationTargetEvidenceV1:
+    entity: str
+    project: str
+    study_scope: WeavePublicationScopeEvidenceV1
+    destination: EvidenceDestinationV1
+    schema_version: Literal[1] = RESEARCH_SCHEMA_VERSION
+
+    @property
+    def project_slug(self) -> str:
+        return f"{self.entity}/{self.project}"
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "schema_version": self.schema_version,
+            "entity": self.entity,
+            "project": self.project,
+            "study_scope": self.study_scope.to_dict(),
+            "destination": self.destination.to_dict(),
+        }
+
+
+@dataclass(frozen=True)
+class WeaveHostedEvidenceRefV1:
+    attempt_id: str
+    kind: Literal[
+        "evaluation_root",
+        "prediction_and_score",
+        "prediction",
+        "agent_evidence_receipt",
+        "dataset",
+    ]
+    object_id: str
+    ref: str
+    system: Literal["weave"] = "weave"
+    native_agent_call: Literal[False] = False
+
+    def to_dict(self) -> dict[str, Any]:
+        return asdict(self)
+
+
+@dataclass(frozen=True)
+class WeavePublicationEvidenceV1:
+    """Public, digest-bound delivery evidence for one verified Weave receipt."""
+
+    publication_id: str
+    receipt_digest: str
+    target: WeavePublicationTargetEvidenceV1
+    result_digest: str
+    qualification_digest: str
+    result_file_sha256: str
+    local_manifest_digest: str
+    local_manifest_file_sha256: str
+    hosted_objects: tuple[WeaveHostedEvidenceRefV1, ...]
+    publisher_id: str
+    publisher_revision: str
+    status: Literal["published"]
+    published_at: str
+    schema_version: Literal[1] = RESEARCH_SCHEMA_VERSION
+
+    @property
+    def attempt_ids(self) -> tuple[str, ...]:
+        return tuple(sorted({item.attempt_id for item in self.hosted_objects}))
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "schema_version": self.schema_version,
+            "publication_id": self.publication_id,
+            "receipt_digest": self.receipt_digest,
+            "target": self.target.to_dict(),
+            "result_digest": self.result_digest,
+            "qualification_digest": self.qualification_digest,
+            "result_file_sha256": self.result_file_sha256,
+            "local_manifest_digest": self.local_manifest_digest,
+            "local_manifest_file_sha256": self.local_manifest_file_sha256,
+            "hosted_objects": [item.to_dict() for item in self.hosted_objects],
+            "publisher_id": self.publisher_id,
+            "publisher_revision": self.publisher_revision,
+            "status": self.status,
+            "published_at": self.published_at,
+        }
+
+
+@dataclass(frozen=True)
+class ResearchIndexReportTargetEvidenceV1:
+    """The exact W&B project selected for a Research index and Report."""
+
+    project: str
+    api_base_url: str
+    app_base_url: str
+    destination_digest: str
+    backend: Literal["wandb"] = "wandb"
+    schema_version: Literal[1] = RESEARCH_SCHEMA_VERSION
+
+    @property
+    def entity(self) -> str:
+        return self.project.split("/", 1)[0]
+
+    @property
+    def project_name(self) -> str:
+        return self.project.split("/", 1)[1]
+
+    def to_dict(self) -> dict[str, Any]:
+        return asdict(self)
+
+
+@dataclass(frozen=True)
+class ResearchIndexReceiptEvidenceV1:
+    """A compact projection that reconstructs one Research-index receipt."""
+
+    publication_id: str
+    index_digest: str
+    index_file_sha256: str
+    receipt_digest: str
+    receipt_file_sha256: str
+    run_url: str
+    artifact_url: str
+    report_url: str | None
+    report_status: Literal["published", "unavailable"]
+    publisher_id: str
+    publisher_revision: str
+    status: Literal["published"]
+    published_at: str
+
+    def to_dict(self) -> dict[str, Any]:
+        return asdict(self)
+
+    def receipt_dict(
+        self,
+        *,
+        research_id: str,
+        target: ResearchIndexReportTargetEvidenceV1,
+    ) -> dict[str, Any]:
+        value = self.to_dict()
+        value.pop("receipt_file_sha256")
+        return {
+            "schema_version": RESEARCH_SCHEMA_VERSION,
+            "publication_id": self.publication_id,
+            "research_id": research_id,
+            "index_digest": self.index_digest,
+            "index_file_sha256": self.index_file_sha256,
+            "target": target.to_dict(),
+            **{
+                key: value[key]
+                for key in (
+                    "run_url",
+                    "artifact_url",
+                    "report_url",
+                    "report_status",
+                    "publisher_id",
+                    "publisher_revision",
+                    "status",
+                    "published_at",
+                    "receipt_digest",
+                )
+            },
+        }
+
+
+@dataclass(frozen=True)
+class ResearchReportReceiptEvidenceV1:
+    """A compact projection that reconstructs one reconciled Report receipt."""
+
+    report_publication_id: str
+    projection_digest: str
+    index_digest: str
+    index_file_sha256: str
+    index_publication_id: str
+    index_publication_receipt_digest: str
+    index_publication_receipt_file_sha256: str
+    receipt_digest: str
+    receipt_file_sha256: str
+    renderer_id: str
+    renderer_revision: str
+    report_id: str
+    report_url: str
+    report_api: str
+    report_api_version: str
+    api_stability: Literal["public_preview"]
+    readback_projection_digest: str
+    rendered_content_digest: str
+    readback_status: Literal["reconciled"]
+    publisher_id: str
+    publisher_revision: str
+    access_mode: Literal["project_settings"]
+    share_link_action: Literal["not_requested"]
+    current_pointer_status: Literal["not_managed"]
+    status: Literal["published_and_reconciled"]
+    published_at: str
+
+    def to_dict(self) -> dict[str, Any]:
+        return asdict(self)
+
+    def receipt_dict(
+        self,
+        *,
+        research_id: str,
+        target: ResearchIndexReportTargetEvidenceV1,
+    ) -> dict[str, Any]:
+        value = self.to_dict()
+        value.pop("receipt_file_sha256")
+        return {
+            "schema_version": RESEARCH_SCHEMA_VERSION,
+            "report_publication_id": self.report_publication_id,
+            "research_id": research_id,
+            "projection_digest": self.projection_digest,
+            "index_digest": self.index_digest,
+            "index_file_sha256": self.index_file_sha256,
+            "index_publication_id": self.index_publication_id,
+            "index_publication_receipt_digest": (
+                self.index_publication_receipt_digest
+            ),
+            "index_publication_receipt_file_sha256": (
+                self.index_publication_receipt_file_sha256
+            ),
+            "target": target.to_dict(),
+            **{
+                key: value[key]
+                for key in (
+                    "renderer_id",
+                    "renderer_revision",
+                    "report_id",
+                    "report_url",
+                    "report_api",
+                    "report_api_version",
+                    "api_stability",
+                    "readback_projection_digest",
+                    "rendered_content_digest",
+                    "readback_status",
+                    "publisher_id",
+                    "publisher_revision",
+                    "access_mode",
+                    "share_link_action",
+                    "current_pointer_status",
+                    "status",
+                    "published_at",
+                    "receipt_digest",
+                )
+            },
+        }
+
+
+@dataclass(frozen=True)
+class ResearchIndexReportStudyMembershipV1:
+    """One compact Study binding from the Research index to local evidence."""
+
+    study_id: str
+    result_digest: str
+    qualification_digest: str
+    result_file_sha256: str
+    weave_project: str
+    weave_publication_id: str
+    weave_receipt_digest: str
+    attempt_count: int
+    attempt_ids_digest: str
+
+    def to_dict(self) -> dict[str, Any]:
+        return asdict(self)
+
+
+@dataclass(frozen=True)
+class ResearchIndexReportPublicationEvidenceV1:
+    """Public evidence for one index receipt and one reconciled Report receipt."""
+
+    research_id: str
+    target: ResearchIndexReportTargetEvidenceV1
+    index: ResearchIndexReceiptEvidenceV1
+    report: ResearchReportReceiptEvidenceV1
+    studies: tuple[ResearchIndexReportStudyMembershipV1, ...]
+    schema_version: Literal[1] = RESEARCH_SCHEMA_VERSION
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "schema_version": self.schema_version,
+            "research_id": self.research_id,
+            "target": self.target.to_dict(),
+            "index": self.index.to_dict(),
+            "report": self.report.to_dict(),
+            "studies": [item.to_dict() for item in self.studies],
         }
 
 
@@ -385,6 +699,763 @@ def experiment_view_manifest_from_dict(
     return ExperimentViewManifestV1(**unsigned, manifest_digest=manifest_digest)
 
 
+def weave_publication_evidence_from_receipt(
+    raw: Mapping[str, Any],
+) -> WeavePublicationEvidenceV1:
+    """Project one fully verified receipt into bounded public Research evidence."""
+
+    fields = {
+        "schema_version",
+        "publication_id",
+        "target",
+        "result_digest",
+        "qualification_digest",
+        "result_file_sha256",
+        "local_manifest_digest",
+        "local_manifest_file_sha256",
+        "hosted_objects",
+        "publisher_id",
+        "publisher_revision",
+        "status",
+        "published_at",
+        "receipt_digest",
+    }
+    unknown = set(raw) - fields
+    missing = fields - set(raw)
+    if unknown or missing:
+        raise ValueError("Weave publication receipt fields are incomplete or unknown")
+    receipt_digest = _sha256_digest(raw.get("receipt_digest"), "receipt_digest")
+    unsigned = {key: value for key, value in raw.items() if key != "receipt_digest"}
+    if stable_digest(unsigned) != receipt_digest:
+        raise ValueError("Weave publication receipt digest does not recompute")
+    target = _weave_publication_target(raw.get("target"))
+    hosted_objects: list[WeaveHostedEvidenceRefV1] = []
+    for item in _sequence(raw.get("hosted_objects"), "hosted_objects"):
+        value = dict(_mapping(item, "hosted object"))
+        object_target = _weave_publication_target(value.pop("target", None))
+        if object_target != target:
+            raise ValueError("hosted object target disagrees with publication target")
+        hosted_objects.append(_weave_hosted_evidence_ref(value, target=target))
+    return weave_publication_evidence_from_dict(
+        {
+            "schema_version": raw.get("schema_version"),
+            "publication_id": raw.get("publication_id"),
+            "receipt_digest": receipt_digest,
+            "target": target.to_dict(),
+            "result_digest": raw.get("result_digest"),
+            "qualification_digest": raw.get("qualification_digest"),
+            "result_file_sha256": raw.get("result_file_sha256"),
+            "local_manifest_digest": raw.get("local_manifest_digest"),
+            "local_manifest_file_sha256": raw.get("local_manifest_file_sha256"),
+            "hosted_objects": [item.to_dict() for item in hosted_objects],
+            "publisher_id": raw.get("publisher_id"),
+            "publisher_revision": raw.get("publisher_revision"),
+            "status": raw.get("status"),
+            "published_at": raw.get("published_at"),
+        }
+    )
+
+
+def weave_publication_evidence_from_dict(
+    raw: Mapping[str, Any],
+) -> WeavePublicationEvidenceV1:
+    fields = {
+        item.name for item in WeavePublicationEvidenceV1.__dataclass_fields__.values()
+    }
+    unknown = set(raw) - fields
+    missing = fields - set(raw)
+    if unknown or missing:
+        raise ValueError("Weave publication evidence fields are incomplete or unknown")
+    if not _is_schema_one(raw.get("schema_version")):
+        raise ValueError("unsupported Weave publication evidence schema")
+    target = _weave_publication_target(raw.get("target"))
+    hosted_objects = tuple(
+        _weave_hosted_evidence_ref(item, target=target)
+        for item in _sequence(raw.get("hosted_objects"), "hosted_objects")
+    )
+    if not hosted_objects:
+        raise ValueError("Weave publication evidence requires hosted objects")
+    if (
+        tuple(sorted(hosted_objects, key=lambda item: (item.attempt_id, item.kind)))
+        != hosted_objects
+    ):
+        raise ValueError(
+            "Weave publication evidence objects are not canonically sorted"
+        )
+    observed = {(item.attempt_id, item.kind) for item in hosted_objects}
+    if len(observed) != len(hosted_objects):
+        raise ValueError("Weave publication evidence contains duplicate objects")
+    attempt_ids = tuple(sorted({item.attempt_id for item in hosted_objects}))
+    expected = {
+        (attempt_id, kind) for attempt_id in attempt_ids for kind in _WEAVE_HOSTED_KINDS
+    }
+    if observed != expected:
+        raise ValueError(
+            "Weave publication evidence requires one exact five-object chain "
+            "per attempt"
+        )
+    result_digest = _sha256_digest(raw.get("result_digest"), "result_digest")
+    local_manifest_digest = _sha256_digest(
+        raw.get("local_manifest_digest"), "local_manifest_digest"
+    )
+    publication_id = _sha256_digest(raw.get("publication_id"), "publication_id")
+    expected_publication_id = stable_digest(
+        {
+            "schema_version": RESEARCH_SCHEMA_VERSION,
+            "target": target.to_dict(),
+            "result_digest": result_digest,
+            "local_manifest_digest": local_manifest_digest,
+        }
+    )
+    if publication_id != expected_publication_id:
+        raise ValueError("Weave publication evidence identity does not recompute")
+    if raw.get("status") != "published":
+        raise ValueError("Weave publication evidence is not published")
+    published_at = _timestamp(raw.get("published_at"))
+    evidence = WeavePublicationEvidenceV1(
+        schema_version=RESEARCH_SCHEMA_VERSION,
+        publication_id=publication_id,
+        receipt_digest=_sha256_digest(raw.get("receipt_digest"), "receipt_digest"),
+        target=target,
+        result_digest=result_digest,
+        qualification_digest=_sha256_digest(
+            raw.get("qualification_digest"), "qualification_digest"
+        ),
+        result_file_sha256=_sha256_digest(
+            raw.get("result_file_sha256"), "result_file_sha256"
+        ),
+        local_manifest_digest=local_manifest_digest,
+        local_manifest_file_sha256=_sha256_digest(
+            raw.get("local_manifest_file_sha256"),
+            "local_manifest_file_sha256",
+        ),
+        hosted_objects=hosted_objects,
+        publisher_id=_text(raw.get("publisher_id"), "publisher_id", 1000),
+        publisher_revision=_text(
+            raw.get("publisher_revision"), "publisher_revision", 1000
+        ),
+        status="published",
+        published_at=published_at,
+    )
+    reconstructed_receipt = evidence.to_dict()
+    receipt_digest = reconstructed_receipt.pop("receipt_digest")
+    reconstructed_receipt["hosted_objects"] = [
+        {**item.to_dict(), "target": target.to_dict()}
+        for item in evidence.hosted_objects
+    ]
+    if stable_digest(reconstructed_receipt) != receipt_digest:
+        raise ValueError("Weave publication receipt digest does not recompute")
+    return evidence
+
+
+def _weave_publication_target(raw: Any) -> WeavePublicationTargetEvidenceV1:
+    value = dict(_mapping(raw, "Weave publication target"))
+    fields = {"schema_version", "entity", "project", "study_scope", "destination"}
+    if set(value) != fields:
+        raise ValueError("Weave publication target fields are incomplete or unknown")
+    if not _is_schema_one(value.get("schema_version")):
+        raise ValueError("unsupported Weave publication target schema")
+    entity = _text(value.get("entity"), "Weave entity", 128)
+    project = _text(value.get("project"), "Weave project", 128)
+    if not _WEAVE_SLUG_PART.fullmatch(entity) or not _WEAVE_SLUG_PART.fullmatch(
+        project
+    ):
+        raise ValueError("Weave publication target is invalid")
+    scope_value = dict(_mapping(value.get("study_scope"), "Study publication scope"))
+    if set(scope_value) != {"schema_version", "research_id", "study_id"}:
+        raise ValueError("Study publication scope fields are incomplete or unknown")
+    if not _is_schema_one(scope_value.get("schema_version")):
+        raise ValueError("unsupported Study publication scope schema")
+    research_id = _text(scope_value.get("research_id"), "research_id", 256)
+    study_id = _text(scope_value.get("study_id"), "study_id", 256)
+    if not _WEAVE_STUDY_ID.fullmatch(research_id) or not _WEAVE_STUDY_ID.fullmatch(
+        study_id
+    ):
+        raise ValueError("Study publication scope is invalid")
+    destination = evidence_destination_from_dict(
+        _mapping(value.get("destination"), "Weave publication destination")
+    )
+    if destination.entity != entity or destination.project != project:
+        raise ValueError("Weave target and destination disagree")
+    target = WeavePublicationTargetEvidenceV1(
+        entity=entity,
+        project=project,
+        study_scope=WeavePublicationScopeEvidenceV1(
+            research_id=research_id,
+            study_id=study_id,
+        ),
+        destination=destination,
+    )
+    if value != target.to_dict():
+        raise ValueError("persisted Weave target must use its canonical values")
+    return target
+
+
+def _weave_hosted_evidence_ref(
+    raw: Any,
+    *,
+    target: WeavePublicationTargetEvidenceV1,
+) -> WeaveHostedEvidenceRefV1:
+    value = dict(_mapping(raw, "hosted evidence object"))
+    fields = {
+        "attempt_id",
+        "kind",
+        "object_id",
+        "ref",
+        "system",
+        "native_agent_call",
+    }
+    if set(value) != fields:
+        raise ValueError("hosted evidence object fields are incomplete or unknown")
+    attempt_id = _sha256_digest(value.get("attempt_id"), "attempt_id")
+    kind = str(value.get("kind") or "")
+    if kind not in _WEAVE_HOSTED_KINDS:
+        raise ValueError("hosted evidence kind is invalid")
+    if value.get("system") != "weave":
+        raise ValueError("hosted evidence system must be weave")
+    if value.get("native_agent_call") is not False:
+        raise ValueError(
+            "a published local Agent receipt is not a native Weave Agent call"
+        )
+    object_id = _text(value.get("object_id"), "hosted object id", 512)
+    if not _WEAVE_OBJECT_ID.fullmatch(object_id):
+        raise ValueError("hosted evidence object id is invalid")
+    if kind == "dataset":
+        _immutable_weave_dataset_object_id(object_id)
+    object_type = "call" if kind in _WEAVE_CALL_KINDS else "object"
+    expected_ref = f"weave:///{target.project_slug}/{object_type}/{object_id}"
+    ref = _text(value.get("ref"), "hosted evidence ref", 2000)
+    if ref != expected_ref:
+        raise ValueError("hosted evidence ref disagrees with its exact Weave target")
+    return WeaveHostedEvidenceRefV1(
+        attempt_id=attempt_id,
+        kind=kind,  # type: ignore[arg-type]
+        object_id=object_id,
+        ref=ref,
+    )
+
+
+def research_index_report_attempt_ids_digest(attempt_ids: Iterable[str]) -> str:
+    """Bind one canonical nonempty attempt census without publishing every ID."""
+
+    values = tuple(sorted(str(item) for item in attempt_ids))
+    if not values or len(set(values)) != len(values):
+        raise ValueError("Report Study attempts must be nonempty and unique")
+    for value in values:
+        _sha256_digest(value, "attempt_id")
+    return stable_digest(
+        {
+            "schema_version": RESEARCH_SCHEMA_VERSION,
+            "attempt_ids": list(values),
+        }
+    )
+
+
+def research_index_report_study_membership_from_dict(
+    raw: Mapping[str, Any],
+) -> ResearchIndexReportStudyMembershipV1:
+    fields = {
+        item.name
+        for item in ResearchIndexReportStudyMembershipV1.__dataclass_fields__.values()
+    }
+    if set(raw) != fields:
+        raise ValueError("Research Report Study membership fields are not exact")
+    study_id = _text(raw.get("study_id"), "Study id", 256)
+    if not _WEAVE_STUDY_ID.fullmatch(study_id):
+        raise ValueError("Research Report Study id is invalid")
+    return ResearchIndexReportStudyMembershipV1(
+        study_id=study_id,
+        result_digest=_sha256_digest(raw.get("result_digest"), "result_digest"),
+        qualification_digest=_sha256_digest(
+            raw.get("qualification_digest"), "qualification_digest"
+        ),
+        result_file_sha256=_sha256_digest(
+            raw.get("result_file_sha256"), "result_file_sha256"
+        ),
+        weave_project=_research_project(raw.get("weave_project")),
+        weave_publication_id=_sha256_digest(
+            raw.get("weave_publication_id"), "weave_publication_id"
+        ),
+        weave_receipt_digest=_sha256_digest(
+            raw.get("weave_receipt_digest"), "weave_receipt_digest"
+        ),
+        attempt_count=_exact_positive_int(
+            raw.get("attempt_count"), "attempt_count"
+        ),
+        attempt_ids_digest=_sha256_digest(
+            raw.get("attempt_ids_digest"), "attempt_ids_digest"
+        ),
+    )
+
+
+def research_index_report_publication_evidence_from_dict(
+    raw: Mapping[str, Any],
+) -> ResearchIndexReportPublicationEvidenceV1:
+    fields = {
+        item.name
+        for item in ResearchIndexReportPublicationEvidenceV1.__dataclass_fields__.values()
+    }
+    if set(raw) != fields:
+        raise ValueError("Research index Report evidence fields are not exact")
+    if not _is_schema_one(raw.get("schema_version")):
+        raise ValueError("unsupported Research index Report evidence schema")
+    research_id = _text(raw.get("research_id"), "research_id", 256)
+    if not _WEAVE_STUDY_ID.fullmatch(research_id):
+        raise ValueError("Research index Report scope is invalid")
+    target = _research_index_report_target(raw.get("target"))
+    index = _research_index_receipt_evidence(
+        raw.get("index"),
+        research_id=research_id,
+        target=target,
+    )
+    report = _research_report_receipt_evidence(
+        raw.get("report"),
+        research_id=research_id,
+        target=target,
+    )
+    studies = tuple(
+        research_index_report_study_membership_from_dict(
+            _mapping(item, "Research Report Study membership")
+        )
+        for item in _sequence(raw.get("studies"), "studies")
+    )
+    if (
+        not studies
+        or tuple(sorted(studies, key=lambda item: item.study_id)) != studies
+        or len({item.study_id for item in studies}) != len(studies)
+    ):
+        raise ValueError(
+            "Research index Report Study memberships must be nonempty, unique, "
+            "and sorted"
+        )
+    if (
+        report.index_digest != index.index_digest
+        or report.index_file_sha256 != index.index_file_sha256
+        or report.index_publication_id != index.publication_id
+        or report.index_publication_receipt_digest != index.receipt_digest
+        or report.index_publication_receipt_file_sha256 != index.receipt_file_sha256
+    ):
+        raise ValueError(
+            "Research Report receipt disagrees with the exact Research index receipt"
+        )
+    return ResearchIndexReportPublicationEvidenceV1(
+        research_id=research_id,
+        target=target,
+        index=index,
+        report=report,
+        studies=studies,
+    )
+
+
+def _research_index_report_target(
+    raw: Any,
+) -> ResearchIndexReportTargetEvidenceV1:
+    value = dict(_mapping(raw, "Research index Report target"))
+    fields = {
+        "schema_version",
+        "project",
+        "api_base_url",
+        "app_base_url",
+        "backend",
+        "destination_digest",
+    }
+    if set(value) != fields:
+        raise ValueError("Research index Report target fields are not exact")
+    if not _is_schema_one(value.get("schema_version")):
+        raise ValueError("unsupported Research index Report target schema")
+    project = _research_project(value.get("project"))
+    api_base_url = _research_https_origin(
+        value.get("api_base_url"), "W&B API origin"
+    )
+    app_base_url = _research_https_origin(
+        value.get("app_base_url"), "W&B application origin"
+    )
+    if value.get("backend") != "wandb":
+        raise ValueError("Research index Report target backend must be wandb")
+    target = ResearchIndexReportTargetEvidenceV1(
+        schema_version=RESEARCH_SCHEMA_VERSION,
+        project=project,
+        api_base_url=api_base_url,
+        app_base_url=app_base_url,
+        backend="wandb",
+        destination_digest=_sha256_digest(
+            value.get("destination_digest"), "destination_digest"
+        ),
+    )
+    unsigned = target.to_dict()
+    destination_digest = unsigned.pop("destination_digest")
+    if stable_digest(unsigned) != destination_digest:
+        raise ValueError("Research index Report destination digest does not recompute")
+    return target
+
+
+def _research_index_receipt_evidence(
+    raw: Any,
+    *,
+    research_id: str,
+    target: ResearchIndexReportTargetEvidenceV1,
+) -> ResearchIndexReceiptEvidenceV1:
+    value = dict(_mapping(raw, "Research-index receipt evidence"))
+    fields = {
+        item.name for item in ResearchIndexReceiptEvidenceV1.__dataclass_fields__.values()
+    }
+    if set(value) != fields:
+        raise ValueError("Research-index receipt evidence fields are not exact")
+    report_status = str(value.get("report_status") or "")
+    report_url = _optional_receipt_text(
+        value.get("report_url"), "index Report URL", 4000
+    )
+    if report_status == "published":
+        if report_url is None:
+            raise ValueError("published index Report requires a URL")
+        _research_project_url(report_url, target, resource="reports")
+    elif report_status == "unavailable":
+        if report_url is not None:
+            raise ValueError("unavailable index Report cannot have a URL")
+    else:
+        raise ValueError("Research-index receipt Report status is invalid")
+    if value.get("status") != "published":
+        raise ValueError("Research-index receipt is not published")
+    evidence = ResearchIndexReceiptEvidenceV1(
+        publication_id=_sha256_digest(
+            value.get("publication_id"), "index publication_id"
+        ),
+        index_digest=_sha256_digest(value.get("index_digest"), "index_digest"),
+        index_file_sha256=_sha256_digest(
+            value.get("index_file_sha256"), "index_file_sha256"
+        ),
+        receipt_digest=_sha256_digest(
+            value.get("receipt_digest"), "index receipt_digest"
+        ),
+        receipt_file_sha256=_sha256_digest(
+            value.get("receipt_file_sha256"), "index receipt_file_sha256"
+        ),
+        run_url=_research_project_url(value.get("run_url"), target, resource="runs"),
+        artifact_url=_research_project_url(
+            value.get("artifact_url"), target, resource="artifacts"
+        ),
+        report_url=report_url,
+        report_status=report_status,  # type: ignore[arg-type]
+        publisher_id=_exact_receipt_text(
+            value.get("publisher_id"), "index publisher_id", 1000
+        ),
+        publisher_revision=_exact_receipt_text(
+            value.get("publisher_revision"), "index publisher_revision", 1000
+        ),
+        status="published",
+        published_at=_receipt_timestamp(
+            value.get("published_at"), "Research-index publication timestamp"
+        ),
+    )
+    expected_id = stable_digest(
+        {
+            "schema_version": RESEARCH_SCHEMA_VERSION,
+            "research_id": research_id,
+            "index_digest": evidence.index_digest,
+            "index_file_sha256": evidence.index_file_sha256,
+            "target": target.to_dict(),
+        }
+    )
+    if evidence.publication_id != expected_id:
+        raise ValueError("Research-index publication identity does not recompute")
+    reconstructed = evidence.receipt_dict(research_id=research_id, target=target)
+    receipt_digest = reconstructed.pop("receipt_digest")
+    if stable_digest(reconstructed) != receipt_digest:
+        raise ValueError("Research-index receipt digest does not recompute")
+    return evidence
+
+
+def _research_report_receipt_evidence(
+    raw: Any,
+    *,
+    research_id: str,
+    target: ResearchIndexReportTargetEvidenceV1,
+) -> ResearchReportReceiptEvidenceV1:
+    value = dict(_mapping(raw, "Research Report receipt evidence"))
+    fields = {
+        item.name
+        for item in ResearchReportReceiptEvidenceV1.__dataclass_fields__.values()
+    }
+    if set(value) != fields:
+        raise ValueError("Research Report receipt evidence fields are not exact")
+    report_id = _safe_receipt_text(
+        value.get("report_id"), "Report id", 512, single_line=True
+    )
+    if not _WANDB_REPORT_ID.fullmatch(report_id):
+        raise ValueError("Research Report id is invalid")
+    report_url = _research_project_url(
+        value.get("report_url"),
+        target,
+        resource="reports",
+        report_id=report_id,
+    )
+    projection_digest = _sha256_digest(
+        value.get("projection_digest"), "Report projection_digest"
+    )
+    readback_projection_digest = _sha256_digest(
+        value.get("readback_projection_digest"),
+        "Report readback_projection_digest",
+    )
+    literals = {
+        "api_stability": "public_preview",
+        "readback_status": "reconciled",
+        "access_mode": "project_settings",
+        "share_link_action": "not_requested",
+        "current_pointer_status": "not_managed",
+        "status": "published_and_reconciled",
+    }
+    if any(value.get(key) != expected for key, expected in literals.items()):
+        raise ValueError("Research Report receipt status fields are invalid")
+    if readback_projection_digest != projection_digest:
+        raise ValueError("Research Report readback does not bind its projection")
+    evidence = ResearchReportReceiptEvidenceV1(
+        report_publication_id=_sha256_digest(
+            value.get("report_publication_id"), "Report publication_id"
+        ),
+        projection_digest=projection_digest,
+        index_digest=_sha256_digest(value.get("index_digest"), "index_digest"),
+        index_file_sha256=_sha256_digest(
+            value.get("index_file_sha256"), "index_file_sha256"
+        ),
+        index_publication_id=_sha256_digest(
+            value.get("index_publication_id"), "index_publication_id"
+        ),
+        index_publication_receipt_digest=_sha256_digest(
+            value.get("index_publication_receipt_digest"),
+            "index_publication_receipt_digest",
+        ),
+        index_publication_receipt_file_sha256=_sha256_digest(
+            value.get("index_publication_receipt_file_sha256"),
+            "index_publication_receipt_file_sha256",
+        ),
+        receipt_digest=_sha256_digest(
+            value.get("receipt_digest"), "Report receipt_digest"
+        ),
+        receipt_file_sha256=_sha256_digest(
+            value.get("receipt_file_sha256"), "Report receipt_file_sha256"
+        ),
+        renderer_id=_safe_receipt_text(
+            value.get("renderer_id"),
+            "Report renderer_id",
+            128,
+            single_line=True,
+        ),
+        renderer_revision=_safe_receipt_text(
+            value.get("renderer_revision"),
+            "Report renderer_revision",
+            128,
+            single_line=True,
+        ),
+        report_id=report_id,
+        report_url=report_url,
+        report_api=_safe_receipt_text(
+            value.get("report_api"), "Report API", 128, single_line=True
+        ),
+        report_api_version=_safe_receipt_text(
+            value.get("report_api_version"),
+            "Report API version",
+            64,
+            single_line=True,
+        ),
+        api_stability="public_preview",
+        readback_projection_digest=readback_projection_digest,
+        rendered_content_digest=_sha256_digest(
+            value.get("rendered_content_digest"), "rendered_content_digest"
+        ),
+        readback_status="reconciled",
+        publisher_id=_safe_receipt_text(
+            value.get("publisher_id"),
+            "Report publisher_id",
+            128,
+            single_line=True,
+        ),
+        publisher_revision=_safe_receipt_text(
+            value.get("publisher_revision"),
+            "Report publisher_revision",
+            256,
+            single_line=True,
+        ),
+        access_mode="project_settings",
+        share_link_action="not_requested",
+        current_pointer_status="not_managed",
+        status="published_and_reconciled",
+        published_at=_receipt_timestamp(
+            value.get("published_at"), "Research Report publication timestamp"
+        ),
+    )
+    expected_id = stable_digest(
+        {
+            "schema_version": RESEARCH_SCHEMA_VERSION,
+            "research_id": research_id,
+            "projection_digest": evidence.projection_digest,
+            "target": target.to_dict(),
+        }
+    )
+    if evidence.report_publication_id != expected_id:
+        raise ValueError("Research Report publication identity does not recompute")
+    reconstructed = evidence.receipt_dict(research_id=research_id, target=target)
+    receipt_digest = reconstructed.pop("receipt_digest")
+    if stable_digest(reconstructed) != receipt_digest:
+        raise ValueError("Research Report receipt digest does not recompute")
+    return evidence
+
+
+def _research_project(value: Any) -> str:
+    project = _exact_receipt_text(value, "W&B project", 257)
+    parts = project.split("/")
+    if len(parts) != 2 or any(not _WEAVE_SLUG_PART.fullmatch(item) for item in parts):
+        raise ValueError("W&B project must be exactly ENTITY/PROJECT")
+    return project
+
+
+def _research_https_origin(value: Any, label: str) -> str:
+    url = _exact_receipt_text(value, label, 2000)
+    if (
+        any(
+            character.isspace() or unicodedata.category(character) == "Cc"
+            for character in url
+        )
+        or "\\" in url
+    ):
+        raise ValueError(f"{label} must be a normalized HTTPS origin")
+    try:
+        parsed = urlsplit(url)
+        hostname = parsed.hostname
+        port = parsed.port
+    except ValueError as exc:
+        raise ValueError(f"{label} must be a normalized HTTPS origin") from exc
+    if (
+        parsed.scheme != "https"
+        or not parsed.netloc
+        or not hostname
+        or parsed.username
+        or parsed.password
+        or (port is not None and not 1 <= port <= 65535)
+        or parsed.path
+        or parsed.query
+        or parsed.fragment
+        or url.endswith("/")
+        or redact_text(url) != url
+    ):
+        raise ValueError(f"{label} must be a normalized HTTPS origin")
+    return url
+
+
+def _research_project_url(
+    value: Any,
+    target: ResearchIndexReportTargetEvidenceV1,
+    *,
+    resource: Literal["runs", "artifacts", "reports"],
+    report_id: str | None = None,
+) -> str:
+    url = _exact_receipt_text(value, f"W&B {resource} URL", 4000)
+    parsed = urlsplit(url)
+    expected = urlsplit(target.app_base_url)
+    parts = _canonical_research_url_path(parsed.path)
+    if (
+        any(character.isspace() for character in url)
+        or any(unicodedata.category(character) == "Cc" for character in url)
+        or any(character in "\\[]()<>'\"`" for character in url)
+        or redact_text(url) != url
+        or parsed.scheme != "https"
+        or not parsed.netloc
+        or parsed.username
+        or parsed.password
+        or parsed.query
+        or parsed.fragment
+        or (parsed.scheme, parsed.netloc) != (expected.scheme, expected.netloc)
+        or len(parts) != (6 if resource == "artifacts" else 4)
+        or parts[:3] != [target.entity, target.project_name, resource]
+        or (resource == "artifacts" and not re.fullmatch(r"v\d+", parts[-1]))
+    ):
+        raise ValueError(f"W&B {resource} URL disagrees with the target project")
+    if report_id is not None:
+        accepted = {f"--{report_id}", f"--{report_id.rstrip('=')}"}
+        if len(parts) != 4 or not any(parts[3].endswith(item) for item in accepted):
+            raise ValueError("W&B Report URL disagrees with the exact Report id")
+    return url
+
+
+def _canonical_research_url_path(path: str) -> list[str]:
+    if (
+        not path.startswith("/")
+        or path.endswith("/")
+        or "//" in path
+        or "\\" in path
+        or "%" in path
+    ):
+        raise ValueError("W&B resource URL path is not canonical")
+    parts = path[1:].split("/")
+    for part in parts:
+        if (
+            not part
+            or part in {".", ".."}
+            or any(unicodedata.category(character) == "Cc" for character in part)
+        ):
+            raise ValueError("W&B resource URL path is not canonical")
+    return parts
+
+
+def _immutable_weave_dataset_object_id(value: str) -> None:
+    if value.count(":") != 1:
+        raise ValueError(
+            "hosted Dataset object id must contain one name and content revision"
+        )
+    name, revision = value.split(":", 1)
+    if not name or not _WEAVE_CONTENT_HASH.fullmatch(revision):
+        raise ValueError(
+            "hosted Dataset object id must use a positive content hash"
+        )
+
+
+def _exact_receipt_text(value: Any, label: str, maximum: int) -> str:
+    if (
+        not isinstance(value, str)
+        or not value.strip()
+        or value != value.strip()
+        or len(value) > maximum
+    ):
+        raise ValueError(f"{label} must contain 1 to {maximum} exact characters")
+    return value
+
+
+def _optional_receipt_text(value: Any, label: str, maximum: int) -> str | None:
+    if value is None:
+        return None
+    return _exact_receipt_text(value, label, maximum)
+
+
+def _safe_receipt_text(
+    value: Any,
+    label: str,
+    maximum: int,
+    *,
+    single_line: bool = False,
+) -> str:
+    text = _exact_receipt_text(value, label, maximum)
+    if (
+        redact_text(text) != text
+        or any(ord(character) < 32 and character not in "\n\t" for character in text)
+        or (single_line and ("\n" in text or "\r" in text))
+    ):
+        raise ValueError(f"{label} is unsafe or invalid")
+    lowered = text.casefold()
+    if any(item in lowered for item in ("javascript:", "data:", "file:", "<script")):
+        raise ValueError(f"{label} contains unsafe content")
+    return text
+
+
+def _receipt_timestamp(value: Any, label: str) -> str:
+    text = _exact_receipt_text(value, label, 100)
+    try:
+        parsed = datetime.fromisoformat(text.replace("Z", "+00:00"))
+    except ValueError as exc:
+        raise ValueError(f"{label} must use ISO 8601") from exc
+    if parsed.tzinfo is None or parsed.utcoffset() is None:
+        raise ValueError(f"{label} must include a timezone")
+    return text
+
+
 def research_log_event_from_dict(
     raw: Mapping[str, Any], *, require_digest: bool = True
 ) -> ResearchLogEventV1:
@@ -436,6 +1507,10 @@ def research_log_event_from_dict(
     experiment_view = event.summary.get("experiment_view")
     experiment_view_page = event.summary.get("experiment_view_page")
     experiment_view_manifest = event.summary.get("experiment_view_manifest")
+    weave_publication = event.summary.get("weave_publication")
+    research_index_report_publication = event.summary.get(
+        "research_index_report_publication"
+    )
     experiment_payloads = sum(
         item is not None
         for item in (experiment_view, experiment_view_page, experiment_view_manifest)
@@ -462,6 +1537,17 @@ def research_log_event_from_dict(
         experiment_view_manifest_from_dict(experiment_view_manifest)
         if event.state not in {"completed", "failed", "cancelled"}:
             raise ValueError("experiment manifests must declare a terminal Study state")
+    _validate_weave_publication_event(
+        event,
+        weave_publication=weave_publication,
+        experiment_payloads=experiment_payloads,
+    )
+    _validate_research_index_report_publication_event(
+        event,
+        publication_raw=research_index_report_publication,
+        experiment_payloads=experiment_payloads,
+        weave_publication=weave_publication,
+    )
     unsigned = event.to_dict()
     unsigned.pop("event_digest", None)
     if (
@@ -479,6 +1565,110 @@ def research_log_event_from_dict(
 
 def sign_research_log_event(event: ResearchLogEventV1) -> ResearchLogEventV1:
     return research_log_event_from_dict(event.to_dict(), require_digest=False)
+
+
+def _validate_weave_publication_event(
+    event: ResearchLogEventV1,
+    *,
+    weave_publication: Any,
+    experiment_payloads: int,
+) -> None:
+    if weave_publication is None:
+        return
+    if experiment_payloads:
+        raise ValueError(
+            "Weave publication evidence cannot replace an experiment projection"
+        )
+    if not isinstance(weave_publication, Mapping):
+        raise ValueError("summary.weave_publication must be an object")
+    publication = weave_publication_evidence_from_dict(weave_publication)
+    scope = publication.target.study_scope
+    if (
+        event.research_id != scope.research_id
+        or event.study_id != scope.study_id
+        or event.classification != "evidence"
+        or event.state != "completed"
+    ):
+        raise ValueError(
+            "Weave publication evidence disagrees with its Research event scope"
+        )
+    expected_evidence = ResearchEvidenceRefV1(
+        system="weave",
+        kind="weave_publication_receipt",
+        ref=f"weave-publication:{publication.publication_id}",
+        digest=publication.receipt_digest,
+        version=str(publication.schema_version),
+        selector={
+            "entity": publication.target.entity,
+            "project": publication.target.project,
+        },
+    )
+    if event.evidence != (expected_evidence,):
+        raise ValueError(
+            "Weave publication event evidence ref disagrees with its receipt"
+        )
+
+
+def _validate_research_index_report_publication_event(
+    event: ResearchLogEventV1,
+    *,
+    publication_raw: Any,
+    experiment_payloads: int,
+    weave_publication: Any,
+) -> None:
+    if publication_raw is None:
+        return
+    if experiment_payloads or weave_publication is not None:
+        raise ValueError(
+            "Research index Report evidence cannot replace Study evidence"
+        )
+    if not isinstance(publication_raw, Mapping):
+        raise ValueError(
+            "summary.research_index_report_publication must be an object"
+        )
+    publication = research_index_report_publication_evidence_from_dict(
+        publication_raw
+    )
+    if (
+        event.research_id != publication.research_id
+        or event.study_id is not None
+        or event.classification != "evidence"
+        or event.state != "completed"
+    ):
+        raise ValueError(
+            "Research index Report evidence disagrees with its Research event scope"
+        )
+    selector = {
+        "entity": publication.target.entity,
+        "project": publication.target.project_name,
+    }
+    expected_evidence = (
+        ResearchEvidenceRefV1(
+            system="wandb",
+            kind="research_index_publication_receipt",
+            ref=f"wandb-research-index:{publication.index.publication_id}",
+            uri=publication.index.run_url,
+            digest=publication.index.receipt_digest,
+            version=str(publication.schema_version),
+            selector=selector,
+        ),
+        ResearchEvidenceRefV1(
+            system="wandb",
+            kind="research_index_report_publication_receipt",
+            ref=(
+                "wandb-research-report:"
+                f"{publication.report.report_publication_id}"
+            ),
+            uri=publication.report.report_url,
+            digest=publication.report.receipt_digest,
+            version=str(publication.schema_version),
+            selector=selector,
+        ),
+    )
+    if event.evidence != expected_evidence:
+        raise ValueError(
+            "Research index Report event refs disagree with its exact receipts"
+        )
 
 
 def event_state(value: str) -> ResearchLogState:
@@ -890,6 +2080,16 @@ def _positive_int(value: Any, label: str) -> int:
     if integer < 1:
         raise ValueError(f"{label} must be a positive integer")
     return integer
+
+
+def _exact_positive_int(value: Any, label: str) -> int:
+    if type(value) is not int or value < 1:
+        raise ValueError(f"{label} must be an exact positive integer")
+    return value
+
+
+def _is_schema_one(value: Any) -> bool:
+    return type(value) is int and value == RESEARCH_SCHEMA_VERSION
 
 
 def _non_negative_int(value: Any, label: str) -> int:

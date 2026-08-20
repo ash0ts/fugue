@@ -46,6 +46,7 @@ def test_cli_lazily_prepares_runnable_wandb_mcp_reference(
                 "materialization": {
                     "artifacts": [
                         {"path": "comparison.yaml"},
+                        {"path": "human-readable-evidence-canary.yaml"},
                         {"path": "private-labels.jsonl"},
                     ]
                 },
@@ -82,6 +83,12 @@ def test_cli_lazily_prepares_runnable_wandb_mcp_reference(
         / _CANDIDATE
         / "comparison.yaml"
     ).as_posix()
+    assert payload["human_readable_comparison_path"] == (
+        tmp_path
+        / ".fugue/reference-studies/wandb-mcp"
+        / _CANDIDATE
+        / "human-readable-evidence-canary.yaml"
+    ).as_posix()
     assert "not-serialized" not in json.dumps(payload)
 
 
@@ -103,7 +110,10 @@ def test_cli_reference_defaults_do_not_require_an_env_file(
                     ".fugue/reference-studies/wandb-mcp/" + _CANDIDATE
                 ),
                 "materialization": {
-                    "artifacts": [{"path": "comparison.yaml"}]
+                    "artifacts": [
+                        {"path": "comparison.yaml"},
+                        {"path": "human-readable-evidence-canary.yaml"},
+                    ]
                 },
             }
         )
@@ -158,6 +168,38 @@ def test_cli_fails_when_preparation_did_not_materialize_a_comparison(
         )
 
 
+def test_cli_fails_when_preparation_omits_human_readable_canary(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from fugue.reference_studies import wandb_mcp
+
+    monkeypatch.setattr(
+        wandb_mcp,
+        "prepare_wandb_mcp_reference_study",
+        lambda **_kwargs: SimpleNamespace(
+            to_dict=lambda: {
+                "source_commit": _CANDIDATE,
+                "destination": (
+                    ".fugue/reference-studies/wandb-mcp/" + _CANDIDATE
+                ),
+                "materialization": {
+                    "artifacts": [{"path": "comparison.yaml"}]
+                },
+            }
+        ),
+    )
+    with pytest.raises(RuntimeError, match="human-readable evidence canary"):
+        main(
+            [
+                "mcp",
+                "prepare-wandb-release",
+                "--repo-root",
+                tmp_path.as_posix(),
+            ]
+        )
+
+
 @pytest.mark.parametrize(
     ("resource_name", "example_name"),
     (
@@ -188,7 +230,7 @@ def test_packaged_comparison_is_local_and_reference_bound() -> None:
     template = yaml.safe_load(_resource_text("comparison.yaml.template"))
     assert template["schema_version"] == 3
     assert template["id"] == (
-        "mcp-main-vs-0-4-{{CANDIDATE_SHORT}}-harbor-canary-v11"
+        "mcp-main-vs-0-4-{{CANDIDATE_SHORT}}-harbor-canary-v13"
     )
     assert template["execution"]["evidence_mode"] == "local"
     assert template["execution"]["environment"] == {"type": "docker"}
@@ -202,6 +244,18 @@ def test_packaged_comparison_is_local_and_reference_bound() -> None:
         "http://127.0.0.1:18080"
     )
     assert template["supersedes"] == [
+        {
+            "result_digest": (
+                "09e9a30fd9ab3e53e98461273ec49c580af807b687bfbb3a327589f401e8424e"
+            ),
+            "reason": (
+                "V11 measured the same locked revisions and tasks under the prior "
+                "evidence-presentation contract; V12 stopped as infrastructure-invalid "
+                "before producing a canonical result, and V13 validates the repaired canonical "
+                "local evidence and human-readable publication path without pooling "
+                "the runs."
+            ),
+        },
         {
             "result_digest": (
                 "e062f5b392a36d9ebd97adc3ab58b6e253cdd9dd943381342d51d76303bbcf38"
@@ -254,6 +308,38 @@ def test_packaged_comparison_is_local_and_reference_bound() -> None:
     assert len(json.loads(_resource_text("tasks.jsonl").splitlines()[0])) > 0
     assert len(_resource_text("tasks.jsonl").splitlines()) == 4
     assert len(_resource_text("private-labels.jsonl").splitlines()) == 4
+
+
+def test_packaged_human_readable_canary_is_a_distinct_four_cell_study() -> None:
+    full = yaml.safe_load(_resource_text("comparison.yaml.template"))
+    canary = yaml.safe_load(
+        _resource_text("human-readable-evidence-canary.yaml.template")
+    )
+
+    assert canary["id"] == (
+        "mcp-main-vs-0-4-{{CANDIDATE_SHORT}}-"
+        "human-readable-evidence-canary-v2"
+    )
+    assert canary["id"] != full["id"]
+    assert canary["taskset"] == {
+        "tasks": "human-readable-evidence-tasks.jsonl",
+        "private_labels": "human-readable-evidence-private-labels.jsonl",
+    }
+    assert canary["execution"]["attempts"] == 1
+    assert canary["execution"]["harnesses"] == ["claude-code"]
+    assert canary["execution"]["evidence_mode"] == "weave_required"
+    assert canary["execution"]["source_evidence_project"] == (
+        "wandb/fugue-mcp-release-source-v2"
+    )
+    assert canary["execution"]["evidence_project"] == (
+        "wandb/fugue-mcp-release-qualification-v1"
+    )
+    assert full["execution"]["evidence_mode"] == "local"
+    gates = {gate["id"]: gate for gate in canary["decision_policy"]["gates"]}
+    assert gates["four-terminal-cells"]["target"] == 4
+    assert gates["candidate-passes-two-tasks"]["target"] == 2
+    assert "eight-terminal-cells" not in gates
+    assert "candidate-passes-four-tasks" not in gates
 
 
 def test_packaged_reference_contains_the_pinned_scorer_runtime_profile() -> None:
@@ -398,6 +484,7 @@ def test_reference_resources_and_mcp_extra_are_packaged() -> None:
     expected = {
         "README.md",
         "comparison.yaml.template",
+        "human-readable-evidence-canary.yaml.template",
         "mcp.json.template",
         "private-labels.jsonl",
         "release-contract-v1.json",

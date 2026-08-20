@@ -73,6 +73,328 @@ def test_programmatic_experiment_with_hosted_destination_infers_weave() -> None:
     assert experiment.evidence_destination.project == "project"
 
 
+def _hosted_startup_cell(
+    *,
+    attempt_id: str = "a" * 64,
+    cell_id: str = "cell-a",
+) -> SimpleNamespace:
+    return SimpleNamespace(
+        applicable=True,
+        execution_kind="agent",
+        attempt_id=attempt_id,
+        id=cell_id,
+        candidate_id="candidate-a",
+        execution_fingerprint="execution-a",
+    )
+
+
+def test_hosted_startup_allows_a_fresh_weave_required_run(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    cell = _hosted_startup_cell()
+
+    class EmptyStore:
+        def __init__(self, _repo_root, _run_id) -> None:
+            pass
+
+        @staticmethod
+        def read_attempt(_attempt_id):
+            raise FileNotFoundError
+
+    monkeypatch.setattr(operator_module, "LocalEvidenceStore", EmptyStore)
+
+    startup = operator_module._hosted_evidence_startup(  # noqa: SLF001
+        repo_root=tmp_path,
+        run_id="run-a",
+        cells=[cell],
+    )
+
+    assert startup.fresh_cells == (cell,)
+
+    with pytest.raises(
+        operator_module.UnsupportedHostedFinalizationRecovery,
+        match="automatic weave_required resume is unsupported",
+    ):
+        operator_module._hosted_evidence_startup(  # noqa: SLF001
+            repo_root=tmp_path,
+            run_id="run-a",
+            cells=[cell],
+            resuming=True,
+        )
+
+    run_dir = tmp_path / ".fugue" / "runtime" / "run-a"
+    run_dir.mkdir(parents=True)
+    (run_dir / "evaluations.jsonl").write_text(
+        json.dumps(
+            {
+                "schema_version": 1,
+                "run_id": "run-a",
+                "status": "pending",
+                "cell_id": "unplanned-cell",
+                "candidate_id": cell.candidate_id,
+            },
+            sort_keys=True,
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+    with pytest.raises(
+        operator_module.UnsupportedHostedFinalizationRecovery,
+        match="after hosted Evaluation construction",
+    ):
+        operator_module._hosted_evidence_startup(  # noqa: SLF001
+            repo_root=tmp_path,
+            run_id="run-a",
+            cells=[cell],
+        )
+
+
+def test_hosted_initialization_intent_blocks_replacement_after_constructor_loss(
+    tmp_path: Path,
+) -> None:
+    cell = _hosted_startup_cell()
+    startup = operator_module._hosted_evidence_startup(  # noqa: SLF001
+        repo_root=tmp_path,
+        run_id="run-a",
+        cells=[cell],
+    )
+    assert startup.fresh_cells == (cell,)
+
+    marker_path = operator_module._write_hosted_initialization_intent(  # noqa: SLF001
+        repo_root=tmp_path,
+        run_id="run-a",
+        project="entity/project",
+        snapshot_sha256="s" * 64,
+        cells=[cell],
+    )
+    marker = json.loads(marker_path.read_text(encoding="utf-8"))
+    unsigned = {
+        key: value for key, value in marker.items() if key != "record_digest"
+    }
+    assert marker["record_digest"] == stable_digest(unsigned)
+    assert marker["cell_bindings_digest"] == stable_digest(marker["cell_bindings"])
+    assert marker_path.stat().st_mode & 0o777 == 0o600
+
+    constructor_calls = 0
+
+    def constructor_lost_after_remote_write() -> None:
+        nonlocal constructor_calls
+        constructor_calls += 1
+        raise ConnectionError("controller lost after remote write")
+
+    with pytest.raises(ConnectionError, match="controller lost"):
+        constructor_lost_after_remote_write()
+
+    with pytest.raises(
+        operator_module.UnsupportedHostedFinalizationRecovery,
+        match="will not create replacement hosted Calls or rerun the Agent",
+    ):
+        operator_module._hosted_evidence_startup(  # noqa: SLF001
+            repo_root=tmp_path,
+            run_id="run-a",
+            cells=[cell],
+        )
+    assert constructor_calls == 1
+
+
+def test_hosted_startup_stops_before_replacing_a_missing_live_graph(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    cell = _hosted_startup_cell()
+
+    class LocalStore:
+        def __init__(self, _repo_root, _run_id) -> None:
+            pass
+
+        @staticmethod
+        def read_attempt(_attempt_id):
+            return SimpleNamespace(record_digest="d" * 64)
+
+    monkeypatch.setattr(operator_module, "LocalEvidenceStore", LocalStore)
+
+    with pytest.raises(
+        operator_module.UnsupportedHostedFinalizationRecovery,
+        match="automatic weave_required resume is unsupported.*local evidence",
+    ):
+        operator_module._hosted_evidence_startup(  # noqa: SLF001
+            repo_root=tmp_path,
+            run_id="run-a",
+            cells=[cell],
+        )
+
+
+def test_hosted_startup_preserves_but_does_not_resume_a_terminal_row(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    cell = _hosted_startup_cell()
+    run_dir = tmp_path / ".fugue" / "runtime" / "run-a"
+    run_dir.mkdir(parents=True)
+    row = {
+        "run_id": "run-a",
+        "cell_id": cell.id,
+        "attempt_id": cell.attempt_id,
+        "candidate_id": cell.candidate_id,
+        "execution_fingerprint": cell.execution_fingerprint,
+        "trace_project": "entity/project",
+        "local_evidence_record_digest": "d" * 64,
+        "hosted_evidence_verification_status": "verified",
+        "hosted_task_result_canonical": True,
+        "terminal_hosted_visibility_verified": True,
+        "evaluation_prediction_graph_verified": True,
+        "evaluation_root_terminal_verified": True,
+    }
+    hosted_path = run_dir / "hosted-evaluation-results.jsonl"
+    hosted_path.write_text(json.dumps(row, sort_keys=True) + "\n", encoding="utf-8")
+    original_hosted_bytes = hosted_path.read_bytes()
+
+    class LocalStore:
+        def __init__(self, _repo_root, _run_id) -> None:
+            pass
+
+        @staticmethod
+        def read_attempt(_attempt_id):
+            return SimpleNamespace(record_digest="d" * 64)
+
+    monkeypatch.setattr(operator_module, "LocalEvidenceStore", LocalStore)
+
+    with pytest.raises(
+        operator_module.UnsupportedHostedFinalizationRecovery,
+        match=(
+            "automatic weave_required resume is unsupported.*"
+            "publish its unchanged result"
+        ),
+    ):
+        operator_module._hosted_evidence_startup(  # noqa: SLF001
+            repo_root=tmp_path,
+            run_id="run-a",
+            cells=[cell],
+        )
+    assert hosted_path.read_bytes() == original_hosted_bytes
+
+
+def test_hosted_startup_rejects_a_partially_completed_evaluation_scope(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    completed = _hosted_startup_cell()
+    unstarted = _hosted_startup_cell(
+        attempt_id="b" * 64,
+        cell_id="cell-b",
+    )
+    run_dir = tmp_path / ".fugue" / "runtime" / "run-a"
+    run_dir.mkdir(parents=True)
+    hosted_path = run_dir / "hosted-evaluation-results.jsonl"
+    hosted_path.write_text(
+        json.dumps(
+            {
+                "run_id": "run-a",
+                "cell_id": completed.id,
+                "attempt_id": completed.attempt_id,
+                "candidate_id": completed.candidate_id,
+                "execution_fingerprint": completed.execution_fingerprint,
+                "trace_project": "entity/project",
+                "local_evidence_record_digest": "d" * 64,
+                "hosted_evidence_verification_status": "verified",
+                "hosted_task_result_canonical": True,
+                "terminal_hosted_visibility_verified": True,
+                "evaluation_prediction_graph_verified": True,
+                "evaluation_root_terminal_verified": True,
+            },
+            sort_keys=True,
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+    original_hosted_bytes = hosted_path.read_bytes()
+
+    class PartialStore:
+        def __init__(self, _repo_root, _run_id) -> None:
+            pass
+
+        @staticmethod
+        def read_attempt(attempt_id):
+            if attempt_id == completed.attempt_id:
+                return SimpleNamespace(record_digest="d" * 64)
+            raise FileNotFoundError
+
+    monkeypatch.setattr(operator_module, "LocalEvidenceStore", PartialStore)
+
+    with pytest.raises(
+        operator_module.UnsupportedHostedFinalizationRecovery,
+        match="automatic weave_required resume is unsupported",
+    ):
+        operator_module._hosted_evidence_startup(  # noqa: SLF001
+            repo_root=tmp_path,
+            run_id="run-a",
+            cells=[completed, unstarted],
+        )
+    assert hosted_path.read_bytes() == original_hosted_bytes
+
+
+def test_execute_run_checks_hosted_recovery_before_live_coordinator_construction(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    service = make_operator_repo(tmp_path)
+    monkeypatch.setattr(operator_module, "agent_runtime_spec", lambda _harness: None)
+    monkeypatch.setattr(operator_module, "_verify_rendered_setup", lambda _jobs: None)
+    monkeypatch.setattr(
+        operator_module,
+        "validate_harbor_job_configs",
+        lambda _paths: None,
+    )
+    checked = 0
+    constructed = 0
+
+    def reject_partial_hosted_graph(**_kwargs):
+        nonlocal checked
+        checked += 1
+        raise operator_module.UnsupportedHostedFinalizationRecovery(
+            "canonical local Agent evidence was preserved"
+        )
+
+    class UnexpectedLiveCoordinator:
+        def __init__(self, *_args, **_kwargs) -> None:
+            nonlocal constructed
+            constructed += 1
+            raise AssertionError("live coordinator must not be constructed")
+
+    monkeypatch.setattr(
+        operator_module,
+        "_hosted_evidence_startup",
+        reject_partial_hosted_graph,
+    )
+    monkeypatch.setattr(
+        operator_module,
+        "LiveEvaluationCoordinator",
+        UnexpectedLiveCoordinator,
+    )
+
+    with pytest.raises(
+        operator_module.UnsupportedHostedFinalizationRecovery,
+        match="local Agent evidence was preserved",
+    ):
+        service.execute_run(
+            ExperimentRequest(experiment_id="demo"),
+            run_id="unsupported-hosted-resume",
+            cell_runner=lambda *_args, **_kwargs: (_ for _ in ()).throw(
+                AssertionError("Agent runner must not start")
+            ),
+        )
+
+    assert checked == 1
+    assert constructed == 0
+    manifest = read_run_manifest(
+        tmp_path / ".fugue" / "runtime" / "unsupported-hosted-resume"
+    )
+    assert manifest is not None
+    assert manifest["status"] == "failed"
+    assert "UnsupportedHostedFinalizationRecovery" in str(manifest.get("error"))
+
+
 def test_run_snapshot_to_dict_uses_json_container_types() -> None:
     snapshot = RunSnapshotV1(
         schema_version=1,
@@ -224,6 +546,113 @@ def test_hosted_evidence_finishes_after_canonical_local_row() -> None:
     ]
 
 
+def test_combined_evidence_overlay_names_local_and_hosted_scopes_explicitly() -> (
+    None
+):
+    class LocalCoordinator:
+        @staticmethod
+        def begin_cell(cell):
+            del cell
+            return {
+                "FUGUE_ATTEMPT_ID": "attempt-a",
+                "FUGUE_LOCAL_EVALUATION_SCOPE_ID": "local-scope-a",
+                "FUGUE_EVALUATION_SCOPE_ID": "local-scope-a",
+            }
+
+    class HostedCoordinator:
+        @staticmethod
+        def begin_cell(cell):
+            del cell
+            return {
+                "FUGUE_ATTEMPT_ID": "attempt-a",
+                "FUGUE_EVALUATION_SCOPE_ID": "hosted-scope-a",
+            }
+
+    coordinators = operator_module._EvidenceCoordinators(  # noqa: SLF001
+        local=LocalCoordinator(),  # type: ignore[arg-type]
+        hosted=HostedCoordinator(),  # type: ignore[arg-type]
+    )
+
+    overlay = coordinators.begin_cell(object())  # type: ignore[arg-type]
+
+    assert overlay == {
+        "FUGUE_ATTEMPT_ID": "attempt-a",
+        "FUGUE_LOCAL_EVALUATION_SCOPE_ID": "local-scope-a",
+        "FUGUE_EVALUATION_SCOPE_ID": "hosted-scope-a",
+    }
+
+
+def test_combined_evidence_overlay_still_rejects_attempt_identity_mismatch() -> None:
+    class LocalCoordinator:
+        @staticmethod
+        def begin_cell(cell):
+            del cell
+            return {
+                "FUGUE_ATTEMPT_ID": "attempt-a",
+                "FUGUE_LOCAL_EVALUATION_SCOPE_ID": "local-scope-a",
+                "FUGUE_EVALUATION_SCOPE_ID": "local-scope-a",
+            }
+
+    class HostedCoordinator:
+        @staticmethod
+        def begin_cell(cell):
+            del cell
+            return {
+                "FUGUE_ATTEMPT_ID": "attempt-b",
+                "FUGUE_EVALUATION_SCOPE_ID": "hosted-scope-a",
+            }
+
+    coordinators = operator_module._EvidenceCoordinators(  # noqa: SLF001
+        local=LocalCoordinator(),  # type: ignore[arg-type]
+        hosted=HostedCoordinator(),  # type: ignore[arg-type]
+    )
+
+    with pytest.raises(
+        RuntimeError,
+        match="local and hosted evidence overlays disagree: FUGUE_ATTEMPT_ID",
+    ):
+        coordinators.begin_cell(object())  # type: ignore[arg-type]
+
+
+def test_hosted_restore_rejects_duplicate_logical_attempts(tmp_path: Path) -> None:
+    results_path = tmp_path / "hosted-results.jsonl"
+    row = {
+        "attempt_id": "attempt-a",
+        "candidate_id": "candidate-a",
+        "execution_fingerprint": "execution-a",
+    }
+    results_path.write_text(
+        "\n".join(json.dumps(row, sort_keys=True) for _ in range(2)) + "\n",
+        encoding="utf-8",
+    )
+
+    class LocalCoordinator:
+        @staticmethod
+        def restore_finished_cell(_cell):
+            return row
+
+    class HostedCoordinator:
+        def __init__(self) -> None:
+            self.results_path = results_path
+
+        @staticmethod
+        def finish_cell(_cell, _outcome, *, canonical_row):
+            assert canonical_row == row
+
+    coordinators = operator_module._EvidenceCoordinators(  # noqa: SLF001
+        local=LocalCoordinator(),  # type: ignore[arg-type]
+        hosted=HostedCoordinator(),  # type: ignore[arg-type]
+    )
+    cell = SimpleNamespace(
+        attempt_id="attempt-a",
+        candidate_id="candidate-a",
+        execution_fingerprint="execution-a",
+    )
+
+    with pytest.raises(RuntimeError, match="duplicate logical attempts"):
+        coordinators.restore_finished_cell(cell, object())  # type: ignore[arg-type]
+
+
 def test_legacy_weave_required_operator_keeps_local_and_hosted_evidence_separate(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -246,6 +675,20 @@ def test_legacy_weave_required_operator_keeps_local_and_hosted_evidence_separate
             assert project == "team/fugue-experiments"
             self.run_id = cells[0].run_id
             self.repo_root = repo_root
+            marker_path = operator_module._hosted_initialization_intent_path(  # noqa: SLF001
+                repo_root,
+                self.run_id,
+            )
+            assert marker_path.is_file()
+            marker = json.loads(marker_path.read_text(encoding="utf-8"))
+            assert marker["trace_project"] == project
+            assert marker["record_digest"] == stable_digest(
+                {
+                    key: value
+                    for key, value in marker.items()
+                    if key != "record_digest"
+                }
+            )
             self.results_path = (
                 repo_root
                 / ".fugue"

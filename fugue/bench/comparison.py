@@ -10,6 +10,7 @@ import shutil
 import subprocess
 import tempfile
 import urllib.parse
+import uuid
 from collections import Counter
 from collections.abc import Callable, Iterable, Mapping, Sequence
 from dataclasses import asdict, dataclass, field, replace
@@ -43,19 +44,38 @@ from fugue.bench.comparison_execution import (
     ComparisonExecutionBindingV1,
     compile_comparison_execution_binding,
     execution_binding_from_approved,
+    recovery_journal_path,
     verify_comparison_execution_binding,
     verify_resume_stage_authorizations,
 )
-from fugue.bench.execution_recovery import ExecutionFinalizationPending
+from fugue.bench.evaluation_semantics import (
+    behavioral_task_output_available,
+    nonbehavioral_score_field_names,
+)
+from fugue.bench.execution_recovery import (
+    ExecutionFinalizationPending,
+    ExecutionRecoveryController,
+)
 from fugue.bench.files import atomic_write_json
-from fugue.bench.library import ExperimentSpec, experiment_from_data, validate_id
+from fugue.bench.legacy_v3_admission import (
+    LegacyHostedV3AdmissionRegistryV1,
+    LegacyHostedV3AdmissionV1,
+    require_legacy_hosted_v3_admission,
+)
+from fugue.bench.library import (
+    ExperimentSpec,
+    experiment_from_data,
+    experiment_from_yaml,
+    validate_id,
+)
 from fugue.bench.local_evidence import (
     LocalEvidenceDestinationV1,
     LocalEvidenceStore,
     ReconciliationStatus,
     local_evidence_destination_from_dict,
     local_result_attempt_projection_v1,
-    local_result_row_projection_digest,
+    local_result_projection_digest_candidates_v1,
+    local_result_row_projection_digest_candidates,
     local_result_row_projection_v1,
 )
 from fugue.bench.manifest import fixture_repository_digest
@@ -65,6 +85,12 @@ from fugue.bench.operator import (
     PreviewSummary,
 )
 from fugue.bench.reproducibility import INPUT_LOCK_NAME, verify_snapshot
+from fugue.bench.task_presentation import (
+    TaskPresentationV1,
+    TaskResultV1,
+    task_presentation_from_dict,
+    task_result_from_dict,
+)
 from fugue.model_plane import (
     EvidenceDestinationV1,
     EvidenceMode,
@@ -110,6 +136,19 @@ PublicationStatus = Literal["not_requested", "published", "failed", "not_applica
 JudgeResponseContract = Literal["scores_v1", "anchored_review_v1"]
 JudgeReviewLabel = Literal["unusable", "weak", "adequate", "strong", "exceptional"]
 _RECONCILIATION_STATUSES = frozenset({"resolved", "unresolved", "unavailable"})
+_NONBEHAVIORAL_EXECUTION_STATUSES = frozenset(
+    {"not_started", "cancelled", "interrupted", "not_applicable"}
+)
+_FATAL_INTEGRITY_TERMINAL_KINDS = frozenset(
+    {
+        "routing_failure",
+        "identity_drift",
+        "privacy_failure",
+        "evidence_failure",
+        "cleanup_failure",
+        "execution_failure",
+    }
+)
 _READINESS = frozenset({"ready", "needs_review", "blocked", "no_comparison_justified"})
 _PUBLIC_TASK_FIELDS = frozenset(
     {
@@ -120,6 +159,10 @@ _PUBLIC_TASK_FIELDS = frozenset(
         "partition",
         "critical_dimensions",
         "repository",
+        "title",
+        "required_output",
+        "public_acceptance_criteria",
+        "scenario",
     }
 )
 _PRIVATE_LABEL_FIELDS = frozenset(
@@ -533,6 +576,67 @@ class JudgeReviewV1:
         return _drop_empty(asdict(self), preserve_false=True)
 
 
+def _attempt_is_nonbehavioral(attempt: Any) -> bool:
+    terminal_kind = attempt.infrastructure.get("terminal_kind")
+    return bool(
+        attempt.execution_status in _NONBEHAVIORAL_EXECUTION_STATUSES
+        or bool(terminal_kind)
+        and not behavioral_task_output_available(
+            {
+                "runtime_outcome": (
+                    attempt.execution_status
+                    if attempt.execution_status in {"completed", "timed_out"}
+                    else None
+                ),
+                "terminal_kind": terminal_kind,
+            }
+        )
+    )
+
+
+def _attempt_requires_hosted_invalidation(attempt: Any) -> bool:
+    """Return whether a fatal attempt closed a provisional hosted result."""
+
+    infrastructure = attempt.infrastructure
+    return bool(
+        _attempt_is_nonbehavioral(attempt)
+        and infrastructure.get("terminal_kind")
+        in _FATAL_INTEGRITY_TERMINAL_KINDS
+        and attempt.execution_status != "not_started"
+    )
+
+
+def _attempt_has_hosted_decision_lifecycle(attempt: Any) -> bool:
+    infrastructure = attempt.infrastructure
+    return bool(
+        infrastructure.get("hosted_decision_contract_version") is not None
+        or infrastructure.get("weave_provisional_predict_and_score_output_digest")
+        or infrastructure.get("weave_hosted_evidence_receipt_call_id")
+        or infrastructure.get("weave_hosted_evidence_invalidation_call_id")
+    )
+
+
+def _hosted_score_identifier(value: str) -> str:
+    normalized = re.sub(r"[^a-zA-Z0-9]+", "_", value).strip("_").lower()
+    return normalized or "score"
+
+
+def _nonbehavioral_attempt_has_results(attempt: Any) -> bool:
+    return bool(
+        _attempt_is_nonbehavioral(attempt)
+        and (
+            attempt.passed is not None
+            or attempt.scores
+            or attempt.score_explanations
+            or attempt.score_details
+            or attempt.judge_reviews
+            or attempt.sanitized_answer_excerpt is not None
+            or attempt.reported_project_identity is not None
+            or attempt.task_result is not None
+        )
+    )
+
+
 @dataclass(frozen=True)
 class PairedAttemptV3:
     attempt_id: str
@@ -544,8 +648,8 @@ class PairedAttemptV3:
     evidence_status: str
     cost_usd: float | None
     latency_sec: float | None
-    input_tokens: float | None
-    output_tokens: float | None
+    input_tokens: int | None
+    output_tokens: int | None
     tool_calls: int
     tools: tuple[str, ...]
     queried_projects: tuple[str, ...]
@@ -571,8 +675,242 @@ class PairedAttemptV3:
     usage_reconciliation_status: ReconciliationStatus | None = None
     score_details: dict[str, ScoreExplanationV1] = field(default_factory=dict)
     judge_reviews: dict[str, JudgeReviewV1] = field(default_factory=dict)
+    arm_label: str | None = None
+    treatment_summary: str | None = None
+    task_presentation: TaskPresentationV1 | None = None
+    task_result: TaskResultV1 | None = None
 
-    def __post_init__(self) -> None:
+    def __post_init__(self) -> None:  # noqa: C901 - validates one immutable view
+        for field_name in ("input_tokens", "output_tokens"):
+            raw_count = getattr(self, field_name)
+            normalized_count = _token_count_or_none(raw_count)
+            if raw_count is not None and normalized_count is None:
+                raise ValueError(f"V3 {field_name} must be a non-negative integer")
+            object.__setattr__(self, field_name, normalized_count)
+        if _nonbehavioral_attempt_has_results(self):
+            raise ValueError(
+                "V3 nonbehavioral attempt cannot contain task or judge results"
+            )
+        if (
+            self.infrastructure.get("hosted_evidence_invalidation_status")
+            == "verified"
+            or self.infrastructure.get(
+                "weave_hosted_evidence_invalidation_call_id"
+            )
+        ) and (
+            self.task_result is not None or self.scores or self.passed is not None
+        ):
+            raise ValueError(
+                "V3 invalidated hosted attempt cannot contain behavioral results"
+            )
+        hosted_lifecycle_present = _attempt_has_hosted_decision_lifecycle(self)
+        if _attempt_requires_hosted_invalidation(self) and hosted_lifecycle_present:
+            invalidation_digests = (
+                "weave_hosted_evidence_invalidation_bindings_digest",
+                "weave_hosted_evidence_invalidation_terminal_output_digest",
+            )
+            if (
+                self.infrastructure.get("hosted_decision_contract_version") != 1
+                or self.infrastructure.get(
+                    "hosted_evidence_invalidation_status"
+                )
+                != "verified"
+                or self.infrastructure.get(
+                    "weave_hosted_evidence_invalidation_object_verified"
+                )
+                is not True
+                or self.infrastructure.get(
+                    "weave_hosted_evidence_invalidation_terminal_verified"
+                )
+                is not True
+                or not self.infrastructure.get(
+                    "weave_hosted_evidence_invalidation_call_id"
+                )
+                or not self.infrastructure.get(
+                    "weave_hosted_evidence_invalidation_error_type"
+                )
+                or not self.infrastructure.get(
+                    "weave_hosted_evidence_invalidation_project"
+                )
+                or not isinstance(
+                    self.infrastructure.get(
+                        "weave_hosted_evidence_invalidation_parent_verified"
+                    ),
+                    bool,
+                )
+                or any(
+                    re.fullmatch(
+                        r"[0-9a-f]{64}",
+                        str(self.infrastructure.get(name) or ""),
+                    )
+                    is None
+                    for name in invalidation_digests
+                )
+                or self.infrastructure.get("evidence_integrity_status") != "invalid"
+            ):
+                raise ValueError(
+                    "V3 fatal hosted attempt requires a verified invalidation receipt"
+                )
+        hosted_contract = self.infrastructure.get(
+            "hosted_decision_contract_version"
+        )
+        if hosted_contract is not None:
+            if (
+                isinstance(hosted_contract, bool)
+                or hosted_contract != 1
+            ):
+                raise ValueError("V3 hosted decision contract version is invalid")
+            behavioral_result = bool(
+                not _attempt_is_nonbehavioral(self)
+                and (self.task_result is not None or self.scores)
+            )
+            if behavioral_result:
+                required_hosted_digests = (
+                    "weave_provisional_predict_and_score_output_digest",
+                    "weave_provisional_score_set_digest",
+                    "weave_provisional_score_call_set_digest",
+                    "weave_hosted_evidence_receipt_bindings_digest",
+                    "weave_hosted_canonical_task_result_digest",
+                    "weave_hosted_canonical_score_set_digest",
+                    "weave_hosted_canonical_payload_digest",
+                )
+                if (
+                    self.infrastructure.get(
+                        "hosted_evidence_verification_status"
+                    )
+                    != "verified"
+                    or self.infrastructure.get(
+                        "hosted_task_result_canonical"
+                    )
+                    is not True
+                    or self.infrastructure.get(
+                        "terminal_hosted_visibility_verified"
+                    )
+                    is not True
+                    or self.infrastructure.get(
+                        "weave_hosted_evidence_receipt_object_verified"
+                    )
+                    is not True
+                    or self.infrastructure.get(
+                        "weave_hosted_evidence_receipt_terminal_verified"
+                    )
+                    is not True
+                    or self.infrastructure.get(
+                        "weave_provisional_call_verification_status"
+                    )
+                    != "verified"
+                    or self.infrastructure.get("task_verdict_owner")
+                    != "post_close_hosted_evidence_verification_receipt"
+                    or not self.infrastructure.get(
+                        "weave_hosted_evidence_receipt_call_id"
+                    )
+                    or any(
+                        re.fullmatch(
+                            r"[0-9a-f]{64}",
+                            str(self.infrastructure.get(name) or ""),
+                        )
+                        is None
+                        for name in required_hosted_digests
+                    )
+                ):
+                    raise ValueError(
+                        "V3 behavioral attempt requires a verified hosted "
+                        "decision receipt"
+                    )
+                payload = self.infrastructure.get(
+                    "weave_hosted_canonical_payload"
+                )
+                if not isinstance(payload, Mapping) or set(payload) != {
+                    "task_result",
+                    "scalar_checks",
+                    "score_descriptors",
+                    "judge_evidence",
+                    "mechanism_evidence",
+                }:
+                    raise ValueError(
+                        "V3 behavioral attempt requires its canonical hosted payload"
+                    )
+                task_result_payload = _mapping(
+                    payload.get("task_result"),
+                    "V3 canonical hosted task result",
+                )
+                scalar_checks = _mapping(
+                    payload.get("scalar_checks"),
+                    "V3 canonical hosted scalar checks",
+                )
+                descriptors = _mapping(
+                    payload.get("score_descriptors"),
+                    "V3 canonical hosted score descriptors",
+                )
+                if (
+                    self.task_result is None
+                    or task_result_payload != self.task_result.to_dict()
+                    or stable_digest(task_result_payload)
+                    != self.infrastructure.get(
+                        "weave_hosted_canonical_task_result_digest"
+                    )
+                    or stable_digest(scalar_checks)
+                    != self.infrastructure.get(
+                        "weave_hosted_canonical_score_set_digest"
+                    )
+                    or stable_digest(payload)
+                    != self.infrastructure.get(
+                        "weave_hosted_canonical_payload_digest"
+                    )
+                ):
+                    raise ValueError(
+                        "V3 hosted decision digests disagree with the canonical "
+                        "attempt payload"
+                    )
+                if self.passed is not None and (
+                    scalar_checks.get("passed") is not self.passed
+                    or scalar_checks.get("task_passed") is not self.passed
+                ):
+                    raise ValueError(
+                        "V3 hosted scalar task verdict disagrees with the attempt"
+                    )
+                descriptors_by_id = {
+                    str(_mapping(item, "V3 hosted score descriptor").get("id") or ""):
+                    (str(key), _mapping(item, "V3 hosted score descriptor"))
+                    for key, item in descriptors.items()
+                }
+                for dimension, score in self.scores.items():
+                    if dimension.startswith("comparison.judge."):
+                        scalar_name = "judge__" + _hosted_score_identifier(
+                            dimension.removeprefix("comparison.judge.")
+                        )
+                    else:
+                        descriptor = descriptors_by_id.get(dimension)
+                        if descriptor is None:
+                            raise ValueError(
+                                "V3 hosted payload omits a deterministic score "
+                                "descriptor"
+                            )
+                        scalar_name, descriptor_value = descriptor
+                        if isinstance(score, bool) and descriptor_value.get(
+                            "passed"
+                        ) is not score:
+                            raise ValueError(
+                                "V3 hosted score descriptor disagrees with its score"
+                            )
+                        detail = self.score_details.get(dimension)
+                        if detail is not None and (
+                            descriptor_value.get("what") != detail.what
+                            or descriptor_value.get("observed") != detail.observed
+                            or descriptor_value.get("why_it_matters") != detail.why
+                        ):
+                            raise ValueError(
+                                "V3 hosted score descriptor disagrees with its "
+                                "explanation"
+                            )
+                    if scalar_checks.get(scalar_name) != score:
+                        raise ValueError(
+                            "V3 hosted scalar check disagrees with the attempt score"
+                        )
+            elif self.infrastructure.get("hosted_task_result_canonical") is True:
+                raise ValueError(
+                    "V3 nonbehavioral attempt cannot claim a canonical hosted result"
+                )
         if set(self.score_details) - set(self.scores):
             raise ValueError("V3 score details reference an unknown score")
         if any(key.startswith("comparison.judge.") for key in self.score_details):
@@ -582,6 +920,35 @@ class PairedAttemptV3:
             for judge_id in self.judge_reviews
         ):
             raise ValueError("V3 judge review ID is invalid")
+        for label, value in (
+            ("V3 arm label", self.arm_label),
+            ("V3 treatment summary", self.treatment_summary),
+        ):
+            if value is not None:
+                _safe_public_text(value, label=label, maximum=2_000)
+        if self.task_presentation is not None and self.task_presentation.task_id != str(
+            self.identity.get("task_id") or ""
+        ):
+            raise ValueError("V3 task presentation disagrees with attempt identity")
+        if self.task_result is not None:
+            if self.task_result.task_passed is None and self.passed:
+                raise ValueError("V3 unresolved task result cannot pass")
+            if (
+                self.task_result.task_passed is not None
+                and self.task_result.task_passed != self.passed
+            ):
+                raise ValueError("V3 task result disagrees with attempt pass status")
+            if self.task_result.agent_execution_status != self.execution_status:
+                raise ValueError(
+                    "V3 task result disagrees with Agent execution status"
+                )
+            if (
+                self.task_result.evidence_integrity_status == "verified"
+                and self.evidence_status not in {"resolved", "reconciled"}
+            ):
+                raise ValueError(
+                    "V3 verified task result requires resolved attempt evidence"
+                )
         for field_name in (
             "cost_reconciliation_status",
             "latency_reconciliation_status",
@@ -647,8 +1014,22 @@ class PairedAttemptV3:
                 judge_reviews={
                     key: item.to_dict() for key, item in self.judge_reviews.items()
                 },
+                task_presentation=(
+                    self.task_presentation.to_dict()
+                    if self.task_presentation is not None
+                    else None
+                ),
+                arm_label=self.arm_label,
+                treatment_summary=self.treatment_summary,
+                task_result=(
+                    self.task_result.to_dict()
+                    if self.task_result is not None
+                    else None
+                ),
             )
-            if stable_digest(projection) != self.local_result_row_projection_digest:
+            if self.local_result_row_projection_digest not in (
+                local_result_projection_digest_candidates_v1(projection)
+            ):
                 raise ValueError(
                     "local paired attempt decision projection digest does not match"
                 )
@@ -978,6 +1359,7 @@ class ComparisonResultV3:
     runtime_locks: tuple[LockDescriptorV1, ...]
     cohort_lineage: dict[str, Any]
     candidate_definitions: dict[str, dict[str, Any]] = field(default_factory=dict)
+    task_catalogue: tuple[TaskPresentationV1, ...] = ()
     local_evidence: dict[str, Any] | None = None
     execution_schedule: dict[str, Any] = field(default_factory=dict)
     evidence_backend: EvidenceBackend = "weave"
@@ -1019,6 +1401,15 @@ class ComparisonResultV3:
             if stable_digest(definition) != candidate_id:
                 raise ValueError(
                     "ComparisonResultV3 candidate definition digest does not match"
+                )
+        if self.task_catalogue:
+            catalogue_ids = [item.task_id for item in self.task_catalogue]
+            if len(set(catalogue_ids)) != len(catalogue_ids):
+                raise ValueError("ComparisonResultV3 task catalogue IDs must be unique")
+            paired_task_ids = {item.task_id for item in self.paired_cases}
+            if set(catalogue_ids) != paired_task_ids:
+                raise ValueError(
+                    "ComparisonResultV3 task catalogue does not cover paired tasks"
                 )
         if self.local_evidence is not None:
             _verify_local_evidence_binding(self.local_evidence)
@@ -1658,10 +2049,15 @@ def _validate_prerequisite_result_binding(
         repo_root=repo_root,
         source_lock_digest=source_lock_digest,
     )
+    bound_prerequisite_lineage = (
+        _legacy_hosted_cohort_lineage(prerequisite_lineage)
+        if _v3_is_recognizable_legacy_hosted_result(result)
+        else prerequisite_lineage
+    )
     if (
         _common_cohort_lineage(expected_lineage)
         != _common_cohort_lineage(prerequisite_lineage)
-        or result.cohort_lineage != prerequisite_lineage
+        or result.cohort_lineage != bound_prerequisite_lineage
     ):
         raise ValueError(
             "prerequisite baseline, candidate, scorer, or execution lineage "
@@ -1802,9 +2198,14 @@ def authorize_comparison_followup(
         root,
         "follow-up prerequisite result",
     )
+    selected_result_bytes = selected_result_path.read_bytes()
+    selected_result_sha256 = hashlib.sha256(selected_result_bytes).hexdigest()
     result = read_comparison_result(selected_result_path)
     if not isinstance(result, ComparisonResultV3):
         raise ValueError("follow-up prerequisite result must be V3")
+    historical_hosted_result = (
+        result.cohort_lineage.get("attempt_projection_contract_version") is None
+    )
     followup = load_comparison(followup_spec_path, repo_root=root)
     execution = followup.execution
     if not (
@@ -1842,7 +2243,16 @@ def authorize_comparison_followup(
         temporary = Path(directory)
         temporary_result = temporary / "result.json"
         temporary_attestation = temporary / "attestation.json"
-        atomic_write_json(temporary_result, result.to_dict())
+        if historical_hosted_result:
+            _write_immutable_bytes(
+                temporary_result,
+                selected_result_bytes,
+                expected_sha256=selected_result_sha256,
+                mode=0o600,
+                label="temporary historical prerequisite result",
+            )
+        else:
+            atomic_write_json(temporary_result, result.to_dict())
         atomic_write_json(temporary_attestation, attestation)
         validation_spec = replace(
             followup,
@@ -1869,11 +2279,20 @@ def authorize_comparison_followup(
         root,
         "canonical prerequisite attestation",
     )
-    _write_consistent_json(
-        canonical_result,
-        result.to_dict(),
-        label="canonical prerequisite result",
-    )
+    if historical_hosted_result:
+        _write_immutable_bytes(
+            canonical_result,
+            selected_result_bytes,
+            expected_sha256=selected_result_sha256,
+            mode=0o600,
+            label="canonical historical prerequisite result",
+        )
+    else:
+        _write_consistent_json(
+            canonical_result,
+            result.to_dict(),
+            label="canonical prerequisite result",
+        )
     _write_consistent_json(
         canonical_attestation,
         attestation,
@@ -2045,6 +2464,7 @@ def _comparison_cohort_lineage(
         }
     unsigned = {
         "schema_version": 1,
+        "attempt_projection_contract_version": 1,
         "source_lock_digest": source_lock_digest,
         "taskset_digest": _sha256_path(repo_root / spec.taskset.tasks),
         "private_labels_digest": _sha256_path(repo_root / spec.taskset.private_labels),
@@ -2085,6 +2505,7 @@ def _verify_cohort_lineage(raw: Mapping[str, Any]) -> None:
         value,
         {
             "schema_version",
+            "attempt_projection_contract_version",
             "source_lock_digest",
             "taskset_digest",
             "private_labels_digest",
@@ -2097,10 +2518,10 @@ def _verify_cohort_lineage(raw: Mapping[str, Any]) -> None:
     )
     if value.get("schema_version") != 1:
         raise ValueError("unsupported comparison cohort lineage schema")
+    if value.get("attempt_projection_contract_version") not in {None, 1}:
+        raise ValueError("unsupported comparison attempt projection contract")
     digest = str(value.get("lineage_digest") or "")
-    unsigned = {
-        key: value[key]
-        for key in (
+    unsigned_keys = (
             "schema_version",
             "source_lock_digest",
             "taskset_digest",
@@ -2109,7 +2530,11 @@ def _verify_cohort_lineage(raw: Mapping[str, Any]) -> None:
             "execution",
             "scorer_digests",
         )
-    }
+    unsigned = {key: value[key] for key in unsigned_keys}
+    if "attempt_projection_contract_version" in value:
+        unsigned["attempt_projection_contract_version"] = value[
+            "attempt_projection_contract_version"
+        ]
     if not re.fullmatch(r"[0-9a-f]{64}", digest) or digest != stable_digest(unsigned):
         raise ValueError("comparison cohort lineage digest does not match")
     source_lock_digest = str(value.get("source_lock_digest") or "")
@@ -2125,7 +2550,7 @@ def _verify_cohort_lineage(raw: Mapping[str, Any]) -> None:
 
 def _common_cohort_lineage(raw: Mapping[str, Any]) -> dict[str, Any]:
     value = _mapping(raw, "comparison cohort lineage")
-    return {
+    common = {
         key: value[key]
         for key in (
             "schema_version",
@@ -2135,6 +2560,20 @@ def _common_cohort_lineage(raw: Mapping[str, Any]) -> dict[str, Any]:
             "scorer_digests",
         )
     }
+    if "attempt_projection_contract_version" in value:
+        common["attempt_projection_contract_version"] = value[
+            "attempt_projection_contract_version"
+        ]
+    return common
+
+
+def _legacy_hosted_cohort_lineage(raw: Mapping[str, Any]) -> dict[str, Any]:
+    """Project a current lock into the exact bounded hosted-only V3 lineage."""
+
+    value = dict(_mapping(raw, "comparison cohort lineage"))
+    value.pop("lineage_digest", None)
+    value.pop("attempt_projection_contract_version", None)
+    return {**value, "lineage_digest": stable_digest(value)}
 
 
 def _qualification_input_readiness(
@@ -2545,7 +2984,11 @@ def preview_comparison(
     manifest_path = Path(experiment.manifest)
     overlay = {
         manifest_path.as_posix(): yaml.safe_dump(manifest, sort_keys=False),
+        str((manifest.get("dataset") or {}).get("source", {}).get("path") or ""): (
+            _jsonl(public_rows)
+        ),
     }
+    overlay.pop("", None)
     service = operator or OperatorService(repo_root)
     matrix = service.preview_experiment(
         experiment,
@@ -3889,7 +4332,15 @@ def analyze_comparison_rows(
         for row in normalized
         if row.get("comparison_required_evaluation_complete") is False
     )
-    operational = _operational_summary(normalized)
+    operational = _operational_summary(
+        normalized,
+        # ComparisonResultV3 persists the normalized token fields in its
+        # digest-bound attempt projection. Legacy ``n_*`` aliases remain a
+        # useful input for V2 and diagnostic summaries, but promoting them in
+        # V3 would let an aggregate claim usage that its canonical attempts do
+        # not contain and cannot reproduce after reload.
+        include_legacy_token_aliases=result_schema_version < 3,
+    )
     evidence_statuses = [_attempt_evidence_status(row) for row in normalized]
     hosted_evidence_statuses = [
         (
@@ -3906,20 +4357,29 @@ def analyze_comparison_rows(
         )
         for row, status in zip(normalized, evidence_statuses, strict=True)
     ]
+    fatal_hosted_invalidations = [
+        bool(not local_result and _row_has_fatal_hosted_invalidation(row))
+        for row in normalized
+    ]
     unresolved_evidence = sum(
         local_status in {"missing", "invalid"}
         or hosted_status in {"missing", "invalid"}
-        for local_status, hosted_status in zip(
+        or fatal_invalidation
+        for local_status, hosted_status, fatal_invalidation in zip(
             evidence_statuses,
             hosted_evidence_statuses,
+            fatal_hosted_invalidations,
             strict=True,
         )
     )
     invalid_evidence = sum(
-        local_status == "invalid" or hosted_status == "invalid"
-        for local_status, hosted_status in zip(
+        local_status == "invalid"
+        or hosted_status == "invalid"
+        or fatal_invalidation
+        for local_status, hosted_status, fatal_invalidation in zip(
             evidence_statuses,
             hosted_evidence_statuses,
+            fatal_hosted_invalidations,
             strict=True,
         )
     )
@@ -4080,7 +4540,10 @@ def analyze_comparison_rows(
         "not_applicable"
         if local_result
         else "invalid"
-        if any(status == "invalid" for status in hosted_evidence_statuses)
+        if (
+            any(status == "invalid" for status in hosted_evidence_statuses)
+            or any(fatal_hosted_invalidations)
+        )
         else "incomplete"
         if any(status == "missing" for status in hosted_evidence_statuses)
         else "reconciled"
@@ -4153,6 +4616,7 @@ def analyze_comparison_rows(
                 )
             ),
             candidate_definitions=resolved_candidate_definitions,
+            task_catalogue=_result_task_catalogue(normalized),
             local_evidence=local_evidence_binding,
             execution_schedule=(
                 dict(execution_lock.get("execution_schedule") or {})
@@ -4229,20 +4693,26 @@ def _analyze_aligned_pairs(
     for (task, harness, attempt), pair in sorted(grouped.items()):
         base = pair.get("baseline")
         candidate = pair.get("candidate")
-        dimension_changes_v2 = _paired_dimension_changes(base, candidate)
-        dimension_changes_v3 = (
-            _paired_dimension_changes_v3(base, candidate)
-            if result_schema_version == 3
-            else ()
-        )
-        if (
+        incomplete_before_dimensions = (
             base is None
             or candidate is None
             or base.get("wandb_serverless_eligible") is False
             or candidate.get("wandb_serverless_eligible") is False
             or base.get("comparison_required_evaluation_complete") is False
             or candidate.get("comparison_required_evaluation_complete") is False
-            or any(item.status == "unavailable" for item in dimension_changes_v2)
+        )
+        dimension_changes_v2 = (
+            ()
+            if incomplete_before_dimensions
+            else _paired_dimension_changes(base, candidate)
+        )
+        dimension_changes_v3 = (
+            ()
+            if incomplete_before_dimensions or result_schema_version != 3
+            else _paired_dimension_changes_v3(base, candidate)
+        )
+        if incomplete_before_dimensions or any(
+            item.status == "unavailable" for item in dimension_changes_v2
         ):
             status: PairStatus = "incomplete"
         else:
@@ -4260,8 +4730,15 @@ def _analyze_aligned_pairs(
                 "attempt": attempt,
             }
         )
+        presented_task = _row_task_presentation(candidate) or _row_task_presentation(
+            base
+        )
         task_label = (
-            _row_text(candidate, "task_name") or _row_text(base, "task_name") or task
+            presented_task.title
+            if presented_task is not None
+            else _row_text(candidate, "task_name")
+            or _row_text(base, "task_name")
+            or task
         )
         if result_schema_version == 3:
             paired_cases_v3.append(
@@ -4680,6 +5157,10 @@ def _apply_v3_decision_validity(
     topology: EvidenceTopologyV1,
     release_note_coverage: Sequence[Mapping[str, Any]],
 ) -> DecisionSummaryV1:
+    # Task-validity wording can narrow a usable result, but it cannot upgrade
+    # an integrity-invalid decision to an ordinary inconclusive Study.
+    if decision.status == "invalid":
+        return decision
     blockers = [
         blocker
         for item in task_validity
@@ -4704,6 +5185,21 @@ def _apply_v3_decision_validity(
         )
     if not blockers:
         return decision
+    if decision.release_target is None:
+        # Task validity can limit the behavioral claim, but a Study without
+        # a governed release policy still cannot synthesize a package HOLD.
+        return replace(
+            decision,
+            status="inconclusive",
+            critical_blockers=tuple(
+                dict.fromkeys((*decision.critical_blockers, *blockers))
+            ),
+            next_action=(
+                "Repair the named task/topology blockers before using this "
+                "Study's bounded behavioral finding."
+            ),
+            attestation=None,
+        )
     status: DecisionStatus = (
         "invalid"
         if any(item.status in {"drifted", "invalid"} for item in task_validity)
@@ -4784,12 +5280,18 @@ def _aligned_analysis_v3(
         reference_arm="baseline",
         arms=tuple(arms),
         contrasts=(
-            AlignedContrastV1(
-                id="candidate-vs-baseline",
-                reference_arm="baseline",
-                treatment_arms=("candidate",),
-                dimensions=tuple(dimensions[key] for key in sorted(dimensions)),
-            ),
+            (
+                AlignedContrastV1(
+                    id="candidate-vs-baseline",
+                    reference_arm="baseline",
+                    treatment_arms=("candidate",),
+                    dimensions=tuple(
+                        dimensions[key] for key in sorted(dimensions)
+                    ),
+                ),
+            )
+            if dimensions
+            else ()
         ),
         aligned_attempts=tuple(
             AlignedAttemptSetV1(
@@ -5707,14 +6209,26 @@ def write_comparison_result(
     return json_path, markdown_path
 
 
-def read_comparison_result(path: Path) -> ComparisonResult:
-    return comparison_result_from_json(path.read_text(encoding="utf-8"))
+def read_comparison_result(
+    path: Path,
+    *,
+    legacy_hosted_v3_registry: LegacyHostedV3AdmissionRegistryV1 | None = None,
+) -> ComparisonResult:
+    return comparison_result_from_json(
+        path.read_bytes(),
+        legacy_hosted_v3_registry=legacy_hosted_v3_registry,
+    )
 
 
-def comparison_result_from_json(payload: str | bytes) -> ComparisonResult:
+def comparison_result_from_json(
+    payload: str | bytes,
+    *,
+    legacy_hosted_v3_registry: LegacyHostedV3AdmissionRegistryV1 | None = None,
+) -> ComparisonResult:
     """Parse and verify one canonical persisted comparison result."""
 
-    raw = json.loads(payload)
+    payload_bytes = payload if isinstance(payload, bytes) else payload.encode("utf-8")
+    raw = json.loads(payload_bytes)
     if not isinstance(raw, dict):
         raise ValueError("comparison result must be a mapping")
     version = raw.get("schema_version")
@@ -5768,12 +6282,6 @@ def comparison_result_from_json(payload: str | bytes) -> ComparisonResult:
         value.setdefault("qualification_digest", "")
         result = ComparisonResultV2(**value)
     elif version == 3:
-        legacy_v3_evidence_contract = not {
-            "evidence_backend",
-            "publication_status",
-            "local_chain_integrity",
-            "hosted_chain_integrity",
-        } <= set(raw)
         allowed = {
             item.name for item in ComparisonResultV3.__dataclass_fields__.values()
         }
@@ -5857,6 +6365,12 @@ def comparison_result_from_json(payload: str | bytes) -> ComparisonResult:
                 value.get("candidate_definitions")
             ).items()
         }
+        value["task_catalogue"] = tuple(
+            task_presentation_from_dict(
+                _mapping(item, "comparison result task presentation")
+            )
+            for item in value.get("task_catalogue") or ()
+        )
         value["local_evidence"] = (
             dict(_mapping(value.get("local_evidence"), "local evidence binding"))
             if value.get("local_evidence") is not None
@@ -5887,16 +6401,25 @@ def comparison_result_from_json(payload: str | bytes) -> ComparisonResult:
         result = ComparisonResultV3(**value)
     else:
         raise ValueError("comparison result schema_version must be 1, 2, or 3")
+    legacy_hosted_v3_admission: LegacyHostedV3AdmissionV1 | None = None
+    if (
+        isinstance(result, ComparisonResultV3)
+        and result.cohort_lineage.get("attempt_projection_contract_version") is None
+    ):
+        legacy_hosted_v3_admission = require_legacy_hosted_v3_admission(
+            payload_bytes,
+            observed=_legacy_hosted_v3_observed_bindings(result),
+            registry=legacy_hosted_v3_registry,
+        )
     if isinstance(result, ComparisonResultV2 | ComparisonResultV3):
         _verify_v2_result_integrity(
             result,
             has_qualification_digest=has_qualification_digest,
-            legacy_serialized=(
-                raw
-                if isinstance(result, ComparisonResultV3)
-                and legacy_v3_evidence_contract
-                else None
-            ),
+            # Verify V3 against the exact serialized artifact. Parsing may
+            # normalize legacy-equivalent scalar forms, such as 100.0 tokens
+            # to the canonical integer 100, before semantic recomputation.
+            legacy_serialized=(raw if isinstance(result, ComparisonResultV3) else None),
+            legacy_hosted_v3_admission=legacy_hosted_v3_admission,
         )
     elif result.result_digest != _legacy_comparison_result_digest(result.to_dict()):
         raise ValueError("comparison result digest does not match")
@@ -5957,30 +6480,57 @@ def _row_text(row: Mapping[str, Any] | None, key: str) -> str | None:
     return value or None
 
 
+def _row_task_presentation(
+    row: Mapping[str, Any] | None,
+) -> TaskPresentationV1 | None:
+    if row is None or row.get("task_presentation") is None:
+        return None
+    return task_presentation_from_dict(
+        _mapping(row.get("task_presentation"), "row task presentation")
+    )
+
+
 def _terminal_execution_status(
     row: Mapping[str, Any],
 ) -> (
     Literal[
         "completed",
+        "timed_out",
         "failed",
         "cancelled",
         "interrupted",
+        "not_started",
         "not_applicable",
     ]
     | None
 ):
+    runtime_outcome = str(row.get("runtime_outcome") or "").lower()
+    if runtime_outcome in {
+        "completed",
+        "timed_out",
+        "cancelled",
+        "interrupted",
+        "not_started",
+        "not_applicable",
+    }:
+        return runtime_outcome  # type: ignore[return-value]
     status = str(row.get("status") or row.get("execution_status") or "").lower()
     if status in {"passed", "success", "succeeded", "completed"}:
         return "completed"
+    if status in {"timed_out", "timeout"}:
+        return "timed_out"
     if status in {
         "failed",
         "error",
         "infrastructure_failed",
-        "timed_out",
-        "timeout",
     }:
         return "failed"
-    if status in {"cancelled", "interrupted", "not_applicable"}:
+    if status in {
+        "cancelled",
+        "interrupted",
+        "not_started",
+        "not_applicable",
+    }:
         return status  # type: ignore[return-value]
     return None
 
@@ -6214,6 +6764,123 @@ def _paired_attempt_view(
                 else row.get("sandbox_cleanup_verified")
             ),
             "orphaned": row.get("orphaned_sandbox"),
+            "run_id": row.get("run_id"),
+            "cell_id": row.get("cell_id"),
+            "trace_project": row.get("trace_project"),
+            "weave_agent_bridge_call_id": row.get(
+                "weave_agent_bridge_call_id"
+            ),
+            # These fields make V3 operational summaries independently
+            # recomputable from canonical attempts instead of trusted prose.
+            "operational_projection_version": 1,
+            "terminal_kind": row.get("terminal_kind"),
+            "exception_class": row.get("exception_class"),
+            "mcp_tool_usage_counts": _mcp_tool_usage_counts(row),
+            "wandb_serverless_eligible": row.get("wandb_serverless_eligible"),
+            "comparison_mechanism": dict(
+                _mapping_or_empty(row.get("comparison_mechanism"))
+            ),
+            "treatment_use_evidence": dict(
+                _mapping_or_empty(row.get("treatment_use_evidence"))
+            ),
+            "comparison_judges": dict(
+                _mapping_or_empty(row.get("comparison_judges"))
+            ),
+            "comparison_judge_status": row.get("comparison_judge_status"),
+            "hosted_decision_contract_version": row.get(
+                "hosted_decision_contract_version"
+            ),
+            "hosted_task_result_canonical": row.get(
+                "hosted_task_result_canonical"
+            ),
+            "hosted_evidence_verification_status": row.get(
+                "hosted_evidence_verification_status"
+            ),
+            "hosted_evidence_verification_owner": row.get(
+                "hosted_evidence_verification_owner"
+            ),
+            "task_verdict_owner": row.get("task_verdict_owner"),
+            "terminal_hosted_visibility_verified": row.get(
+                "terminal_hosted_visibility_verified"
+            ),
+            "weave_hosted_evidence_receipt_call_id": row.get(
+                "weave_hosted_evidence_receipt_call_id"
+            ),
+            "weave_hosted_evidence_receipt_ref": row.get(
+                "weave_hosted_evidence_receipt_ref"
+            ),
+            "weave_hosted_evidence_receipt_url": row.get(
+                "weave_hosted_evidence_receipt_url"
+            ),
+            "weave_hosted_evidence_receipt_object_verified": row.get(
+                "weave_hosted_evidence_receipt_object_verified"
+            ),
+            "weave_hosted_evidence_receipt_terminal_verified": row.get(
+                "weave_hosted_evidence_receipt_terminal_verified"
+            ),
+            "weave_provisional_call_verification_status": row.get(
+                "weave_provisional_call_verification_status"
+            ),
+            "weave_provisional_predict_and_score_output_digest": row.get(
+                "weave_provisional_predict_and_score_output_digest"
+            ),
+            "weave_provisional_score_set_digest": row.get(
+                "weave_provisional_score_set_digest"
+            ),
+            "weave_provisional_score_call_set_digest": row.get(
+                "weave_provisional_score_call_set_digest"
+            ),
+            "weave_hosted_evidence_receipt_bindings_digest": row.get(
+                "weave_hosted_evidence_receipt_bindings_digest"
+            ),
+            "weave_hosted_canonical_task_result_digest": row.get(
+                "weave_hosted_canonical_task_result_digest"
+            ),
+            "weave_hosted_canonical_score_set_digest": row.get(
+                "weave_hosted_canonical_score_set_digest"
+            ),
+            "weave_hosted_canonical_payload_digest": row.get(
+                "weave_hosted_canonical_payload_digest"
+            ),
+            "weave_hosted_canonical_payload": (
+                dict(row["weave_hosted_canonical_payload"])
+                if isinstance(row.get("weave_hosted_canonical_payload"), Mapping)
+                else None
+            ),
+            "weave_hosted_evidence_invalidation_call_id": row.get(
+                "weave_hosted_evidence_invalidation_call_id"
+            ),
+            "weave_hosted_evidence_invalidation_ref": row.get(
+                "weave_hosted_evidence_invalidation_ref"
+            ),
+            "weave_hosted_evidence_invalidation_url": row.get(
+                "weave_hosted_evidence_invalidation_url"
+            ),
+            "weave_hosted_evidence_invalidation_object_verified": row.get(
+                "weave_hosted_evidence_invalidation_object_verified"
+            ),
+            "weave_hosted_evidence_invalidation_terminal_verified": row.get(
+                "weave_hosted_evidence_invalidation_terminal_verified"
+            ),
+            "weave_hosted_evidence_invalidation_bindings_digest": row.get(
+                "weave_hosted_evidence_invalidation_bindings_digest"
+            ),
+            "weave_hosted_evidence_invalidation_terminal_output_digest": row.get(
+                "weave_hosted_evidence_invalidation_terminal_output_digest"
+            ),
+            "weave_hosted_evidence_invalidation_error_type": row.get(
+                "weave_hosted_evidence_invalidation_error_type"
+            ),
+            "weave_hosted_evidence_invalidation_parent_verified": row.get(
+                "weave_hosted_evidence_invalidation_parent_verified"
+            ),
+            "weave_hosted_evidence_invalidation_project": row.get(
+                "weave_hosted_evidence_invalidation_project"
+            ),
+            "hosted_evidence_invalidation_status": row.get(
+                "hosted_evidence_invalidation_status"
+            ),
+            "evidence_integrity_status": row.get("evidence_integrity_status"),
         },
         preserve_false=True,
     )
@@ -6231,10 +6898,14 @@ def _paired_attempt_view(
         cost_usd=_row_number(row, "cost_usd", "observed_cost_usd", "total_cost_usd"),
         latency_sec=_row_latency_sec(row),
         input_tokens=_number_or_none(
-            usage.get("input_tokens") or row.get("input_tokens")
+            usage.get("input_tokens")
+            if usage.get("input_tokens") is not None
+            else row.get("input_tokens")
         ),
         output_tokens=_number_or_none(
-            usage.get("output_tokens") or row.get("output_tokens")
+            usage.get("output_tokens")
+            if usage.get("output_tokens") is not None
+            else row.get("output_tokens")
         ),
         tool_calls=tool_call_count,
         tools=tuple(tool_names),
@@ -6286,7 +6957,7 @@ def _paired_attempt_view_v3(
         if row.get("local_evidence_links") and require_hosted_evidence
         else ()
     )
-    return PairedAttemptV3(
+    attempt = PairedAttemptV3(
         attempt_id=legacy.attempt_id,
         identity=legacy.identity,
         prediction_id=str(projection.get("prediction_id") or "") or None,
@@ -6300,8 +6971,8 @@ def _paired_attempt_view_v3(
         evidence_status=_evidence_link_set_status(evidence_links),
         cost_usd=_number_or_none(projection.get("cost_usd")),
         latency_sec=_number_or_none(projection.get("latency_sec")),
-        input_tokens=_number_or_none(projection.get("input_tokens")),
-        output_tokens=_number_or_none(projection.get("output_tokens")),
+        input_tokens=_token_count_or_none(projection.get("input_tokens")),
+        output_tokens=_token_count_or_none(projection.get("output_tokens")),
         tool_calls=_non_negative_int(projection.get("tool_calls"), "tool calls"),
         tools=tuple(str(item) for item in projection.get("tools") or ()),
         queried_projects=tuple(
@@ -6402,7 +7073,43 @@ def _paired_attempt_view_v3(
                 projection.get("judge_reviews")
             ).items()
         },
+        arm_label=(
+            str(projection["arm_label"])
+            if projection.get("arm_label") is not None
+            else None
+        ),
+        treatment_summary=(
+            str(projection["treatment_summary"])
+            if projection.get("treatment_summary") is not None
+            else None
+        ),
+        task_presentation=(
+            task_presentation_from_dict(
+                _mapping(
+                    projection.get("task_presentation"),
+                    "V3 task presentation",
+                )
+            )
+            if projection.get("task_presentation") is not None
+            else None
+        ),
+        task_result=(
+            task_result_from_dict(
+                _mapping(projection.get("task_result"), "V3 task result")
+            )
+            if projection.get("task_result") is not None
+            else None
+        ),
     )
+    if (
+        require_hosted_evidence
+        and _attempt_requires_hosted_invalidation(attempt)
+        and not _attempt_has_hosted_decision_lifecycle(attempt)
+    ):
+        raise ValueError(
+            "V3 fatal hosted attempt requires a verified invalidation receipt"
+        )
+    return attempt
 
 
 def _paired_dimension_changes_v3(
@@ -7456,6 +8163,17 @@ def _attempt_evidence_status(row: Mapping[str, Any]) -> str:
     return _evidence_link_set_status(links)
 
 
+def _row_has_fatal_hosted_invalidation(row: Mapping[str, Any]) -> bool:
+    """Return whether a required hosted decision was fatally invalidated."""
+
+    return bool(
+        row.get("terminal_kind") in _FATAL_INTEGRITY_TERMINAL_KINDS
+        and str(row.get("runtime_outcome") or row.get("status") or "")
+        != "not_started"
+        and row.get("evidence_integrity_status") == "invalid"
+    )
+
+
 def _evidence_link_set_status(
     links: Sequence[AttemptEvidenceLinkV1],
 ) -> str:
@@ -7572,6 +8290,17 @@ def _number_or_none(value: Any) -> float | None:
         number = float(value)
         return number if math.isfinite(number) else None
     return None
+
+
+def _token_count_or_none(value: Any) -> int | None:
+    """Normalize a provider token count without turning it into a float."""
+
+    if isinstance(value, bool) or not isinstance(value, int | float):
+        return None
+    number = float(value)
+    if not math.isfinite(number) or number < 0 or not number.is_integer():
+        return None
+    return int(number)
 
 
 def _decision_attestation(
@@ -7976,9 +8705,7 @@ def _paired_attempt_v3(raw: Any) -> PairedAttemptV3 | None:
         "hosted_evidence_links",
     }
     _reject_unknown(value, allowed, "V3 paired attempt")
-    score_explanations = _mapping(
-        value.get("score_explanations"), "V3 score explanations"
-    )
+    score_explanations = _mapping_or_empty(value.get("score_explanations"))
     score_details = {
         str(dimension): _score_explanation_v1(detail, dimension=str(dimension))
         for dimension, detail in _mapping_or_empty(
@@ -8010,8 +8737,8 @@ def _paired_attempt_v3(raw: Any) -> PairedAttemptV3 | None:
         evidence_status=_text(value.get("evidence_status"), "V3 evidence status", 100),
         cost_usd=_number_or_none(value.get("cost_usd")),
         latency_sec=_number_or_none(value.get("latency_sec")),
-        input_tokens=_number_or_none(value.get("input_tokens")),
-        output_tokens=_number_or_none(value.get("output_tokens")),
+        input_tokens=_token_count_or_none(value.get("input_tokens")),
+        output_tokens=_token_count_or_none(value.get("output_tokens")),
         tool_calls=_non_negative_int(value.get("tool_calls", 0), "tool calls"),
         tools=_string_tuple(value.get("tools") or [], "V3 tool", allow_empty=True),
         queried_projects=_string_tuple(
@@ -8083,6 +8810,26 @@ def _paired_attempt_v3(raw: Any) -> PairedAttemptV3 | None:
         ),
         score_details=score_details,
         judge_reviews=judge_reviews,
+        arm_label=_optional_text(value.get("arm_label"), "V3 arm label", 2_000),
+        treatment_summary=_optional_text(
+            value.get("treatment_summary"),
+            "V3 treatment summary",
+            2_000,
+        ),
+        task_presentation=(
+            task_presentation_from_dict(
+                _mapping(value.get("task_presentation"), "V3 task presentation")
+            )
+            if value.get("task_presentation") is not None
+            else None
+        ),
+        task_result=(
+            task_result_from_dict(
+                _mapping(value.get("task_result"), "V3 task result")
+            )
+            if value.get("task_result") is not None
+            else None
+        ),
     )
 
 
@@ -8343,6 +9090,43 @@ def _result_candidate_definitions(
         if candidate_id in observed and observed[candidate_id] != definition:
             raise ValueError("attempt candidate definition changed after approval")
     return dict(sorted(result.items()))
+
+
+def _result_task_catalogue(
+    rows: Sequence[Mapping[str, Any]],
+) -> tuple[TaskPresentationV1, ...]:
+    """Return the exact public task card once per logical task.
+
+    Historical V3 rows may not have task presentation metadata. If any row in
+    a new result supplies it, every task and arm must supply the same card.
+    """
+
+    presentations: dict[str, TaskPresentationV1] = {}
+    rows_with_presentations = 0
+    for row in rows:
+        raw = row.get("task_presentation")
+        if raw is None:
+            continue
+        rows_with_presentations += 1
+        presentation = task_presentation_from_dict(
+            _mapping(raw, "result task presentation")
+        )
+        task_id = str(row.get("task_id") or row.get("task_name") or "")
+        if presentation.task_id != task_id:
+            raise ValueError("result task presentation disagrees with its row")
+        existing = presentations.setdefault(task_id, presentation)
+        if existing != presentation:
+            raise ValueError("result task presentation changed across attempts")
+    if not rows_with_presentations:
+        return ()
+    expected_task_ids = {
+        str(row.get("task_id") or row.get("task_name") or "") for row in rows
+    }
+    if "" in expected_task_ids or set(presentations) != expected_task_ids:
+        raise ValueError("result task catalogue does not cover every task")
+    if rows_with_presentations != len(rows):
+        raise ValueError("result attempts do not all carry task presentation")
+    return tuple(presentations[key] for key in sorted(presentations))
 
 
 def _local_evidence_binding_from_rows(
@@ -9406,14 +10190,41 @@ def _legacy_comparison_result_digest(raw: Mapping[str, Any]) -> str:
     return _comparison_qualification_digest(raw)
 
 
+def _legacy_hosted_v3_observed_bindings(
+    result: ComparisonResultV3,
+) -> dict[str, str]:
+    return {
+        "comparison_id": result.comparison_id,
+        "result_digest": result.result_digest,
+        "qualification_digest": result.qualification_digest,
+        "preview_digest": result.preview_digest,
+        "result_source": result.source,
+        "source_project": (
+            _destination_project_slug(result.evidence_topology.source_destination)
+            or ""
+        ),
+        "result_project": (
+            _destination_project_slug(result.evidence_topology.result_destination)
+            or ""
+        ),
+        "source_lock_digest": result.evidence_topology.source_lock_digest,
+        "evidence_topology_digest": result.evidence_topology.topology_digest,
+        "aligned_analysis_digest": result.aligned_analysis.analysis_digest,
+    }
+
+
 def _verify_v2_result_integrity(
     result: ComparisonResultV2 | ComparisonResultV3,
     *,
     has_qualification_digest: bool,
     legacy_serialized: Mapping[str, Any] | None = None,
+    legacy_hosted_v3_admission: LegacyHostedV3AdmissionV1 | None = None,
 ) -> None:
     if isinstance(result, ComparisonResultV3):
-        _verify_v3_result_shape(result)
+        _verify_v3_result_shape(
+            result,
+            legacy_hosted_v3_admission=legacy_hosted_v3_admission,
+        )
     attestation = result.decision.attestation
     if not has_qualification_digest:
         if result.decision.status == "go" or attestation is not None:
@@ -9504,8 +10315,70 @@ def _verify_weave_attempt_links(
     return result
 
 
+def _v3_is_recognizable_legacy_hosted_result(result: ComparisonResultV3) -> bool:
+    """Recognize the bounded hosted-only V3 shape that predates local evidence.
+
+    A missing version marker is not itself proof that an artifact is historical.
+    Without this shape check, a current local-first result could delete its marker
+    and operational projections, recompute its envelope digest, and bypass the
+    attempt-derived summary checks below.
+    """
+
+    attempts = tuple(
+        attempt
+        for pair in result.paired_cases
+        for attempt in (pair.baseline, pair.candidate)
+        if attempt is not None
+    )
+    return bool(
+        attempts
+        and result.cohort_lineage.get("attempt_projection_contract_version") is None
+        and result.evidence_backend == "weave"
+        and result.local_evidence is None
+        and not result.task_catalogue
+        and result.local_chain_integrity == "not_applicable"
+        and all(
+            not attempt.hosted_evidence_links
+            and {link.system for link in attempt.evidence_links} == {"weave"}
+            and attempt.local_evidence_record_digest is None
+            and attempt.local_prediction_row_sha256 is None
+            and attempt.local_result_row_projection_digest is None
+            and attempt.task_presentation is None
+            and attempt.task_result is None
+            and attempt.arm_label is None
+            and attempt.treatment_summary is None
+            and attempt.infrastructure.get("operational_projection_version") is None
+            for attempt in attempts
+        )
+    )
+
+
+def _v3_requires_current_attempt_semantics(
+    result: ComparisonResultV3,
+    *,
+    legacy_hosted_v3_admission: LegacyHostedV3AdmissionV1 | None = None,
+) -> bool:
+    """Identify V3 artifacts that must satisfy the current local-first contract."""
+
+    marker = result.cohort_lineage.get("attempt_projection_contract_version")
+    if marker == 1:
+        return True
+    if (
+        marker is None
+        and legacy_hosted_v3_admission is not None
+        and _v3_is_recognizable_legacy_hosted_result(result)
+    ):
+        return False
+    raise ValueError(
+        "ComparisonResultV3 without the current attempt projection contract is "
+        "not an admitted historical hosted result"
+    )
+
+
 def _v3_canonical_attempt_rows(  # noqa: C901 - one bounded audit checks every V3 edge
     result: ComparisonResultV3,
+    *,
+    legacy_hosted_v3_admission: LegacyHostedV3AdmissionV1 | None = None,
 ) -> list[dict[str, Any]]:
     """Rebuild the safe decision-bearing row surface from canonical V3 pairs."""
 
@@ -9516,6 +10389,10 @@ def _v3_canonical_attempt_rows(  # noqa: C901 - one bounded audit checks every V
     project = _destination_project_slug(result_destination) or ""
     source_project = _destination_project_slug(source_destination)
     app_base_url = _destination_app_base_url(result_destination) or ""
+    current_attempt_semantics = _v3_requires_current_attempt_semantics(
+        result,
+        legacy_hosted_v3_admission=legacy_hosted_v3_admission,
+    )
     aligned_by_id = {
         item.alignment_id: item for item in result.aligned_analysis.aligned_attempts
     }
@@ -9571,11 +10448,18 @@ def _v3_canonical_attempt_rows(  # noqa: C901 - one bounded audit checks every V
                 )
                 if not dimension.startswith("comparison.judge.")
             }
-            if not score_dimensions:
+            if not score_dimensions and pair.status != "incomplete":
                 raise ValueError(
                     "ComparisonResultV3 complete pairs require deterministic scores"
                 )
-            if {item.id for item in pair.dimension_changes} != score_dimensions:
+            if pair.status == "incomplete" and pair.dimension_changes:
+                raise ValueError(
+                    "ComparisonResultV3 incomplete pair cannot claim dimension "
+                    "changes"
+                )
+            if pair.status != "incomplete" and {
+                item.id for item in pair.dimension_changes
+            } != score_dimensions:
                 raise ValueError(
                     "ComparisonResultV3 dimension changes do not cover the "
                     "canonical attempt scores"
@@ -9722,6 +10606,14 @@ def _v3_canonical_attempt_rows(  # noqa: C901 - one bounded audit checks every V
                 )
 
             canonical_systems = {item.system for item in attempt.evidence_links}
+            if current_attempt_semantics and (
+                canonical_systems != {"local_artifact"}
+                or result.local_evidence is None
+            ):
+                raise ValueError(
+                    "current ComparisonResultV3 attempts require the canonical "
+                    "local evidence chain"
+                )
             if canonical_systems == {"local_artifact"}:
                 _verify_local_attempt_links(attempt.evidence_links)
                 if (
@@ -9817,6 +10709,179 @@ def _v3_canonical_attempt_rows(  # noqa: C901 - one bounded audit checks every V
                 )
 
             infrastructure = dict(attempt.infrastructure)
+            behavioral_attempt = bool(
+                not _attempt_is_nonbehavioral(attempt)
+                and (
+                    attempt.task_result is not None
+                    or attempt.scores
+                    or attempt.passed is not None
+                )
+            )
+            if (
+                current_attempt_semantics
+                and result.evidence_backend == "weave"
+                and behavioral_attempt
+            ):
+                if infrastructure.get("hosted_decision_contract_version") != 1:
+                    raise ValueError(
+                        "current Weave ComparisonResultV3 behavioral attempt "
+                        "requires a hosted decision receipt"
+                    )
+                receipt_links = hosted_links or attempt.evidence_links
+                bindings = _v3_hosted_decision_bindings(
+                    attempt=attempt,
+                    infrastructure=infrastructure,
+                    project=project,
+                    resolved_call_ids=resolved_call_ids,
+                    evidence_links=receipt_links,
+                )
+                if any(
+                    not value
+                    for key, value in bindings.items()
+                    if key != "schema_version"
+                ):
+                    raise ValueError(
+                        "ComparisonResultV3 hosted decision bindings are incomplete"
+                    )
+                expected_receipt_call_id = _v3_hosted_decision_call_id(
+                    project=project,
+                    run_id=str(infrastructure.get("run_id") or ""),
+                    cell_id=str(infrastructure.get("cell_id") or ""),
+                    attempt_id_value=attempt.attempt_id,
+                    evaluation_root_call_id=str(
+                        resolved_call_ids.get("evaluation_root") or ""
+                    ),
+                    predict_and_score_call_id=str(
+                        resolved_call_ids.get("prediction_and_score") or ""
+                    ),
+                    prediction_call_id=str(
+                        resolved_call_ids.get("prediction") or ""
+                    ),
+                )
+                if (
+                    infrastructure.get("weave_hosted_evidence_receipt_call_id")
+                    != expected_receipt_call_id
+                    or infrastructure.get("weave_hosted_evidence_receipt_ref")
+                    != _weave_call_ref(project, expected_receipt_call_id)
+                    or infrastructure.get("weave_hosted_evidence_receipt_url")
+                    != _weave_call_url(
+                        project,
+                        expected_receipt_call_id,
+                        app_base_url=app_base_url,
+                    )
+                    or infrastructure.get(
+                        "weave_hosted_evidence_receipt_bindings_digest"
+                    )
+                    != stable_digest(bindings)
+                ):
+                    raise ValueError(
+                        "ComparisonResultV3 hosted decision receipt identity or "
+                        "bindings disagree with its evidence chain"
+                    )
+            fatal_hosted_attempt = bool(
+                current_attempt_semantics
+                and result.evidence_backend == "weave"
+                and _attempt_requires_hosted_invalidation(attempt)
+            )
+            if fatal_hosted_attempt:
+                bindings = _v3_hosted_invalidation_bindings(
+                    attempt=attempt,
+                    infrastructure=infrastructure,
+                    project=project,
+                    resolved_call_ids=resolved_call_ids,
+                )
+                required_digest_fields = (
+                    "canonical_local_record_digest",
+                    "provisional_predict_and_score_output_digest",
+                    "provisional_score_set_digest",
+                )
+                if (
+                    any(
+                        not value
+                        for key, value in bindings.items()
+                        if key
+                        not in {
+                            "schema_version",
+                            "verified_predict_and_score_ancestry",
+                        }
+                    )
+                    or not isinstance(
+                        bindings["verified_predict_and_score_ancestry"], bool
+                    )
+                    or any(
+                        re.fullmatch(r"[0-9a-f]{64}", str(bindings[name] or ""))
+                        is None
+                        for name in required_digest_fields
+                    )
+                ):
+                    raise ValueError(
+                        "ComparisonResultV3 hosted invalidation bindings are incomplete"
+                    )
+                expected_call_id = _v3_hosted_invalidation_call_id(
+                    project=project,
+                    run_id=str(infrastructure.get("run_id") or ""),
+                    cell_id=str(infrastructure.get("cell_id") or ""),
+                    attempt_id_value=attempt.attempt_id,
+                    evaluation_root_call_id=str(
+                        resolved_call_ids.get("evaluation_root") or ""
+                    ),
+                    predict_and_score_call_id=str(
+                        resolved_call_ids.get("prediction_and_score") or ""
+                    ),
+                    prediction_call_id=str(
+                        resolved_call_ids.get("prediction") or ""
+                    ),
+                )
+                terminal_output = _v3_hosted_invalidation_terminal_output(bindings)
+                if (
+                    infrastructure.get("hosted_decision_contract_version") != 1
+                    or infrastructure.get(
+                        "hosted_evidence_invalidation_status"
+                    )
+                    != "verified"
+                    or infrastructure.get(
+                        "weave_hosted_evidence_invalidation_object_verified"
+                    )
+                    is not True
+                    or infrastructure.get(
+                        "weave_hosted_evidence_invalidation_terminal_verified"
+                    )
+                    is not True
+                    or infrastructure.get(
+                        "weave_hosted_evidence_invalidation_project"
+                    )
+                    != project
+                    or infrastructure.get(
+                        "weave_hosted_evidence_invalidation_call_id"
+                    )
+                    != expected_call_id
+                    or infrastructure.get(
+                        "weave_hosted_evidence_invalidation_ref"
+                    )
+                    != _weave_call_ref(project, expected_call_id)
+                    or infrastructure.get(
+                        "weave_hosted_evidence_invalidation_url"
+                    )
+                    != _weave_call_url(
+                        project,
+                        expected_call_id,
+                        app_base_url=app_base_url,
+                    )
+                    or infrastructure.get(
+                        "weave_hosted_evidence_invalidation_bindings_digest"
+                    )
+                    != stable_digest(bindings)
+                    or infrastructure.get(
+                        "weave_hosted_evidence_invalidation_terminal_output_digest"
+                    )
+                    != stable_digest(terminal_output)
+                    or infrastructure.get("evidence_integrity_status") != "invalid"
+                    or infrastructure.get("hosted_task_result_canonical") is True
+                ):
+                    raise ValueError(
+                        "ComparisonResultV3 hosted invalidation receipt identity or "
+                        "bindings disagree with its fatal attempt"
+                    )
             backend = str(infrastructure.get("backend") or "")
             row = {
                 "variant_id": arm,
@@ -9829,13 +10894,57 @@ def _v3_canonical_attempt_rows(  # noqa: C901 - one bounded audit checks every V
                 "status": attempt.execution_status,
                 "comparison_evaluation_status": attempt.evaluation_status,
                 "comparison_required_evaluation_complete": (
-                    attempt.evaluation_status == "completed"
+                    # Current deterministic evaluation rows use ``scored``.
+                    # Historical V3 rows used ``completed`` for the same
+                    # terminal contract. Preserve only independently
+                    # recognizable legacy results; a current local-first V3
+                    # cannot downgrade this contract by changing one string.
+                    attempt.evaluation_status == "scored"
+                    or (
+                        not current_attempt_semantics
+                        and attempt.evaluation_status == "completed"
+                    )
                 ),
+                "evidence_status": attempt.evidence_status,
                 "comparison_deterministic_scores": dict(attempt.scores),
+                "comparison_judge_scores": (
+                    {
+                        dimension.removeprefix("comparison.judge."): value
+                        for dimension, value in attempt.scores.items()
+                        if dimension.startswith("comparison.judge.")
+                    }
+                    or None
+                ),
+                "comparison_judges": (
+                    dict(
+                        _mapping_or_empty(infrastructure.get("comparison_judges"))
+                    )
+                    or None
+                ),
+                "comparison_judge_status": infrastructure.get(
+                    "comparison_judge_status"
+                ),
+                "comparison_mechanism": (
+                    dict(
+                        _mapping_or_empty(infrastructure.get("comparison_mechanism"))
+                    )
+                    or None
+                ),
+                "treatment_use_evidence": (
+                    dict(
+                        _mapping_or_empty(infrastructure.get("treatment_use_evidence"))
+                    )
+                    or None
+                ),
                 "comparison_deterministic_criticality": {
                     item.id: item.critical for item in pair.dimension_changes
                 },
                 "trace_project": project or None,
+                "run_id": infrastructure.get("run_id"),
+                "cell_id": infrastructure.get("cell_id"),
+                "weave_agent_bridge_call_id": infrastructure.get(
+                    "weave_agent_bridge_call_id"
+                ),
                 "local_evidence_links": (
                     [item.to_dict() for item in attempt.evidence_links]
                     if canonical_systems == {"local_artifact"}
@@ -9848,7 +10957,54 @@ def _v3_canonical_attempt_rows(  # noqa: C901 - one bounded audit checks every V
                 "queried_projects": list(attempt.queried_projects),
                 "cost_usd": attempt.cost_usd,
                 "latency_sec": attempt.latency_sec,
+                "input_tokens": attempt.input_tokens,
+                "output_tokens": attempt.output_tokens,
                 "tool_call_count": attempt.tool_calls,
+                "mcp_tool_usage_counts": dict(
+                    _mapping_or_empty(infrastructure.get("mcp_tool_usage_counts"))
+                ),
+                **{
+                    key: infrastructure.get(key)
+                    for key in (
+                        "hosted_decision_contract_version",
+                        "hosted_task_result_canonical",
+                        "hosted_evidence_verification_status",
+                        "hosted_evidence_verification_owner",
+                        "task_verdict_owner",
+                        "terminal_hosted_visibility_verified",
+                        "weave_hosted_evidence_receipt_call_id",
+                        "weave_hosted_evidence_receipt_ref",
+                        "weave_hosted_evidence_receipt_url",
+                        "weave_hosted_evidence_receipt_object_verified",
+                        "weave_hosted_evidence_receipt_terminal_verified",
+                        "weave_provisional_call_verification_status",
+                        "weave_provisional_predict_and_score_output_digest",
+                        "weave_provisional_score_set_digest",
+                        "weave_provisional_score_call_set_digest",
+                        "weave_hosted_evidence_receipt_bindings_digest",
+                        "weave_hosted_canonical_task_result_digest",
+                        "weave_hosted_canonical_score_set_digest",
+                        "weave_hosted_canonical_payload_digest",
+                        "weave_hosted_canonical_payload",
+                        "weave_hosted_evidence_invalidation_call_id",
+                        "weave_hosted_evidence_invalidation_ref",
+                        "weave_hosted_evidence_invalidation_url",
+                        "weave_hosted_evidence_invalidation_object_verified",
+                        "weave_hosted_evidence_invalidation_terminal_verified",
+                        "weave_hosted_evidence_invalidation_bindings_digest",
+                        "weave_hosted_evidence_invalidation_terminal_output_digest",
+                        "weave_hosted_evidence_invalidation_error_type",
+                        "weave_hosted_evidence_invalidation_parent_verified",
+                        "weave_hosted_evidence_invalidation_project",
+                        "hosted_evidence_invalidation_status",
+                        "evidence_integrity_status",
+                    )
+                },
+                "terminal_kind": infrastructure.get("terminal_kind"),
+                "exception_class": infrastructure.get("exception_class"),
+                "wandb_serverless_eligible": infrastructure.get(
+                    "wandb_serverless_eligible"
+                ),
                 "execution_fingerprint": attempt.execution_fingerprint,
                 "runtime_lock_digest": attempt.runtime_lock_digest,
                 "infrastructure_conformance_complete": infrastructure.get(
@@ -9957,6 +11113,13 @@ def _v3_semantic_integrity(
         )
         for row in rows
     ]
+    fatal_hosted_invalidations = [
+        bool(
+            result.evidence_backend == "weave"
+            and _row_has_fatal_hosted_invalidation(row)
+        )
+        for row in rows
+    ]
     cross_project_attempts = sum(
         bool(
             _cross_project_queries(
@@ -9987,10 +11150,11 @@ def _v3_semantic_integrity(
         for row in rows
     )
     invalid_evidence = sum(
-        status == "invalid" or hosted == "invalid"
-        for status, hosted in zip(
+        status == "invalid" or hosted == "invalid" or fatal_invalidation
+        for status, hosted, fatal_invalidation in zip(
             evidence_statuses,
             hosted_evidence_statuses,
+            fatal_hosted_invalidations,
             strict=True,
         )
     )
@@ -10011,10 +11175,13 @@ def _v3_semantic_integrity(
         "unique_attempts": len(set(attempt_ids)),
         "duplicate_attempt_ids": duplicate_attempt_ids,
         "unresolved_evidence_attempts": sum(
-            status in {"missing", "invalid"} or hosted in {"missing", "invalid"}
-            for status, hosted in zip(
+            status in {"missing", "invalid"}
+            or hosted in {"missing", "invalid"}
+            or fatal_invalidation
+            for status, hosted, fatal_invalidation in zip(
                 evidence_statuses,
                 hosted_evidence_statuses,
+                fatal_hosted_invalidations,
                 strict=True,
             )
         ),
@@ -10035,6 +11202,7 @@ def _v3_decision_facts(
     rows: Sequence[Mapping[str, Any]],
     *,
     integrity: Mapping[str, Any],
+    required_evaluations_incomplete: int,
     allow_local_harbor_conformance: bool = True,
 ) -> dict[str, str | float | int | bool | None]:
     grade = _evidence_grade(integrity, rows)
@@ -10050,7 +11218,7 @@ def _v3_decision_facts(
         improved=result.improved,
         regressed=result.regressed,
         incomplete=result.incomplete,
-        required_incomplete=result.required_evaluations_incomplete,
+        required_incomplete=required_evaluations_incomplete,
         integrity=integrity,
         evidence_grade=grade,
         allow_local_harbor_conformance=allow_local_harbor_conformance,
@@ -10069,7 +11237,11 @@ def _v3_decision_facts(
     return facts
 
 
-def _verify_v3_result_shape(result: ComparisonResultV3) -> None:  # noqa: C901
+def _verify_v3_result_shape(  # noqa: C901
+    result: ComparisonResultV3,
+    *,
+    legacy_hosted_v3_admission: LegacyHostedV3AdmissionV1 | None = None,
+) -> None:
     if result.evidence_project != _destination_project_slug(
         result.evidence_topology.result_destination
     ):
@@ -10100,7 +11272,10 @@ def _verify_v3_result_shape(result: ComparisonResultV3) -> None:  # noqa: C901
         result.evidence_topology.result_destination
     ):
         raise ValueError("ComparisonResultV3 cohort lineage project topology disagrees")
-    canonical_rows = _v3_canonical_attempt_rows(result)
+    canonical_rows = _v3_canonical_attempt_rows(
+        result,
+        legacy_hosted_v3_admission=legacy_hosted_v3_admission,
+    )
     semantic_integrity = _v3_semantic_integrity(result, canonical_rows)
     for key, expected in semantic_integrity.items():
         if result.integrity.get(key) != expected:
@@ -10114,6 +11289,39 @@ def _verify_v3_result_shape(result: ComparisonResultV3) -> None:  # noqa: C901
         for attempt in (pair.baseline, pair.candidate)
         if attempt is not None
     )
+    if result.task_catalogue:
+        task_catalogue = {item.task_id: item for item in result.task_catalogue}
+        for pair in result.paired_cases:
+            presentation = task_catalogue[pair.task_id]
+            if pair.task_label != presentation.title:
+                raise ValueError(
+                    "ComparisonResultV3 task label disagrees with task catalogue"
+                )
+            for attempt in (pair.baseline, pair.candidate):
+                if attempt is None:
+                    continue
+                if attempt.task_presentation != presentation:
+                    raise ValueError(
+                        "ComparisonResultV3 attempt task presentation disagrees "
+                        "with its catalogue"
+                    )
+                if attempt.task_result is None and not _attempt_is_nonbehavioral(
+                    attempt
+                ):
+                    raise ValueError(
+                        "ComparisonResultV3 presented attempt requires task result"
+                    )
+                if not attempt.arm_label or not attempt.treatment_summary:
+                    raise ValueError(
+                        "ComparisonResultV3 presented attempt requires arm copy"
+                    )
+    arm_copy: dict[str, tuple[str | None, str | None]] = {}
+    for attempt in attempts:
+        arm = str(attempt.identity.get("arm") or "")
+        current = (attempt.arm_label, attempt.treatment_summary)
+        previous = arm_copy.setdefault(arm, current)
+        if previous != current:
+            raise ValueError("ComparisonResultV3 arm presentation changed across tasks")
     result_candidate_ids = {
         str(attempt.identity.get("candidate") or "") for attempt in attempts
     }
@@ -10196,6 +11404,8 @@ def _verify_v3_result_shape(result: ComparisonResultV3) -> None:  # noqa: C901
     expected_hosted_chain = (
         "not_applicable"
         if result.evidence_backend == "local"
+        else "invalid"
+        if any(_attempt_requires_hosted_invalidation(attempt) for attempt in attempts)
         else _chain_integrity_from_statuses(
             (
                 attempt.evidence_status
@@ -10275,9 +11485,11 @@ def _verify_v3_result_shape(result: ComparisonResultV3) -> None:  # noqa: C901
     }
     terminal_states = {
         "completed",
+        "timed_out",
         "failed",
         "cancelled",
         "interrupted",
+        "not_started",
         "not_applicable",
     }
     attempt_statuses = [
@@ -10330,6 +11542,7 @@ def _verify_v3_result_shape(result: ComparisonResultV3) -> None:  # noqa: C901
         result,
         canonical_rows=canonical_rows,
         semantic_integrity=semantic_integrity,
+        legacy_hosted_v3_admission=legacy_hosted_v3_admission,
     )
 
 
@@ -10338,6 +11551,7 @@ def _verify_v3_derived_analysis(
     *,
     canonical_rows: Sequence[Mapping[str, Any]],
     semantic_integrity: Mapping[str, Any],
+    legacy_hosted_v3_admission: LegacyHostedV3AdmissionV1 | None = None,
 ) -> None:
     (
         pair_counts,
@@ -10362,6 +11576,18 @@ def _verify_v3_derived_analysis(
     ):
         raise ValueError(
             "ComparisonResultV3 task pass totals disagree with paired attempts"
+        )
+    required_evaluations_incomplete = sum(
+        row.get("comparison_required_evaluation_complete") is False
+        for row in canonical_rows
+    )
+    if (
+        result.required_evaluations_incomplete
+        != required_evaluations_incomplete
+    ):
+        raise ValueError(
+            "ComparisonResultV3 required evaluation total disagrees with "
+            "canonical attempts"
         )
     recomputed_validity = _task_validity_v3(
         result.paired_cases,
@@ -10412,6 +11638,7 @@ def _verify_v3_derived_analysis(
         candidate_critical_failures=candidate_critical_failures,
         task_validity=verified_validity,
         legacy_blocker_wording=legacy_blocker_wording,
+        required_evaluations_incomplete=required_evaluations_incomplete,
     )
     reconstructed_rows = [
         {
@@ -10440,7 +11667,150 @@ def _verify_v3_derived_analysis(
         result,
         canonical_rows=canonical_rows,
         semantic_integrity=semantic_integrity,
+        required_evaluations_incomplete=required_evaluations_incomplete,
     )
+    _verify_v3_attempt_derived_summaries(
+        result,
+        canonical_rows=canonical_rows,
+        semantic_integrity=semantic_integrity,
+        required_evaluations_incomplete=required_evaluations_incomplete,
+        legacy_hosted_v3_admission=legacy_hosted_v3_admission,
+    )
+
+
+def _verify_v3_attempt_derived_summaries(
+    result: ComparisonResultV3,
+    *,
+    canonical_rows: Sequence[Mapping[str, Any]],
+    semantic_integrity: Mapping[str, Any],
+    required_evaluations_incomplete: int,
+    legacy_hosted_v3_admission: LegacyHostedV3AdmissionV1 | None = None,
+) -> None:
+    """Verify summaries that must never outrun canonical attempt evidence."""
+
+    attempts = tuple(
+        attempt
+        for pair in result.paired_cases
+        for attempt in (pair.baseline, pair.candidate)
+        if attempt is not None
+    )
+    if attempts and all(_attempt_is_nonbehavioral(attempt) for attempt in attempts):
+        expected_judge = {
+            "status": "not_used",
+            "claim_status": "not_applicable",
+            "judges": [],
+            "by_variant": {"baseline": {}, "candidate": {}},
+            "unavailable_attempts": 0,
+        }
+        if result.judge_summary != expected_judge:
+            raise ValueError(
+                "ComparisonResultV3 nonbehavioral attempts cannot claim judge results"
+            )
+        if result.mechanism_summary:
+            raise ValueError(
+                "ComparisonResultV3 nonbehavioral attempts cannot claim mechanism use"
+            )
+    if not attempts:
+        return
+    projection_versions = tuple(
+        attempt.infrastructure.get("operational_projection_version")
+        for attempt in attempts
+    )
+    if projection_versions != (1,) * len(attempts):
+        # Historical hosted V3 attempts did not carry enough canonical
+        # operational input to reproduce every aggregate. Preserve only the
+        # independently recognizable all-legacy shape. Current local-first or
+        # task-presented V3 artifacts require version 1 on every attempt, and
+        # a mixed version set is never a historical contract.
+        if (
+            legacy_hosted_v3_admission is not None
+            and _v3_is_recognizable_legacy_hosted_result(result)
+            and all(version is None for version in projection_versions)
+        ):
+            return
+        raise ValueError(
+            "ComparisonResultV3 current attempts require operational "
+            "projection version 1"
+        )
+    expected_judge = _judge_summary(canonical_rows)
+    if result.judge_summary != expected_judge:
+        raise ValueError(
+            "ComparisonResultV3 judge summary disagrees with canonical attempts"
+        )
+    expected_mechanism = _mechanism_summary(canonical_rows)
+    if result.mechanism_summary != expected_mechanism:
+        raise ValueError(
+            "ComparisonResultV3 mechanism summary disagrees with canonical attempts"
+        )
+    expected_operational = _operational_summary(
+        canonical_rows,
+        include_legacy_token_aliases=False,
+    )
+    if result.operational_summary != expected_operational:
+        raise ValueError(
+            "ComparisonResultV3 operational summary disagrees with canonical attempts: "
+            f"expected {expected_operational!r}, observed "
+            f"{result.operational_summary!r}"
+        )
+    expected_behavioral = _behavioral_summary(
+        rows=canonical_rows,
+        integrity=semantic_integrity,
+        improved=result.improved,
+        regressed=result.regressed,
+        mixed=result.mixed,
+        unchanged=result.unchanged,
+        incomplete=result.incomplete,
+        required_incomplete=required_evaluations_incomplete,
+        unresolved_evidence=int(
+            semantic_integrity.get("unresolved_evidence_attempts") or 0
+        ),
+        cross_project_attempts=int(
+            semantic_integrity.get("cross_project_attempts") or 0
+        ),
+    )
+    expected_behavioral = _behavioral_summary_v3(
+        expected_behavioral,
+        paired_cases=result.paired_cases,
+        task_validity=result.task_validity,
+    )
+    if result.behavioral_summary != expected_behavioral:
+        raise ValueError(
+            "ComparisonResultV3 behavioral explanation disagrees with "
+            "canonical attempts"
+        )
+    policy = _decision_policy(result.decision_policy)
+    expected_decision = _evaluate_decision(
+        policy=policy,
+        rows=canonical_rows,
+        deterministic=result.deterministic_summary,
+        operational=expected_operational,
+        improved=result.improved,
+        regressed=result.regressed,
+        incomplete=result.incomplete,
+        required_incomplete=required_evaluations_incomplete,
+        integrity=semantic_integrity,
+        attestation=result.decision.attestation,
+        release_note_coverage=result.release_note_coverage,
+        evidence_mode=(
+            "local" if result.evidence_backend == "local" else "weave_required"
+        ),
+    )
+    expected_decision = _apply_v3_decision_validity(
+        expected_decision,
+        task_validity=result.task_validity,
+        topology=result.evidence_topology,
+        release_note_coverage=result.release_note_coverage,
+    )
+    expected_decision = _apply_decision_attestation(
+        expected_decision,
+        result.decision.attestation,
+        qualification_digest=result.qualification_digest,
+        require_actionability_review=True,
+    )
+    if result.decision != expected_decision:
+        raise ValueError(
+            "ComparisonResultV3 decision explanation disagrees with canonical attempts"
+        )
 
 
 def _legacy_v3_task_validity(
@@ -10497,6 +11867,8 @@ def _verify_v3_pairs(
         if (
             pair.baseline is None
             or pair.candidate is None
+            or _attempt_is_nonbehavioral(pair.baseline)
+            or _attempt_is_nonbehavioral(pair.candidate)
             or any(change.status == "unavailable" for change in pair.dimension_changes)
         ):
             expected_pair_status = "incomplete"
@@ -10529,6 +11901,7 @@ def _verify_v3_behavioral_summary(
     candidate_critical_failures: int,
     task_validity: Sequence[TaskValidityV1],
     legacy_blocker_wording: bool,
+    required_evaluations_incomplete: int,
 ) -> None:
     behavioral = result.behavioral_summary
     if (
@@ -10567,7 +11940,7 @@ def _verify_v3_behavioral_summary(
         expected_behavioral_status = "invalid"
     elif (
         pair_counts["incomplete"]
-        or result.required_evaluations_incomplete
+        or required_evaluations_incomplete
         or int(result.integrity.get("unresolved_evidence_attempts") or 0)
         or int(result.integrity.get("harbor_conformance_unavailable_attempts") or 0)
     ):
@@ -10597,6 +11970,7 @@ def _verify_v3_decision_gates(
     *,
     canonical_rows: Sequence[Mapping[str, Any]],
     semantic_integrity: Mapping[str, Any],
+    required_evaluations_incomplete: int,
 ) -> None:
     decision = result.decision
     policy = _decision_policy(result.decision_policy)
@@ -10655,6 +12029,7 @@ def _verify_v3_decision_gates(
         result,
         canonical_rows,
         integrity=semantic_integrity,
+        required_evaluations_incomplete=required_evaluations_incomplete,
         # Local V3 artifacts written before local publication became optional
         # carried the hosted-privacy gate and did not treat the shared Harbor
         # receipt as general infrastructure evidence. Preserve verification of
@@ -10807,6 +12182,90 @@ def scaffold_comparison(
     )
 
 
+def _unscorable_agent_execution_reason(row: Mapping[str, Any]) -> str | None:
+    """Explain why one terminal row has no behavioral output to score."""
+
+    if behavioral_task_output_available(row):
+        return None
+    runtime_outcome = str(row.get("runtime_outcome") or "")
+    terminal_kind = str(row.get("terminal_kind") or "")
+    if runtime_outcome == "not_started":
+        return (
+            "Agent execution did not start; no behavioral output is available "
+            "to score"
+        )
+    if runtime_outcome in {"cancelled", "interrupted", "not_applicable"}:
+        return (
+            f"Agent execution was {runtime_outcome.replace('_', ' ')}; no "
+            "behavioral output is available to score"
+        )
+    if terminal_kind:
+        return (
+            "Agent execution ended with "
+            f"{terminal_kind.replace('_', ' ')}; no valid behavioral output is "
+            "available to score"
+        )
+    if not runtime_outcome and str(row.get("status") or "") in {
+        "cancelled",
+        "interrupted",
+        "not_applicable",
+    }:
+        return (
+            "Agent execution did not produce a behavioral output that Fugue can "
+            "score"
+        )
+    return None
+
+
+def _withhold_comparison_behavioral_scores(
+    row: dict[str, Any],
+    *,
+    reason: str,
+) -> None:
+    """Remove task and judge verdicts when the Agent produced no output."""
+
+    suppressed_score_fields = nonbehavioral_score_field_names(row)
+    for name in (
+        *suppressed_score_fields,
+        "comparison_deterministic_scores",
+        "comparison_score_details",
+        "comparison_deterministic_criticality",
+        "comparison_dimension_roles",
+        "comparison_mechanism",
+        "comparison_judges",
+        "comparison_judge_scores",
+        "comparison_judge_status",
+        "treatment_use_evidence",
+        "task_result",
+        "weave_hosted_evidence_receipt_bindings_digest",
+        "weave_hosted_canonical_task_result_digest",
+        "weave_hosted_canonical_score_set_digest",
+        "weave_hosted_canonical_payload_digest",
+        "weave_hosted_canonical_payload",
+    ):
+        row.pop(name, None)
+    if suppressed_score_fields:
+        row["nonbehavioral_suppressed_score_fields"] = list(
+            suppressed_score_fields
+        )
+    row.update(
+        {
+            "pass": None,
+            "benchmark_pass": None,
+            "comparison_evaluation_status": "unavailable",
+            "comparison_evaluation_reason": reason,
+            "comparison_required_evaluation_complete": False,
+            # A receipt created for a previous behavioral state remains audit
+            # history only. It cannot continue to own a canonical task verdict
+            # after a typed nonbehavioral or fatal-integrity terminal wins.
+            "hosted_task_result_canonical": False,
+            "hosted_evidence_verification_status": "invalid",
+            "weave_hosted_evidence_receipt_object_verified": False,
+            "weave_hosted_evidence_receipt_terminal_verified": False,
+        }
+    )
+
+
 def score_comparison_rows(
     spec: ComparisonSpecV1,
     rows: Sequence[Mapping[str, Any]],
@@ -10858,6 +12317,14 @@ def score_comparison_rows(
         )
         label = labels.get(task_id)
         row.setdefault("benchmark_pass", row.get("pass"))
+        unscorable_reason = _unscorable_agent_execution_reason(row)
+        if unscorable_reason is not None:
+            _withhold_comparison_behavioral_scores(
+                row,
+                reason=unscorable_reason,
+            )
+            scored.append(row)
+            continue
         if label is None:
             row["pass"] = None
             row["comparison_evaluation_status"] = "unavailable"
@@ -12133,6 +13600,191 @@ def _weave_call_ref(project: str, call_id: str) -> str:
     return f"weave:///{entity}/{project_id}/call/{call_id}"
 
 
+def _v3_hosted_decision_call_id(
+    *,
+    project: str,
+    run_id: str,
+    cell_id: str,
+    attempt_id_value: str,
+    evaluation_root_call_id: str,
+    predict_and_score_call_id: str,
+    prediction_call_id: str,
+) -> str:
+    """Recompute the deterministic hosted decision Call identity."""
+
+    identity = {
+        "schema_version": 1,
+        "kind": "post_close_hosted_evidence_verification",
+        "project": project,
+        "run_id": run_id,
+        "cell_id": cell_id,
+        "attempt_id": attempt_id_value,
+        "evaluation_root_call_id": evaluation_root_call_id,
+        "predict_and_score_call_id": predict_and_score_call_id,
+        "prediction_call_id": prediction_call_id,
+    }
+    canonical = json.dumps(identity, sort_keys=True, separators=(",", ":"))
+    return str(uuid.uuid5(uuid.NAMESPACE_URL, canonical))
+
+
+def _v3_hosted_invalidation_call_id(
+    *,
+    project: str,
+    run_id: str,
+    cell_id: str,
+    attempt_id_value: str,
+    evaluation_root_call_id: str,
+    predict_and_score_call_id: str,
+    prediction_call_id: str,
+) -> str:
+    """Recompute the deterministic hosted invalidation Call identity."""
+
+    identity = {
+        "schema_version": 1,
+        "kind": "post_close_hosted_evidence_invalidation",
+        "project": project,
+        "run_id": run_id,
+        "cell_id": cell_id,
+        "attempt_id": attempt_id_value,
+        "evaluation_root_call_id": evaluation_root_call_id,
+        "predict_and_score_call_id": predict_and_score_call_id,
+        "prediction_call_id": prediction_call_id,
+    }
+    canonical = json.dumps(identity, sort_keys=True, separators=(",", ":"))
+    return str(uuid.uuid5(uuid.NAMESPACE_URL, canonical))
+
+
+def _v3_hosted_invalidation_bindings(
+    *,
+    attempt: PairedAttemptV3,
+    infrastructure: Mapping[str, Any],
+    project: str,
+    resolved_call_ids: Mapping[str, str],
+) -> dict[str, Any]:
+    """Rebuild the exact inputs bound by a hosted invalidation receipt."""
+
+    return {
+        "schema_version": 1,
+        "attempt_id": attempt.attempt_id,
+        "expected_predict_and_score_call_id": resolved_call_ids.get(
+            "prediction_and_score", ""
+        ),
+        "verification_receipt_call_id": str(
+            infrastructure.get("weave_hosted_evidence_receipt_call_id") or ""
+        ),
+        "evidence_project": project,
+        "canonical_local_record_digest": str(
+            attempt.local_evidence_record_digest or ""
+        ),
+        "provisional_predict_and_score_output_digest": str(
+            infrastructure.get(
+                "weave_provisional_predict_and_score_output_digest"
+            )
+            or ""
+        ),
+        "provisional_score_set_digest": str(
+            infrastructure.get("weave_provisional_score_set_digest") or ""
+        ),
+        "failure_phase": "post_close_hosted_evidence_reconciliation",
+        "failure_code": "hosted_evidence_reconciliation_failed",
+        "error_type": str(
+            infrastructure.get("weave_hosted_evidence_invalidation_error_type")
+            or ""
+        ),
+        "verified_predict_and_score_ancestry": infrastructure.get(
+            "weave_hosted_evidence_invalidation_parent_verified"
+        ),
+    }
+
+
+def _v3_hosted_invalidation_terminal_output(
+    bindings: Mapping[str, Any],
+) -> dict[str, Any]:
+    """Rebuild the exact terminal invalidation receipt output."""
+
+    return {
+        "schema_version": 1,
+        "canonical": False,
+        "verification_status": "invalidated",
+        "bindings_digest": stable_digest(dict(bindings)),
+        "invalidates": {
+            "predict_and_score_call_id": bindings[
+                "expected_predict_and_score_call_id"
+            ],
+            "provisional_output_digest": bindings[
+                "provisional_predict_and_score_output_digest"
+            ],
+            "provisional_scores_digest": bindings[
+                "provisional_score_set_digest"
+            ],
+        },
+        "failure_phase": bindings["failure_phase"],
+        "failure_code": bindings["failure_code"],
+        "canonical_local_record_digest": bindings[
+            "canonical_local_record_digest"
+        ],
+        "reason": (
+            "The provisional prediction-and-score Call did not reconcile. "
+            "Fugue did not use its task observation or scores."
+        ),
+    }
+
+
+def _v3_hosted_decision_bindings(
+    *,
+    attempt: PairedAttemptV3,
+    infrastructure: Mapping[str, Any],
+    project: str,
+    resolved_call_ids: Mapping[str, str],
+    evidence_links: Sequence[AttemptEvidenceLinkV1],
+) -> dict[str, Any]:
+    """Rebuild the exact payload bound by the hosted decision receipt."""
+
+    dataset_ref = next(
+        (link.ref for link in evidence_links if link.kind == "dataset"),
+        "",
+    )
+    agent_receipt_call_id = (
+        resolved_call_ids.get("agent_root")
+        or resolved_call_ids.get("agent_evidence_receipt")
+        or resolved_call_ids.get("agent_evidence")
+        or ""
+    )
+    return {
+        "schema_version": 1,
+        "attempt_id": attempt.attempt_id,
+        "evaluation_root_call_id": resolved_call_ids.get("evaluation_root", ""),
+        "predict_and_score_call_id": resolved_call_ids.get(
+            "prediction_and_score", ""
+        ),
+        "prediction_call_id": resolved_call_ids.get("prediction", ""),
+        "dataset_ref": dataset_ref,
+        "agent_bridge_call_id": str(
+            infrastructure.get("weave_agent_bridge_call_id") or ""
+        ),
+        "agent_receipt_call_id": agent_receipt_call_id,
+        "evidence_project": project,
+        "canonical_local_record_digest": str(
+            attempt.local_evidence_record_digest or ""
+        ),
+        "provisional_predict_and_score_output_digest": str(
+            infrastructure.get(
+                "weave_provisional_predict_and_score_output_digest"
+            )
+            or ""
+        ),
+        "provisional_score_set_digest": str(
+            infrastructure.get("weave_provisional_score_set_digest") or ""
+        ),
+        "provisional_score_call_set_digest": str(
+            infrastructure.get("weave_provisional_score_call_set_digest") or ""
+        ),
+        "canonical_payload_digest": str(
+            infrastructure.get("weave_hosted_canonical_payload_digest") or ""
+        ),
+    }
+
+
 def _weave_object_url_from_ref(
     project: str,
     ref: str,
@@ -12205,6 +13857,18 @@ def _study_console_backlink(
 
 
 def _mcp_tool_usage_counts(row: Mapping[str, Any]) -> dict[str, int]:
+    projected = row.get("mcp_tool_usage_counts")
+    if isinstance(projected, Mapping):
+        result: dict[str, int] = {}
+        for raw_name, raw_count in projected.items():
+            if (
+                isinstance(raw_count, int)
+                and not isinstance(raw_count, bool)
+                and raw_count > 0
+            ):
+                result[str(raw_name)] = raw_count
+        if result:
+            return result
     normalized_counts: dict[str, int] = {}
     normalized_calls = row.get("mcp_tool_calls")
     if isinstance(normalized_calls, Sequence) and not isinstance(
@@ -12242,6 +13906,8 @@ def _mcp_tool_usage_counts(row: Mapping[str, Any]) -> dict[str, int]:
 
 def _operational_summary(
     rows: Sequence[Mapping[str, Any]],
+    *,
+    include_legacy_token_aliases: bool = True,
 ) -> dict[str, Any]:
     execution: dict[str, int] = {}
     evidence: dict[str, int] = {}
@@ -12265,9 +13931,17 @@ def _operational_summary(
             row.get("status") or row.get("execution_status") or "unknown"
         )
         execution[status] = execution.get(status, 0) + 1
+        has_canonical_evidence = bool(
+            row.get("local_evidence_links")
+            or row.get("evaluation_url")
+            or row.get("weave_evaluation_root_ref")
+            or row.get("eval_predict_and_score_url")
+            or row.get("prediction_url")
+            or row.get("dataset_url")
+        )
         evidence_status = (
             _attempt_evidence_status(row)
-            if row.get("local_evidence_links")
+            if has_canonical_evidence
             else str(
                 row.get("trace_link_status") or row.get("evidence_status") or "unknown"
             )
@@ -12277,7 +13951,7 @@ def _operational_summary(
             "exception_class"
         ):
             infrastructure_failures += 1
-        if "wandb_serverless_eligible" in row:
+        if isinstance(row.get("wandb_serverless_eligible"), bool):
             wandb_rows += 1
             wandb_eligible += row.get("wandb_serverless_eligible") is True
         variant = str(row.get("variant_id") or "unknown")
@@ -12297,18 +13971,18 @@ def _operational_summary(
         if row_latency_ms is not None:
             latency_ms += row_latency_ms
             latency_rows += 1
-        row_input = row.get("input_tokens")
-        row_output = row.get("output_tokens")
-        if not isinstance(row_input, int) or isinstance(row_input, bool):
-            row_input = row.get("n_input_tokens")
-        if not isinstance(row_output, int) or isinstance(row_output, bool):
-            row_output = row.get("n_output_tokens")
-        if (
-            isinstance(row_input, int)
-            and not isinstance(row_input, bool)
-            and isinstance(row_output, int)
-            and not isinstance(row_output, bool)
-        ):
+        usage = _mapping_or_empty(row.get("usage"))
+        row_input = _token_count_or_none(row.get("input_tokens"))
+        row_output = _token_count_or_none(row.get("output_tokens"))
+        if row_input is None:
+            row_input = _token_count_or_none(usage.get("input_tokens"))
+        if row_input is None and include_legacy_token_aliases:
+            row_input = _token_count_or_none(row.get("n_input_tokens"))
+        if row_output is None:
+            row_output = _token_count_or_none(usage.get("output_tokens"))
+        if row_output is None and include_legacy_token_aliases:
+            row_output = _token_count_or_none(row.get("n_output_tokens"))
+        if row_input is not None and row_output is not None:
             input_tokens += row_input
             output_tokens += row_output
             usage_rows += 1
@@ -12356,6 +14030,28 @@ def _comparison_scorer_names(spec: ComparisonSpecV1) -> tuple[str, ...]:
                 f"comparison.deterministic.{check}" for check in evaluator.checks
             )
     return tuple(sorted(names))
+
+
+def _comparison_dimension_roles(
+    spec: ComparisonSpecV1,
+) -> dict[str, DimensionRole]:
+    """Return the locked semantic role for every deterministic score key."""
+
+    roles: dict[str, DimensionRole] = {}
+    for evaluator in spec.evaluators:
+        if evaluator.type != "deterministic":
+            continue
+        if evaluator.scorer:
+            for dimension, role in evaluator.dimension_roles.items():
+                roles[f"{evaluator.id}.{dimension}"] = role
+            continue
+        for check in evaluator.checks:
+            if check not in {"answer_present", "expected_values"}:
+                raise ValueError(
+                    f"unsupported deterministic check role: {check}"
+                )
+            roles[check] = "outcome"
+    return dict(sorted(roles.items()))
 
 
 def _project_comparison_start(
@@ -12419,7 +14115,29 @@ def _score_and_bind_exported_comparison_rows(
     scored: list[dict[str, Any]] = []
     for raw_row in rows:
         row = dict(raw_row)
-        if row.get("comparison_evaluation_status") not in {
+        hosted_decision_reason = _hosted_decision_unscorable_reason(
+            row,
+            evidence_mode=spec.execution.evidence_mode,
+        )
+        if hosted_decision_reason is not None:
+            row.update(
+                {
+                    "status": "failed",
+                    "benchmark_outcome": "unscored",
+                    "terminal_kind": "evidence_failure",
+                    "evidence_integrity_status": "invalid",
+                    "hosted_task_result_canonical": False,
+                }
+            )
+        unscorable_reason = hosted_decision_reason or (
+            _unscorable_agent_execution_reason(row)
+        )
+        if unscorable_reason is not None:
+            _withhold_comparison_behavioral_scores(
+                row,
+                reason=unscorable_reason,
+            )
+        elif row.get("comparison_evaluation_status") not in {
             "scored",
             "unavailable",
         }:
@@ -12461,6 +14179,143 @@ def _score_and_bind_exported_comparison_rows(
                 infrastructure_receipt["receipt_digest"]
             )
     return scored
+
+
+def _hosted_decision_unscorable_reason(
+    row: Mapping[str, Any],
+    *,
+    evidence_mode: EvidenceMode,
+) -> str | None:
+    """Reject local-first Weave behavior without its verified decision edge."""
+
+    if (
+        evidence_mode != "weave_required"
+        or re.fullmatch(
+            r"[0-9a-f]{64}",
+            str(row.get("local_evidence_record_digest") or ""),
+        )
+        is None
+    ):
+        return None
+    required_digests = (
+        "weave_provisional_predict_and_score_output_digest",
+        "weave_provisional_score_set_digest",
+        "weave_provisional_score_call_set_digest",
+        "weave_hosted_evidence_receipt_bindings_digest",
+        "weave_hosted_canonical_task_result_digest",
+        "weave_hosted_canonical_score_set_digest",
+        "weave_hosted_canonical_payload_digest",
+    )
+    canonical_payload = row.get("weave_hosted_canonical_payload")
+    canonical_task_result = (
+        canonical_payload.get("task_result")
+        if isinstance(canonical_payload, Mapping)
+        else None
+    )
+    canonical_scalar_checks = (
+        canonical_payload.get("scalar_checks")
+        if isinstance(canonical_payload, Mapping)
+        else None
+    )
+    trace_project = str(row.get("trace_project") or "")
+    expected_receipt_call_id = _v3_hosted_decision_call_id(
+        project=trace_project,
+        run_id=str(row.get("run_id") or ""),
+        cell_id=str(row.get("cell_id") or ""),
+        attempt_id_value=str(row.get("attempt_id") or ""),
+        evaluation_root_call_id=str(
+            row.get("weave_evaluation_root_call_id") or ""
+        ),
+        predict_and_score_call_id=str(
+            row.get("eval_predict_and_score_call_id") or ""
+        ),
+        prediction_call_id=str(row.get("weave_prediction_call_id") or ""),
+    )
+    expected_bindings = {
+        "schema_version": 1,
+        "attempt_id": str(row.get("attempt_id") or ""),
+        "evaluation_root_call_id": str(
+            row.get("weave_evaluation_root_call_id") or ""
+        ),
+        "predict_and_score_call_id": str(
+            row.get("eval_predict_and_score_call_id") or ""
+        ),
+        "prediction_call_id": str(row.get("weave_prediction_call_id") or ""),
+        "dataset_ref": str(row.get("weave_dataset_ref") or ""),
+        "agent_bridge_call_id": str(
+            row.get("weave_agent_bridge_call_id") or ""
+        ),
+        "agent_receipt_call_id": str(row.get("weave_agent_root_call_id") or ""),
+        "evidence_project": trace_project,
+        "canonical_local_record_digest": str(
+            row.get("local_evidence_record_digest") or ""
+        ),
+        "provisional_predict_and_score_output_digest": str(
+            row.get("weave_provisional_predict_and_score_output_digest") or ""
+        ),
+        "provisional_score_set_digest": str(
+            row.get("weave_provisional_score_set_digest") or ""
+        ),
+        "provisional_score_call_set_digest": str(
+            row.get("weave_provisional_score_call_set_digest") or ""
+        ),
+        "canonical_payload_digest": str(
+            row.get("weave_hosted_canonical_payload_digest") or ""
+        ),
+    }
+    trace_receipt = row.get("trace_receipt")
+    app_base_url = (
+        str(trace_receipt.get("app_base_url") or "https://wandb.ai")
+        if isinstance(trace_receipt, Mapping)
+        else "https://wandb.ai"
+    )
+    verified = bool(
+        row.get("hosted_decision_contract_version") == 1
+        and not isinstance(row.get("hosted_decision_contract_version"), bool)
+        and row.get("hosted_evidence_verification_status") == "verified"
+        and row.get("hosted_task_result_canonical") is True
+        and row.get("terminal_hosted_visibility_verified") is True
+        and row.get("weave_hosted_evidence_receipt_object_verified") is True
+        and row.get("weave_hosted_evidence_receipt_terminal_verified") is True
+        and row.get("weave_provisional_call_verification_status") == "verified"
+        and row.get("task_verdict_owner")
+        == "post_close_hosted_evidence_verification_receipt"
+        and all(
+            value
+            for key, value in expected_bindings.items()
+            if key != "schema_version"
+        )
+        and row.get("weave_hosted_evidence_receipt_call_id")
+        == expected_receipt_call_id
+        and row.get("weave_hosted_evidence_receipt_ref")
+        == _weave_call_ref(trace_project, expected_receipt_call_id)
+        and row.get("weave_hosted_evidence_receipt_url")
+        == _weave_call_url(
+            trace_project,
+            expected_receipt_call_id,
+            app_base_url=app_base_url,
+        )
+        and row.get("weave_hosted_evidence_receipt_bindings_digest")
+        == stable_digest(expected_bindings)
+        and all(
+            re.fullmatch(r"[0-9a-f]{64}", str(row.get(name) or ""))
+            for name in required_digests
+        )
+        and isinstance(canonical_task_result, Mapping)
+        and isinstance(canonical_scalar_checks, Mapping)
+        and stable_digest(canonical_task_result)
+        == row.get("weave_hosted_canonical_task_result_digest")
+        and stable_digest(canonical_scalar_checks)
+        == row.get("weave_hosted_canonical_score_set_digest")
+        and stable_digest(canonical_payload)
+        == row.get("weave_hosted_canonical_payload_digest")
+        and canonical_task_result == row.get("task_result")
+    )
+    if verified:
+        return None
+    return (
+        "weave-required attempt has no exact post-close hosted decision receipt"
+    )
 
 
 def _publish_comparison_result(
@@ -12545,6 +14400,779 @@ def _publish_comparison_result(
     )
     if publication_error is not None:
         raise publication_error
+
+
+def finalize_local_comparison_result(  # noqa: C901 - one fail-closed recovery boundary
+    spec: ComparisonSpecV1,
+    *,
+    comparison_path: Path,
+    run_id: str,
+    repo_root: Path,
+    publish_research: bool = True,
+) -> tuple[ComparisonResultV3, Path, Path, Path]:
+    """Finish a completed local run without executing or scoring any cell.
+
+    This recovery path consumes only immutable host artifacts. It deliberately
+    does not construct an OperatorService, resolve credentials, export a run,
+    invoke a scorer or judge, or admit a physical execution.
+    """
+
+    run_id = validate_id(run_id, kind="run id")
+    root = repo_root.resolve()
+    if spec.schema_version < 3:
+        raise ValueError("local result finalization requires a V3 comparison")
+    if spec.execution.evidence_mode != "local":
+        raise ValueError("local result finalization supports local evidence only")
+
+    spec_path = _safe_input_path(comparison_path, root, "comparison")
+    run_dir = root / ".fugue" / "runtime" / run_id
+    input_lock_path = run_dir / INPUT_LOCK_NAME
+    experiment_path = run_dir / "experiment.yaml"
+    run_manifest_path = run_dir / "run.json"
+    for path, label in (
+        (input_lock_path, "run input lock"),
+        (experiment_path, "frozen experiment"),
+        (run_manifest_path, "run manifest"),
+    ):
+        _require_finalization_file(path, label)
+
+    input_lock = _load_json_object(input_lock_path, "run input lock")
+    if not verify_snapshot(input_lock):
+        raise ValueError("run input lock digest does not match")
+    if input_lock.get("run_id") != run_id:
+        raise ValueError("run input lock belongs to another run")
+    request = _mapping(input_lock.get("request"), "run input lock request")
+    approved = _mapping(
+        request.get("approved_comparison"),
+        "run approved comparison lock",
+    )
+    _verify_approved_comparison_execution_lock(approved)
+    if approved.get("evidence_mode") != "local":
+        raise ValueError("run approved comparison is not local evidence")
+    if approved.get("comparison_id") != spec.id:
+        raise ValueError("run approved comparison targets another comparison")
+    if approved.get("spec_digest") != spec.spec_digest:
+        raise ValueError("current comparison spec differs from the approved run")
+    preview_digest = str(approved.get("preview_digest") or "")
+    binding = execution_binding_from_approved(approved)
+    _verified_approved_inputs(approved, repo_root=root)
+    expected_qualification_inputs = {
+        str(name): str(digest)
+        for name, digest in _mapping(
+            approved.get("qualification_input_digests"),
+            "approved qualification input digests",
+        ).items()
+    }
+    observed_qualification_inputs, qualification_blockers = (
+        _qualification_input_readiness(spec, repo_root=root)
+    )
+    if qualification_blockers or (
+        observed_qualification_inputs != expected_qualification_inputs
+    ):
+        details = "; ".join(qualification_blockers) or "digest mismatch"
+        raise ValueError(
+            "approved source and qualification locks did not re-verify: " + details
+        )
+    release_note_coverage = _bound_v3_release_note_coverage(
+        spec,
+        readiness={
+            "qualification_input_digests": expected_qualification_inputs,
+        },
+        repo_root=root,
+    )
+
+    frozen_experiment = experiment_from_yaml(
+        experiment_path.read_text(encoding="utf-8")
+    )
+    frozen_definition = frozen_experiment.to_dict()
+    if (
+        frozen_definition != input_lock.get("experiment")
+        or stable_digest(frozen_definition)
+        != input_lock.get("resolved_experiment_sha256")
+        or frozen_experiment.id != spec.id
+    ):
+        raise ValueError("frozen experiment disagrees with the immutable run lock")
+
+    journal_path = recovery_journal_path(root, run_id)
+    _require_finalization_file(journal_path, "comparison execution journal")
+    journal_sha256 = _sha256_path(journal_path)
+    controller = ExecutionRecoveryController(
+        journal_path,
+        controller_id=f"comparison-{run_id}"[:200],
+        schedule=binding.schedule,
+    )
+    recovery = controller.snapshot()
+    if _sha256_path(journal_path) != journal_sha256:
+        raise RuntimeError("host-only finalization changed the execution journal")
+    scheduled_ids = {
+        item.logical_attempt_id for item in binding.schedule.logical_attempts
+    }
+    if (
+        not recovery.complete
+        or recovery.fatal_reasons
+        or recovery.active_physical_execution_ids
+        or set(recovery.canonical_results) != scheduled_ids
+        or len(recovery.physical_executions)
+        > binding.schedule.maximum_physical_executions
+    ):
+        raise RuntimeError(
+            "comparison execution is not complete and safe for host-only finalization"
+        )
+    for logical_id, physical_id in recovery.canonical_results.items():
+        physical = recovery.physical_executions.get(physical_id)
+        canonical_count = sum(
+            int(
+                state.canonical
+                and state.identity.logical_attempt_id == logical_id
+            )
+            for state in recovery.physical_executions.values()
+        )
+        if (
+            physical is None
+            or canonical_count != 1
+            or not physical.canonical
+            or physical.identity.logical_attempt_id != logical_id
+            or not physical.started
+            or physical.terminal_kind
+            not in {"success", "task_failure", "agent_timeout", "cancelled"}
+            or not physical.fully_reconciled
+            or physical.canonical_reconciliation is None
+            or physical.remaining_harbor_resources
+        ):
+            raise RuntimeError(
+                "comparison execution has an unreconciled canonical physical result"
+            )
+    if any(
+        state.active or not state.fully_reconciled
+        for state in recovery.physical_executions.values()
+    ):
+        raise RuntimeError(
+            "comparison execution retains an unreconciled physical execution"
+        )
+
+    run_manifest = _load_json_object(run_manifest_path, "run manifest")
+    execution_summary = _mapping(
+        run_manifest.get("comparison_execution"),
+        "run comparison execution summary",
+    )
+    if (
+        run_manifest.get("status") != "passed"
+        or run_manifest.get("experiment_id") != spec.id
+        or run_manifest.get("snapshot_sha256") != input_lock.get("snapshot_sha256")
+        or int(run_manifest.get("cell_count") or 0) != binding.logical_cell_count
+        or execution_summary.get("binding_digest") != binding.binding_digest
+        or execution_summary.get("schedule_digest")
+        != binding.schedule.schedule_digest
+        or execution_summary.get("event_chain_digest")
+        != recovery.event_chain_digest
+        or execution_summary.get("controller_id") != recovery.controller_id
+        or execution_summary.get("journal")
+        != journal_path.relative_to(root).as_posix()
+        or int(execution_summary.get("logical_attempt_count") or 0)
+        != recovery.logical_attempt_count
+        or int(execution_summary.get("physical_execution_count") or 0)
+        != len(recovery.physical_executions)
+        or execution_summary.get("complete") is not True
+        or int(execution_summary.get("canonical_result_count") or 0)
+        != len(scheduled_ids)
+    ):
+        raise RuntimeError("run manifest does not describe the completed execution")
+
+    store = LocalEvidenceStore(root, run_id)
+    manifest = store.read_manifest()
+    if (
+        manifest.status != "complete"
+        or manifest.run_id != run_id
+        or set(manifest.planned_attempt_ids) != scheduled_ids
+        or set(manifest.terminal_attempt_ids) != scheduled_ids
+        or manifest.run_snapshot_sha256 != input_lock.get("snapshot_sha256")
+        or manifest.evaluation_asset_lock_sha256
+        != input_lock.get("evaluation_asset_lock_sha256")
+    ):
+        raise RuntimeError("local evidence manifest does not bind the completed run")
+    for record in manifest.attempt_records:
+        attempt_record = store.read_attempt(record.attempt_id)
+        if attempt_record.record_digest != record.record_digest:
+            raise RuntimeError("local attempt record disagrees with its manifest")
+    checkpoint_binding = _verify_finalization_checkpoint(
+        approved=approved,
+        binding=binding,
+        repo_root=root,
+        run_id=run_id,
+    )
+
+    destination = root / COMPARISON_RESULT_ROOT / preview_digest
+    attempts_path = destination / "attempts.jsonl"
+    _require_finalization_file(attempts_path, "final exported attempts")
+    attempts_bytes = attempts_path.read_bytes()
+    attempts_sha256 = hashlib.sha256(attempts_bytes).hexdigest()
+    rows = _read_jsonl(attempts_path, "comparison attempt rows")
+    rows_before_binding = _json_value(rows)
+    if {str(row.get("attempt_id") or "") for row in rows} != scheduled_ids:
+        raise RuntimeError("final exported attempts disagree with the schedule")
+    if any(str(row.get("run_id") or "") != run_id for row in rows):
+        raise RuntimeError("final exported attempts belong to another run")
+    _bind_local_execution_evidence(rows, repo_root=root, run_id=run_id)
+    if rows != rows_before_binding:
+        raise RuntimeError(
+            "final exported attempts require mutation before result construction"
+        )
+    source_drift_digest = _verify_finalization_source_drift(rows, approved=approved)
+
+    result = analyze_comparison_rows(
+        comparison_id=spec.id,
+        preview_digest=preview_digest,
+        rows=rows,
+        source=run_id,
+        expected_evidence_project=None,
+        approved_comparison=approved,
+        decision_policy=spec.decision_policy,
+        expected_source_evidence_project=spec.execution.source_evidence_project,
+        result_schema_version=3,
+        study_intent=_approved_study_intent(approved),
+        release_note_coverage=release_note_coverage,
+        supersedes=spec.supersedes,
+    )
+    if not isinstance(result, ComparisonResultV3):  # pragma: no cover - fixed call
+        raise RuntimeError("local finalization did not construct ComparisonResultV3")
+
+    receipt_path = destination / "local-result-finalization.json"
+    existing_receipt = _read_local_finalization_receipt(receipt_path)
+    if existing_receipt is not None:
+        _verify_existing_local_finalization(
+            existing_receipt,
+            result=result,
+            result_path=destination / "result.json",
+            run_id=run_id,
+            preview_digest=preview_digest,
+            spec_digest=spec.spec_digest,
+            input_lock_sha256=_sha256_path(input_lock_path),
+            attempts_sha256=attempts_sha256,
+            journal_sha256=journal_sha256,
+            journal_chain_digest=recovery.event_chain_digest,
+            manifest_digest=manifest.manifest_digest,
+            source_drift_digest=source_drift_digest,
+            qualification_inputs_digest=stable_digest(
+                expected_qualification_inputs
+            ),
+            release_note_coverage_digest=stable_digest(
+                [dict(item) for item in release_note_coverage]
+            ),
+            checkpoint_binding=checkpoint_binding,
+            repo_root=root,
+        )
+        _publish_comparison_result(
+            spec=spec,
+            result=result,
+            json_path=destination / "result.json",
+            markdown_path=destination / "result.md",
+            destination=destination,
+            publication_path=destination / "research-publication.json",
+            projection=None,
+            publish_research=publish_research,
+            repo_root=root,
+        )
+        return (
+            result,
+            destination / "result.json",
+            destination / "result.md",
+            receipt_path,
+        )
+
+    prior_result_path = destination / "result.json"
+    if approved.get("source_lock_digest") and not prior_result_path.is_file():
+        raise ValueError(
+            "source-backed finalization requires the prior digest-bound result "
+            "envelope to preserve its execution-time drift checks"
+        )
+    rejected_partial = _archive_rejected_local_result(
+        prior_result_path,
+        destination=destination,
+        recomputed=result,
+    )
+    destination.parent.mkdir(parents=True, exist_ok=True)
+    with tempfile.TemporaryDirectory(
+        dir=destination.parent,
+        prefix=f".{preview_digest[:12]}.finalize-",
+    ) as temporary:
+        staged = Path(temporary) / "result"
+        staged.mkdir()
+        _write_immutable_bytes(
+            staged / "attempts.jsonl",
+            attempts_bytes,
+            expected_sha256=attempts_sha256,
+            mode=0o600,
+            label="staged final attempts",
+        )
+        staged_json, _staged_markdown = write_comparison_result(
+            result,
+            destination=staged,
+        )
+        if read_comparison_result(staged_json).to_dict() != result.to_dict():
+            raise RuntimeError("staged comparison result did not round-trip")
+        for name in ("result.json", "result.md", "reproduction.json"):
+            _atomic_bytes(destination / name, (staged / name).read_bytes())
+
+    json_path = destination / "result.json"
+    markdown_path = destination / "result.md"
+    if read_comparison_result(json_path).to_dict() != result.to_dict():
+        raise RuntimeError("canonical comparison result did not round-trip")
+
+    from fugue.bench.runtime_provenance import (
+        resolve_fugue_distribution_provenance,
+    )
+
+    runtime = _mapping(input_lock.get("runtime"), "run runtime provenance")
+    execution_distribution = _mapping(
+        runtime.get("fugue_distribution"),
+        "run Fugue distribution provenance",
+    )
+    rejected_archives = _rejected_local_result_archives(destination)
+    if rejected_partial is not None and rejected_partial not in rejected_archives:
+        raise RuntimeError("rejected partial result archive was not preserved")
+    unsigned_receipt: dict[str, Any] = {
+        "schema_version": 1,
+        "kind": "local_comparison_result_finalization",
+        "comparison_id": spec.id,
+        "run_id": run_id,
+        "preview_digest": preview_digest,
+        "spec_digest": spec.spec_digest,
+        "bindings": {
+            "comparison_spec": {
+                "path": spec_path.relative_to(root).as_posix(),
+                "sha256": _sha256_path(spec_path),
+            },
+            "run_manifest": {
+                "path": run_manifest_path.relative_to(root).as_posix(),
+                "sha256": _sha256_path(run_manifest_path),
+            },
+            "input_lock": {
+                "path": input_lock_path.relative_to(root).as_posix(),
+                "sha256": _sha256_path(input_lock_path),
+                "snapshot_sha256": input_lock["snapshot_sha256"],
+            },
+            "frozen_experiment": {
+                "path": experiment_path.relative_to(root).as_posix(),
+                "sha256": _sha256_path(experiment_path),
+                "resolved_experiment_sha256": input_lock[
+                    "resolved_experiment_sha256"
+                ],
+            },
+            "execution_schedule": {
+                "binding_digest": binding.binding_digest,
+                "schedule_digest": binding.schedule.schedule_digest,
+                "journal_path": journal_path.relative_to(root).as_posix(),
+                "journal_sha256": journal_sha256,
+                "event_chain_digest": recovery.event_chain_digest,
+                "logical_attempts": len(scheduled_ids),
+                "physical_executions": len(recovery.physical_executions),
+            },
+            "attempts": {
+                "path": attempts_path.relative_to(root).as_posix(),
+                "sha256": attempts_sha256,
+                "row_count": len(rows),
+                "attempt_id_set_digest": stable_digest(sorted(scheduled_ids)),
+                "source_drift_digest": source_drift_digest,
+            },
+            "local_evidence": {
+                "path": store.manifest_path.relative_to(root).as_posix(),
+                "sha256": _sha256_path(store.manifest_path),
+                "manifest_digest": manifest.manifest_digest,
+                "attempt_record_set_digest": manifest.attempt_record_set_digest,
+            },
+            "qualification_inputs": {
+                "digests": expected_qualification_inputs,
+                "digest": stable_digest(expected_qualification_inputs),
+                "release_note_coverage_digest": stable_digest(
+                    [dict(item) for item in release_note_coverage]
+                ),
+            },
+            "checkpoint": checkpoint_binding,
+        },
+        "execution_distribution": execution_distribution,
+        "finalizer_distribution": resolve_fugue_distribution_provenance(),
+        "result": {
+            "path": json_path.relative_to(root).as_posix(),
+            "sha256": _sha256_path(json_path),
+            "result_digest": result.result_digest,
+            "markdown_path": markdown_path.relative_to(root).as_posix(),
+            "markdown_sha256": _sha256_path(markdown_path),
+            "reproduction_path": (
+                destination / "reproduction.json"
+            ).relative_to(root).as_posix(),
+            "reproduction_sha256": _sha256_path(
+                destination / "reproduction.json"
+            ),
+        },
+        "rejected_partial_results": rejected_archives,
+        "research_projection": {
+            "status": "separate_optional_receipt",
+            "path": (
+                destination / "research-publication.json"
+            ).relative_to(root).as_posix(),
+        },
+    }
+    receipt = {
+        **unsigned_receipt,
+        "receipt_digest": stable_digest(unsigned_receipt),
+    }
+    atomic_write_json(receipt_path, receipt)
+    _verify_existing_local_finalization(
+        receipt,
+        result=result,
+        result_path=json_path,
+        run_id=run_id,
+        preview_digest=preview_digest,
+        spec_digest=spec.spec_digest,
+        input_lock_sha256=_sha256_path(input_lock_path),
+        attempts_sha256=attempts_sha256,
+        journal_sha256=journal_sha256,
+        journal_chain_digest=recovery.event_chain_digest,
+        manifest_digest=manifest.manifest_digest,
+        source_drift_digest=source_drift_digest,
+        qualification_inputs_digest=stable_digest(expected_qualification_inputs),
+        release_note_coverage_digest=stable_digest(
+            [dict(item) for item in release_note_coverage]
+        ),
+        checkpoint_binding=checkpoint_binding,
+        repo_root=root,
+    )
+    _publish_comparison_result(
+        spec=spec,
+        result=result,
+        json_path=json_path,
+        markdown_path=markdown_path,
+        destination=destination,
+        publication_path=destination / "research-publication.json",
+        projection=None,
+        publish_research=publish_research,
+        repo_root=root,
+    )
+    return result, json_path, markdown_path, receipt_path
+
+
+def _require_finalization_file(path: Path, label: str) -> None:
+    if not path.is_file() or path.is_symlink():
+        raise ValueError(f"host-only finalization requires an immutable {label}")
+
+
+def _verify_finalization_checkpoint(
+    *,
+    approved: Mapping[str, Any],
+    binding: ComparisonExecutionBindingV1,
+    repo_root: Path,
+    run_id: str,
+) -> dict[str, Any] | None:
+    checkpoint_ids = tuple(
+        item.logical_attempt_id
+        for item in binding.schedule.logical_attempts
+        if item.stage_id == "checkpoint"
+    )
+    if not checkpoint_ids:
+        if int(approved.get("evidence_checkpoint_cells") or 0):
+            raise ValueError("approved checkpoint has no scheduled attempts")
+        return None
+    path = repo_root / ".fugue" / "runtime" / run_id / "comparison-checkpoint.json"
+    _require_finalization_file(path, "comparison checkpoint receipt")
+    receipt = _load_json_object(path, "comparison checkpoint receipt")
+    supplied = str(receipt.get("receipt_digest") or "")
+    unsigned = {key: value for key, value in receipt.items() if key != "receipt_digest"}
+    row_digests = {
+        attempt_id_value: stable_digest(row)
+        for attempt_id_value in checkpoint_ids
+        if (
+            row := _local_comparison_prediction_row(
+                repo_root=repo_root,
+                run_id=run_id,
+                attempt_id=attempt_id_value,
+            )
+        )
+        is not None
+    }
+    expected_drift = {
+        "status": "matched",
+        "expected_digest": str(approved.get("source_lock_digest") or ""),
+        "observed_digest": str(approved.get("source_lock_digest") or ""),
+    }
+    if (
+        supplied != stable_digest(unsigned)
+        or receipt.get("run_id") != run_id
+        or receipt.get("schedule_digest") != binding.schedule.schedule_digest
+        or receipt.get("checkpoint_attempt_ids") != list(checkpoint_ids)
+        or receipt.get("checkpoint_row_digests") != row_digests
+        or len(row_digests) != len(checkpoint_ids)
+        or (
+            approved.get("source_lock_digest")
+            and receipt.get("source_drift") != expected_drift
+        )
+    ):
+        raise ValueError("comparison checkpoint receipt does not re-verify")
+    return {
+        "path": path.relative_to(repo_root).as_posix(),
+        "sha256": _sha256_path(path),
+        "receipt_digest": supplied,
+        "checkpoint_row_set_digest": stable_digest(row_digests),
+    }
+
+
+def _verify_finalization_source_drift(
+    rows: Sequence[Mapping[str, Any]],
+    *,
+    approved: Mapping[str, Any],
+) -> str:
+    """Bind the prior source checks to the frozen lock and final attempts.
+
+    The finalizer intentionally does not query a changing hosted source. It
+    re-verifies every locally frozen source/qualification artifact above, then
+    requires the recorded pre-run, checkpoint, and post-run checks to name the
+    exact approved source-lock digest. The finalization receipt commits to this
+    projection and the complete attempts file hash.
+    """
+
+    source_lock_digest = str(approved.get("source_lock_digest") or "")
+    if not source_lock_digest:
+        return stable_digest([])
+    fields = ["source_pre_run_drift", "source_post_run_drift"]
+    if int(approved.get("evidence_checkpoint_cells") or 0):
+        fields.insert(1, "source_checkpoint_drift")
+    projected: list[dict[str, Any]] = []
+    expected = {
+        "status": "matched",
+        "expected_digest": source_lock_digest,
+        "observed_digest": source_lock_digest,
+    }
+    for row in rows:
+        item: dict[str, Any] = {"attempt_id": str(row.get("attempt_id") or "")}
+        for field_name in fields:
+            observed = row.get(field_name)
+            if not isinstance(observed, Mapping) or dict(observed) != expected:
+                raise ValueError(
+                    f"{field_name} does not match the approved source lock"
+                )
+            item[field_name] = expected
+        projected.append(item)
+    return stable_digest(sorted(projected, key=lambda item: item["attempt_id"]))
+
+
+def _archive_rejected_local_result(
+    result_path: Path,
+    *,
+    destination: Path,
+    recomputed: ComparisonResultV3,
+) -> dict[str, str] | None:
+    if not result_path.exists():
+        return None
+    _require_finalization_file(result_path, "existing comparison result")
+    try:
+        existing = read_comparison_result(result_path)
+    except (OSError, TypeError, ValueError, RuntimeError):
+        raw = _load_json_object(result_path, "rejected comparison result")
+        supplied = str(raw.get("qualification_digest") or "")
+        if (
+            not re.fullmatch(r"[0-9a-f]{64}", supplied)
+            or raw.get("result_digest") != supplied
+            or _comparison_qualification_digest(raw) != supplied
+        ):
+            raise ValueError(
+                "rejected comparison result has no valid qualification digest"
+            ) from None
+        repaired = _json_value(raw)
+        expected = _json_value(recomputed.to_dict())
+        repaired["operational_summary"] = expected["operational_summary"]
+        repaired["qualification_digest"] = expected["qualification_digest"]
+        repaired["result_digest"] = expected["result_digest"]
+        if repaired != expected:
+            raise ValueError(
+                "rejected comparison result differs beyond the recoverable "
+                "operational summary"
+            ) from None
+        body = result_path.read_bytes()
+        sha256 = hashlib.sha256(body).hexdigest()
+        archive = destination / "rejected-results" / f"{sha256}.result.json"
+        _write_immutable_bytes(
+            archive,
+            body,
+            expected_sha256=sha256,
+            mode=0o600,
+            label="rejected partial result archive",
+        )
+        return {
+            "path": archive.relative_to(destination).as_posix(),
+            "sha256": sha256,
+            "qualification_digest": supplied,
+        }
+    if not isinstance(existing, ComparisonResultV3) or (
+        existing.to_dict() != recomputed.to_dict()
+    ):
+        raise ValueError("existing canonical result conflicts with recomputation")
+    return None
+
+
+def _rejected_local_result_archives(destination: Path) -> list[dict[str, str]]:
+    archive_root = destination / "rejected-results"
+    if not archive_root.exists():
+        return []
+    if not archive_root.is_dir() or archive_root.is_symlink():
+        raise ValueError("rejected result archive root is invalid")
+    values: list[dict[str, str]] = []
+    for path in sorted(archive_root.glob("*.result.json")):
+        _require_finalization_file(path, "rejected partial result archive")
+        sha256 = _sha256_path(path)
+        if path.name != f"{sha256}.result.json":
+            raise ValueError("rejected partial result archive name is invalid")
+        raw = _load_json_object(path, "rejected partial result archive")
+        qualification_digest = str(raw.get("qualification_digest") or "")
+        if _comparison_qualification_digest(raw) != qualification_digest:
+            raise ValueError("rejected partial result archive digest does not match")
+        values.append(
+            {
+                "path": path.relative_to(destination).as_posix(),
+                "sha256": sha256,
+                "qualification_digest": qualification_digest,
+            }
+        )
+    return values
+
+
+def _read_local_finalization_receipt(path: Path) -> dict[str, Any] | None:
+    if not path.exists():
+        return None
+    _require_finalization_file(path, "local result finalization receipt")
+    receipt = _load_json_object(path, "local result finalization receipt")
+    supplied = str(receipt.get("receipt_digest") or "")
+    unsigned = {key: value for key, value in receipt.items() if key != "receipt_digest"}
+    if supplied != stable_digest(unsigned):
+        raise ValueError("local result finalization receipt digest does not match")
+    return receipt
+
+
+def _verify_existing_local_finalization(
+    receipt: Mapping[str, Any],
+    *,
+    result: ComparisonResultV3,
+    result_path: Path,
+    run_id: str,
+    preview_digest: str,
+    spec_digest: str,
+    input_lock_sha256: str,
+    attempts_sha256: str,
+    journal_sha256: str,
+    journal_chain_digest: str,
+    manifest_digest: str,
+    source_drift_digest: str,
+    qualification_inputs_digest: str,
+    release_note_coverage_digest: str,
+    checkpoint_binding: Mapping[str, Any] | None,
+    repo_root: Path,
+) -> None:
+    supplied = str(receipt.get("receipt_digest") or "")
+    unsigned = {key: value for key, value in receipt.items() if key != "receipt_digest"}
+    bindings = _mapping(receipt.get("bindings"), "finalization bindings")
+    input_lock = _mapping(bindings.get("input_lock"), "finalization input lock")
+    execution = _mapping(
+        bindings.get("execution_schedule"),
+        "finalization execution schedule",
+    )
+    attempts = _mapping(bindings.get("attempts"), "finalization attempts")
+    local_evidence = _mapping(
+        bindings.get("local_evidence"),
+        "finalization local evidence",
+    )
+    qualification_inputs = _mapping(
+        bindings.get("qualification_inputs"),
+        "finalization qualification inputs",
+    )
+    result_binding = _mapping(receipt.get("result"), "finalization result")
+    if (
+        supplied != stable_digest(unsigned)
+        or receipt.get("kind") != "local_comparison_result_finalization"
+        or receipt.get("run_id") != run_id
+        or receipt.get("preview_digest") != preview_digest
+        or receipt.get("spec_digest") != spec_digest
+        or input_lock.get("sha256") != input_lock_sha256
+        or execution.get("journal_sha256") != journal_sha256
+        or execution.get("event_chain_digest") != journal_chain_digest
+        or attempts.get("sha256") != attempts_sha256
+        or attempts.get("source_drift_digest") != source_drift_digest
+        or local_evidence.get("manifest_digest") != manifest_digest
+        or qualification_inputs.get("digest") != qualification_inputs_digest
+        or qualification_inputs.get("release_note_coverage_digest")
+        != release_note_coverage_digest
+        or bindings.get("checkpoint") != checkpoint_binding
+        or result_binding.get("result_digest") != result.result_digest
+        or result_binding.get("sha256") != _sha256_path(result_path)
+        or read_comparison_result(result_path).to_dict() != result.to_dict()
+    ):
+        raise ValueError("local result finalization receipt conflicts with run state")
+    for binding_name in (
+        "comparison_spec",
+        "run_manifest",
+        "input_lock",
+        "frozen_experiment",
+        "local_evidence",
+    ):
+        file_binding = _mapping(
+            bindings.get(binding_name),
+            f"finalization {binding_name} binding",
+        )
+        path = _safe_input_path(
+            Path(str(file_binding.get("path") or "")),
+            repo_root,
+            f"finalization {binding_name}",
+        )
+        _require_finalization_file(path, f"finalization {binding_name}")
+        if _sha256_path(path) != file_binding.get("sha256"):
+            raise ValueError(f"finalization {binding_name} changed")
+    for path_field, digest_field, label in (
+        ("journal_path", "journal_sha256", "execution journal"),
+        ("path", "sha256", "attempts"),
+    ):
+        file_binding = execution if label == "execution journal" else attempts
+        path = _safe_input_path(
+            Path(str(file_binding.get(path_field) or "")),
+            repo_root,
+            f"finalization {label}",
+        )
+        _require_finalization_file(path, f"finalization {label}")
+        if _sha256_path(path) != file_binding.get(digest_field):
+            raise ValueError(f"finalization {label} changed")
+    for path_field, digest_field, label in (
+        ("path", "sha256", "result JSON"),
+        ("markdown_path", "markdown_sha256", "result Markdown"),
+        ("reproduction_path", "reproduction_sha256", "reproduction receipt"),
+    ):
+        path = _safe_input_path(
+            Path(str(result_binding.get(path_field) or "")),
+            repo_root,
+            f"finalization {label}",
+        )
+        _require_finalization_file(path, f"finalization {label}")
+        if _sha256_path(path) != result_binding.get(digest_field):
+            raise ValueError(f"finalization {label} changed")
+    for item in _sequence(
+        receipt.get("rejected_partial_results") or [],
+        "rejected partial results",
+        allow_empty=True,
+    ):
+        value = _mapping(item, "rejected partial result")
+        path = repo_root / COMPARISON_RESULT_ROOT / preview_digest / str(value["path"])
+        _require_finalization_file(path, "rejected partial result archive")
+        if _sha256_path(path) != value.get("sha256"):
+            raise ValueError("rejected partial result archive changed")
+
+
+def _atomic_bytes(path: Path, value: bytes) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    temporary = path.with_name(f".{path.name}.{uuid.uuid4().hex}.tmp")
+    try:
+        descriptor = os.open(temporary, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+        with os.fdopen(descriptor, "wb") as handle:
+            handle.write(value)
+            handle.flush()
+            os.fsync(handle.fileno())
+        os.replace(temporary, path)
+    finally:
+        temporary.unlink(missing_ok=True)
 
 
 def execute_comparison(  # noqa: C901 - one governed execution transaction
@@ -12762,6 +15390,10 @@ def execute_comparison(  # noqa: C901 - one governed execution transaction
             row["source_pre_run_drift"] = source_pre_run_drift.to_dict()
         if source_checkpoint_drift is not None:
             row["source_checkpoint_drift"] = source_checkpoint_drift.to_dict()
+
+    evaluate_attempt.fugue_dimension_roles = _comparison_dimension_roles(  # type: ignore[attr-defined]
+        spec
+    )
 
     def finalize_checkpoint_wave(_outcomes: tuple[Any, ...]) -> None:
         """Close the pair-complete gate after local evidence is immutable."""
@@ -13271,8 +15903,8 @@ def _bind_local_execution_evidence(
                 "local comparison row record digest disagrees with its manifest"
             )
         if record.result_row_projection_digest is None or (
-            local_result_row_projection_digest(row)
-            != record.result_row_projection_digest
+            record.result_row_projection_digest
+            not in local_result_row_projection_digest_candidates(row)
         ):
             raise RuntimeError(
                 "local comparison row decision fields disagree with its immutable "
@@ -14135,11 +16767,28 @@ def _public_case(
     }
     interaction["controller_digest"] = stable_digest(interaction)
     repository = _public_task_repository(task, repo_root)
+    presentation_contract = {
+        **(
+            {"required_output": str(task["required_output"])}
+            if task.get("required_output")
+            else {}
+        ),
+        **(
+            {
+                "public_acceptance_criteria": list(
+                    task["public_acceptance_criteria"]
+                )
+            }
+            if task.get("public_acceptance_criteria")
+            else {}
+        ),
+    }
     return {
         "schema_version": 1,
         "id": task_id,
-        "title": task_id.replace("-", " ").title(),
+        "title": str(task.get("title") or task_id.replace("-", " ").title()),
         "instruction": instruction,
+        **presentation_contract,
         "attachments": _task_attachments(task, repo_root),
         "environment": {
             "profile_id": "artifact-python-v1",
@@ -14167,7 +16816,7 @@ def _public_case(
         "interaction": interaction,
         "harness_applicability": applicability,
         "profile_digests": {},
-        "scenario_id": "comparison",
+        "scenario_id": str(task.get("scenario") or "comparison"),
         "tags": list(task.get("tags") or []),
         "partition": str(task.get("partition") or "holdout"),
         "source_index": index,
@@ -14443,6 +17092,7 @@ def _load_public_tasks(path: Path) -> list[dict[str, Any]]:
             isinstance(item, str) for item in tags
         ):
             raise ValueError(f"public task {task_id} tags must be strings")
+        _validate_public_task_presentation_fields(row, task_id=task_id)
         critical_dimensions = row.get("critical_dimensions") or []
         if not isinstance(critical_dimensions, list) or not all(
             isinstance(item, str) and item.strip() for item in critical_dimensions
@@ -14497,6 +17147,41 @@ def _load_public_tasks(path: Path) -> list[dict[str, Any]]:
             row.pop("critical_dimensions", None)
         row["resources"] = resources
     return rows
+
+
+def _validate_public_task_presentation_fields(
+    row: Mapping[str, Any], *, task_id: str
+) -> None:
+    for field_name in ("title", "required_output", "scenario"):
+        if field_name not in row:
+            continue
+        value = row[field_name]
+        if not isinstance(value, str) or not value.strip():
+            raise ValueError(
+                f"public task {task_id} {field_name} must be non-empty text"
+            )
+        if redact_value(value) != value:
+            raise ValueError(
+                f"public task {task_id} {field_name} contains sensitive text"
+            )
+    public_criteria = row.get("public_acceptance_criteria")
+    if public_criteria is None:
+        return
+    if not isinstance(public_criteria, list) or not public_criteria or not all(
+        isinstance(item, str) and item.strip() for item in public_criteria
+    ):
+        raise ValueError(
+            f"public task {task_id} public_acceptance_criteria must be non-empty "
+            "strings"
+        )
+    if len(public_criteria) != len(set(public_criteria)):
+        raise ValueError(
+            f"public task {task_id} public_acceptance_criteria must be unique"
+        )
+    if redact_value(public_criteria) != public_criteria:
+        raise ValueError(
+            f"public task {task_id} public_acceptance_criteria contain sensitive text"
+        )
 
 
 def _load_private_labels(path: Path) -> list[dict[str, Any]]:
@@ -15768,6 +18453,13 @@ def _optional_text(value: Any, label: str, limit: int) -> str | None:
         return None
     if len(text.encode()) > limit:
         raise ValueError(f"{label} exceeds {limit} bytes")
+    return text
+
+
+def _safe_public_text(value: Any, *, label: str, maximum: int) -> str:
+    text = _text(value, label, maximum)
+    if redact_value(text) != text:
+        raise ValueError(f"{label} contains sensitive text")
     return text
 
 

@@ -29,6 +29,7 @@ from fugue.redaction import redact_text, secrets_from_env
 
 if TYPE_CHECKING:
     from fugue.bench.job_config import RenderedJob
+    from fugue.bench.task_presentation import TaskPresentationV1
 
 CellStatus = Literal[
     "pending",
@@ -67,6 +68,31 @@ CellTerminalKind = Literal[
 ]
 CellStartedCallback = Callable[["PlannedCell"], Mapping[str, str] | None]
 CellFinishedCallback = Callable[["PlannedCell", "CellOutcome"], None]
+
+_AGENT_EVIDENCE_DIRECTORY_NAMES = frozenset({"agent", "sessions", "subagents"})
+_AGENT_EVIDENCE_FILE_NAMES = frozenset(
+    {
+        "claude-code.txt",
+        "codex.jsonl",
+        "fugue-meta.json",
+        "hermes-session.jsonl",
+        "openclaw.session.jsonl",
+        "trajectory.json",
+    }
+)
+HARBOR_PARENT_RUNNER_CLASSIFIER_DIGEST = stable_digest(
+    {
+        "schema_version": 1,
+        "contract": "fugue.harbor-parent-runner-classifier",
+        "agent_evidence_directories": sorted(_AGENT_EVIDENCE_DIRECTORY_NAMES),
+        "agent_evidence_files": sorted(_AGENT_EVIDENCE_FILE_NAMES),
+        "nested_trial_result": "result.json",
+        "artifact_reporting": "bounded_categories_only",
+        "no_agent_evidence": "runner_start_failure",
+        "agent_evidence_without_job_result": "execution_failure",
+        "process_started_cost": "unavailable",
+    }
+)
 
 
 @dataclass(frozen=True)
@@ -112,6 +138,9 @@ class PlannedCell:
     integration_provenance: tuple[dict[str, Any], ...] = ()
     physical_execution_id: str = ""
     retry_ordinal: int = 0
+    arm_label: str = ""
+    treatment_summary: str = ""
+    task_presentation: TaskPresentationV1 | None = None
 
     @property
     def attempt_identity(self) -> dict[str, Any]:
@@ -142,6 +171,13 @@ class PlannedCell:
             "context_system_id": self.context_system_id,
             "context_delivery": self.context_delivery,
             "variant_id": self.variant_id,
+            "arm_label": self.arm_label or self.variant_id,
+            "treatment_summary": self.treatment_summary or None,
+            "task_presentation": (
+                self.task_presentation.to_dict()
+                if self.task_presentation is not None
+                else None
+            ),
             "model_provider": self.model_provider,
             "model": self.model,
             "trial_index": self.trial_index,
@@ -224,6 +260,7 @@ class _HarborJobResult:
     reward: float | None = None
     terminal_kind: CellTerminalKind | None = None
     runtime_outcome: RuntimeOutcome | None = None
+    authoritative_terminal: bool = False
 
 
 class _CellWallTimeExceeded(RuntimeError):
@@ -309,6 +346,9 @@ def plan_cells(
                 ),
                 approved_comparison=dict(approved_comparison or {}),
                 integration_provenance=job.integration_provenance,
+                arm_label=job.arm_label or job.variant_label or job.variant_id,
+                treatment_summary=job.treatment_summary,
+                task_presentation=job.task_presentation,
             )
         )
     return schedule_cells(cells, scheduling_seed)
@@ -555,14 +595,23 @@ def execute_cells(  # noqa: C901 - owns the complete cell lifecycle
                 returncode = int(result.returncode)
             harbor_result = (
                 _harbor_job_result(cell, repo_root)
-                if runner is None and returncode == 0 and cell.execution_kind == "agent"
+                if runner is None and cell.execution_kind == "agent"
                 else _HarborJobResult(None, "unscored")
             )
             trial_error = harbor_result.error
             cancellation_requested = bool(
                 cancellation_event is not None and cancellation_event.is_set()
             )
-            if harbor_result.terminal_kind is not None:
+            if (
+                cancellation_requested
+                and (returncode != 0 or trial_error is not None)
+                and not harbor_result.authoritative_terminal
+            ):
+                status = "cancelled"
+                trial_error = cancellation_message
+                terminal_kind = "cancelled"
+                runtime_outcome = "cancelled"
+            elif harbor_result.terminal_kind is not None:
                 terminal_kind = harbor_result.terminal_kind
                 status = (
                     "passed"
@@ -574,13 +623,6 @@ def execute_cells(  # noqa: C901 - owns the complete cell lifecycle
                 runtime_outcome = harbor_result.runtime_outcome or (
                     "completed" if status != "cancelled" else "cancelled"
                 )
-            elif cancellation_requested and (
-                returncode != 0 or trial_error is not None
-            ):
-                status = "cancelled"
-                trial_error = cancellation_message
-                terminal_kind = "cancelled"
-                runtime_outcome = "cancelled"
             else:
                 status = (
                     "passed" if returncode == 0 and trial_error is None else "failed"
@@ -873,9 +915,22 @@ def _harbor_job_result(cell: PlannedCell, repo_root: Path) -> _HarborJobResult:
         path = repo_root / path
     try:
         result = json.loads(path.read_text())
-    except (FileNotFoundError, json.JSONDecodeError, OSError) as exc:
+    except (FileNotFoundError, json.JSONDecodeError, OSError):
+        startup = _harbor_pre_agent_failure_evidence(cell, repo_root)
+        if startup["verified_no_agent_evidence"] is True:
+            return _HarborJobResult(
+                "Harbor exited before it produced a structured job result or "
+                "any Agent, session, or tool evidence",
+                "unscored",
+                terminal_kind="runner_start_failure",
+                runtime_outcome="not_started",
+            )
         return _HarborJobResult(
-            f"Harbor did not produce a readable job result: {exc}", "unscored"
+            "Harbor exited without a readable job result after Agent, session, "
+            "or tool evidence appeared",
+            "unscored",
+            terminal_kind="execution_failure",
+            runtime_outcome="interrupted",
         )
     bound_terminal = _bound_harbor_terminal_result(
         cell=cell,
@@ -1029,11 +1084,83 @@ def _bound_harbor_terminal_result(
         ),
         terminal_kind=str(outcome["terminal_kind"]),  # type: ignore[arg-type]
         runtime_outcome=str(outcome["runtime_outcome"]),  # type: ignore[arg-type]
+        authoritative_terminal=True,
     )
 
 
 def _absolute_cell_path(path: Path, repo_root: Path) -> Path:
     return path if path.is_absolute() else repo_root / path
+
+
+def _harbor_pre_agent_failure_evidence(
+    cell: PlannedCell,
+    repo_root: Path,
+) -> dict[str, Any]:
+    """Describe whether Harbor produced any evidence that an Agent started.
+
+    A nonzero Harbor CLI exit is not a task result when the CLI fails while it
+    loads Fugue's plugin.  This bounded inventory checks only the exact
+    physical job namespace.  It never parses log text or infers behavior from
+    an exception message.
+    """
+
+    result_path = _absolute_cell_path(cell.result_path, repo_root).resolve()
+    job_root = result_path.parent
+    physical_root = (
+        repo_root
+        / ".fugue"
+        / "runtime"
+        / cell.run_id
+        / "physical-executions"
+        / cell.physical_execution_id
+    ).resolve()
+    # Persist only fixed categories. A trial controls path names, so retaining a
+    # relative path here could copy sensitive text from a filename into the
+    # trusted host receipt before the later privacy scan runs.
+    observed: set[str] = set()
+    if (physical_root / "harbor-terminal.json").is_file():
+        observed.add("harbor_terminal")
+    if job_root.is_dir():
+        for path in job_root.rglob("*"):
+            try:
+                relative = path.relative_to(job_root)
+            except ValueError:
+                continue
+            parts = {part.lower() for part in relative.parts}
+            name = path.name.lower()
+            marker_directories = _AGENT_EVIDENCE_DIRECTORY_NAMES & parts
+            observed.update(f"agent_directory:{item}" for item in marker_directories)
+            if path.is_symlink():
+                if (
+                    marker_directories
+                    or name in _AGENT_EVIDENCE_FILE_NAMES
+                    or name == "result.json"
+                ):
+                    observed.add("agent_artifact_symlink")
+                continue
+            if path.is_dir():
+                continue
+            if not path.is_file():
+                continue
+            if name in _AGENT_EVIDENCE_FILE_NAMES:
+                observed.add(f"agent_file:{name}")
+            if name == "result.json" and path.resolve() != result_path:
+                observed.add("nested_trial_result")
+    result_status = (
+        "missing"
+        if not result_path.exists()
+        else "unreadable"
+        if result_path.is_symlink() or not result_path.is_file()
+        else "malformed"
+    )
+    return {
+        "schema_version": 1,
+        "kind": "harbor_pre_agent_failure_evidence",
+        "classifier_digest": HARBOR_PARENT_RUNNER_CLASSIFIER_DIGEST,
+        "result_status": result_status,
+        "observed_agent_session_or_tool_artifacts": sorted(observed),
+        "verified_no_agent_evidence": not observed,
+    }
 
 
 def _write_physical_runner_terminal_observation(
@@ -1072,6 +1199,17 @@ def _write_physical_runner_terminal_observation(
             "runtime_outcome": outcome.runtime_outcome,
             "terminal_kind": outcome.terminal_kind,
         },
+        **(
+            {
+                "runner_start_evidence": _harbor_pre_agent_failure_evidence(
+                    cell,
+                    repo_root,
+                )
+            }
+            if outcome.terminal_kind == "runner_start_failure"
+            and outcome.returncode is not None
+            else {}
+        ),
     }
     payload = {**unsigned, "receipt_digest": stable_digest(unsigned)}
     path = (

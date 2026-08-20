@@ -10,6 +10,7 @@ from fugue.preflight import (
     HARBOR_VERSION,
     PreflightCheck,
     harbor_import_check,
+    harbor_version_check,
     run_preflight,
     validate_harbor_job_configs,
 )
@@ -47,13 +48,15 @@ def test_harbor_import_check_uses_resolved_tool_python(
     harbor = tool_bin / "harbor"
     harbor.touch()
     harbor_python = tool_bin / "python"
-    harbor_python.touch()
+    harbor_python.touch(mode=0o700)
 
     launcher_dir = tmp_path / "bin"
     launcher_dir.mkdir()
     launcher = launcher_dir / "harbor"
     launcher.symlink_to(harbor)
-    monkeypatch.setattr("fugue.preflight.shutil.which", lambda name: str(launcher))
+    monkeypatch.setattr(
+        "fugue.preflight._harbor_executable", lambda: launcher.as_posix()
+    )
 
     commands: list[list[str]] = []
 
@@ -67,7 +70,42 @@ def test_harbor_import_check_uses_resolved_tool_python(
 
     assert check.ok is True
     assert check.name == "adapters"
-    assert commands == [[harbor_python.as_posix(), "-c", "import fugue.agents"]]
+    assert commands == [
+        [
+            harbor_python.as_posix(),
+            "-I",
+            "-c",
+            "import fugue.agents; import fugue.bench.harbor_terminal",
+        ]
+    ]
+
+
+def test_harbor_version_check_uses_windows_tool_python(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    tool_bin = tmp_path / "venv" / "Scripts"
+    tool_bin.mkdir(parents=True)
+    harbor = tool_bin / "harbor.exe"
+    harbor.write_bytes(b"launcher")
+    harbor.chmod(0o700)
+    harbor_python = tool_bin / "python.exe"
+    harbor_python.write_bytes(b"interpreter")
+    harbor_python.chmod(0o700)
+    monkeypatch.setattr(
+        "fugue.preflight._harbor_executable", lambda: harbor.as_posix()
+    )
+    commands: list[list[str]] = []
+
+    def fake_run(command, **kwargs):
+        commands.append(command)
+        return subprocess.CompletedProcess(command, 0, HARBOR_VERSION, "")
+
+    monkeypatch.setattr("fugue.preflight.subprocess.run", fake_run)
+
+    check = harbor_version_check()
+
+    assert check.ok is True
+    assert commands[0][:3] == [harbor_python.as_posix(), "-I", "-c"]
 
 
 def test_preflight_reports_harbor_runtime_adapter_check(
@@ -117,10 +155,12 @@ def test_job_configs_are_validated_by_harbor_tool_python(
     harbor = tool_bin / "harbor"
     harbor.touch()
     harbor_python = tool_bin / "python"
-    harbor_python.touch()
+    harbor_python.touch(mode=0o700)
     config = tmp_path / "job.json"
     config.write_text("{}")
-    monkeypatch.setattr("fugue.preflight.shutil.which", lambda name: str(harbor))
+    monkeypatch.setattr(
+        "fugue.preflight._harbor_executable", lambda: harbor.as_posix()
+    )
     commands: list[list[str]] = []
 
     def fake_run(command, **kwargs):
@@ -133,7 +173,7 @@ def test_job_configs_are_validated_by_harbor_tool_python(
 
     [command] = commands
     assert command[0] == harbor_python.as_posix()
-    assert command[1] == "-c"
+    assert command[1:3] == ["-I", "-c"]
     assert command[-2:] == [HARBOR_VERSION, config.as_posix()]
 
 

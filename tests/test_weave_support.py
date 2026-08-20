@@ -71,6 +71,41 @@ def test_initialize_weave_reactivates_destination_after_a_b_a_switch(
     ]
 
 
+def test_live_evaluation_destination_lease_rejects_cross_project_switch(
+    monkeypatch,
+) -> None:
+    initialized: list[str] = []
+    weave = SimpleNamespace(init=initialized.append)
+    monkeypatch.setitem(sys.modules, "weave", weave)
+    monkeypatch.setattr(weave_support, "_ACTIVE_DESTINATION_DIGEST", None)
+    monkeypatch.setattr(weave_support, "_ACTIVE_DESTINATION_LEASE_DIGEST", None)
+    monkeypatch.setattr(weave_support, "_ACTIVE_DESTINATION_LEASE_COUNT", 0)
+    monkeypatch.setattr(
+        weave_support,
+        "_active_weave_project_slug",
+        lambda _weave: weave_support._WEAVE_CLIENT_CONTEXT_UNAVAILABLE,
+    )
+    monkeypatch.setattr(weave_support, "_apply_weave_environment", lambda env: None)
+
+    lease = weave_support.acquire_weave_destination_lease("wandb/project-a", {})
+    weave_support.initialize_weave("wandb/project-a", {})
+    with pytest.raises(RuntimeError, match="lease is active"):
+        weave_support.initialize_weave("wandb/project-b", {})
+
+    weave_support.release_weave_destination_lease(lease)
+    weave_support.initialize_weave("wandb/project-b", {})
+
+    assert initialized == ["wandb/project-a", "wandb/project-b"]
+
+
+def test_active_weave_project_uses_the_public_client_api() -> None:
+    weave = SimpleNamespace(
+        get_client=lambda: SimpleNamespace(entity="wandb", project="project-a")
+    )
+
+    assert weave_support._active_weave_project_slug(weave) == "wandb/project-a"
+
+
 def test_initialize_weave_reactivates_same_project_when_endpoint_changes(
     monkeypatch,
 ) -> None:
@@ -144,7 +179,7 @@ def test_initialize_weave_reactivates_cached_destination_when_client_was_cleared
     monkeypatch.setattr(
         weave_support,
         "_active_weave_project_slug",
-        lambda: next(active_projects),
+        lambda _weave: next(active_projects),
     )
 
     weave_support.initialize_weave("wandb/project-a", {})
@@ -166,7 +201,7 @@ def test_weave_destination_session_serializes_and_restores_environment(
     monkeypatch.setattr(
         weave_support,
         "_active_weave_project_slug",
-        lambda: weave_support._WEAVE_CLIENT_CONTEXT_UNAVAILABLE,
+        lambda _weave: weave_support._WEAVE_CLIENT_CONTEXT_UNAVAILABLE,
     )
     monkeypatch.setenv("WANDB_API_KEY", "original-key")
 
@@ -228,7 +263,7 @@ def test_weave_destination_session_restores_every_owned_key_when_init_fails(
     monkeypatch.setattr(
         weave_support,
         "_active_weave_project_slug",
-        lambda: weave_support._WEAVE_CLIENT_CONTEXT_UNAVAILABLE,
+        lambda _weave: weave_support._WEAVE_CLIENT_CONTEXT_UNAVAILABLE,
     )
 
     with pytest.raises(RuntimeError, match="initialization failure"):

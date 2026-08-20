@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import hashlib
 import importlib.util
 import json
 from dataclasses import replace
@@ -41,6 +42,10 @@ from fugue.bench.comparison import (
 from fugue.bench.intervention_provenance import (
     build_intervention_component_lock,
     write_intervention_component_lock,
+)
+from fugue.bench.legacy_v3_admission import (
+    LegacyHostedV3AdmissionRegistryV1,
+    legacy_hosted_v3_admission_registry_from_dict,
 )
 from fugue.bench.library import get_experiment
 from fugue.bench.loop_failure import (
@@ -117,6 +122,56 @@ def _links(prefix: str) -> tuple[AttemptEvidenceLinkV1, ...]:
             url=f"{base}/objects/dataset/versions/v1",
         ),
     )
+
+
+def _legacy_hosted_registry(
+    result: ComparisonResultV3,
+    payload: bytes,
+) -> LegacyHostedV3AdmissionRegistryV1:
+    """Authorize only the exact synthetic hosted-V10 bytes used by this test."""
+
+    admission = {
+        "schema_version": 1,
+        "result_file_sha256": hashlib.sha256(payload).hexdigest(),
+        "comparison_id": result.comparison_id,
+        "result_digest": result.result_digest,
+        "qualification_digest": result.qualification_digest,
+        "preview_digest": result.preview_digest,
+        "result_source": result.source,
+        "source_project": SOURCE_PROJECT,
+        "result_project": RESULT_PROJECT,
+        "source_lock_digest": result.evidence_topology.source_lock_digest,
+        "evidence_topology_digest": result.evidence_topology.topology_digest,
+        "aligned_analysis_digest": result.aligned_analysis.analysis_digest,
+        "reviewed_provenance": {
+            "kind": "test-only-synthetic-v10",
+            "digest": stable_digest({"fixture": "loop-engineering-v10"}),
+            "review_status": "reviewed",
+            "preview_artifact_sha256": stable_digest(
+                {"fixture": "loop-engineering-preview"}
+            ),
+            "spec_digest": stable_digest(
+                {"fixture": "loop-engineering-spec"}
+            ),
+        },
+    }
+    admission["admission_digest"] = stable_digest(admission)
+    registry = {
+        "schema_version": 1,
+        "kind": "legacy-hosted-v3-admission-registry",
+        "admissions": [admission],
+    }
+    registry["registry_digest"] = stable_digest(registry)
+    return legacy_hosted_v3_admission_registry_from_dict(registry)
+
+
+def _write_legacy_hosted_result(
+    path: Path,
+    result: ComparisonResultV3,
+) -> LegacyHostedV3AdmissionRegistryV1:
+    payload = json.dumps(result.to_dict(), sort_keys=True).encode("utf-8")
+    path.write_bytes(payload)
+    return _legacy_hosted_registry(result, payload)
 
 
 def _attempt(
@@ -515,7 +570,14 @@ def _result(
         qualification_digest="d" * 64,
         result_digest="d" * 64,
     )
-    canonical_rows = _v3_canonical_attempt_rows(preliminary)
+    preliminary_admission = _legacy_hosted_registry(
+        preliminary,
+        b"test-only-pre-serialization-v10",
+    ).admissions[0]
+    canonical_rows = _v3_canonical_attempt_rows(
+        preliminary,
+        legacy_hosted_v3_admission=preliminary_admission,
+    )
     integrity = _v3_semantic_integrity(preliminary, canonical_rows)
     canonical = replace(
         preliminary,
@@ -572,11 +634,21 @@ def _build_lock(
         qualification_digest=changed_preview_digest,
         result_digest=changed_preview_digest,
     )
-    result_path.write_text(
-        json.dumps(selected_result.to_dict(), sort_keys=True),
-        encoding="utf-8",
+    registry = _write_legacy_hosted_result(result_path, selected_result)
+    assert (
+        read_comparison_result(
+            result_path,
+            legacy_hosted_v3_registry=registry,
+        )
+        == selected_result
     )
-    assert read_comparison_result(result_path) == selected_result
+    _monkeypatch.setattr(
+        "fugue.bench.loop_failure.read_comparison_result",
+        lambda path: read_comparison_result(
+            path,
+            legacy_hosted_v3_registry=registry,
+        ),
+    )
     baseline = selected_result.paired_cases[0].baseline
     assert baseline is not None
     return build_comparison_failure_lock(
@@ -672,10 +744,11 @@ def test_v3_behavioral_summary_names_shared_critical_failure_once(
     assert result.behavioral_summary.critical_blockers == expected
 
     result_path = tmp_path / "result.json"
-    result_path.write_text(json.dumps(result.to_dict()), encoding="utf-8")
-    assert read_comparison_result(result_path).behavioral_summary.critical_blockers == (
-        expected
-    )
+    registry = _write_legacy_hosted_result(result_path, result)
+    assert read_comparison_result(
+        result_path,
+        legacy_hosted_v3_registry=registry,
+    ).behavioral_summary.critical_blockers == expected
 
 
 def test_v10_failure_lock_binds_repeated_real_failure_without_answers(

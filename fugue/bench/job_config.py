@@ -42,7 +42,7 @@ from fugue.bench.context_contracts import (
     ContextDelivery,
     resolve_context_capabilities,
 )
-from fugue.bench.evaluations import load_cases, scorer_bundle
+from fugue.bench.evaluations import load_cases, public_evaluation_case, scorer_bundle
 from fugue.bench.harness_contracts import harness_capabilities
 from fugue.bench.integrations import (
     IntegrationBinding,
@@ -77,6 +77,11 @@ from fugue.bench.services import (
     without_managed_service_environment,
 )
 from fugue.bench.sources import ResolvedSkill, SkillSetupRequired, resolve_skills
+from fugue.bench.task_presentation import (
+    TaskPresentationV1,
+    candidate_treatment_summary,
+    task_presentation_from_public_case,
+)
 from fugue.bench.task_runtime import (
     read_task_runtime_lock,
     task_runtime_lock_identity,
@@ -182,6 +187,9 @@ class RenderedJob:
     candidate_id: str
     resolved_candidate: ResolvedCandidate
     execution_kind: str
+    arm_label: str = ""
+    treatment_summary: str = ""
+    task_presentation: TaskPresentationV1 | None = None
     outer_wall_time_sec: int | None = None
     execution_limits_digest: str = ""
     expected_evidence_paths: tuple[str, ...] = ()
@@ -310,6 +318,11 @@ def _build_jobs(
         env=env,
     )
     evaluation_cases = _evaluation_cases(
+        manifest,
+        repo_root,
+        asset_overlay or {},
+    )
+    task_presentations = _task_presentations(
         manifest,
         repo_root,
         asset_overlay or {},
@@ -561,6 +574,11 @@ def _build_jobs(
                     execution=candidate_execution,
                 )
                 candidate_id = resolved_candidate.candidate_id
+                arm_label = variant.label.strip() or variant.id
+                treatment_summary = candidate_treatment_summary(
+                    resolved_candidate.definition
+                )
+                task_presentation = task_presentations.get(tasks[0].id)
                 context_instruction = _context_instruction_path(
                     runtime_root,
                     spec,
@@ -596,6 +614,9 @@ def _build_jobs(
                     comparison_example_id=comparison_example_id,
                     candidate_id=candidate_id,
                     execution_fingerprint=resolved_candidate.execution_fingerprint,
+                    arm_label=arm_label,
+                    treatment_summary=treatment_summary,
+                    task_presentation=task_presentation,
                     applicable=applicable,
                     skip_reason=skip_reason,
                     collect_evidence=bool(required_capabilities),
@@ -700,6 +721,9 @@ def _build_jobs(
                         candidate_id=candidate_id,
                         resolved_candidate=resolved_candidate,
                         execution_kind="agent",
+                        arm_label=arm_label,
+                        treatment_summary=treatment_summary,
+                        task_presentation=task_presentation,
                         outer_wall_time_sec=(
                             experiment.execution_limits.wall_time_sec
                             if experiment.execution_limits is not None
@@ -782,6 +806,9 @@ def _job_config(
     comparison_example_id: str,
     candidate_id: str,
     execution_fingerprint: str,
+    arm_label: str,
+    treatment_summary: str,
+    task_presentation: TaskPresentationV1 | None,
     applicable: bool,
     skip_reason: str | None,
     collect_evidence: bool,
@@ -904,6 +931,11 @@ def _job_config(
         "preset_id": preset_id,
         "variant_id": variant.id,
         "variant_label": variant.label,
+        "arm_label": arm_label,
+        "treatment_summary": treatment_summary,
+        "task_presentation": (
+            task_presentation.to_dict() if task_presentation is not None else None
+        ),
         "prompt_id": variant.prompt_id,
         "context_system_id": context_spec.id,
         "context_delivery": variant.context.delivery,
@@ -980,6 +1012,65 @@ def _evaluation_cases(
     if text is None and not resolved.is_file():
         return {}
     return {str(case["id"]): case for case in load_cases(resolved, text=text)}
+
+
+def _task_presentations(
+    manifest: BenchmarkManifest,
+    repo_root: Path,
+    overlay: Mapping[str, str],
+) -> dict[str, TaskPresentationV1]:
+    """Resolve public task cards from the exact locked Dataset source.
+
+    Some Dataset formats also contain host-only scoring fields. The public
+    projection removes those fields before the presentation contract validates
+    the prompt. A Dataset without a readable public source remains compatible,
+    but does not claim that its prompt was published.
+    """
+
+    source_path = str(manifest.dataset.source.get("path") or "")
+    if not source_path:
+        return {}
+    relative = Path(source_path)
+    if relative.is_absolute() or ".." in relative.parts:
+        raise ValueError("task presentation source must be repository-relative")
+    text = overlay.get(relative.as_posix())
+    resolved = repo_root / relative
+    if text is None:
+        if not resolved.is_file():
+            return {}
+        text = resolved.read_text(encoding="utf-8")
+    expected_digest = str(manifest.dataset.source.get("sha256") or "")
+    if expected_digest and hashlib.sha256(text.encode()).hexdigest() != expected_digest:
+        raise ValueError("task presentation source digest does not match")
+    rows: dict[str, dict[str, Any]] = {}
+    for number, line in enumerate(text.splitlines(), start=1):
+        if not line.strip():
+            continue
+        value = json.loads(line)
+        if not isinstance(value, dict):
+            raise ValueError(
+                f"{relative}:{number}: public task source row must be an object"
+            )
+        task_id = str(value.get("id") or "")
+        if not task_id:
+            raise ValueError(f"{relative}:{number}: public task id is required")
+        if task_id in rows:
+            raise ValueError(f"{relative}: duplicate public task id: {task_id}")
+        rows[task_id] = public_evaluation_case(value)
+    presentations: dict[str, TaskPresentationV1] = {}
+    for task in manifest.tasks:
+        metadata = _task_authoring_metadata(task)
+        presentation = task_presentation_from_public_case(
+            task_id=task.id,
+            public_case=rows.get(task.id),
+            title=None,
+            scenario=str(metadata.get("scenario_id") or "") or None,
+            tags=tuple(str(item) for item in metadata.get("tags") or ()),
+            partition=str(metadata.get("partition") or "") or None,
+        )
+        if presentation is not None:
+            presentations[task.id] = presentation
+    return presentations
 
 
 def _dataset_config(

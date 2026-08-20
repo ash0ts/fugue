@@ -3,6 +3,7 @@ from __future__ import annotations
 import hashlib
 import json
 import re
+import unicodedata
 from collections.abc import Callable, Mapping, Sequence
 from dataclasses import asdict, dataclass
 from datetime import UTC, datetime
@@ -404,8 +405,18 @@ class ResearchIndexPublicationOutcomeV1:
     def __post_init__(self) -> None:
         if not isinstance(self.target, ResearchIndexPublicationTargetV1):
             raise ValueError("invalid Research-index publication target")
-        _target_url(self.run_url, self.target, "publication Run URL")
-        _target_url(self.artifact_url, self.target, "publication artifact URL")
+        _target_url(
+            self.run_url,
+            self.target,
+            "publication Run URL",
+            resource="runs",
+        )
+        _target_url(
+            self.artifact_url,
+            self.target,
+            "publication artifact URL",
+            resource="artifacts",
+        )
         if self.report_status == "published" and self.report_url is None:
             raise ValueError("published Research Report requires a URL")
         if self.report_status == "unavailable" and self.report_url is not None:
@@ -413,7 +424,12 @@ class ResearchIndexPublicationOutcomeV1:
         if self.report_status not in {"published", "unavailable"}:
             raise ValueError("unsupported Research Report status")
         if self.report_url is not None:
-            _target_url(self.report_url, self.target, "publication Report URL")
+            _target_url(
+                self.report_url,
+                self.target,
+                "publication Report URL",
+                resource="reports",
+            )
         _text(self.publisher_id, "publisher id")
         _text(self.publisher_revision, "publisher revision")
         if self.status != "published":
@@ -470,8 +486,18 @@ class ResearchIndexPublicationReceiptV1:
         _scope(self.research_id, "Research id")
         if not isinstance(self.target, ResearchIndexPublicationTargetV1):
             raise ValueError("invalid Research-index publication target")
-        _target_url(self.run_url, self.target, "publication Run URL")
-        _target_url(self.artifact_url, self.target, "publication artifact URL")
+        _target_url(
+            self.run_url,
+            self.target,
+            "publication Run URL",
+            resource="runs",
+        )
+        _target_url(
+            self.artifact_url,
+            self.target,
+            "publication artifact URL",
+            resource="artifacts",
+        )
         if self.report_status == "published" and self.report_url is None:
             raise ValueError("published Research Report requires a URL")
         if self.report_status == "unavailable" and self.report_url is not None:
@@ -479,7 +505,12 @@ class ResearchIndexPublicationReceiptV1:
         if self.report_status not in {"published", "unavailable"}:
             raise ValueError("unsupported Research Report status")
         if self.report_url is not None:
-            _target_url(self.report_url, self.target, "publication Report URL")
+            _target_url(
+                self.report_url,
+                self.target,
+                "publication Report URL",
+                resource="reports",
+            )
         _text(self.publisher_id, "publisher id")
         _text(self.publisher_revision, "publisher revision")
         _timestamp(self.published_at)
@@ -1166,30 +1197,56 @@ def _safe_ref(value: str) -> None:
         raise ValueError("unsafe Weave evidence ref")
 
 
-def _safe_url(value: str) -> None:
-    parsed = urlsplit(value)
-    if (
-        parsed.scheme != "https"
-        or not parsed.netloc
-        or parsed.username
-        or parsed.password
-        or any(sensitive_key(key) for key, _ in parse_qsl(parsed.query))
-        or redact_text(value) != value
-    ):
+def _safe_url(value: str) -> tuple[Any, list[str]]:
+    if not isinstance(value, str):
         raise ValueError("unsafe publication URL")
-
-
-def _safe_origin(value: str, label: str) -> None:
     parsed = urlsplit(value)
     if (
-        parsed.scheme != "https"
+        value != value.strip()
+        or any(character.isspace() for character in value)
+        or any(unicodedata.category(character) == "Cc" for character in value)
+        or any(character in "\\[]()<>'\"`" for character in value)
+        or parsed.scheme != "https"
         or not parsed.netloc
         or parsed.username
         or parsed.password
         or parsed.query
         or parsed.fragment
+        or any(sensitive_key(key) for key, _ in parse_qsl(parsed.query))
         or redact_text(value) != value
-        or value.endswith("/")
+    ):
+        raise ValueError("unsafe publication URL")
+    return parsed, _canonical_url_path(parsed.path)
+
+
+def _safe_origin(value: str, label: str) -> None:
+    if (
+        not isinstance(value, str)
+        or value != value.strip()
+        or any(character.isspace() for character in value)
+        or any(unicodedata.category(character) == "Cc" for character in value)
+    ):
+        raise ValueError(f"{label} must be a normalized safe HTTPS URL")
+    try:
+        parsed = urlsplit(value)
+        hostname = parsed.hostname
+        port = parsed.port
+    except ValueError as exc:
+        raise ValueError(
+            f"{label} must be a normalized safe HTTPS URL"
+        ) from exc
+    if (
+        parsed.scheme != "https"
+        or not parsed.netloc
+        or not hostname
+        or parsed.username
+        or parsed.password
+        or "\\" in value
+        or (port is not None and not 1 <= port <= 65535)
+        or parsed.path
+        or parsed.query
+        or parsed.fragment
+        or redact_text(value) != value
     ):
         raise ValueError(f"{label} must be a normalized safe HTTPS URL")
 
@@ -1198,12 +1255,39 @@ def _target_url(
     value: str,
     target: ResearchIndexPublicationTargetV1,
     label: str,
+    *,
+    resource: Literal["runs", "artifacts", "reports"],
 ) -> None:
-    _safe_url(value)
-    parsed = urlsplit(value)
+    parsed, path = _safe_url(value)
     expected = urlsplit(target.app_base_url)
-    if (parsed.scheme, parsed.netloc) != (expected.scheme, expected.netloc):
-        raise ValueError(f"{label} has a different application origin")
+    entity, project = target.project.split("/")
+    if (
+        (parsed.scheme, parsed.netloc) != (expected.scheme, expected.netloc)
+        or len(path) != (6 if resource == "artifacts" else 4)
+        or path[:3] != [entity, project, resource]
+        or (resource == "artifacts" and not re.fullmatch(r"v\d+", path[-1]))
+    ):
+        raise ValueError(f"{label} disagrees with the target project path")
+
+
+def _canonical_url_path(path: str) -> list[str]:
+    if (
+        not path.startswith("/")
+        or path.endswith("/")
+        or "//" in path
+        or "\\" in path
+        or "%" in path
+    ):
+        raise ValueError("publication URL path is not canonical")
+    parts = path[1:].split("/")
+    for part in parts:
+        if (
+            not part
+            or part in {".", ".."}
+            or any(unicodedata.category(character) == "Cc" for character in part)
+        ):
+            raise ValueError("publication URL path is not canonical")
+    return parts
 
 
 def _timestamp(value: str) -> None:

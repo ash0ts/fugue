@@ -8,10 +8,13 @@ import pytest
 import fugue.research.experiment_views as experiment_views_module
 from fugue.bench.candidates import attempt_id
 from fugue.bench.library import get_experiment
+from fugue.bench.task_presentation import task_presentation_from_public_case
 from fugue.research.display_labels import preview_with_governed_display_labels
 from fugue.research.experiment_views import (
     EXPERIMENT_VIEW_CELL_LIMIT,
     ExperimentViewV1,
+    ExperimentViewV3,
+    build_comparison_evaluation_view,
     build_design_view,
     build_evaluation_view,
     build_progress_view,
@@ -24,6 +27,89 @@ _V3_STUDY_CONSOLE_GOLDEN = (
     Path(__file__).parent / "fixtures/experiment-view-v3-study-console-golden.json"
 )
 _REPO_ROOT = Path(__file__).parents[1]
+
+
+def _current_v3_result_payload() -> dict[str, object]:
+    payload = json.loads(_V3_STUDY_CONSOLE_GOLDEN.read_text(encoding="utf-8"))
+    presentation = task_presentation_from_public_case(
+        task_id="task-1",
+        public_case={
+            "title": "Reconcile direct Evaluation children",
+            "prompt": (
+                "Inspect the two named Evaluation roots. Report the exact direct "
+                "child counts and explain whether maintainers can trust them."
+            ),
+            "required_output": "A concise maintainer decision with exact counts.",
+            "public_acceptance_criteria": [
+                "Report one count for each named Evaluation root.",
+                "Separate observed evidence from unsupported causes.",
+            ],
+            "scenario": "mcp-release-maintenance",
+            "tags": ["mcp", "evaluation"],
+            "partition": "checkpoint",
+        },
+    )
+    assert presentation is not None
+    for arm in ("baseline", "candidate"):
+        attempt = payload["paired_cases"][0][arm]
+        task_passed = bool(attempt["passed"])
+        attempt.update(
+            {
+                "arm_label": "MCP main" if arm == "baseline" else "MCP 0.4",
+                "treatment_summary": (
+                    "Use the locked baseline MCP runtime."
+                    if arm == "baseline"
+                    else "Use the locked staging/0.4 MCP runtime."
+                ),
+                "task_presentation": presentation.to_dict(),
+                "task_result": {
+                    "schema_version": 1,
+                    "task_passed": task_passed,
+                    "outcome_summary": (
+                        "The answer met every required check."
+                        if task_passed
+                        else "The answer did not report the required exact counts."
+                    ),
+                    "failed_required_checks": (
+                        []
+                        if task_passed
+                        else [
+                            {
+                                "id": "exact-counts",
+                                "label": "Report both exact direct-child counts",
+                                "explanation": (
+                                    "The answer omitted one required count."
+                                ),
+                                "critical": True,
+                            }
+                        ]
+                    ),
+                    "answer_digest": ("b" if arm == "baseline" else "c") * 64,
+                    "agent_execution_status": "completed",
+                    "evidence_integrity_status": "verified",
+                },
+            }
+        )
+    payload.update(
+        {
+            "rows": 2,
+            "source": "current-result-run",
+            "result_digest": "7" * 64,
+            "qualification_digest": "8" * 64,
+            "incomplete": 0,
+            "required_evaluations_incomplete": 0,
+            "operational_summary": {
+                "execution_states": {"completed": 2},
+                "infrastructure_failures": 0,
+            },
+            "integrity": {
+                "status": "reconciled",
+                "unresolved_evidence_attempts": 0,
+                "harbor_conformance_failed_attempts": 0,
+            },
+        }
+    )
+    return payload
 
 
 def test_local_comparison_rows_use_a_non_clickable_fugue_identity() -> None:
@@ -162,6 +248,224 @@ def test_v3_study_console_wire_keeps_pre_status_results_readable() -> None:
     normalized = json.loads(json.dumps(parsed.to_dict()))
 
     assert normalized == payload
+
+
+def test_reviewed_legacy_v3_view_keeps_bare_audit_refs_readable() -> None:
+    payload = json.loads(_V3_STUDY_CONSOLE_GOLDEN.read_text(encoding="utf-8"))
+    payload.update(
+        {
+            "result_digest": (
+                "e062f5b392a36d9ebd97adc3ab58b6e253cdd9dd943381342d51d76303bbcf38"
+            ),
+            "qualification_digest": (
+                "e062f5b392a36d9ebd97adc3ab58b6e253cdd9dd943381342d51d76303bbcf38"
+            ),
+            "preview_digest": (
+                "26e97037dd3b146d610cc5a95fc487df0cb407aeb04f3c1cd01e074b14d5d803"
+            ),
+        }
+    )
+    for arm in ("baseline", "candidate"):
+        for link in payload["paired_cases"][0][arm]["evidence_links"]:
+            link["ref"] = link["ref"].rsplit("/", 1)[-1]
+
+    parsed = experiment_view_from_dict(payload)
+
+    assert parsed.result_digest == payload["result_digest"]
+    assert parsed.paired_cases[0]["candidate"]["evidence_links"][0]["ref"] == (
+        "candidate-evaluation_root"
+    )
+
+
+def test_current_v3_result_projects_human_readable_attempt_contract() -> None:
+    view = build_comparison_evaluation_view(_current_v3_result_payload())
+
+    assert isinstance(view, ExperimentViewV3)
+    pair = view.paired_cases[0]
+    assert pair["task_label"] == "Bounded answer"
+    assert pair["baseline"]["arm_label"] == "MCP main"
+    assert pair["candidate"]["arm_label"] == "MCP 0.4"
+    assert pair["candidate"]["treatment_summary"] == (
+        "Use the locked staging/0.4 MCP runtime."
+    )
+    assert pair["candidate"]["task_presentation"]["title"] == (
+        "Reconcile direct Evaluation children"
+    )
+    assert pair["candidate"]["task_presentation"]["public_prompt"] == [
+        {
+            "order": 1,
+            "text": (
+                "Inspect the two named Evaluation roots. Report the exact direct "
+                "child counts and explain whether maintainers can trust them."
+            ),
+        }
+    ]
+    assert pair["baseline"]["task_result"]["task_passed"] is False
+    assert pair["baseline"]["task_result"]["failed_required_checks"] == [
+        {
+            "id": "exact-counts",
+            "label": "Report both exact direct-child counts",
+            "explanation": "The answer omitted one required count.",
+            "critical": True,
+        }
+    ]
+    assert pair["candidate"]["task_result"]["task_passed"] is True
+    assert pair["candidate"]["task_result"]["failed_required_checks"] == []
+    reparsed = experiment_view_from_dict(view.to_dict())
+    assert reparsed.to_dict() == view.to_dict()
+
+
+def test_v3_result_accepts_timed_out_as_terminal_behavioral_evidence() -> None:
+    payload = _current_v3_result_payload()
+    baseline = payload["paired_cases"][0]["baseline"]
+    baseline["execution_status"] = "timed_out"
+    baseline["task_result"]["agent_execution_status"] = "timed_out"
+    payload["operational_summary"]["execution_states"] = {
+        "completed": 1,
+        "timed_out": 1,
+    }
+
+    view = build_comparison_evaluation_view(payload)
+
+    assert isinstance(view, ExperimentViewV3)
+    assert view.completed_cells == 2
+    assert view.state_counts == {"completed": 1, "timed_out": 1}
+    pair = view.paired_cases[0]
+    assert pair["baseline"]["execution_status"] == "timed_out"
+    assert pair["baseline"]["task_result"]["task_passed"] is False
+    assert pair["dimension_changes"][0]["status"] == "improved"
+
+
+def test_v3_not_started_pair_is_terminal_but_has_no_behavioral_claim() -> None:
+    payload = _current_v3_result_payload()
+    payload["incomplete"] = 1
+    payload["operational_summary"] = {
+        "execution_states": {"not_started": 2},
+        "infrastructure_failures": 2,
+    }
+    payload["behavioral_summary"].update(
+        {
+            "status": "incomplete",
+            "recommendation": "INCOMPLETE — repair execution before comparison.",
+            "improved_pairs": 0,
+            "regressed_pairs": 0,
+            "mixed_pairs": 0,
+            "unchanged_pairs": 0,
+            "incomplete_pairs": 1,
+            "candidate_critical_failures": 0,
+            "critical_blockers": ["task-1: Agent execution did not start."],
+            "supported_claim": None,
+            "next_action": "Repair execution and resume the same logical cells.",
+        }
+    )
+    payload["judge_summary"] = {
+        "status": "not_used",
+        "claim_status": "not_applicable",
+        "judges": [],
+        "by_variant": {"baseline": {}, "candidate": {}},
+        "unavailable_attempts": 0,
+    }
+    pair = payload["paired_cases"][0]
+    pair["status"] = "incomplete"
+    pair["dimension_changes"] = []
+    for arm in ("baseline", "candidate"):
+        attempt = pair[arm]
+        attempt["execution_status"] = "not_started"
+        attempt["evaluation_status"] = "unavailable"
+        attempt["cost_reconciliation_status"] = "unavailable"
+        attempt["latency_reconciliation_status"] = "unavailable"
+        attempt["usage_reconciliation_status"] = "unavailable"
+        attempt["tool_calls"] = 0
+        attempt["tools"] = []
+        attempt["queried_projects"] = []
+        attempt["actual_query_scope"] = []
+        for field_name in (
+            "passed",
+            "cost_usd",
+            "latency_sec",
+            "input_tokens",
+            "output_tokens",
+            "scores",
+            "score_explanations",
+            "sanitized_answer_excerpt",
+            "reported_project_identity",
+            "task_result",
+        ):
+            attempt.pop(field_name, None)
+
+    view = build_comparison_evaluation_view(payload)
+
+    assert isinstance(view, ExperimentViewV3)
+    assert view.completed_cells == 2
+    assert view.state_counts == {"not_started": 2}
+    assert view.evidence_eligible is False
+    assert view.judge_summary["status"] == "not_used"
+    projected_pair = view.paired_cases[0]
+    assert projected_pair["status"] == "incomplete"
+    assert projected_pair["dimension_changes"] == ()
+    for arm in ("baseline", "candidate"):
+        attempt = projected_pair[arm]
+        assert attempt["execution_status"] == "not_started"
+        assert attempt["arm_label"]
+        assert attempt["treatment_summary"]
+        assert attempt["task_presentation"]["task_id"] == "task-1"
+        assert "passed" not in attempt
+        assert attempt["scores"] == {}
+        assert "task_result" not in attempt
+
+
+def test_v3_nonbehavioral_pair_rejects_behavioral_dimensions() -> None:
+    payload = _current_v3_result_payload()
+    pair = payload["paired_cases"][0]
+    pair["status"] = "incomplete"
+    pair["baseline"]["execution_status"] = "not_started"
+    for field_name in (
+        "passed",
+        "scores",
+        "score_explanations",
+        "sanitized_answer_excerpt",
+        "reported_project_identity",
+        "task_result",
+    ):
+        pair["baseline"].pop(field_name, None)
+
+    with pytest.raises(
+        ValueError,
+        match="incomplete nonbehavioral pair cannot contain dimensions",
+    ):
+        build_comparison_evaluation_view(payload)
+
+
+def test_v3_fatal_integrity_terminal_overrides_completed_behavior() -> None:
+    payload = _current_v3_result_payload()
+    pair = payload["paired_cases"][0]
+    baseline = pair["baseline"]
+    baseline["infrastructure"]["terminal_kind"] = "evidence_failure"
+
+    with pytest.raises(
+        ValueError,
+        match="nonbehavioral attempt cannot contain task results",
+    ):
+        build_comparison_evaluation_view(payload)
+
+    for field_name in (
+        "passed",
+        "scores",
+        "score_explanations",
+        "score_details",
+        "judge_reviews",
+        "sanitized_answer_excerpt",
+        "reported_project_identity",
+        "task_result",
+    ):
+        baseline.pop(field_name, None)
+    pair["status"] = "incomplete"
+
+    with pytest.raises(
+        ValueError,
+        match="incomplete nonbehavioral pair cannot contain dimensions",
+    ):
+        build_comparison_evaluation_view(payload)
 
 
 def test_v3_study_console_wire_rejects_unknown_reconciliation_status() -> None:
@@ -350,6 +654,56 @@ def test_v3_judge_summary_rejects_impossible_evaluated_counts() -> None:
             attempts=4,
             arm_attempts={"baseline": 2, "candidate": 2},
         )
+
+    unavailable = {
+        **scored,
+        "status": "unavailable",
+        "by_variant": {"baseline": {}, "candidate": {}},
+        "unavailable_attempts": 0,
+    }
+    with pytest.raises(ValueError, match="unavailable counts do not reconcile"):
+        experiment_views_module._safe_judge_summary(
+            unavailable,
+            integrity_status="reconciled",
+            attempts=4,
+            arm_attempts={"baseline": 2, "candidate": 2},
+        )
+
+
+def test_judge_completeness_counts_attempts_once_across_dimensions() -> None:
+    result = {
+        "rows": 4,
+        "baseline_passed": 1,
+        "candidate_passed": 2,
+        "judge_summary": {
+            "status": "scored",
+            "by_variant": {
+                "baseline": {
+                    "judge.actionability": {"evaluated": 1, "mean": 0.5},
+                    "judge.grounding": {"evaluated": 1, "mean": 0.6},
+                },
+                "candidate": {
+                    "judge.actionability": {"evaluated": 2, "mean": 0.7},
+                    "judge.grounding": {"evaluated": 2, "mean": 0.8},
+                },
+            },
+            "unavailable_attempts": 1,
+        },
+    }
+
+    summaries = experiment_views_module._comparison_outcome_summaries(
+        result,
+        baseline_total=2,
+        candidate_total=2,
+        infrastructure_failures=0,
+        missing_evidence=0,
+    )
+    judge = next(item for item in summaries if item.id == "judge-evidence")
+
+    assert judge.status == "failed"
+    assert judge.passed == 3
+    assert judge.total == 4
+    assert judge.unavailable == 1
 
 
 def test_v3_view_rejects_published_judge_rationale() -> None:
@@ -1362,6 +1716,58 @@ def test_large_progress_views_are_bounded_without_losing_aggregates() -> None:
     assert progress.state_counts["task:pending"] == 1
     assert progress.state_counts["evaluation:pending"] == 300
     assert progress.state_counts["evidence:pending"] == 300
+
+
+def test_progress_counts_timed_out_and_not_started_as_distinct_terminal_cells() -> None:
+    progress = build_progress_view(
+        {
+            "state": "running",
+            "approval": {"approval_digest": _A},
+            "preview": {**_preview(), "estimated_cells": 3},
+        },
+        {
+            "status": "running",
+            "cells": [
+                {
+                    "cell_id": "not-started-cell",
+                    "candidate_id": "baseline-candidate",
+                    "status": "not_started",
+                    "harness": "claude-code",
+                    "variant_id": "baseline",
+                    "task_id": "task-1",
+                    "benchmark_outcome": "unscored",
+                },
+                {
+                    "cell_id": "timed-out-cell",
+                    "candidate_id": "candidate-candidate",
+                    "status": "timed_out",
+                    "harness": "claude-code",
+                    "variant_id": "candidate",
+                    "task_id": "task-1",
+                    "benchmark_outcome": "failed",
+                },
+                {
+                    "cell_id": "running-cell",
+                    "candidate_id": "candidate-candidate",
+                    "status": "running",
+                    "harness": "claude-code",
+                    "variant_id": "candidate",
+                    "task_id": "task-2",
+                    "benchmark_outcome": "unscored",
+                },
+            ],
+        },
+    )
+
+    assert progress.completed_cells == 2
+    assert progress.state_counts["execution:not_started"] == 1
+    assert progress.state_counts["execution:timed_out"] == 1
+    assert progress.state_counts["execution:running"] == 1
+    cells = {cell.execution_status: cell for cell in progress.cells}
+    assert cells["not_started"].task_outcome == "unavailable"
+    assert cells["not_started"].reason_code == "execution_not_started"
+    assert cells["timed_out"].task_outcome == "failed"
+    assert cells["timed_out"].reason_code == "task_not_passed"
 
 
 def test_experiment_view_union_rejects_unknown_nested_fields() -> None:

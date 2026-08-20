@@ -12,6 +12,7 @@ from types import SimpleNamespace
 import pytest
 
 from fugue.bench.execution import (
+    HARBOR_PARENT_RUNNER_CLASSIFIER_DIGEST,
     PlannedCell,
     _host_process_command,
     execute_cells,
@@ -164,6 +165,128 @@ def test_provider_diagnostic_starts_resolved_harbor_console_script(
 
     assert outcome.status == "passed"
     assert outcome.runtime_outcome == "completed"
+
+
+def test_harbor_cli_import_failure_before_agent_is_not_a_task_failure(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    cell = replace(
+        _cell("run-harbor-import-failure", "harbor-import-failure"),
+        command=(sys.executable, "-c", "raise SystemExit(1)"),
+        result_path=tmp_path / "jobs" / "import-failure" / "result.json",
+        physical_execution_id="f" * 64,
+    )
+    monkeypatch.setattr(
+        "fugue.bench.execution.verify_harbor_job_attestation",
+        lambda *_args, **_kwargs: None,
+    )
+
+    [outcome] = execute_cells([cell], repo_root=tmp_path, max_workers=1)
+
+    assert outcome.status == "failed"
+    assert outcome.returncode == 1
+    assert outcome.terminal_kind == "runner_start_failure"
+    assert outcome.runtime_outcome == "not_started"
+    assert outcome.benchmark_outcome == "unscored"
+    receipt = json.loads(
+        (
+            tmp_path
+            / ".fugue/runtime/run-harbor-import-failure/physical-executions"
+            / ("f" * 64)
+            / "runner-terminal.json"
+        ).read_text()
+    )
+    assert receipt["runner_start_evidence"] == {
+        "schema_version": 1,
+        "kind": "harbor_pre_agent_failure_evidence",
+        "classifier_digest": HARBOR_PARENT_RUNNER_CLASSIFIER_DIGEST,
+        "result_status": "missing",
+        "observed_agent_session_or_tool_artifacts": [],
+        "verified_no_agent_evidence": True,
+    }
+
+
+def test_resultless_harbor_exit_after_operator_cancellation_stays_cancelled(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    cancellation = threading.Event()
+    cell = replace(
+        _cell("run-cancelled-harbor", "cancelled-harbor"),
+        result_path=tmp_path / "jobs" / "cancelled-harbor" / "result.json",
+    )
+
+    def cancelled_process(*_args: object, **_kwargs: object) -> int:
+        cancellation.set()
+        return 143
+
+    monkeypatch.setattr(
+        "fugue.bench.execution._run_cell_process",
+        cancelled_process,
+    )
+
+    [outcome] = execute_cells(
+        [cell],
+        repo_root=tmp_path,
+        max_workers=1,
+        cancellation_event=cancellation,
+    )
+
+    assert outcome.status == "cancelled"
+    assert outcome.returncode == 143
+    assert outcome.terminal_kind == "cancelled"
+    assert outcome.runtime_outcome == "cancelled"
+    assert outcome.benchmark_outcome == "unscored"
+
+
+def test_parent_directory_named_agent_is_not_agent_evidence(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    repo_root = tmp_path / "agent"
+    result_path = repo_root / "jobs" / "import-failure" / "result.json"
+    result_path.parent.mkdir(parents=True)
+    (result_path.parent / "ordinary.log").write_text("startup failed", encoding="utf-8")
+    cell = replace(
+        _cell("run-parent-agent", "parent-agent"),
+        command=(sys.executable, "-c", "raise SystemExit(1)"),
+        result_path=result_path,
+    )
+    monkeypatch.setattr(
+        "fugue.bench.execution.verify_harbor_job_attestation",
+        lambda *_args, **_kwargs: None,
+    )
+
+    [outcome] = execute_cells([cell], repo_root=repo_root, max_workers=1)
+
+    assert outcome.terminal_kind == "runner_start_failure"
+    assert outcome.runtime_outcome == "not_started"
+
+
+def test_missing_harbor_result_after_agent_evidence_is_not_retryable(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    result_path = tmp_path / "jobs" / "interrupted" / "result.json"
+    agent_dir = result_path.parent / "trial-a" / "agent"
+    agent_dir.mkdir(parents=True)
+    (agent_dir / "trajectory.json").write_text("{}", encoding="utf-8")
+    cell = replace(
+        _cell("run-harbor-interrupted", "harbor-interrupted"),
+        command=(sys.executable, "-c", "raise SystemExit(1)"),
+        result_path=result_path,
+    )
+    monkeypatch.setattr(
+        "fugue.bench.execution.verify_harbor_job_attestation",
+        lambda *_args, **_kwargs: None,
+    )
+
+    [outcome] = execute_cells([cell], repo_root=tmp_path, max_workers=1)
+
+    assert outcome.terminal_kind == "execution_failure"
+    assert outcome.runtime_outcome == "interrupted"
+    assert outcome.benchmark_outcome == "unscored"
 
 
 def test_seeded_scheduling_is_reproducible_and_run_independent() -> None:

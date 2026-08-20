@@ -24,6 +24,13 @@ from fugue.bench.research_index import (
     read_research_index_publication_receipt,
 )
 from fugue.redaction import redact_text, sensitive_key
+from fugue.research.records import (
+    ResearchIndexReportPublicationEvidenceV1,
+    ResearchIndexReportStudyMembershipV1,
+    research_index_report_attempt_ids_digest,
+    research_index_report_publication_evidence_from_dict,
+    research_index_report_study_membership_from_dict,
+)
 
 RESEARCH_INDEX_REPORT_SCHEMA_VERSION = 1
 RESEARCH_INDEX_REPORT_RENDERER_ID = "fugue-wandb-research-report"
@@ -660,6 +667,193 @@ def read_research_index_report_publication_receipt(
         ) from exc
 
 
+def build_research_index_report_study_memberships(
+    index_path: Path,
+    index_receipt_path: Path,
+    *,
+    secret_values: Sequence[str] = (),
+) -> tuple[str, tuple[ResearchIndexReportStudyMembershipV1, ...]]:
+    """Read one immutable index and return its compact Research bindings."""
+
+    index_path, index_bytes = _source(index_path, "Research index")
+    index_receipt_path, index_receipt_bytes = _source(
+        index_receipt_path,
+        "Research-index publication receipt",
+    )
+    try:
+        _secret_free(index_bytes, secret_values)
+        _secret_free(index_receipt_bytes, secret_values)
+        index = read_research_index(index_path)
+        index_receipt = read_research_index_publication_receipt(index_receipt_path)
+        _bind_index_receipt(
+            index,
+            hashlib.sha256(index_bytes).hexdigest(),
+            index_receipt,
+        )
+        studies = tuple(_report_membership(item) for item in index.studies)
+        _secret_free(
+            _bytes([item.to_dict() for item in studies]),
+            secret_values,
+        )
+        _unchanged(index_path, index_bytes)
+        _unchanged(index_receipt_path, index_receipt_bytes)
+        return index.research_id, studies
+    except ResearchIndexReportError:
+        raise
+    except (OSError, TypeError, ValueError) as exc:
+        raise ResearchIndexReportError(
+            "Research Report Study memberships failed canonical validation"
+        ) from exc
+
+
+def verify_research_index_report_publication(
+    index_path: Path,
+    index_receipt_path: Path,
+    report_receipt_path: Path,
+    *,
+    secret_values: Sequence[str] = (),
+) -> ResearchIndexReportPublicationReceiptV1:
+    """Verify a prior reconciled receipt without reading or rewriting W&B."""
+
+    index_path, index_bytes = _source(index_path, "Research index")
+    index_receipt_path, index_receipt_bytes = _source(
+        index_receipt_path,
+        "Research-index publication receipt",
+    )
+    report_receipt_path, report_receipt_bytes = _source(
+        report_receipt_path,
+        "Research Report publication receipt",
+    )
+    try:
+        _secret_free(report_receipt_bytes, secret_values)
+        projection = build_research_index_report_projection(
+            index_path,
+            index_receipt_path,
+            secret_values=secret_values,
+        )
+        receipt = read_research_index_report_publication_receipt(report_receipt_path)
+        _verify_report_receipt(receipt, projection)
+        _unchanged(index_path, index_bytes)
+        _unchanged(index_receipt_path, index_receipt_bytes)
+        _unchanged(report_receipt_path, report_receipt_bytes)
+        return receipt
+    except ResearchIndexReportError:
+        raise
+    except (OSError, TypeError, ValueError) as exc:
+        raise ResearchIndexReportError(
+            "Research Report publication receipt failed local verification"
+        ) from exc
+
+
+def build_research_index_report_publication_evidence(
+    index_path: Path,
+    index_receipt_path: Path,
+    report_receipt_path: Path,
+    *,
+    secret_values: Sequence[str] = (),
+) -> ResearchIndexReportPublicationEvidenceV1:
+    """Bind exact index and Report receipt bytes into public Research evidence."""
+
+    index_path, index_bytes = _source(index_path, "Research index")
+    index_receipt_path, index_receipt_bytes = _source(
+        index_receipt_path,
+        "Research-index publication receipt",
+    )
+    report_receipt_path, report_receipt_bytes = _source(
+        report_receipt_path,
+        "Research Report publication receipt",
+    )
+    try:
+        for payload in (index_bytes, index_receipt_bytes, report_receipt_bytes):
+            _secret_free(payload, secret_values)
+        index = read_research_index(index_path)
+        index_receipt = read_research_index_publication_receipt(index_receipt_path)
+        index_file_sha = hashlib.sha256(index_bytes).hexdigest()
+        index_receipt_file_sha = hashlib.sha256(index_receipt_bytes).hexdigest()
+        report_receipt_file_sha = hashlib.sha256(report_receipt_bytes).hexdigest()
+        _bind_index_receipt(index, index_file_sha, index_receipt)
+        projection = build_research_index_report_projection(
+            index_path,
+            index_receipt_path,
+            secret_values=secret_values,
+        )
+        report_receipt = read_research_index_report_publication_receipt(
+            report_receipt_path
+        )
+        _verify_report_receipt(report_receipt, projection)
+        index_source = index_receipt.to_dict()
+        report_source = report_receipt.to_dict()
+        evidence = research_index_report_publication_evidence_from_dict(
+            {
+                "schema_version": 1,
+                "research_id": index.research_id,
+                "target": index_receipt.target.to_dict(),
+                "index": {
+                    "publication_id": index_source["publication_id"],
+                    "index_digest": index_source["index_digest"],
+                    "index_file_sha256": index_source["index_file_sha256"],
+                    "receipt_digest": index_source["receipt_digest"],
+                    "receipt_file_sha256": index_receipt_file_sha,
+                    "run_url": index_source["run_url"],
+                    "artifact_url": index_source["artifact_url"],
+                    "report_url": index_source["report_url"],
+                    "report_status": index_source["report_status"],
+                    "publisher_id": index_source["publisher_id"],
+                    "publisher_revision": index_source["publisher_revision"],
+                    "status": index_source["status"],
+                    "published_at": index_source["published_at"],
+                },
+                "report": {
+                    **{
+                        key: report_source[key]
+                        for key in (
+                            "report_publication_id",
+                            "projection_digest",
+                            "index_digest",
+                            "index_file_sha256",
+                            "index_publication_id",
+                            "index_publication_receipt_digest",
+                            "index_publication_receipt_file_sha256",
+                            "receipt_digest",
+                            "renderer_id",
+                            "renderer_revision",
+                            "report_id",
+                            "report_url",
+                            "report_api",
+                            "report_api_version",
+                            "api_stability",
+                            "readback_projection_digest",
+                            "rendered_content_digest",
+                            "readback_status",
+                            "publisher_id",
+                            "publisher_revision",
+                            "access_mode",
+                            "share_link_action",
+                            "current_pointer_status",
+                            "status",
+                            "published_at",
+                        )
+                    },
+                    "receipt_file_sha256": report_receipt_file_sha,
+                },
+                "studies": [
+                    _report_membership(item).to_dict() for item in index.studies
+                ],
+            }
+        )
+        _secret_free(_bytes(evidence.to_dict()), secret_values)
+        _unchanged(index_path, index_bytes)
+        _unchanged(index_receipt_path, index_receipt_bytes)
+        _unchanged(report_receipt_path, report_receipt_bytes)
+        return evidence
+    except ResearchIndexReportError:
+        raise
+    except (OSError, TypeError, ValueError) as exc:
+        raise ResearchIndexReportError(
+            "Research index Report evidence failed canonical validation"
+        ) from exc
+
+
 def _read_research_index_report_publication_receipt(
     path: Path,
 ) -> ResearchIndexReportPublicationReceiptV1:
@@ -748,6 +942,50 @@ def _report_study(
         primary_evidence_url=(
             f"{app_base_url}/{study.project}/weave/calls/{quote(call_id, safe='')}"
         ),
+    )
+
+
+def _report_membership(study: Any) -> ResearchIndexReportStudyMembershipV1:
+    from fugue.bench.local_publication import weave_publication_receipt_from_dict
+
+    try:
+        raw_receipt = json.loads(study.publication_receipt_json)
+        receipt = weave_publication_receipt_from_dict(_map(raw_receipt))
+    except (TypeError, ValueError, json.JSONDecodeError) as exc:
+        raise ResearchIndexReportError(
+            "Research index Study has an invalid embedded Weave receipt"
+        ) from exc
+    attempt_ids = tuple(
+        sorted({str(item.attempt_id) for item in receipt.hosted_objects})
+    )
+    scope = receipt.target.study_scope
+    if (
+        scope is None
+        or scope.study_id != study.study_id
+        or receipt.result_digest != study.result_digest
+        or receipt.qualification_digest != study.qualification_digest
+        or receipt.result_file_sha256 != study.result_file_sha256
+        or receipt.receipt_digest != study.publication_receipt_digest
+        or receipt.target.project_slug != study.project
+        or len(attempt_ids) != study.rows
+    ):
+        raise ResearchIndexReportError(
+            "Research index Study membership disagrees with its Weave receipt"
+        )
+    return research_index_report_study_membership_from_dict(
+        {
+            "study_id": study.study_id,
+            "result_digest": study.result_digest,
+            "qualification_digest": study.qualification_digest,
+            "result_file_sha256": study.result_file_sha256,
+            "weave_project": study.project,
+            "weave_publication_id": receipt.publication_id,
+            "weave_receipt_digest": receipt.receipt_digest,
+            "attempt_count": len(attempt_ids),
+            "attempt_ids_digest": research_index_report_attempt_ids_digest(
+                attempt_ids
+            ),
+        }
     )
 
 
@@ -983,7 +1221,27 @@ def _safe_url(value: str) -> tuple[Any, list[str]]:
         or any(sensitive_key(key) for key, _ in parse_qsl(parsed.query))
     ):
         raise ValueError("unsafe Research Report URL")
-    return parsed, [part for part in parsed.path.split("/") if part]
+    return parsed, _canonical_url_path(parsed.path)
+
+
+def _canonical_url_path(path: str) -> list[str]:
+    if (
+        not path.startswith("/")
+        or path.endswith("/")
+        or "//" in path
+        or "\\" in path
+        or "%" in path
+    ):
+        raise ValueError("Research Report URL path is not canonical")
+    parts = path[1:].split("/")
+    for part in parts:
+        if (
+            not part
+            or part in {".", ".."}
+            or any(unicodedata.category(character) == "Cc" for character in part)
+        ):
+            raise ValueError("Research Report URL path is not canonical")
+    return parts
 
 
 def _target_object_url(
@@ -997,8 +1255,9 @@ def _target_object_url(
     entity, project = target.project.split("/")
     if (
         (parsed.scheme, parsed.netloc) != (base.scheme, base.netloc)
-        or len(parts) < 4
+        or len(parts) != (6 if resource == "artifacts" else 4)
         or parts[:3] != [entity, project, resource]
+        or (resource == "artifacts" and not re.fullmatch(r"v\d+", parts[-1]))
     ):
         raise ValueError("Research Report source URL disagrees with its target")
 

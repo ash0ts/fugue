@@ -1,9 +1,9 @@
 schema_version: 3
-id: mcp-main-vs-0-4-{{CANDIDATE_SHORT}}-harbor-canary-v13
-question: Does the exact W&B MCP staging/0.4.0 commit improve or preserve factual, bounded maintainer work relative to the exact main baseline on the four locked release-canary behaviors?
+id: mcp-main-vs-0-4-{{CANDIDATE_SHORT}}-human-readable-evidence-canary-v2
+question: Does the exact W&B MCP staging/0.4.0 commit improve or preserve factual, bounded maintainer work on the two tasks selected for human-readable evidence review?
 taskset:
-  tasks: tasks.jsonl
-  private_labels: private-labels.jsonl
+  tasks: human-readable-evidence-tasks.jsonl
+  private_labels: human-readable-evidence-private-labels.jsonl
 baseline:
   label: W&B MCP main at 53b199a5
   integrations: ["{{MCP_BASELINE_LOCK_ID}}"]
@@ -11,11 +11,6 @@ candidate:
   label: W&B MCP staging/0.4.0 at {{CANDIDATE_SHA}}
   integrations: ["{{MCP_CANDIDATE_LOCK_ID}}"]
 changed: [integrations]
-supersedes:
-  - result_digest: 09e9a30fd9ab3e53e98461273ec49c580af807b687bfbb3a327589f401e8424e
-    reason: V11 measured the same locked revisions and tasks under the prior evidence-presentation contract; V12 stopped as infrastructure-invalid before producing a canonical result, and V13 validates the repaired canonical local evidence and human-readable publication path without pooling the runs.
-  - result_digest: e062f5b392a36d9ebd97adc3ab58b6e253cdd9dd943381342d51d76303bbcf38
-    reason: V10 compared the same locked tasks against the earlier 5c6cc1c9 staging candidate; this Study freezes the current staging head under a new candidate, preview, approval, and Study identity.
 evaluators:
   - id: tool-surface
     type: deterministic
@@ -65,10 +60,18 @@ execution:
     id: wandb-mcp-release
     version: 1
     intent: python-package-release-qualification
+  evidence_mode: weave_required
   source_evidence_project: wandb/fugue-mcp-release-source-v2
   source_evidence_destination:
     entity: wandb
     project: fugue-mcp-release-source-v2
+    api_base_url: https://api.wandb.ai
+    trace_base_url: https://trace.wandb.ai
+    app_base_url: https://wandb.ai
+  evidence_project: wandb/fugue-mcp-release-qualification-v1
+  evidence_destination:
+    entity: wandb
+    project: fugue-mcp-release-qualification-v1
     api_base_url: https://api.wandb.ai
     trace_base_url: https://trace.wandb.ai
     app_base_url: https://wandb.ai
@@ -84,31 +87,30 @@ execution:
   concurrency: 1
   evidence_checkpoint_cells: 2
   max_cost_usd: 10
-  reserve_per_attempt_usd: 1.25
+  reserve_per_attempt_usd: 2.5
   approval_required: true
   preparation_required: true
   trace_content: full
-  evidence_mode: local
   environment: {type: docker}
 decision_policy:
-  release_target: W&B MCP staging/0.4.0 V13 local behavioral and human-readable publication canary; Python package, managed-service, and Helm release gates are separate
+  release_target: W&B MCP human-readable hosted evidence canary; package, managed-service, and Helm release gates are separate
   candidate_sha: "{{CANDIDATE_SHA}}"
   minimum_evidence_grade: A
   human_signoff_required: true
   gates:
-    - id: eight-terminal-cells
-      label: Eight unique terminal local cells
+    - id: four-terminal-cells
+      label: Four unique terminal cells with hosted evidence
       category: integrity
       source: matrix.terminal_rows
       operator: gte
-      target: 8
+      target: 4
       critical: true
-    - id: candidate-passes-four-tasks
-      label: Candidate passes all four critical canary tasks
+    - id: candidate-passes-two-tasks
+      label: Candidate passes both critical evidence tasks
       category: task
       source: task.candidate_passed
       operator: gte
-      target: 4
+      target: 2
       critical: true
     - id: candidate-critical-dimensions
       label: Candidate has no critical outcome or safety failure

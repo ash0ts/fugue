@@ -44,6 +44,10 @@ def test_wheel_runs_from_empty_directory_without_harbor_or_weave(
         )
         assert "fugue/resources/context-systems/none.yaml" in names
         assert "fugue/resources/asset-manifest-v1.json" in names
+        assert (
+            "fugue/resources/compatibility/"
+            "legacy-hosted-v3-admissions-v1.json"
+        ) in names
         assert "fugue/resources/runtime/claude-code/package.json" in names
         assert "fugue/resources/runtime/fugue-context/Dockerfile" in names
         assert "fugue/resources/runtime/fugue-context/requirements.lock" in names

@@ -51,17 +51,39 @@ fugue compare "$COMPARISON" \
 fugue result latest
 ```
 
+Preparation also emits `human_readable_comparison_path`. That comparison is a
+separate four-cell hosted-evidence canary. It contains only the Run-inventory
+and Evaluation-reconciliation tasks. It writes native EvaluationLogger
+evidence to `wandb/fugue-mcp-release-qualification-v1` so an authenticated
+researcher can audit the scored attempts and Agent spans. Its dedicated task
+and private-label files are selected and locked during trusted preparation;
+no later command truncates the four-task local reference bundle. Run it with a
+new preview and approval capped at four cells:
+
+```bash
+COMPARISON=$(python -c 'import json; print(json.load(open("/tmp/wandb-mcp-preparation.json"))["human_readable_comparison_path"])')
+
+fugue check "$COMPARISON" --env-file /path/to/.env --json
+fugue compare "$COMPARISON" --preview --env-file /path/to/.env --json
+fugue approve PREVIEW_DIGEST --max-cells 4 --max-usd 10
+fugue compare "$COMPARISON" \
+  --run --approval APPROVAL_DIGEST --env-file /path/to/.env
+```
+
 During trusted preparation, the reference-study adapter uses `WANDB_API_KEY`
 to freeze the read-only hosted source evidence. During trials, the tested MCP
-servers use the same credential to query W&B. Fugue writes canonical evidence
-to its local ledger; that ledger does not use the W&B credential. Preparation
-fails rather than seeding, repairing, or silently accepting drift in the
-source project. The selected model route requires `ANTHROPIC_API_KEY`.
-Credential values and the host-only private labels are never copied into task
-inputs, locks, traces, results, or CI artifacts.
+servers use the same credential to query W&B. The full four-task comparison
+writes canonical evidence to its local ledger. The human-readable canary also
+uses the W&B credential to write its required EvaluationLogger and trace
+evidence to the locked result project. Preparation fails rather than seeding,
+repairing, or silently accepting drift in the source project. The selected
+model route requires `ANTHROPIC_API_KEY`. Credential values and the host-only
+private labels are never copied into task inputs, locks, traces, results, or CI
+artifacts.
 
-If desired, publish a sanitized, digest-bound projection of the completed local
-result. Fugue keeps the canonical local result unchanged:
+For the full four-task comparison, you can publish a sanitized, digest-bound
+projection of the completed local result. Fugue keeps the canonical local
+result unchanged:
 
 ```bash
 fugue publish weave /path/to/result.json \

@@ -203,6 +203,8 @@ def test_local_evidence_round_trip_preserves_canonical_identities(
 
     overlay = coordinator.begin_attempt(attempt.attempt_id)
     assert overlay["FUGUE_ATTEMPT_ID"] == attempt.attempt_id
+    assert overlay["FUGUE_LOCAL_EVALUATION_SCOPE_ID"] == attempt.evaluation_scope_id
+    assert overlay["FUGUE_EVALUATION_SCOPE_ID"] == attempt.evaluation_scope_id
     assert overlay["FUGUE_LOCAL_PREDICTION_ID"] == attempt.prediction_id
 
     record = coordinator.finish_attempt(

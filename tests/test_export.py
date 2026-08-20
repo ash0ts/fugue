@@ -7,7 +7,6 @@ from dataclasses import asdict, replace
 from pathlib import Path
 from types import SimpleNamespace
 
-import httpx
 import pytest
 
 from fugue.agent_tracing import agent_conversation_id
@@ -29,7 +28,135 @@ from fugue.bench.export import (
 )
 from fugue.bench.local_evidence import local_attempt_refs
 from fugue.bench.operator import OperatorService
+from fugue.bench.task_presentation import (
+    PublicPromptPartV1,
+    TaskPresentationV1,
+    task_presentation_from_public_case,
+)
 from fugue.mcp_evidence import safe_graphql_event_arguments
+
+
+class _PublicPrediction:
+    """Small public EvaluationLogger stand-in used by post-hoc tests."""
+
+    def __init__(self, logger, inputs, output=None, **metadata) -> None:
+        index = getattr(logger, "_public_prediction_count", 0) + 1
+        logger._public_prediction_count = index
+        self.evaluate_call = getattr(logger, "_public_evaluate_call", None)
+        if self.evaluate_call is None:
+            evaluation = SimpleNamespace(
+                dataset=getattr(logger, "dataset", None),
+                ref=SimpleNamespace(
+                    uri="weave:///entity/project/object/evaluation:test"
+                ),
+            )
+            self.evaluate_call = SimpleNamespace(
+                id="evaluation-root",
+                project_id="entity/project",
+                inputs={"self": evaluation},
+                ref=SimpleNamespace(uri="weave:///entity/project/call/evaluation-root"),
+            )
+            logger._public_evaluate_call = self.evaluate_call
+        self.predict_and_score_call = SimpleNamespace(
+            id=f"predict-and-score-{index}",
+            project_id="entity/project",
+            ref=SimpleNamespace(
+                uri=f"weave:///entity/project/call/predict-and-score-{index}"
+            ),
+        )
+        self.predict_call = SimpleNamespace(
+            id=f"prediction-{index}",
+            project_id="entity/project",
+            ref=SimpleNamespace(uri=f"weave:///entity/project/call/prediction-{index}"),
+        )
+        self._logger = logger
+        self._inputs = inputs
+        self.output = output
+        self.metadata = metadata
+        self.scores = {}
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, _exc_type, _exc, _traceback) -> None:
+        self.finish()
+
+    def log_score(self, name, value) -> None:
+        self.scores[name] = value
+
+    def finish(self) -> None:
+        log_example = getattr(self._logger, "log_example", None)
+        if callable(log_example):
+            log_example(self._inputs, self.output, self.scores)
+
+
+class _PublicEvaluationLoggerMixin:
+    def log_prediction(self, inputs, output=None, **metadata):
+        return _PublicPrediction(self, inputs, output, **metadata)
+
+
+def _attach_public_call_handles(
+    prediction,
+    *,
+    dataset=None,
+    project: str = "entity/project",
+    trace_id: str = "a" * 32,
+):
+    evaluation = SimpleNamespace(
+        dataset=dataset,
+        ref=SimpleNamespace(uri=f"weave:///{project}/object/evaluation:test"),
+    )
+    prediction.evaluate_call = SimpleNamespace(
+        id="evaluation-root",
+        project_id=project,
+        parent_id=None,
+        trace_id=trace_id,
+        inputs={"self": evaluation},
+        ref=SimpleNamespace(uri=f"weave:///{project}/call/evaluation-root"),
+    )
+    prediction.predict_and_score_call.parent_id = "evaluation-root"
+    prediction.predict_and_score_call.trace_id = trace_id
+    prediction.predict_and_score_call.ref = SimpleNamespace(
+        uri=(f"weave:///{project}/call/{prediction.predict_and_score_call.id}")
+    )
+    if not hasattr(prediction, "predict_call"):
+        prediction.predict_call = SimpleNamespace(
+            id=f"{prediction.predict_and_score_call.id}-prediction",
+            project_id=project,
+            parent_id=prediction.predict_and_score_call.id,
+            trace_id=trace_id,
+            ref=SimpleNamespace(
+                uri=(
+                    f"weave:///{project}/call/"
+                    f"{prediction.predict_and_score_call.id}-prediction"
+                )
+            ),
+        )
+    return prediction
+
+
+def _live_test_cell(*, cell_id: str, run_id: str) -> PlannedCell:
+    return PlannedCell(
+        id=cell_id,
+        run_id=run_id,
+        run_name=run_id,
+        workload_id="coding",
+        task_id="task-a",
+        harness="claude-code",
+        context_system_id="none",
+        variant_id="candidate",
+        model_provider="anthropic",
+        model="anthropic/claude-sonnet-5",
+        trial_index=1,
+        comparison_example_id="example-a",
+        candidate_id="candidate-a",
+        execution_fingerprint="execution-a",
+        config_path=Path("config.yaml"),
+        result_path=Path("jobs/result.json"),
+        command=("harbor", "run"),
+        env={"WANDB_API_KEY": "test-only"},
+        n_attempts=1,
+    )
 
 
 def _write_export_fixture(tmp_path: Path) -> Path:
@@ -252,7 +379,7 @@ def test_weave_publication_uses_current_signature_and_local_ledger(
             self.name = name
             self.rows = rows
 
-    class FakeLogger:
+    class FakeLogger(_PublicEvaluationLoggerMixin):
         def __init__(self, **kwargs) -> None:
             self.__dict__.update(kwargs)
             self.examples = []
@@ -271,9 +398,9 @@ def test_weave_publication_uses_current_signature_and_local_ledger(
             self.failed = exception
 
     fake_weave = SimpleNamespace(
-            init=lambda project, **kwargs: calls.append(
-                ("init", project, __import__("os").environ.get("WANDB_BASE_URL"))
-            ),
+        init=lambda project, **kwargs: calls.append(
+            ("init", project, __import__("os").environ.get("WANDB_BASE_URL"))
+        ),
         Dataset=FakeDataset,
         EvaluationLogger=FakeLogger,
     )
@@ -323,7 +450,7 @@ def test_weave_publication_uses_current_signature_and_local_ledger(
     assert first.evaluations[0].url == "https://wandb.test/evaluations/eval-1"
     assert len(loggers) == 2
     for logger in loggers:
-        assert logger.name.startswith("memory-ab | coding |")
+        assert logger.name.startswith("memory ab · Legacy arm ·")
         assert logger.model["name"] == "codex__rag-bm25__test-model"
         assert logger.model["candidate_id"] == "candidate-1"
         assert logger.eval_attributes == {
@@ -334,7 +461,13 @@ def test_weave_publication_uses_current_signature_and_local_ledger(
             "fugue.workload_id": "coding",
             "fugue.record_type": "trial",
             "fugue.variant_id": "rag-bm25",
+            "fugue.arm_label": "Legacy arm",
+            "fugue.treatment_summary": (
+                "This legacy row did not publish a canonical treatment summary."
+            ),
             "fugue.candidate_id": "candidate-1",
+            "fugue.run_id": "run-1",
+            "fugue.run_ids": "run-1",
         }
         assert logger.dataset.rows == [
             {
@@ -349,7 +482,11 @@ def test_weave_publication_uses_current_signature_and_local_ledger(
         assert "variant_id" not in inputs
         assert output["status"] == "passed"
         assert output["trace_link_status"] == "post_hoc_unlinked"
-        assert scores == {"reward": 1.0, "passed": True}
+        assert scores == {
+            "reward": 1.0,
+            "passed": True,
+            "task_passed": True,
+        }
         assert logger.summary is True
         assert logger.failed is None
     markers = [
@@ -365,13 +502,744 @@ def test_weave_publication_uses_current_signature_and_local_ledger(
     assert ("init", project, "https://api.wandb.ai") in calls
 
 
+def test_evaluation_row_digest_matches_weave_0536_dataset_digest() -> None:
+    inputs = {
+        "comparison_example_id": "example-1",
+        "workload_id": "coding",
+        "task_id": "task",
+    }
+
+    assert export._evaluation_row_digest({}, inputs) == (
+        "VaryYLwyY4qgi9n3SBZ2FWzHLXYqEMIpgiwLX6FyrwA"
+    )
+
+
+def test_task_result_never_promotes_mechanism_failure_to_task_blocker() -> None:
+    row = {
+        "pass": False,
+        "trace_link_status": "linked",
+        "agent_runtime_completed": True,
+        "comparison_deterministic_scores": {
+            "assigned_skill_opened": False,
+        },
+        "comparison_dimension_roles": {
+            "assigned_skill_opened": "mechanism",
+        },
+    }
+
+    result = export._task_result(row)
+
+    assert result["agent_execution_status"] == "completed"
+    assert result["task_passed"] is False
+    assert result["failed_required_checks"] == [
+        {
+            "id": "task_outcome_not_satisfied",
+            "label": "Required Task Outcome",
+            "explanation": (
+                "The terminal task verdict did not pass, but the legacy scorer "
+                "did not publish a more specific failed check."
+            ),
+            "critical": True,
+        }
+    ]
+    assert (
+        export._weave_score_descriptors(row)["mechanism__assigned_skill_opened"]["role"]
+        == "mechanism"
+    )
+
+
+def test_task_result_lists_critical_and_noncritical_required_failures() -> None:
+    row = {
+        "pass": False,
+        "trace_link_status": "linked",
+        "agent_runtime_completed": True,
+        "comparison_deterministic_scores": {
+            "answer_correct": False,
+            "coverage_honest": False,
+        },
+        "comparison_dimension_roles": {
+            "answer_correct": "outcome",
+            "coverage_honest": "safety_gate",
+        },
+        "comparison_deterministic_criticality": {
+            "answer_correct": True,
+            "coverage_honest": False,
+        },
+    }
+
+    result = export._task_result(row)
+
+    assert [item["id"] for item in result["failed_required_checks"]] == [
+        "answer_correct",
+        "coverage_honest",
+    ]
+    assert [item["critical"] for item in result["failed_required_checks"]] == [
+        True,
+        False,
+    ]
+
+
+def test_live_evaluation_rejects_exact_env_secret_before_remote_write(
+    tmp_path: Path,
+) -> None:
+    secret = "opaque-value-123456789"
+    presentation = TaskPresentationV1(
+        task_id="task-secret",
+        title="Inspect a public fixture",
+        public_prompt=(
+            PublicPromptPartV1(
+                order=1,
+                text=f"Inspect the fixture value {secret}.",
+            ),
+        ),
+        required_output="Return one bounded JSON object.",
+        public_acceptance_criteria=("The JSON object is syntactically valid.",),
+    )
+    cell = PlannedCell(
+        id="cell-secret",
+        run_id="run-secret",
+        run_name="secret-boundary",
+        workload_id="coding",
+        task_id="task-secret",
+        harness="codex",
+        context_system_id="none",
+        variant_id="baseline",
+        model_provider="anthropic",
+        model="anthropic/test-model",
+        trial_index=1,
+        comparison_example_id="example-secret",
+        candidate_id="candidate-secret",
+        execution_fingerprint="runtime-secret",
+        config_path=Path("config.json"),
+        result_path=Path("jobs/result.json"),
+        command=("harbor", "run"),
+        env={
+            "WANDB_API_KEY": "test-only-wandb-key",
+            "ANTHROPIC_API_KEY": secret,
+            "WANDB_ENTITY": "entity",
+            "WANDB_PROJECT": "project",
+        },
+        n_attempts=1,
+        task_presentation=presentation,
+    )
+
+    with pytest.raises(ValueError, match="contain sensitive text"):
+        LiveEvaluationCoordinator(
+            [cell],
+            repo_root=tmp_path,
+            project="entity/project",
+            env=cell.env,
+            weave_module=SimpleNamespace(),
+        )
+
+
+def test_live_evaluation_dataset_excludes_future_scripted_turns(
+    tmp_path: Path,
+) -> None:
+    datasets = []
+
+    class FakeDataset:
+        def __init__(self, *, name, rows) -> None:
+            self.name = name
+            self.rows = rows
+            self.ref = SimpleNamespace(
+                uri="weave:///entity/project/object/tasks:dataset-v1"
+            )
+            datasets.append(self)
+
+    class FakeLogger:
+        def __init__(self, **_kwargs) -> None:
+            pass
+
+    presentation = task_presentation_from_public_case(
+        task_id="scripted-task",
+        public_case={
+            "id": "scripted-task",
+            "prompt": "Inspect the repository and report the current finding.",
+            "interaction": {
+                "type": "scripted",
+                "scripted_turns": [
+                    "Now revise the finding after reading the hidden follow-up."
+                ],
+            },
+        },
+    )
+    assert presentation is not None
+    cell = PlannedCell(
+        id="cell-scripted",
+        run_id="run-scripted",
+        run_name="scripted-turn-boundary",
+        workload_id="coding",
+        task_id="scripted-task",
+        harness="codex",
+        context_system_id="none",
+        variant_id="baseline",
+        model_provider="anthropic",
+        model="anthropic/test-model",
+        trial_index=1,
+        comparison_example_id="example-scripted",
+        candidate_id="candidate-scripted",
+        execution_fingerprint="runtime-scripted",
+        config_path=Path("config.json"),
+        result_path=Path("jobs/result.json"),
+        command=("harbor", "run"),
+        env={
+            "WANDB_API_KEY": "test-only-wandb-key",
+            "WANDB_ENTITY": "entity",
+            "WANDB_PROJECT": "project",
+        },
+        n_attempts=1,
+        task_presentation=presentation,
+    )
+
+    LiveEvaluationCoordinator(
+        [cell],
+        repo_root=tmp_path,
+        project="entity/project",
+        env=cell.env,
+        weave_module=SimpleNamespace(
+            Dataset=FakeDataset,
+            EvaluationLogger=FakeLogger,
+        ),
+    )
+
+    assert len(datasets) == 1
+    serialized = json.dumps(datasets[0].rows, sort_keys=True)
+    assert "Inspect the repository and report the current finding." in serialized
+    assert "hidden follow-up" not in serialized
+
+
+def test_live_evaluation_leases_destination_before_objects_and_releases_on_init_error(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    events: list[str] = []
+
+    class FakeDataset:
+        def __init__(self, **_kwargs) -> None:
+            events.append("dataset")
+
+    class BrokenLogger:
+        def __init__(self, **_kwargs) -> None:
+            events.append("evaluation-root")
+            raise RuntimeError("logger failed")
+
+    fake_weave = SimpleNamespace(
+        Dataset=FakeDataset,
+        EvaluationLogger=BrokenLogger,
+        get_client=lambda: SimpleNamespace(project_id="entity/project"),
+    )
+
+    def acquire(project, env):
+        assert project == "entity/project"
+        assert env["FUGUE_WEAVE_PROJECT"] == "entity/project"
+        events.append("lease-acquired")
+        return "lease-a"
+
+    def initialize(project, env):
+        assert project == "entity/project"
+        assert env["FUGUE_WEAVE_PROJECT"] == "entity/project"
+        events.append("client-active")
+        return fake_weave
+
+    def release(lease):
+        assert lease == "lease-a"
+        events.append("lease-released")
+
+    monkeypatch.setattr(export, "acquire_weave_destination_lease", acquire)
+    monkeypatch.setattr(export, "initialize_weave", initialize)
+    monkeypatch.setattr(export, "release_weave_destination_lease", release)
+    cell = PlannedCell(
+        id="cell-init-failure",
+        run_id="run-init-failure",
+        run_name="init failure",
+        workload_id="coding",
+        task_id="task-a",
+        harness="codex",
+        context_system_id="none",
+        variant_id="none",
+        model_provider="anthropic",
+        model="anthropic/claude-sonnet-5",
+        trial_index=1,
+        comparison_example_id="example-a",
+        candidate_id="candidate-a",
+        execution_fingerprint="execution-a",
+        config_path=Path("config.yaml"),
+        result_path=Path("jobs/result.json"),
+        command=("harbor", "run"),
+        env={"WANDB_API_KEY": "test-only"},
+        n_attempts=1,
+    )
+
+    with pytest.raises(RuntimeError, match="logger failed"):
+        LiveEvaluationCoordinator(
+            [cell],
+            repo_root=tmp_path,
+            project="entity/project",
+            env=cell.env,
+        )
+
+    assert events == [
+        "lease-acquired",
+        "client-active",
+        "dataset",
+        "client-active",
+        "evaluation-root",
+        "lease-released",
+    ]
+
+
+def test_constructor_isolates_root_interrupt_and_releases_destination_lease(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    events: list[str] = []
+
+    class FakeDataset:
+        def __init__(self, **_kwargs) -> None:
+            pass
+
+    class InterruptingLogger:
+        created = 0
+
+        def __init__(self, **_kwargs) -> None:
+            type(self).created += 1
+            if type(self).created == 2:
+                raise RuntimeError("second root failed")
+
+        @staticmethod
+        def fail(_error) -> None:
+            events.append("first-root-close-attempted")
+            raise KeyboardInterrupt
+
+    client = SimpleNamespace(project_id="entity/project")
+    fake_weave = SimpleNamespace(
+        Dataset=FakeDataset,
+        EvaluationLogger=InterruptingLogger,
+        get_client=lambda: client,
+    )
+    monkeypatch.setattr(
+        export,
+        "acquire_weave_destination_lease",
+        lambda _project, _env: "lease-a",
+    )
+    monkeypatch.setattr(export, "initialize_weave", lambda _project, _env: fake_weave)
+    monkeypatch.setattr(
+        export,
+        "release_weave_destination_lease",
+        lambda lease: events.append(f"released:{lease}"),
+    )
+    first = _live_test_cell(cell_id="cell-a", run_id="run-init-roots")
+    second = replace(
+        first,
+        id="cell-b",
+        variant_id="candidate-b",
+        candidate_id="candidate-b",
+        comparison_example_id="example-b",
+    )
+
+    with pytest.raises(RuntimeError, match="second root failed"):
+        LiveEvaluationCoordinator(
+            [first, second],
+            repo_root=tmp_path,
+            project="entity/project",
+            env=first.env,
+        )
+
+    assert events == ["first-root-close-attempted", "released:lease-a"]
+
+
+def test_live_finalize_releases_destination_lease_when_cleanup_raises(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    released: list[str] = []
+    coordinator = object.__new__(LiveEvaluationCoordinator)
+    coordinator._destination_lease = "lease-a"
+
+    def fail_cleanup(*, cancelled: bool):
+        assert cancelled is False
+        raise RuntimeError("cleanup failed")
+
+    coordinator._finalize_without_lease_release = fail_cleanup
+    monkeypatch.setattr(
+        export,
+        "release_weave_destination_lease",
+        released.append,
+    )
+
+    with pytest.raises(RuntimeError, match="cleanup failed"):
+        coordinator.finalize()
+
+    assert released == ["lease-a"]
+    assert coordinator._destination_lease is None
+
+
+def test_hosted_dynamic_row_merge_rejects_nonempty_identity_conflict() -> None:
+    canonical = {
+        "weave_evaluation_root_call_id": "local-claimed-root",
+        "task_id": "task-a",
+        "comparison_deterministic_scores": {"fact-correct": True},
+    }
+
+    with pytest.raises(
+        RuntimeError,
+        match="hosted lifecycle field weave_evaluation_root_call_id",
+    ):
+        export._merge_hosted_dynamic_row_fields(
+            canonical,
+            {
+                "weave_evaluation_root_call_id": "hosted-root",
+                "task_id": "hosted-must-not-merge",
+                "comparison_deterministic_scores": {"fact-correct": False},
+            },
+        )
+
+    assert canonical["task_id"] == "task-a"
+    assert canonical["comparison_deterministic_scores"] == {"fact-correct": True}
+
+
+def test_hosted_decision_receipt_controls_canonical_behavior() -> None:
+    canonical = {
+        "record_type": "trial",
+        "run_id": "run-a",
+        "cell_id": "cell-a",
+        "attempt_id": "a" * 64,
+        "candidate_id": "candidate-a",
+        "execution_fingerprint": "e" * 64,
+        "prediction_id": "p" * 64,
+        "evidence_backend": "weave",
+        "trace_project": "entity/project",
+        "trace_receipt": {"app_base_url": "https://wandb.ai"},
+        "weave_evaluation_root_call_id": "evaluation",
+        "eval_predict_and_score_call_id": "predict-and-score",
+        "weave_prediction_call_id": "prediction",
+        "weave_dataset_ref": "weave:///entity/project/object/tasks:v1",
+        "weave_agent_bridge_call_id": "bridge",
+        "weave_agent_root_call_id": "agent-receipt",
+        "local_evidence_record_digest": "d" * 64,
+        "status": "passed",
+        "runtime_outcome": "completed",
+        "terminal_kind": "success",
+        "pass": True,
+        "comparison_evaluation_status": "scored",
+        "comparison_required_evaluation_complete": True,
+        "comparison_deterministic_scores": {"answer_correct": True},
+        "task_result": {
+            "schema_version": 1,
+            "task_passed": True,
+            "outcome_summary": "The task passed.",
+            "failed_required_checks": [],
+            "answer_digest": None,
+            "agent_execution_status": "completed",
+            "evidence_integrity_status": "verified",
+        },
+    }
+    canonical_result = export._canonical_hosted_task_result(canonical)
+    receipt_call_id = export._hosted_evidence_verification_call_id(canonical)
+    provisional_score_set_digest = stable_digest(
+        export._provisional_evaluation_scores(canonical)
+    )
+    bindings = {
+        "schema_version": 1,
+        "attempt_id": canonical["attempt_id"],
+        "evaluation_root_call_id": canonical["weave_evaluation_root_call_id"],
+        "predict_and_score_call_id": canonical[
+            "eval_predict_and_score_call_id"
+        ],
+        "prediction_call_id": canonical["weave_prediction_call_id"],
+        "dataset_ref": canonical["weave_dataset_ref"],
+        "agent_bridge_call_id": canonical["weave_agent_bridge_call_id"],
+        "agent_receipt_call_id": canonical["weave_agent_root_call_id"],
+        "evidence_project": canonical["trace_project"],
+        "canonical_local_record_digest": canonical[
+            "local_evidence_record_digest"
+        ],
+        "provisional_predict_and_score_output_digest": "1" * 64,
+        "provisional_score_set_digest": provisional_score_set_digest,
+        "provisional_score_call_set_digest": "3" * 64,
+        "canonical_payload_digest": stable_digest(canonical_result),
+    }
+    hosted = {
+        **canonical,
+        "hosted_decision_contract_version": 1,
+        "hosted_evidence_verification_status": "verified",
+        "hosted_task_result_canonical": True,
+        "terminal_hosted_visibility_verified": True,
+        "weave_hosted_evidence_receipt_object_verified": True,
+        "weave_hosted_evidence_receipt_terminal_verified": True,
+        "weave_provisional_call_verification_status": "verified",
+        "task_verdict_owner": (
+            "post_close_hosted_evidence_verification_receipt"
+        ),
+        "weave_provisional_predict_and_score_output_digest": "1" * 64,
+        "weave_provisional_score_set_digest": provisional_score_set_digest,
+        "weave_provisional_score_call_set_digest": "3" * 64,
+        "weave_hosted_evidence_receipt_call_id": receipt_call_id,
+        "weave_hosted_evidence_receipt_ref": export._weave_call_ref(
+            "entity/project", receipt_call_id
+        ),
+        "weave_hosted_evidence_receipt_url": export._weave_call_url(
+            "entity/project", receipt_call_id
+        ),
+        "weave_hosted_evidence_receipt_bindings_digest": stable_digest(bindings),
+        "weave_hosted_canonical_task_result_digest": stable_digest(
+            canonical_result["task_result"]
+        ),
+        "weave_hosted_canonical_score_set_digest": stable_digest(
+            canonical_result["scalar_checks"]
+        ),
+        "weave_hosted_canonical_payload_digest": stable_digest(canonical_result),
+        "weave_hosted_canonical_payload": canonical_result,
+    }
+
+    accepted = dict(canonical)
+    export._apply_hosted_decision_to_canonical_row(accepted, hosted)
+    assert accepted["pass"] is True
+    assert accepted["comparison_deterministic_scores"] == {
+        "answer_correct": True
+    }
+    assert accepted["hosted_task_result_canonical"] is True
+
+    invalidation_error_type = "RuntimeError"
+    invalidation_parent_verified = False
+    invalidation_hosted = {
+        **hosted,
+        "weave_hosted_evidence_invalidation_error_type": (
+            invalidation_error_type
+        ),
+        "weave_hosted_evidence_invalidation_parent_verified": (
+            invalidation_parent_verified
+        ),
+        "weave_hosted_evidence_invalidation_project": "entity/project",
+    }
+    invalidation_bindings = export._hosted_evidence_invalidation_bindings(
+        invalidation_hosted,
+        project="entity/project",
+        error_type=invalidation_error_type,
+        parent_verified=invalidation_parent_verified,
+    )
+    invalidation_output = export._hosted_evidence_invalidation_terminal_output(
+        invalidation_bindings
+    )
+    invalidation_call_id = export._hosted_evidence_invalidation_call_id(
+        invalidation_hosted
+    )
+    invalidation_hosted.update(
+        {
+            "hosted_evidence_invalidation_status": "verified",
+            "weave_hosted_evidence_invalidation_call_id": invalidation_call_id,
+            "weave_hosted_evidence_invalidation_ref": export._weave_call_ref(
+                "entity/project", invalidation_call_id
+            ),
+            "weave_hosted_evidence_invalidation_url": export._weave_call_url(
+                "entity/project", invalidation_call_id
+            ),
+            "weave_hosted_evidence_invalidation_object_verified": True,
+            "weave_hosted_evidence_invalidation_terminal_verified": True,
+            "weave_hosted_evidence_invalidation_bindings_digest": stable_digest(
+                invalidation_bindings
+            ),
+            "weave_hosted_evidence_invalidation_terminal_output_digest": (
+                stable_digest(invalidation_output)
+            ),
+        }
+    )
+    assert export._hosted_evidence_invalidation_verified(invalidation_hosted)
+
+    invalidated = dict(canonical)
+    export._apply_hosted_decision_to_canonical_row(
+        invalidated,
+        invalidation_hosted,
+    )
+    assert invalidated["terminal_kind"] == "evidence_failure"
+    assert invalidated["pass"] is None
+    assert invalidated["comparison_evaluation_status"] == "unavailable"
+    assert "comparison_deterministic_scores" not in invalidated
+    assert "task_result" not in invalidated
+
+    for field_name, invalid_value in (
+        ("weave_hosted_evidence_invalidation_call_id", "forged"),
+        ("weave_hosted_evidence_invalidation_bindings_digest", "0" * 64),
+        ("weave_hosted_evidence_invalidation_terminal_output_digest", "0" * 64),
+        ("weave_hosted_evidence_invalidation_object_verified", False),
+        ("weave_hosted_evidence_invalidation_terminal_verified", False),
+    ):
+        forged_invalidation = {**invalidation_hosted, field_name: invalid_value}
+        assert not export._hosted_evidence_invalidation_verified(
+            forged_invalidation
+        )
+
+    rejected = dict(canonical)
+    export._apply_hosted_decision_to_canonical_row(
+        rejected,
+        {**hosted, "hosted_evidence_verification_status": "invalid"},
+    )
+    assert rejected["runtime_outcome"] == "completed"
+    assert rejected["terminal_kind"] == "evidence_failure"
+    assert rejected["pass"] is None
+    assert rejected["comparison_evaluation_status"] == "unavailable"
+    assert "comparison_deterministic_scores" not in rejected
+    assert "task_result" not in rejected
+
+    forged_digest = dict(canonical)
+    export._apply_hosted_decision_to_canonical_row(
+        forged_digest,
+        {**hosted, "weave_hosted_canonical_score_set_digest": "0" * 64},
+    )
+    assert forged_digest["terminal_kind"] == "evidence_failure"
+    assert forged_digest["pass"] is None
+    assert "comparison_deterministic_scores" not in forged_digest
+    assert "task_result" not in forged_digest
+
+    malformed = dict(canonical)
+    export._apply_hosted_decision_to_canonical_row(
+        malformed,
+        {**hosted, "hosted_decision_contract_version": "not-an-integer"},
+    )
+    assert malformed["terminal_kind"] == "evidence_failure"
+    assert malformed["pass"] is None
+    assert "comparison_deterministic_scores" not in malformed
+    assert "task_result" not in malformed
+
+
+def test_provisional_hosted_readback_rejects_prediction_output_drift() -> None:
+    project = "entity/project"
+    trace_id = "a" * 32
+    provisional_output = {
+        "canonical": False,
+        "verification_status": "pending_terminal_reconciliation",
+    }
+    required_attributes = {
+        "fugue.result.canonical": False,
+        "fugue.result.status": "provisional",
+        "fugue.evidence.status": "pending_terminal_reconciliation",
+        "fugue.task_verdict.owner": (
+            "post_close_hosted_evidence_verification_receipt"
+        ),
+    }
+    evaluation = SimpleNamespace(
+        id="evaluation",
+        project_id=project,
+        parent_id=None,
+        trace_id=trace_id,
+        ended_at="terminal",
+    )
+    predict_and_score = SimpleNamespace(
+        id="pas",
+        project_id=project,
+        parent_id="evaluation",
+        trace_id=trace_id,
+        ended_at="terminal",
+        attributes=required_attributes,
+        display_name="PROVISIONAL · UNSCORED · task · arm · Attempt 1",
+        output={
+            "output": provisional_output,
+            "scores": {},
+            "model_latency": None,
+        },
+    )
+    prediction = SimpleNamespace(
+        id="prediction",
+        project_id=project,
+        parent_id="pas",
+        trace_id=trace_id,
+        ended_at="terminal",
+        attributes=required_attributes,
+        display_name="PROVISIONAL · Agent execution (no scored answer) · task",
+        output={"tampered": True},
+    )
+    calls = {
+        "pas": predict_and_score,
+        "prediction": prediction,
+    }
+    client = SimpleNamespace(
+        project_id=project,
+        get_call=lambda call_id: calls[call_id],
+    )
+    coordinator = object.__new__(LiveEvaluationCoordinator)
+    coordinator.project = project
+    coordinator.trace_timeout_sec = 0
+    coordinator._cancellation_event = threading.Event()
+    coordinator._weave_requires_reactivation = False
+    row = {
+        "attempt_id": "a" * 64,
+        "local_evidence_record_digest": "d" * 64,
+        "weave_hosted_evidence_receipt_call_id": "receipt",
+        "weave_provisional_score_calls": [],
+    }
+    active = export._LivePrediction(
+        session=SimpleNamespace(),
+        prediction=SimpleNamespace(
+            evaluate_call=evaluation,
+            predict_and_score_call=predict_and_score,
+            predict_call=prediction,
+            output=provisional_output,
+        ),
+        bridge_call=None,
+        bridge_client=client,
+        row=row,
+        opened_monotonic=0.0,
+    )
+
+    with pytest.raises(RuntimeError, match="prediction Call did not reconcile"):
+        coordinator._verify_provisional_hosted_records(active=active, row=row)
+
+    prediction.output = provisional_output
+    verified = coordinator._verify_provisional_hosted_records(active=active, row=row)
+    assert verified["predict_and_score_output_digest"] == stable_digest(
+        predict_and_score.output
+    )
+
+
+def test_posthoc_publication_rejects_exact_env_secret_before_remote_write(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    secret = "opaque-value-987654321"
+    presentation = TaskPresentationV1(
+        task_id="task-secret",
+        title="Inspect a public fixture",
+        public_prompt=(
+            PublicPromptPartV1(
+                order=1,
+                text=f"Inspect the fixture value {secret}.",
+            ),
+        ),
+        required_output="Return one bounded JSON object.",
+        public_acceptance_criteria=("The JSON object is syntactically valid.",),
+    )
+
+    def unexpected_remote_write(*_args, **_kwargs):
+        raise AssertionError("Weave initialized before the secret preflight")
+
+    monkeypatch.setattr(export, "initialize_weave", unexpected_remote_write)
+
+    with pytest.raises(ValueError, match="contain sensitive text"):
+        publish_to_weave(
+            [
+                {
+                    "record_type": "trial",
+                    "run_id": "run-secret",
+                    "task_id": "task-secret",
+                    "candidate_id": "candidate-secret",
+                    "comparison_example_id": "example-secret",
+                    "trial_index": 1,
+                    "task_presentation": presentation.to_dict(),
+                }
+            ],
+            "entity/project",
+            ledger_root=tmp_path,
+            env={"ANTHROPIC_API_KEY": secret},
+        )
+
+
 def test_weave_publication_keeps_direct_outcomes_and_skips_admin_rows(
     tmp_path: Path, monkeypatch
 ) -> None:
     logged = []
     summaries = []
 
-    class FakeLogger:
+    class FakeLogger(_PublicEvaluationLoggerMixin):
         def __init__(self, **kwargs) -> None:
             pass
 
@@ -450,7 +1318,7 @@ def test_weave_publication_counts_one_prediction_per_sequence_cell(
     declared_scorers = []
     logged_scores = []
 
-    class FakeLogger:
+    class FakeLogger(_PublicEvaluationLoggerMixin):
         ui_url = "https://wandb.test/evaluations/direct"
 
         def __init__(self, **kwargs) -> None:
@@ -751,7 +1619,7 @@ def test_compile_export_normalizes_before_publication(
 def test_export_recovers_direct_evaluation_after_marker_only_crash(
     tmp_path: Path, monkeypatch
 ) -> None:
-    class FakeLogger:
+    class FakeLogger(_PublicEvaluationLoggerMixin):
         ui_url = "https://wandb.test/evaluations/recovered"
 
         def __init__(self, **kwargs) -> None:
@@ -941,7 +1809,7 @@ def test_weave_publication_shares_dataset_across_candidates(
             self.rows = rows
             datasets.append(self)
 
-    class FakeLogger:
+    class FakeLogger(_PublicEvaluationLoggerMixin):
         def __init__(self, **kwargs) -> None:
             self.__dict__.update(kwargs)
             self.ui_url = None
@@ -1013,18 +1881,17 @@ def test_weave_publication_shares_dataset_across_candidates(
         }
     ]
     assert {logger.name for logger in loggers} == {
-        "memory-ab | coding | codex | none",
-        "memory-ab | coding | codex | rag-bm25",
+        "memory ab · Legacy arm · candidate-no",
+        "memory ab · Legacy arm · candidate-ra",
     }
-    assert len(
-        {
-            logger.eval_attributes["fugue.evaluation_scope_id"]
-            for logger in loggers
-        }
-    ) == 1
-    assert {
-        logger.eval_attributes["fugue.candidate_id"] for logger in loggers
-    } == {"candidate-none", "candidate-rag"}
+    assert (
+        len({logger.eval_attributes["fugue.evaluation_scope_id"] for logger in loggers})
+        == 1
+    )
+    assert {logger.eval_attributes["fugue.candidate_id"] for logger in loggers} == {
+        "candidate-none",
+        "candidate-rag",
+    }
     assert loggers[0].scorers == loggers[1].scorers
     assert {logger.model["name"] for logger in loggers} == {
         "codex__none__test-model",
@@ -1060,7 +1927,7 @@ def test_weave_publication_groups_repeated_trials_under_one_example(
             self.name = name
             self.rows = rows
 
-    class FakeLogger:
+    class FakeLogger(_PublicEvaluationLoggerMixin):
         ui_url = None
 
         def __init__(self, **kwargs) -> None:
@@ -1115,11 +1982,36 @@ def test_weave_publication_groups_repeated_trials_under_one_example(
     assert loggers[0].examples[0] == loggers[0].examples[1]
 
 
-def test_live_evaluation_links_native_root_and_finalizes_cleanly(
+def test_live_evaluation_links_native_root_and_finalizes_cleanly(  # noqa: C901
     tmp_path: Path,
 ) -> None:
     loggers = []
     predictions = []
+    attribute_contexts: list[dict[str, object]] = []
+    active_attribute_contexts: list[dict[str, object]] = []
+
+    class AttributeContext:
+        def __init__(self, values) -> None:
+            self.values = dict(values)
+
+        def __enter__(self):
+            active_attribute_contexts.append(self.values)
+            return None
+
+        def __exit__(self, exc_type, exc, traceback) -> None:
+            assert active_attribute_contexts.pop() == self.values
+            return None
+
+    def attributes(values):
+        attribute_contexts.append(dict(values))
+        return AttributeContext(values)
+
+    def current_attributes():
+        return {
+            key: value
+            for context in active_attribute_contexts
+            for key, value in context.items()
+        }
 
     class FakeDataset:
         def __init__(self, *, name, rows) -> None:
@@ -1138,10 +2030,12 @@ def test_live_evaluation_links_native_root_and_finalizes_cleanly(
                 parent_id=evaluate_call.id,
                 trace_id=evaluate_call.trace_id,
                 summary=None,
-                ref=SimpleNamespace(
-                    uri=f"weave:///entity/project/call/{call_id}"
-                ),
+                ref=SimpleNamespace(uri=f"weave:///entity/project/call/{call_id}"),
                 ui_url=f"https://wandb.test/calls/{call_id}",
+                ended_at=None,
+                attributes=current_attributes(),
+                display_name=None,
+                output=None,
             )
             self.predict_call = SimpleNamespace(
                 id=f"{call_id}-model",
@@ -1152,44 +2046,100 @@ def test_live_evaluation_links_native_root_and_finalizes_cleanly(
                     uri=f"weave:///entity/project/call/{call_id}-model"
                 ),
                 ui_url=f"https://wandb.test/calls/{call_id}-model",
+                ended_at=None,
+                attributes=current_attributes(),
+                display_name=None,
+                output=None,
             )
             self.output = None
             self.scores = {}
             self.finished = False
+            self.score_calls = []
+            client.public_calls[call_id] = self.predict_and_score_call
+            client.public_calls[f"{call_id}-model"] = self.predict_call
 
         def __enter__(self):
             return self
 
-        def log_score(self, name, value) -> None:
-            self.scores[name] = value
+        def log_score(self, name, value=...):
+            if value is not ...:
+                self.scores[name] = value
+                return None
+            score_call = SimpleNamespace(
+                id=f"{self.predict_and_score_call.id}-score-{len(self.score_calls) + 1}",
+                project_id="entity/project",
+                parent_id=self.predict_and_score_call.id,
+                trace_id=self.predict_and_score_call.trace_id,
+                attributes=current_attributes(),
+                display_name=None,
+                output=None,
+                ended_at=None,
+            )
+            self.score_calls.append(score_call)
+            client.public_calls[score_call.id] = score_call
+            prediction = self
+
+            class ScoreContext:
+                def __init__(self) -> None:
+                    self.score_call = score_call
+                    self.value = None
+
+                def __enter__(self):
+                    return self
+
+                def __exit__(self, exc_type, exc, traceback) -> None:
+                    score_call.output = self.value
+                    score_call.ended_at = "terminal"
+                    prediction.scores[name] = self.value
+
+            return ScoreContext()
 
         def __exit__(self, exc_type, exc, traceback) -> None:
             self.finished = True
+            self.predict_and_score_call.output = {
+                "output": self.output,
+                "scores": dict(self.scores),
+                "model_latency": None,
+            }
+            self.predict_call.output = self.output
+            self.predict_and_score_call.ended_at = "terminal"
+            self.predict_call.ended_at = "terminal"
 
-    class FakeLogger:
+    class FakeLogger(_PublicEvaluationLoggerMixin):
         def __init__(self, **kwargs) -> None:
             self.__dict__.update(kwargs)
             self.ui_url = None
             self._pseudo_evaluation = SimpleNamespace(
                 dataset=self.dataset,
-                ref=SimpleNamespace(
-                    uri="weave:///entity/project/object/eval:shared"
-                ),
+                ref=SimpleNamespace(uri="weave:///entity/project/object/eval:shared"),
             )
+
+            class EvaluationObjectRef:
+                @staticmethod
+                def uri() -> str:
+                    return "weave:///entity/project/object/eval:shared"
+
+                def get(inner_self):
+                    del inner_self
+                    assert "flush" not in client.events
+                    client.events.append("evaluation-ref-resolved")
+                    return self._pseudo_evaluation
+
             self._evaluate_call = SimpleNamespace(
                 id="evaluation-root-1",
                 project_id="entity/project",
                 parent_id=None,
                 trace_id="a" * 32,
-                inputs={"self": self._pseudo_evaluation},
+                inputs={"self": EvaluationObjectRef()},
                 ref=SimpleNamespace(
                     uri="weave:///entity/project/call/evaluation-root-1"
                 ),
             )
+            client.public_calls[self._evaluate_call.id] = self._evaluate_call
             self.summarized = False
             loggers.append(self)
 
-        def log_prediction(self, inputs):
+        def log_prediction(self, inputs, **_metadata):
             prediction = FakePrediction(
                 f"predict-{len(predictions) + 1}",
                 self._evaluate_call,
@@ -1200,14 +2150,19 @@ def test_live_evaluation_links_native_root_and_finalizes_cleanly(
         def log_summary(self) -> None:
             self.summarized = True
             self.ui_url = "https://wandb.test/evaluations/live"
+            self._evaluate_call.ended_at = "terminal"
 
         def fail(self, exception) -> None:
             raise AssertionError(exception)
 
-    client = _OutOfOrderWeaveClient("entity/project")
+    client = _OutOfOrderWeaveClient(
+        "entity/project",
+        forbid_flush_while_evaluation_children_open=True,
+    )
     fake_weave = SimpleNamespace(
         Dataset=FakeDataset,
         EvaluationLogger=FakeLogger,
+        attributes=attributes,
         get_client=lambda: client,
     )
     cell = PlannedCell(
@@ -1246,10 +2201,21 @@ def test_live_evaluation_links_native_root_and_finalizes_cleanly(
 
     def summaries(**kwargs):
         call_id = predictions[0].predict_and_score_call.id
+        pending_calls = {
+            call.id: call
+            for kind, call, _output in client.pending
+            if kind == "start"
+        }
         bridge_ids = [
             call_id_value
-            for call_id_value, call in client.remote.items()
-            if call.get("parent_id") == f"{call_id}-model"
+            for call_id_value, call in {
+                **{
+                    key: SimpleNamespace(**value)
+                    for key, value in client.remote.items()
+                },
+                **pending_calls,
+            }.items()
+            if getattr(call, "parent_id", None) == f"{call_id}-model"
         ]
         bridge_id = bridge_ids[0] if bridge_ids else ""
         agent_ids = [value for value in client.remote if value not in bridge_ids]
@@ -1260,9 +2226,11 @@ def test_live_evaluation_links_native_root_and_finalizes_cleanly(
             "trace_id": "a" * 32,
             "span_id": "b" * 16,
             "otel_parent_span_id": str(
-                (client.remote.get(bridge_id, {}).get("attributes") or {}).get(
-                    "fugue.agent_bridge_otel_parent_span_id"
-                )
+                (
+                    client.remote.get(bridge_id, {}).get("attributes")
+                    or getattr(pending_calls.get(bridge_id), "attributes", {})
+                    or {}
+                ).get("fugue.agent_bridge_otel_parent_span_id")
                 or ""
             ),
             "run_key": ("run-a:coding:trial:task-a:codex:rag-bm25:rag-bm25:t001"),
@@ -1273,6 +2241,7 @@ def test_live_evaluation_links_native_root_and_finalizes_cleanly(
             "execution_fingerprint": "execution-a",
             "comparison_example_id": "example-a",
             "trial_index": 1,
+            "eval_run_id": "evaluation-root-1",
             "eval_predict_and_score_call_id": call_id,
         }
         if agent_call_id:
@@ -1318,11 +2287,34 @@ def test_live_evaluation_links_native_root_and_finalizes_cleanly(
                 "weave_trace_ids": ["a" * 32],
                 "weave_root_span_ids": ["b" * 16],
                 "weave_root_spans": [root],
+                "weave_eval_span_link_status": "complete",
+                "weave_eval_span_link_failures": [],
                 "weave_authoritative_call_graph": graph,
                 "weave_authoritative_missing_call_ids": [],
             }
         }
 
+    def host_evaluator(row):
+        row.update(
+            {
+                "pass": True,
+                "comparison_evaluation_status": "scored",
+                "comparison_required_evaluation_complete": True,
+                "comparison_deterministic_scores": {
+                    "fact-correct": True,
+                    "citation-quality": 0.75,
+                },
+                "comparison_dimension_roles": {
+                    "fact-correct": "outcome",
+                    "citation-quality": "outcome",
+                },
+            }
+        )
+
+    host_evaluator.fugue_dimension_roles = {
+        "fact-correct": "outcome",
+        "citation-quality": "outcome",
+    }
     coordinator = LiveEvaluationCoordinator(
         [cell],
         repo_root=tmp_path,
@@ -1331,38 +2323,90 @@ def test_live_evaluation_links_native_root_and_finalizes_cleanly(
         weave_module=fake_weave,
         summary_fetcher=summaries,
         trace_timeout_sec=0,
-        host_evaluator=lambda row: row.update(
-            {
-                "comparison_evaluation_status": "scored",
-                "comparison_required_evaluation_complete": True,
-                "comparison_deterministic_scores": {
-                    "fact-correct": True,
-                    "citation-quality": 0.75,
-                },
-            }
-        ),
+        host_evaluator=host_evaluator,
         host_scorer_names=(
             "comparison.deterministic.fact-correct",
             "comparison.deterministic.citation-quality",
         ),
     )
-    overlay = coordinator.begin_cell(cell)
+
+    class CanonicalLocalCoordinator:
+        @staticmethod
+        def begin_cell(_cell):
+            return {}
+
+        @staticmethod
+        def finish_cell(_cell, outcome):
+            row = export._completed_evaluation_row(
+                cell,
+                outcome,
+                export._planned_evaluation_row(cell),
+            )
+            host_evaluator(row)
+            row["evaluation_judge_status"] = "not_requested"
+            row["local_evidence_record_digest"] = "c" * 64
+            export._set_adapter_outcome(row)
+            assert "weave_evaluation_root_call_id" not in row
+            assert "eval_predict_and_score_call_id" not in row
+            assert "weave_prediction_call_id" not in row
+            assert "weave_agent_bridge_call_id" not in row
+            assert "weave_hosted_evidence_receipt_call_id" not in row
+            return row
+
+    evidence = operator._EvidenceCoordinators(
+        local=CanonicalLocalCoordinator(),  # type: ignore[arg-type]
+        hosted=coordinator,
+    )
+    overlay = evidence.begin_cell(cell)
     assert overlay is not None
+    assert "evaluation-ref-resolved" in client.events
+    assert "flush" not in client.events
+    assert any(
+        values.get("fugue.run_id") == "run-a" for values in attribute_contexts
+    )
     traceparent = overlay.pop("FUGUE_WEAVE_TRACEPARENT")
     assert traceparent.startswith(f"00-{'a' * 32}-")
     assert traceparent.endswith("-01")
     assert overlay == {
         "FUGUE_ATTEMPT_ID": cell.attempt_id,
+        "FUGUE_WEAVE_EVAL_RUN_ID": "evaluation-root-1",
         "FUGUE_WEAVE_EVAL_PREDICT_AND_SCORE_CALL_ID": "predict-1",
         "FUGUE_WEAVE_EVAL_PROJECT_ID": "entity/project",
+        "FUGUE_WEAVE_EVAL_KIND": "agent",
+        "FUGUE_WEAVE_EVAL_ROW_DIGEST": export._evaluation_row_digest(
+            export._planned_evaluation_row(cell),
+            export._evaluation_inputs(export._planned_evaluation_row(cell)),
+        ),
+        "FUGUE_WEAVE_EVAL_EXAMPLE_ID": "task-a",
+        "FUGUE_WEAVE_EVAL_TRIAL_INDEX": "0",
         "FUGUE_WEAVE_EVAL_NAME": loggers[0].name,
         "FUGUE_EVALUATION_SCOPE_ID": loggers[0].eval_attributes[
             "fugue.evaluation_scope_id"
         ],
     }
 
-    coordinator.finish_cell(cell, CellOutcome(cell.id, "passed", returncode=0))
+    evidence.finish_cell(
+        cell,
+        CellOutcome(
+            cell.id,
+            "passed",
+            returncode=0,
+            benchmark_outcome="passed",
+            runtime_outcome="completed",
+            terminal_kind="success",
+        ),
+    )
+    immutable_pas_output = json.loads(json.dumps(predictions[0].output))
+    assert "flush" not in client.events
     publication = coordinator.finalize()
+    assert client.events.index("evaluation-ref-resolved") < client.events.index(
+        "flush"
+    )
+    assert client.events.index("flush") < max(
+        index
+        for index, event in enumerate(client.events)
+        if event == "get-call:evaluation-root-1"
+    )
 
     assert publication.published == 1
     assert publication.failures == ()
@@ -1371,7 +2415,34 @@ def test_live_evaluation_links_native_root_and_finalizes_cleanly(
     assert publication.evaluations[0].direct_predictions == 0
     assert predictions[0].finished is True
     assert predictions[0].output["observed_conversation_id"] == "native-conversation"
-    assert predictions[0].output["trace_link_status"] == "linked"
+    assert (
+        predictions[0].output["trace_link_status"]
+        == "pending_terminal_reconciliation"
+    )
+    assert predictions[0].output["canonical"] is False
+    assert predictions[0].output["evidence_phase"] == "provisional_scoring_v1"
+    assert predictions[0].output["verification_status"] == (
+        "pending_terminal_reconciliation"
+    )
+    assert predictions[0].output["task_verdict_owner"] == (
+        "post_close_hosted_evidence_verification_receipt"
+    )
+    assert "task_result" not in predictions[0].output
+    assert "provisional_task_observation" in predictions[0].output
+    assert predictions[0].predict_and_score_call.display_name.startswith(
+        "PROVISIONAL · PASSED ·"
+    )
+    assert predictions[0].predict_call.display_name.startswith(
+        "PROVISIONAL · Agent answer ·"
+    )
+    for call in (
+        predictions[0].predict_and_score_call,
+        predictions[0].predict_call,
+    ):
+        assert call.attributes["fugue.result.canonical"] is False
+        assert call.attributes["fugue.evidence.status"] == (
+            "pending_terminal_reconciliation"
+        )
     live_row = json.loads(
         (tmp_path / ".fugue/runtime/run-a/evaluation-results.jsonl").read_text()
     )
@@ -1420,12 +2491,67 @@ def test_live_evaluation_links_native_root_and_finalizes_cleanly(
     assert live_row["weave_prediction_object_verified"] is True
     assert live_row["evaluation_prediction_graph_verified"] is True
     assert live_row["agent_graph_verified"] is True
-    assert live_row["evaluation_judge_status"] == "not_requested"
-    assert predictions[0].scores["comparison.deterministic.fact-correct"] is True
+    assert live_row["agent_cross_transport_edge"]["status"] == "verified"
     assert (
-        predictions[0].scores["comparison.deterministic.citation-quality"]
-        == 0.75
+        live_row["weave_agent_bridge_cross_transport_edge"]["status"]
+        == "verified"
     )
+    assert live_row["evaluation_root_terminal_verified"] is True
+    assert live_row["hosted_evidence_verification_status"] == "verified"
+    assert live_row["terminal_hosted_visibility_verified"] is True
+    receipt_call_id = live_row["weave_hosted_evidence_receipt_call_id"]
+    assert client.remote[receipt_call_id]["terminal"] is True
+    assert client.remote[receipt_call_id]["parent_id"] == "predict-1"
+    assert client.remote[receipt_call_id]["inputs"]["attempt_id"] == cell.attempt_id
+    assert client.remote[receipt_call_id]["inputs"]["predict_and_score_call_id"] == (
+        "predict-1"
+    )
+    receipt_output = client.remote[receipt_call_id]["output"]
+    receipt_attributes = client.remote[receipt_call_id]["attributes"]
+    assert receipt_output["canonical"] is True
+    assert receipt_output["verification_status"] == "verified"
+    assert receipt_output["task_result"]["task_passed"] is True
+    assert receipt_output["scalar_checks"]["outcome__fact_correct"] is True
+    assert receipt_output["scalar_checks"]["outcome__citation_quality"] == 0.75
+    assert receipt_output["predict_and_score_binding"]["call_id"] == "predict-1"
+    assert receipt_attributes["fugue.result.canonical"] is False
+    assert receipt_attributes["fugue.evidence.phase"] == (
+        "canonical_verdict_pending_v1"
+    )
+    assert receipt_attributes["fugue.evidence.status"] == (
+        "pending_terminal_readback"
+    )
+    assert client.remote[receipt_call_id]["display_name"].startswith(
+        "CANONICAL · PASSED ·"
+    )
+    assert predictions[0].output == immutable_pas_output
+    assert predictions[0].predict_and_score_call.output == {
+        "output": immutable_pas_output,
+        "scores": dict(predictions[0].scores),
+        "model_latency": None,
+    }
+    assert live_row["evaluation_judge_status"] == "not_requested"
+    assert predictions[0].output["provisional_judge_evidence"] == {
+        "status": "unavailable",
+        "advisory": True,
+        "reason": "This attempt has no published judge review.",
+        "calibration_status": "unavailable",
+    }
+    assert predictions[0].scores[
+        "provisional__outcome__fact_correct__not_canonical"
+    ] is True
+    assert predictions[0].scores[
+        "provisional__outcome__citation_quality__not_canonical"
+    ] == 0.75
+    assert predictions[0].score_calls
+    for score_call in predictions[0].score_calls:
+        assert score_call.display_name.startswith("PROVISIONAL SCORE ·")
+        assert score_call.display_name.endswith("NOT A FUGUE VERDICT")
+        assert score_call.attributes["fugue.result.canonical"] is False
+        assert score_call.attributes["fugue.evidence.status"] == (
+            "pending_terminal_reconciliation"
+        )
+        assert score_call.ended_at == "terminal"
     assert live_row["adapter_outcome"]["rubric_evaluation"]["state"] == (
         "not_requested"
     )
@@ -1433,13 +2559,490 @@ def test_live_evaluation_links_native_root_and_finalizes_cleanly(
         "weave": {"genai_span_ref": [{"trace_id": "a" * 32, "span_id": "b" * 16}]}
     }
     assert loggers[0].summarized is True
-    statuses = [
-        json.loads(line)["status"]
+    assert client.events.index("get-call:predict-1") < client.events.index(
+        f"calls-complete-published:{receipt_call_id}"
+    )
+    events = [
+        json.loads(line)
         for line in (tmp_path / ".fugue/runtime/run-a/evaluations.jsonl")
         .read_text()
         .splitlines()
     ]
-    assert statuses == ["pending", "prediction_open", "trace_linked", "finalized"]
+    statuses = [event["status"] for event in events]
+    assert statuses == [
+        "pending",
+        "prediction_open",
+        "trace_linked",
+        "hosted_evidence_verified",
+        "finalized",
+    ]
+    opened = events[1]
+    assert opened["evaluation_root_call_id"] == "evaluation-root-1"
+    assert opened["eval_predict_and_score_call_id"] == "predict-1"
+    assert opened["prediction_call_id"] == "predict-1-model"
+    assert opened["agent_bridge_call_id"] == live_row["weave_agent_bridge_call_id"]
+    assert opened["evaluation_trace_id"] == "a" * 32
+
+
+def test_hosted_verification_receipt_accepts_exact_end_after_finish_interruption(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    project = "entity/project"
+    trace_id = "a" * 32
+    evaluation_root = SimpleNamespace(
+        id="evaluation-root",
+        project_id=project,
+        parent_id=None,
+        trace_id=trace_id,
+    )
+    predict_and_score = SimpleNamespace(
+        id="predict-and-score",
+        project_id=project,
+        parent_id=evaluation_root.id,
+        trace_id=trace_id,
+    )
+    finished: list[dict[str, object]] = []
+
+    class PublicClient:
+        project_id = project
+        calls: dict[str, object] = {}
+
+        @staticmethod
+        def create_call(
+            _op,
+            inputs,
+            parent=None,
+            attributes=None,
+            display_name=None,
+            *,
+            use_stack=True,
+            _call_id_override=None,
+        ):
+            del use_stack
+            if _call_id_override in PublicClient.calls:
+                raise RuntimeError("deterministic receipt already exists")
+            call = SimpleNamespace(
+                id=_call_id_override,
+                parent_id=getattr(parent, "id", None),
+                project_id=project,
+                trace_id=getattr(parent, "trace_id", None) or "root-trace",
+                inputs=inputs,
+                attributes=attributes,
+                display_name=display_name,
+                output=None,
+                ended_at=None,
+            )
+            PublicClient.calls[call.id] = call
+            return call
+
+        @staticmethod
+        def finish_call(call, output=None):
+            finished.append(dict(output or {}))
+            call.output = dict(output or {})
+            call.ended_at = "terminal"
+
+        @staticmethod
+        def get_call(call_id):
+            return PublicClient.calls[call_id]
+
+    coordinator = object.__new__(LiveEvaluationCoordinator)
+    coordinator.project = project
+    coordinator.weave = SimpleNamespace(get_client=lambda: PublicClient)
+    coordinator.trace_timeout_sec = 0
+    coordinator._cancellation_event = threading.Event()
+    row = {
+        "run_id": "run-a",
+        "cell_id": "cell-a",
+        "attempt_id": "a" * 64,
+        "weave_evaluation_root_call_id": evaluation_root.id,
+        "eval_predict_and_score_call_id": predict_and_score.id,
+        "weave_prediction_call_id": "prediction",
+        "weave_dataset_ref": "weave:///entity/project/object/tasks:v1",
+        "weave_agent_bridge_call_id": "bridge",
+        "weave_agent_root_call_id": "agent-receipt",
+        "local_evidence_record_digest": "d" * 64,
+        "task_id": "task-a",
+        "candidate_id": "candidate-a",
+        "trial_index": 1,
+        "pass": True,
+        "status": "passed",
+        "runtime_outcome": "completed",
+        "terminal_kind": "success",
+        "comparison_evaluation_status": "scored",
+        "comparison_required_evaluation_complete": True,
+        "comparison_deterministic_scores": {"answer_correct": True},
+        "comparison_dimension_roles": {"answer_correct": "outcome"},
+    }
+    coordinator._prepare_hosted_evidence_verification_receipt(row)
+    active = export._LivePrediction(
+        session=SimpleNamespace(),
+        prediction=SimpleNamespace(
+            evaluate_call=evaluation_root,
+            predict_and_score_call=predict_and_score,
+            output={
+                "canonical": False,
+                "verification_status": "pending_terminal_reconciliation",
+            },
+        ),
+        bridge_call=SimpleNamespace(),
+        bridge_client=PublicClient,
+        row=row,
+        opened_monotonic=0.0,
+    )
+    original_finish = coordinator._finish_evidence_call
+    finish_attempts = 0
+
+    monkeypatch.setattr(
+        coordinator,
+        "_verify_provisional_hosted_records",
+        lambda **_kwargs: {
+            "local_record_digest": "d" * 64,
+            "predict_and_score_output_digest": "e" * 64,
+            "provisional_score_set_digest": "f" * 64,
+            "provisional_score_call_set_digest": "1" * 64,
+        },
+    )
+    row["weave_provisional_predict_and_score_output_digest"] = "e" * 64
+
+    def interrupt_first_finish(*args, **kwargs):
+        nonlocal finish_attempts
+        finish_attempts += 1
+        if finish_attempts == 1:
+            original_finish(*args, **kwargs)
+            raise KeyboardInterrupt
+        return original_finish(*args, **kwargs)
+
+    monkeypatch.setattr(
+        coordinator,
+        "_finish_evidence_call",
+        interrupt_first_finish,
+    )
+    coordinator._publish_hosted_evidence_verification_receipt(
+        active=active,
+        row=row,
+    )
+
+    assert finish_attempts == 1
+    assert len(finished) == 1
+    assert finished[0]["hosted_evidence_integrity"] == "verified"
+    assert len(str(finished[0]["bindings_digest"])) == 64
+    assert finished[0]["task_verdict_owner"] == (
+        "post_close_hosted_evidence_verification_receipt"
+    )
+    assert finished[0]["canonical"] is True
+    assert "cleanup_after_failure" not in finished[0]
+    assert row["hosted_evidence_verification_status"] == "verified"
+
+    verified_call = PublicClient.calls[
+        row["weave_hosted_evidence_receipt_call_id"]
+    ]
+    coordinator._publish_hosted_evidence_verification_receipt(
+        active=active,
+        row=row,
+    )
+    assert finish_attempts == 1
+    assert len(finished) == 1
+    assert row["hosted_evidence_verification_status"] == "verified"
+
+    verified_call.output = {"canonical": True, "forged": True}
+    with pytest.raises(RuntimeError, match="terminal hosted evidence decision.*conflicts"):
+        coordinator._publish_hosted_evidence_verification_receipt(
+            active=active,
+            row=row,
+        )
+    assert len(finished) == 1
+
+
+def test_eager_call_owners_recover_side_effect_before_create_interruption() -> None:
+    project = "entity/project"
+    trace_id = "a" * 32
+
+    class InterruptingClient:
+        project_id = project
+
+        def __init__(self) -> None:
+            self.calls: dict[str, object] = {}
+            self.finished: list[dict[str, object]] = []
+
+        def create_call(
+            self,
+            _op,
+            inputs,
+            parent=None,
+            attributes=None,
+            display_name=None,
+            *,
+            use_stack=True,
+            _call_id_override=None,
+        ):
+            del use_stack
+            if _call_id_override in self.calls:
+                raise RuntimeError("deterministic Call already exists")
+            self.calls[_call_id_override] = SimpleNamespace(
+                id=_call_id_override,
+                parent_id=getattr(parent, "id", None),
+                project_id=project,
+                trace_id=getattr(parent, "trace_id", None) or "root-trace",
+                inputs=dict(inputs),
+                attributes=dict(attributes or {}),
+                display_name=display_name,
+                output=None,
+                ended_at=None,
+            )
+            raise KeyboardInterrupt
+
+        def get_call(self, call_id):
+            return self.calls[call_id]
+
+        def finish_call(self, call, output=None):
+            self.finished.append(dict(output or {}))
+            call.output = dict(output or {})
+            call.ended_at = "terminal"
+
+    def coordinator_for(client):
+        value = object.__new__(LiveEvaluationCoordinator)
+        value.project = project
+        value.weave = SimpleNamespace(get_client=lambda: client)
+        value._weave_requires_reactivation = False
+        value.trace_timeout_sec = 0
+        value._cancellation_event = threading.Event()
+        return value
+
+    bridge_client = InterruptingClient()
+    bridge_coordinator = coordinator_for(bridge_client)
+    cell = _live_test_cell(cell_id="cell-bridge-owner", run_id="run-bridge-owner")
+    with pytest.raises(KeyboardInterrupt):
+        bridge_coordinator._open_agent_bridge(
+            cell=cell,
+            row={},
+            prediction=SimpleNamespace(
+                predict_call=SimpleNamespace(
+                    id="prediction",
+                    project_id=project,
+                    trace_id=trace_id,
+                )
+            ),
+        )
+    assert bridge_client.finished == [{"status": "bridge_create_interrupted"}]
+
+    agent_client = InterruptingClient()
+    agent_coordinator = coordinator_for(agent_client)
+    bridge = SimpleNamespace(id="bridge", project_id=project, trace_id=trace_id)
+    agent_row = {
+        "run_id": "run-a",
+        "cell_id": "cell-a",
+        "run_key": "run-key",
+        "harness": "claude-code",
+        "task_id": "task-a",
+        "candidate_id": "candidate-a",
+        "attempt_id": "a" * 64,
+        "execution_fingerprint": "e" * 64,
+        "comparison_example_id": "example-a",
+        "trial_index": 1,
+        "eval_predict_and_score_call_id": "pas",
+        "weave_evaluation_root_call_id": "evaluation",
+        "trace_project": project,
+        "status": "passed",
+    }
+    with pytest.raises(KeyboardInterrupt):
+        agent_coordinator._materialize_native_agent_call(
+            active=export._LivePrediction(
+                session=SimpleNamespace(),
+                prediction=SimpleNamespace(),
+                bridge_call=bridge,
+                bridge_client=agent_client,
+                row=agent_row,
+                opened_monotonic=0.0,
+            ),
+            row=agent_row,
+            root={
+                "conversation_id": "conversation",
+                "trace_id": trace_id,
+                "span_id": "b" * 16,
+            },
+        )
+    assert agent_client.finished == [
+        {"status": "native_agent_receipt_create_interrupted"}
+    ]
+
+    hosted_client = InterruptingClient()
+    hosted_coordinator = coordinator_for(hosted_client)
+    evaluation = SimpleNamespace(
+        id="evaluation",
+        project_id=project,
+        parent_id=None,
+        trace_id=trace_id,
+    )
+    pas = SimpleNamespace(
+        id="pas",
+        project_id=project,
+        parent_id=evaluation.id,
+        trace_id=trace_id,
+    )
+    hosted_row = {
+        "run_id": "run-a",
+        "cell_id": "cell-a",
+        "attempt_id": "a" * 64,
+        "weave_evaluation_root_call_id": evaluation.id,
+        "eval_predict_and_score_call_id": pas.id,
+        "weave_prediction_call_id": "prediction",
+        "weave_dataset_ref": "weave:///entity/project/object/tasks:v1",
+        "weave_agent_bridge_call_id": "bridge",
+        "weave_agent_root_call_id": "agent",
+        "local_evidence_record_digest": "d" * 64,
+        "task_id": "task-a",
+        "candidate_id": "candidate-a",
+        "trial_index": 1,
+        "status": "passed",
+        "runtime_outcome": "completed",
+        "terminal_kind": "success",
+        "pass": True,
+        "comparison_evaluation_status": "scored",
+        "comparison_required_evaluation_complete": True,
+        "comparison_deterministic_scores": {"answer_correct": True},
+        "comparison_dimension_roles": {"answer_correct": "outcome"},
+    }
+    hosted_coordinator._prepare_hosted_evidence_verification_receipt(hosted_row)
+    hosted_row["weave_provisional_predict_and_score_output_digest"] = "e" * 64
+    hosted_coordinator._verify_provisional_hosted_records = lambda **_kwargs: {
+        "local_record_digest": "d" * 64,
+        "predict_and_score_output_digest": "e" * 64,
+        "provisional_score_set_digest": "f" * 64,
+        "provisional_score_call_set_digest": "1" * 64,
+    }
+    with pytest.raises(KeyboardInterrupt):
+        hosted_coordinator._publish_hosted_evidence_verification_receipt(
+            active=export._LivePrediction(
+                session=SimpleNamespace(),
+                prediction=SimpleNamespace(
+                    evaluate_call=evaluation,
+                    predict_and_score_call=pas,
+                    output={
+                        "canonical": False,
+                        "verification_status": "pending_terminal_reconciliation",
+                    },
+                ),
+                bridge_call=bridge,
+                bridge_client=hosted_client,
+                row=hosted_row,
+                opened_monotonic=0.0,
+            ),
+            row=hosted_row,
+        )
+    assert hosted_client.finished == [
+        {"status": "hosted_evidence_receipt_create_interrupted"}
+    ]
+    interrupted_receipt = hosted_client.calls[
+        hosted_row["weave_hosted_evidence_receipt_call_id"]
+    ]
+    assert interrupted_receipt.attributes["fugue.result.canonical"] is False
+    assert interrupted_receipt.attributes["fugue.evidence.status"] == (
+        "pending_terminal_readback"
+    )
+    assert interrupted_receipt.display_name.startswith("PENDING VERIFICATION ·")
+    assert interrupted_receipt.output == {
+        "status": "hosted_evidence_receipt_create_interrupted"
+    }
+
+    invalidation_client = InterruptingClient()
+    invalidation_coordinator = coordinator_for(invalidation_client)
+    invalidation_row = {
+        **hosted_row,
+        "evaluation_prediction_graph_verified": False,
+        "weave_provisional_predict_and_score_output_digest": "e" * 64,
+        "weave_provisional_score_set_digest": "f" * 64,
+    }
+    invalidation_active = export._LivePrediction(
+        session=SimpleNamespace(),
+        prediction=SimpleNamespace(
+            predict_and_score_call=pas,
+        ),
+        bridge_call=bridge,
+        bridge_client=invalidation_client,
+        row=invalidation_row,
+        opened_monotonic=0.0,
+    )
+    invalidation_coordinator._publish_hosted_evidence_invalidation_receipt(
+        active=invalidation_active,
+        row=invalidation_row,
+        error=RuntimeError("hosted graph did not reconcile"),
+    )
+    assert len(invalidation_client.finished) == 1
+    assert invalidation_client.finished[0]["canonical"] is False
+    assert invalidation_client.finished[0]["verification_status"] == "invalidated"
+    invalidation_call = next(iter(invalidation_client.calls.values()))
+    assert invalidation_call.parent_id is None
+    assert invalidation_call.output == invalidation_client.finished[0]
+    assert invalidation_row["hosted_evidence_invalidation_status"] == "verified"
+
+    # Host-only recovery reuses the same exact terminal invalidation. It does
+    # not rerun the Agent and does not create a second logical decision.
+    invalidation_coordinator._publish_hosted_evidence_invalidation_receipt(
+        active=invalidation_active,
+        row=invalidation_row,
+        error=RuntimeError("hosted graph did not reconcile"),
+    )
+    assert len(invalidation_client.calls) == 1
+    assert len(invalidation_client.finished) == 1
+
+
+def test_parented_hosted_invalidation_rejects_wrong_trace() -> None:
+    project = "entity/project"
+    trace_id = "a" * 32
+    client = _OutOfOrderWeaveClient(
+        project,
+        forbid_flush_while_evaluation_children_open=True,
+    )
+    original_create = client.create_call
+
+    def create_with_wrong_trace(*args, **kwargs):
+        call = original_create(*args, **kwargs)
+        call.trace_id = "b" * 32
+        return call
+
+    client.create_call = create_with_wrong_trace
+    coordinator = object.__new__(LiveEvaluationCoordinator)
+    coordinator.project = project
+    coordinator.weave = SimpleNamespace(get_client=lambda: client)
+    coordinator._weave_requires_reactivation = False
+    coordinator.trace_timeout_sec = 0
+    coordinator._cancellation_event = threading.Event()
+    pas = SimpleNamespace(
+        id="pas",
+        project_id=project,
+        parent_id="evaluation",
+        trace_id=trace_id,
+    )
+    row = {
+        "run_id": "run-a",
+        "cell_id": "cell-a",
+        "attempt_id": "a" * 64,
+        "task_id": "task-a",
+        "trial_index": 1,
+        "local_evidence_record_digest": "d" * 64,
+        "eval_predict_and_score_call_id": pas.id,
+        "weave_evaluation_root_call_id": "evaluation",
+        "weave_prediction_call_id": "prediction",
+        "weave_hosted_evidence_receipt_call_id": "receipt",
+        "weave_provisional_predict_and_score_output_digest": "e" * 64,
+        "weave_provisional_score_set_digest": "f" * 64,
+        "evaluation_prediction_graph_verified": True,
+    }
+    active = export._LivePrediction(
+        session=SimpleNamespace(),
+        prediction=SimpleNamespace(predict_and_score_call=pas),
+        bridge_call=SimpleNamespace(),
+        bridge_client=client,
+        row=row,
+        opened_monotonic=0.0,
+    )
+
+    with pytest.raises(RuntimeError, match="invalidation receipt changed identity"):
+        coordinator._publish_hosted_evidence_invalidation_receipt(
+            active=active,
+            row=row,
+            error=RuntimeError("hosted graph did not reconcile"),
+        )
 
 
 @pytest.mark.parametrize(
@@ -1458,9 +3061,7 @@ def test_live_evaluation_graph_rejects_navigation_only_or_wrong_ancestry(
 ) -> None:
     project = "entity/project"
     dataset = SimpleNamespace(
-        ref=SimpleNamespace(
-            uri="weave:///entity/project/object/tasks:dataset-v1"
-        )
+        ref=SimpleNamespace(uri="weave:///entity/project/object/tasks:dataset-v1")
     )
     evaluation = SimpleNamespace(
         dataset=dataset,
@@ -1472,18 +3073,14 @@ def test_live_evaluation_graph_rejects_navigation_only_or_wrong_ancestry(
         parent_id=None,
         trace_id="weave-trace",
         inputs={"self": evaluation},
-        ref=SimpleNamespace(
-            uri="weave:///entity/project/call/evaluation-root"
-        ),
+        ref=SimpleNamespace(uri="weave:///entity/project/call/evaluation-root"),
     )
     predict_and_score = SimpleNamespace(
         id="predict-and-score",
         project_id=project,
         parent_id=evaluation_call.id,
         trace_id=evaluation_call.trace_id,
-        ref=SimpleNamespace(
-            uri="weave:///entity/project/call/predict-and-score"
-        ),
+        ref=SimpleNamespace(uri="weave:///entity/project/call/predict-and-score"),
         ui_url="https://wandb.test/calls/predict-and-score",
     )
     predict = SimpleNamespace(
@@ -1494,11 +3091,6 @@ def test_live_evaluation_graph_rejects_navigation_only_or_wrong_ancestry(
         ref=SimpleNamespace(uri="weave:///entity/project/call/prediction"),
         ui_url="https://wandb.test/calls/prediction",
     )
-    logger = SimpleNamespace(
-        _pseudo_evaluation=evaluation,
-        _evaluate_call=evaluation_call,
-        ui_url="https://wandb.test/calls/evaluation-root",
-    )
     prediction = SimpleNamespace(
         evaluate_call=evaluation_call,
         predict_and_score_call=predict_and_score,
@@ -1508,9 +3100,7 @@ def test_live_evaluation_graph_rejects_navigation_only_or_wrong_ancestry(
         evaluation_call.inputs = {"self": SimpleNamespace(dataset=dataset)}
     elif drift == "dataset_owner":
         evaluation.dataset = SimpleNamespace(
-            ref=SimpleNamespace(
-                uri="weave:///entity/project/object/other-dataset:v1"
-            )
+            ref=SimpleNamespace(uri="weave:///entity/project/object/other-dataset:v1")
         )
     elif drift == "predict_and_score_parent":
         predict_and_score.parent_id = "other-evaluation"
@@ -1536,7 +3126,6 @@ def test_live_evaluation_graph_rejects_navigation_only_or_wrong_ancestry(
     )
     export._verify_live_evaluation_graph(
         row,
-        logger=logger,
         dataset=dataset,
         prediction=prediction,
         project=project,
@@ -1546,7 +3135,236 @@ def test_live_evaluation_graph_rejects_navigation_only_or_wrong_ancestry(
     assert row["evaluation_prediction_graph_error"]
 
 
-def test_claude_live_evaluation_opens_real_otel_parent_bridge() -> None:
+def test_live_evaluation_graph_resolves_immutable_evaluation_object_ref() -> None:
+    project = "entity/project"
+    dataset = SimpleNamespace(
+        ref=SimpleNamespace(uri="weave:///entity/project/object/tasks:dataset-v1")
+    )
+    evaluation = SimpleNamespace(
+        dataset=dataset,
+        ref=SimpleNamespace(uri="weave:///entity/project/object/eval:v1"),
+    )
+
+    class EvaluationObjectRef:
+        def __init__(self) -> None:
+            self.get_calls = 0
+
+        @staticmethod
+        def uri() -> str:
+            return "weave:///entity/project/object/eval:v1"
+
+        def get(self):
+            self.get_calls += 1
+            return evaluation
+
+    evaluation_ref = EvaluationObjectRef()
+    evaluation_call = SimpleNamespace(
+        id="evaluation-root",
+        project_id=project,
+        parent_id=None,
+        trace_id="weave-trace",
+        inputs={"self": evaluation_ref},
+        ref=SimpleNamespace(uri="weave:///entity/project/call/evaluation-root"),
+    )
+    predict_and_score = SimpleNamespace(
+        id="predict-and-score",
+        project_id=project,
+        parent_id=evaluation_call.id,
+        trace_id=evaluation_call.trace_id,
+    )
+    predict = SimpleNamespace(
+        id="prediction",
+        project_id=project,
+        parent_id=predict_and_score.id,
+        trace_id=evaluation_call.trace_id,
+    )
+    prediction = SimpleNamespace(
+        evaluate_call=evaluation_call,
+        predict_and_score_call=predict_and_score,
+        predict_call=predict,
+    )
+
+    row: dict[str, object] = {}
+    export._verify_live_evaluation_graph(
+        row,
+        dataset=dataset,
+        prediction=prediction,
+        project=project,
+    )
+
+    assert evaluation_ref.get_calls == 1
+    assert row["evaluation_root_object_verified"] is True
+    assert row["evaluation_root_dataset_relationship_verified"] is True
+    assert row["evaluation_prediction_graph_verified"] is True
+
+
+def test_evaluation_evidence_uses_hydrated_weave_object_without_resolving() -> None:
+    project = "entity/project"
+    dataset = SimpleNamespace(
+        ref=SimpleNamespace(uri="weave:///entity/project/object/tasks:dataset-v1")
+    )
+
+    class HydratedEvaluation:
+        ref = SimpleNamespace(uri="weave:///entity/project/object/eval:v1")
+
+        def __init__(self, owned_dataset) -> None:
+            self.dataset = owned_dataset
+
+        @staticmethod
+        def get():
+            raise AssertionError("a hydrated Evaluation must not resolve itself")
+
+    evaluation_call = SimpleNamespace(
+        id="evaluation-root",
+        project_id=project,
+        inputs={"self": HydratedEvaluation(dataset)},
+    )
+
+    def reject_resolution(_value):
+        raise AssertionError("a hydrated Evaluation must not use the resolver")
+
+    row: dict[str, object] = {}
+    export._apply_evaluation_evidence(
+        row,
+        evaluation_call=evaluation_call,
+        dataset=dataset,
+        project=project,
+        object_resolver=reject_resolution,
+    )
+
+    assert "evaluation_root_resolution_error" not in row
+    assert row["evaluation_root_object_verified"] is True
+    assert row["evaluation_root_dataset_relationship_verified"] is True
+
+
+def test_evaluation_evidence_resolves_ref_only_input_with_public_resolver() -> None:
+    project = "entity/project"
+    dataset = SimpleNamespace(
+        ref=SimpleNamespace(uri="weave:///entity/project/object/tasks:dataset-v1")
+    )
+    evaluation = SimpleNamespace(
+        ref=SimpleNamespace(uri="weave:///entity/project/object/eval:v1"),
+        dataset=dataset,
+    )
+
+    class EvaluationRef:
+        ref = SimpleNamespace(uri="weave:///entity/project/object/eval:v1")
+
+        @staticmethod
+        def get():
+            raise AssertionError("the configured public resolver must take precedence")
+
+    evaluation_ref = EvaluationRef()
+    resolved: list[object] = []
+
+    def resolve(value):
+        resolved.append(value)
+        return evaluation
+
+    row: dict[str, object] = {}
+    export._apply_evaluation_evidence(
+        row,
+        evaluation_call=SimpleNamespace(
+            id="evaluation-root",
+            project_id=project,
+            inputs={"self": evaluation_ref},
+        ),
+        dataset=dataset,
+        project=project,
+        object_resolver=resolve,
+    )
+
+    assert resolved == [evaluation_ref]
+    assert row["evaluation_root_object_verified"] is True
+    assert row["evaluation_root_dataset_relationship_verified"] is True
+
+
+def test_evaluation_evidence_fails_closed_for_broken_ref_only_resolver() -> None:
+    project = "entity/project"
+    dataset = SimpleNamespace(
+        ref=SimpleNamespace(uri="weave:///entity/project/object/tasks:dataset-v1")
+    )
+    evaluation_ref = SimpleNamespace(
+        uri=lambda: "weave:///entity/project/object/eval:v1"
+    )
+    row: dict[str, object] = {}
+
+    def broken_resolver(_value):
+        raise RuntimeError("object unavailable")
+
+    export._apply_evaluation_evidence(
+        row,
+        evaluation_call=SimpleNamespace(
+            id="evaluation-root",
+            project_id=project,
+            inputs={"self": evaluation_ref},
+        ),
+        dataset=dataset,
+        project=project,
+        object_resolver=broken_resolver,
+    )
+
+    assert row["evaluation_root_resolution_error"] == "RuntimeError"
+    assert row["evaluation_root_object_verified"] is False
+    assert row["evaluation_root_dataset_relationship_verified"] is False
+
+
+def test_live_evaluation_graph_fails_closed_when_object_ref_resolution_fails() -> None:
+    project = "entity/project"
+    dataset = SimpleNamespace(
+        ref=SimpleNamespace(uri="weave:///entity/project/object/tasks:dataset-v1")
+    )
+
+    class BrokenEvaluationObjectRef:
+        @staticmethod
+        def uri() -> str:
+            return "weave:///entity/project/object/eval:v1"
+
+        @staticmethod
+        def get():
+            raise RuntimeError("object unavailable")
+
+    evaluation_call = SimpleNamespace(
+        id="evaluation-root",
+        project_id=project,
+        parent_id=None,
+        trace_id="weave-trace",
+        inputs={"self": BrokenEvaluationObjectRef()},
+    )
+    predict_and_score = SimpleNamespace(
+        id="predict-and-score",
+        project_id=project,
+        parent_id=evaluation_call.id,
+        trace_id=evaluation_call.trace_id,
+    )
+    predict = SimpleNamespace(
+        id="prediction",
+        project_id=project,
+        parent_id=predict_and_score.id,
+        trace_id=evaluation_call.trace_id,
+    )
+
+    row: dict[str, object] = {}
+    export._verify_live_evaluation_graph(
+        row,
+        dataset=dataset,
+        prediction=SimpleNamespace(
+            evaluate_call=evaluation_call,
+            predict_and_score_call=predict_and_score,
+            predict_call=predict,
+        ),
+        project=project,
+    )
+
+    assert row["evaluation_root_resolution_error"] == "RuntimeError"
+    assert row["evaluation_root_object_verified"] is False
+    assert row["evaluation_root_dataset_relationship_verified"] is False
+    assert row["evaluation_prediction_graph_verified"] is False
+
+
+def test_claude_live_evaluation_opens_real_otel_parent_bridge(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     project = "entity/project"
     trace_id = "a" * 32
     prediction_call = SimpleNamespace(
@@ -1637,7 +3455,9 @@ def test_claude_live_evaluation_opens_real_otel_parent_bridge() -> None:
     assert bridge.id != bridge_parent_span
     assert row["weave_agent_bridge_parent_id"] == prediction_call.id
     assert row["weave_agent_bridge_trace_id"] == trace_id
-    assert row["weave_agent_bridge_object_verified"] is True
+    assert row["weave_agent_bridge_local_identity_verified"] is True
+    assert row["weave_agent_bridge_object_verified"] is False
+    assert created[0]["attributes"]["fugue.run_id"] == "run-bridge"
 
     active = export._LivePrediction(
         session=SimpleNamespace(),
@@ -1658,11 +3478,25 @@ def test_claude_live_evaluation_opens_real_otel_parent_bridge() -> None:
         status="linked",
         terminal_row=terminal_row,
     )
-    assert finished == [(bridge, {"status": "linked"})]
+    assert finished == [(bridge, {"agent_execution_status": "completed"})]
     assert row["weave_agent_bridge_close_status"] == "linked"
-    assert row["weave_agent_bridge_closed_verified"] is True
+    assert row["weave_agent_bridge_close_recorded"] is True
+    assert row["weave_agent_bridge_closed_verified"] is False
     assert terminal_row["weave_agent_bridge_close_status"] == "linked"
-    assert terminal_row["weave_agent_bridge_closed_verified"] is True
+    assert terminal_row["weave_agent_bridge_close_recorded"] is True
+    assert terminal_row["weave_agent_bridge_closed_verified"] is False
+
+    def interrupt_after_validation(*_args, **_kwargs) -> None:
+        raise KeyboardInterrupt
+
+    monkeypatch.setattr(export, "_apply_call_evidence", interrupt_after_validation)
+    with pytest.raises(KeyboardInterrupt):
+        coordinator._open_agent_bridge(
+            cell=cell,
+            row={},
+            prediction=SimpleNamespace(predict_call=prediction_call),
+        )
+    assert finished[-1][1] == {"status": "start_failed"}
 
     class FailingClient:
         @staticmethod
@@ -1682,16 +3516,67 @@ def test_claude_live_evaluation_opens_real_otel_parent_bridge() -> None:
     assert failed_row["weave_agent_bridge_closed_verified"] is False
     assert failed_row["weave_agent_bridge_close_error"] == "RuntimeError"
 
+    class InterruptingClient:
+        @staticmethod
+        def finish_call(call, output=None):
+            raise KeyboardInterrupt
+
+    interrupted_row: dict[str, object] = {}
+    coordinator._finish_agent_bridge(
+        export._LivePrediction(
+            session=SimpleNamespace(),
+            prediction=SimpleNamespace(),
+            bridge_call=bridge,
+            bridge_client=InterruptingClient(),
+            row=interrupted_row,
+            opened_monotonic=0.0,
+        ),
+        status="interrupted",
+    )
+    assert interrupted_row["weave_agent_bridge_closed_verified"] is False
+    assert interrupted_row["weave_agent_bridge_close_error"] == "KeyboardInterrupt"
+
 
 class _OutOfOrderWeaveClient:
     """Model Weave's async start/end queues with hostile flush ordering."""
 
-    def __init__(self, project: str, *, drop_ends: bool = False) -> None:
+    def __init__(
+        self,
+        project: str,
+        *,
+        drop_ends: bool = False,
+        forbid_flush_while_evaluation_children_open: bool = False,
+    ) -> None:
         self.project_id = project
         self.drop_ends = drop_ends
+        self.forbid_flush_while_evaluation_children_open = (
+            forbid_flush_while_evaluation_children_open
+        )
         self.pending: list[tuple[str, object, object]] = []
         self.remote: dict[str, dict[str, object]] = {}
+        self.public_calls: dict[str, object] = {}
         self.events: list[str] = []
+
+    def get_call(self, call_id: str):
+        self.events.append(f"get-call:{call_id}")
+        if call_id in self.public_calls:
+            return self.public_calls[call_id]
+        value = self.remote[call_id]
+        return SimpleNamespace(
+            id=value["call_id"],
+            parent_id=value.get("parent_id"),
+            project_id=value["project_id"],
+            trace_id=value["trace_id"],
+            ended_at="terminal" if value.get("terminal") else None,
+            inputs=value.get("inputs"),
+            output=value.get("output"),
+            attributes=value.get("attributes"),
+            display_name=value.get("display_name"),
+        )
+
+    @staticmethod
+    def get(ref):
+        return ref.get()
 
     def create_call(
         self,
@@ -1706,23 +3591,81 @@ class _OutOfOrderWeaveClient:
     ):
         call = SimpleNamespace(
             id=_call_id_override,
-            parent_id=parent.id,
+            parent_id=getattr(parent, "id", None),
             project_id=self.project_id,
-            trace_id=parent.trace_id,
+            trace_id=getattr(parent, "trace_id", None) or f"root-{_call_id_override}",
             op_name=str(op),
             attributes=attributes or {},
             inputs=inputs,
+            display_name=display_name,
+            output=None,
+            ended_at=None,
         )
+        def set_display_name(value: str) -> None:
+            call.display_name = value
+            if call.id in self.remote:
+                self.remote[call.id]["display_name"] = value
+
+        call.set_display_name = set_display_name
         self.pending.append(("start", call, None))
         self.events.append(f"start-scheduled:{call.id}")
         return call
 
     def finish_call(self, call, output=None):
+        if self.forbid_flush_while_evaluation_children_open:
+            start = next(
+                (
+                    item
+                    for item in self.pending
+                    if item[0] == "start" and item[1].id == call.id
+                ),
+                None,
+            )
+            if start is not None:
+                self.pending.remove(start)
+                self.remote[call.id] = {
+                    "call_id": call.id,
+                    "parent_id": call.parent_id,
+                    "project_id": call.project_id,
+                    "trace_id": call.trace_id,
+                    "terminal": True,
+                    "attributes": dict(call.attributes),
+                    "inputs": dict(call.inputs),
+                    "output": output,
+                    "display_name": call.display_name,
+                }
+                self.events.append(f"calls-complete-published:{call.id}")
+                return
         self.pending.append(("end", call, output))
         self.events.append(f"end-scheduled:{call.id}")
 
     def flush(self) -> None:
+        if self.forbid_flush_while_evaluation_children_open and any(
+            getattr(call, "parent_id", None)
+            and getattr(call, "ended_at", None) is None
+            for call in self.public_calls.values()
+        ):
+            raise AssertionError(
+                "full flush would wait for open prediction-and-score Calls"
+            )
+        self.events.append("flush")
         pending, self.pending = self.pending, []
+        if self.forbid_flush_while_evaluation_children_open:
+            starts = {call.id: call for kind, call, _ in pending if kind == "start"}
+            ends = {call.id: output for kind, call, output in pending if kind == "end"}
+            for call_id, call in starts.items():
+                self.remote[call_id] = {
+                    "call_id": call.id,
+                    "parent_id": call.parent_id,
+                    "project_id": call.project_id,
+                    "trace_id": call.trace_id,
+                    "terminal": call_id in ends,
+                    "attributes": dict(call.attributes),
+                    "inputs": dict(call.inputs),
+                    "output": ends.get(call_id),
+                    "display_name": call.display_name,
+                }
+            return
         # If start and end are flushed together, process the end first. That
         # reproduces the SDK race which dropped the V5 terminal update.
         for kind, call, output in reversed(pending):
@@ -1734,6 +3677,8 @@ class _OutOfOrderWeaveClient:
                     "trace_id": call.trace_id,
                     "terminal": False,
                     "attributes": dict(call.attributes),
+                    "inputs": dict(call.inputs),
+                    "display_name": call.display_name,
                 }
                 self.events.append(f"start-published:{call.id}")
             elif self.drop_ends or call.id not in self.remote:
@@ -1806,7 +3751,10 @@ def test_claude_call_lifecycle_flushes_start_before_end_across_a_b_a(
 ) -> None:
     project_a = "entity/project-a"
     project_b = "entity/project-b"
-    client_a = _OutOfOrderWeaveClient(project_a)
+    client_a = _OutOfOrderWeaveClient(
+        project_a,
+        forbid_flush_while_evaluation_children_open=True,
+    )
     client_b = _OutOfOrderWeaveClient(project_b)
     clients = {project_a: client_a, project_b: client_b}
     active = {"client": client_b}
@@ -1871,6 +3819,7 @@ def test_claude_call_lifecycle_flushes_start_before_end_across_a_b_a(
         "comparison_example_id": "example-a",
         "trial_index": 1,
         "eval_predict_and_score_call_id": "predict-and-score",
+        "weave_evaluation_root_call_id": "evaluation",
         "trace_project": project_a,
         "status": "passed",
         "agent_response_sha256": "f" * 64,
@@ -1881,8 +3830,7 @@ def test_claude_call_lifecycle_flushes_start_before_end_across_a_b_a(
         row=row,
         prediction=SimpleNamespace(predict_call=prediction_call),
     )
-    assert row["weave_agent_bridge_start_verified"] is True
-    activate(project_b, {})
+    assert row["weave_agent_bridge_start_verified"] is False
     active_prediction = export._LivePrediction(
         session=SimpleNamespace(),
         prediction=SimpleNamespace(),
@@ -1902,7 +3850,6 @@ def test_claude_call_lifecycle_flushes_start_before_end_across_a_b_a(
         row=row,
         root=root,
     )
-    activate(project_b, {})
     coordinator._finish_agent_bridge(
         active_prediction,
         status="agent_completed",
@@ -1910,27 +3857,17 @@ def test_claude_call_lifecycle_flushes_start_before_end_across_a_b_a(
     )
 
     native_id = str(row["weave_agent_root_call_id"])
-    assert activations == [
-        project_a,
-        project_b,
-        project_a,
-        project_b,
-        project_a,
-    ]
+    assert activations == [project_a, project_a, project_a, project_a]
     assert client_a.remote[native_id]["terminal"] is True
     assert client_a.remote[bridge.id]["terminal"] is True
-    assert row["weave_agent_root_call_start_verified"] is True
-    assert row["weave_agent_root_call_terminal_verified"] is True
-    assert row["weave_agent_bridge_closed_verified"] is True
-    assert f"start-published:{native_id}" in client_a.events
-    assert client_a.events.index(f"start-published:{native_id}") < (
-        client_a.events.index(f"end-published:{native_id}")
-    )
-    assert f"end-dropped:{native_id}" not in client_a.events
+    assert row["weave_agent_root_call_start_verified"] is False
+    assert row["weave_agent_root_call_terminal_verified"] is False
+    assert row["weave_agent_bridge_closed_verified"] is False
+    assert f"calls-complete-published:{native_id}" in client_a.events
     assert client_b.remote == {}
 
 
-def test_claude_native_call_rejects_a_missing_remote_terminal_end() -> None:
+def test_claude_native_call_keeps_missing_remote_terminal_end_pending() -> None:
     project = "entity/project"
     client = _OutOfOrderWeaveClient(project, drop_ends=True)
     bridge = SimpleNamespace(
@@ -1960,6 +3897,7 @@ def test_claude_native_call_rejects_a_missing_remote_terminal_end() -> None:
         "comparison_example_id": "example-a",
         "trial_index": 1,
         "eval_predict_and_score_call_id": "predict-and-score",
+        "weave_evaluation_root_call_id": "evaluation",
         "trace_project": project,
         "status": "passed",
     }
@@ -1972,26 +3910,27 @@ def test_claude_native_call_rejects_a_missing_remote_terminal_end() -> None:
         opened_monotonic=0.0,
     )
 
-    with pytest.raises(
-        RuntimeError,
-        match="Agent evidence receipt end was not durably published",
-    ):
-        coordinator._materialize_native_agent_call(
-            active=active_prediction,
-            row=row,
-            root={
-                "conversation_id": "native-session",
-                "trace_id": "a" * 32,
-                "span_id": "c" * 16,
-            },
-        )
+    coordinator._materialize_native_agent_call(
+        active=active_prediction,
+        row=row,
+        root={
+            "conversation_id": "native-session",
+            "trace_id": "a" * 32,
+            "span_id": "c" * 16,
+        },
+    )
 
     native_id = str(row["weave_agent_root_call_id"])
-    assert client.remote[native_id]["terminal"] is False
-    assert row["weave_agent_root_call_start_verified"] is True
+    assert native_id not in client.remote
+    assert row["weave_agent_root_call_start_verified"] is False
     assert row["weave_agent_root_call_terminal_verified"] is False
-    assert "weave_agent_root_call_object_created" not in row
-    assert f"end-dropped:{native_id}" in client.events
+    assert row["weave_agent_root_call_object_created"] is True
+    assert row["weave_agent_root_call_terminal_recorded"] is True
+    assert (
+        row["weave_agent_root_call_publication_status"]
+        == "pending_terminal_reconciliation"
+    )
+    assert f"end-scheduled:{native_id}" in client.events
 
 
 def test_claude_live_evaluation_normalizes_weave_uuid_traceparent() -> None:
@@ -2021,9 +3960,7 @@ def test_claude_live_evaluation_normalizes_weave_uuid_traceparent() -> None:
                 parent_id=parent.id,
                 project_id=project,
                 trace_id=parent.trace_id,
-                ref=SimpleNamespace(
-                    uri=f"weave:///{project}/call/{_call_id_override}"
-                ),
+                ref=SimpleNamespace(uri=f"weave:///{project}/call/{_call_id_override}"),
             )
 
         @staticmethod
@@ -2069,7 +4006,7 @@ def test_claude_live_evaluation_normalizes_weave_uuid_traceparent() -> None:
     assert len(bridge_parent_span) == 16
     assert row["weave_agent_bridge_cross_transport_edge"] == {
         "schema_version": 1,
-        "status": "verified",
+        "status": "local_recorded",
         "weave_call_id": bridge.id,
         "otel_trace_id": compact,
         "otel_span_id": bridge_parent_span,
@@ -2078,7 +4015,9 @@ def test_claude_live_evaluation_normalizes_weave_uuid_traceparent() -> None:
     assert row["weave_agent_bridge_otel_trace_id"] == compact
 
 
-def test_claude_materializes_real_call_from_verified_native_otel_root() -> None:
+def test_claude_materializes_real_call_from_verified_native_otel_root(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     project = "entity/project"
     weave_trace_id = "019fb117-8955-7662-8225-67228a32b976"
     bridge = SimpleNamespace(
@@ -2137,6 +4076,7 @@ def test_claude_materializes_real_call_from_verified_native_otel_root() -> None:
         "comparison_example_id": "example-a",
         "trial_index": 1,
         "eval_predict_and_score_call_id": "predict-and-score",
+        "weave_evaluation_root_call_id": "evaluation",
         "trace_project": project,
         "status": "passed",
         "agent_response_sha256": "f" * 64,
@@ -2168,6 +4108,7 @@ def test_claude_materializes_real_call_from_verified_native_otel_root() -> None:
         "native_agent_root_cross_transport_receipt"
     )
     assert created[0]["attributes"]["fugue.attempt_id"] == "a" * 64
+    assert created[0]["attributes"]["fugue.run_id"] == "run-a"
     assert len(str(created[0]["id"])) == 36
     assert str(export.uuid.UUID(str(created[0]["id"]))) == created[0]["id"]
     assert created[0]["id"] != root["span_id"]
@@ -2180,8 +4121,35 @@ def test_claude_materializes_real_call_from_verified_native_otel_root() -> None:
         "native_otel_cross_transport_receipt_v1"
     )
     assert row["weave_agent_root_is_native_call"] is False
-    assert row["agent_cross_transport_edge"]["status"] == "verified"
+    assert row["agent_cross_transport_edge"]["status"] == "local_recorded"
+    assert created[0]["attributes"][
+        "fugue.evidence.cross_transport_edge_status"
+    ] == "local_recorded"
     assert row["weave_agent_root_call_otel_span_id"] == "b" * 16
+
+    original_finish = coordinator._finish_evidence_call
+    finish_attempts = 0
+
+    def interrupt_first_finish(*args, **kwargs):
+        nonlocal finish_attempts
+        finish_attempts += 1
+        if finish_attempts == 1:
+            raise KeyboardInterrupt
+        return original_finish(*args, **kwargs)
+
+    monkeypatch.setattr(
+        coordinator,
+        "_finish_evidence_call",
+        interrupt_first_finish,
+    )
+    with pytest.raises(KeyboardInterrupt):
+        coordinator._materialize_native_agent_call(
+            active=active,
+            row=dict(row),
+            root=root,
+        )
+    assert finish_attempts == 2
+    assert finished[-1][1]["cleanup_after_failure"] is True
 
 
 def test_verified_native_claude_root_requires_bridge_otel_parent() -> None:
@@ -2248,7 +4216,7 @@ def test_verified_native_root_rejects_missing_bridge_otel_parent_identity() -> N
 
 
 @pytest.mark.parametrize("harness", ["hermes", "openclaw", "claude-code", "codex"])
-def test_agent_trace_is_remotely_verified_before_evaluation_output(
+def test_agent_trace_stays_pending_until_evaluation_output_closes(
     monkeypatch: pytest.MonkeyPatch,
     harness: str,
 ) -> None:
@@ -2269,16 +4237,14 @@ def test_agent_trace_is_remotely_verified_before_evaluation_output(
     coordinator.project = "entity/project"
     coordinator._wait_for_trace = lambda row, **kwargs: {}
     coordinator._append_event = lambda *args, **kwargs: None
-    coordinator._record_verified_agent_root = (
-        lambda **kwargs: (
-            events.append("verified"),
-            kwargs["row"].update(
-                {
-                    "trace_link_status": "linked",
-                    "trace_link_error": None,
-                }
-            ),
-        )
+    coordinator._record_verified_agent_root = lambda **kwargs: (
+        events.append("verified"),
+        kwargs["row"].update(
+            {
+                "trace_link_status": "linked",
+                "trace_link_error": None,
+            }
+        ),
     )
     monkeypatch.setattr(
         export,
@@ -2293,9 +4259,7 @@ def test_agent_trace_is_remotely_verified_before_evaluation_output(
     monkeypatch.setattr(
         export,
         "_verify_authoritative_agent_graph",
-        lambda row: row.update(
-            {"weave_authoritative_call_graph_verified": True}
-        ),
+        lambda row: row.update({"weave_authoritative_call_graph_verified": True}),
     )
     cell = SimpleNamespace(
         harness=harness,
@@ -2309,9 +4273,7 @@ def test_agent_trace_is_remotely_verified_before_evaluation_output(
     }
     active = export._LivePrediction(
         session=SimpleNamespace(),
-        prediction=SimpleNamespace(
-            predict_and_score_call=SimpleNamespace(summary={})
-        ),
+        prediction=SimpleNamespace(predict_and_score_call=SimpleNamespace(summary={})),
         bridge_call=SimpleNamespace(
             id="bridge",
             project_id="entity/project",
@@ -2328,41 +4290,20 @@ def test_agent_trace_is_remotely_verified_before_evaluation_output(
         predict_and_score_call_id="predict-and-score",
     )
 
-    assert events == ["bridge-finished", "verified"]
-    assert export._evaluation_output(row)["trace_link_status"] == "linked"
-    assert "remote_verification_pending" not in json.dumps(row)
-
-
-def test_live_evaluation_marks_exact_prediction_ops_eager() -> None:
-    def predict_and_score() -> None:
-        return None
-
-    def predict() -> None:
-        return None
-
-    predict_and_score.eager_call_start = False
-    predict.eager_call_start = False
-    logger_type = type("EvaluationLogger", (), {})
-    logger_type.__module__ = "weave.evaluation.eval_imperative"
-    logger = logger_type()
-    logger._pseudo_evaluation = SimpleNamespace(
-        predict_and_score=predict_and_score
+    assert events == ["bridge-finished"]
+    assert row["trace_link_status"] == "pending_terminal_reconciliation"
+    assert (
+        export._evaluation_output(row)["trace_link_status"]
+        == "pending_terminal_reconciliation"
     )
-    logger._context_predict_method = predict
-
-    assert export._enable_eager_evaluation_starts(logger) is True
-    assert predict_and_score.eager_call_start is True
-    assert predict.eager_call_start is True
 
 
-def test_real_live_evaluation_fails_closed_without_eager_ops() -> None:
-    logger_type = type("EvaluationLogger", (), {})
-    logger_type.__module__ = "weave.evaluation.eval_imperative"
-    logger = logger_type()
-    logger._pseudo_evaluation = SimpleNamespace()
-    logger._context_predict_method = None
+def test_live_evaluation_uses_only_public_prediction_call_handles() -> None:
+    source = Path(export.__file__).read_text(encoding="utf-8")
 
-    assert export._enable_eager_evaluation_starts(logger) is False
+    assert "_pseudo_evaluation" not in source
+    assert "prediction.evaluate_call" in source
+    assert "prediction.predict_and_score_call" in source
 
 
 def test_claude_begin_failure_closes_entered_prediction(
@@ -2390,11 +4331,11 @@ def test_claude_begin_failure_closes_entered_prediction(
 
     prediction = FakePrediction()
 
-    class FakeLogger:
+    class FakeLogger(_PublicEvaluationLoggerMixin):
         def __init__(self, **kwargs) -> None:
             self.__dict__.update(kwargs)
 
-        def log_prediction(self, inputs):
+        def log_prediction(self, inputs, **_metadata):
             return prediction
 
     cell = PlannedCell(
@@ -2431,7 +4372,7 @@ def test_claude_begin_failure_closes_entered_prediction(
 
     with pytest.raises(
         RuntimeError,
-        match="Evaluation graph is unresolved before Agent execution",
+        match="did not return its public Evaluation Call",
     ):
         coordinator.begin_cell(cell)
 
@@ -2441,8 +4382,7 @@ def test_claude_begin_failure_closes_entered_prediction(
     statuses = [
         json.loads(line)["status"]
         for line in (
-            tmp_path
-            / ".fugue/runtime/run-claude-start-failure/evaluations.jsonl"
+            tmp_path / ".fugue/runtime/run-claude-start-failure/evaluations.jsonl"
         )
         .read_text()
         .splitlines()
@@ -2450,10 +4390,956 @@ def test_claude_begin_failure_closes_entered_prediction(
     assert statuses == ["pending", "prediction_start_failed"]
 
 
+def test_live_eager_root_failure_withholds_task_verdict_and_scores(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    class FakeDataset:
+        def __init__(self, **kwargs) -> None:
+            self.__dict__.update(kwargs)
+
+    class Prediction:
+        def __init__(self) -> None:
+            self.predict_and_score_call = SimpleNamespace(
+                id="predict-and-score",
+                project_id="entity/project",
+                summary=None,
+            )
+            self.output = None
+            self.scores: dict[str, object] = {}
+            self.exit_args: list[tuple[object, object, object]] = []
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, exc_type, exc, traceback) -> None:
+            self.exit_args.append((exc_type, exc, traceback))
+
+    prediction = _attach_public_call_handles(Prediction())
+
+    class FakeLogger:
+        def __init__(self, **_kwargs) -> None:
+            pass
+
+        @staticmethod
+        def log_prediction(inputs, **_metadata):
+            del inputs
+            return prediction
+
+    original_planned_row = export._planned_evaluation_row
+
+    def planned_row_with_stale_scores(cell: PlannedCell) -> dict[str, object]:
+        row = original_planned_row(cell)
+        row.update(
+            {
+                "pass": False,
+                "comparison_deterministic_scores": {"tool.answer_correct": False},
+                "comparison_dimension_roles": {"tool.answer_correct": "outcome"},
+                "comparison_score_details": {
+                    "tool.answer_correct": {"observed": "missing"}
+                },
+            }
+        )
+        return row
+
+    monkeypatch.setattr(export, "_planned_evaluation_row", planned_row_with_stale_scores)
+    captured_row: dict[str, object] = {}
+    original_output = export._evaluation_output
+
+    def capture_output(row, **kwargs):
+        captured_row.update(row)
+        return original_output(row, **kwargs)
+
+    monkeypatch.setattr(export, "_evaluation_output", capture_output)
+    cell = _live_test_cell(
+        cell_id="cell-eager-root-failure",
+        run_id="run-eager-root-failure",
+    )
+    coordinator = LiveEvaluationCoordinator(
+        [cell],
+        repo_root=tmp_path,
+        project="entity/project",
+        env=cell.env,
+        weave_module=SimpleNamespace(
+            Dataset=FakeDataset,
+            EvaluationLogger=FakeLogger,
+        ),
+    )
+    coordinator._verify_eager_evaluation_root = (
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(
+            RuntimeError("eager Evaluation root is unavailable")
+        )
+    )
+
+    with pytest.raises(RuntimeError, match="eager Evaluation root is unavailable"):
+        coordinator.begin_cell(cell)
+
+    assert captured_row["pass"] is None
+    assert captured_row["benchmark_outcome"] == "unscored"
+    assert captured_row["runtime_outcome"] == "not_started"
+    assert captured_row["terminal_kind"] == "evidence_failure"
+    assert captured_row["evidence_integrity_status"] == "invalid"
+    assert captured_row["comparison_evaluation_status"] == "unavailable"
+    assert captured_row["comparison_required_evaluation_complete"] is False
+    assert "comparison_deterministic_scores" not in captured_row
+    assert "comparison_dimension_roles" not in captured_row
+    assert "comparison_score_details" not in captured_row
+    assert prediction.scores == {}
+    assert prediction.output["provisional_status"] == "unscored"
+    assert prediction.output["canonical"] is False
+    assert prediction.output["agent_execution_status"] == "not_started"
+    assert prediction.output["evidence_integrity_status"] == "invalid"
+    assert "task_result" not in prediction.output
+    assert "score_details" not in prediction.output
+    assert len(prediction.exit_args) == 1
+    assert prediction.exit_args[0][0] is RuntimeError
+    assert coordinator._predictions == {}
+
+
+@pytest.mark.parametrize(
+    ("runtime_outcome", "passed"),
+    (("completed", True), ("timed_out", False)),
+)
+def test_evaluation_output_keeps_task_verdict_for_behavioral_terminal_states(
+    runtime_outcome: str,
+    passed: bool,
+) -> None:
+    output = export._evaluation_output(
+        {
+            "record_type": "trial",
+            "execution_kind": "agent",
+            "task_id": "task-a",
+            "status": "passed" if passed else "failed",
+            "runtime_outcome": runtime_outcome,
+            "pass": passed,
+            "evidence_integrity_status": "verified",
+        }
+    )
+
+    assert output["task_result"]["task_passed"] is passed
+    assert output["task_result"]["agent_execution_status"] == runtime_outcome
+    assert output["agent_execution_status"] == runtime_outcome
+
+    legacy = export._evaluation_output(
+        {
+            "record_type": "trial",
+            "execution_kind": "agent",
+            "task_id": "legacy-task",
+            "status": "failed",
+            "pass": False,
+            "evidence_integrity_status": "verified",
+        }
+    )
+    assert legacy["task_result"]["task_passed"] is False
+
+
+def test_live_begin_closes_prediction_when_enter_is_interrupted(tmp_path: Path) -> None:
+    class InterruptedPrediction:
+        def __init__(self) -> None:
+            self.predict_and_score_call = SimpleNamespace(id="pas-a")
+            self.output = None
+            self.exit_count = 0
+
+        def __enter__(self):
+            raise KeyboardInterrupt
+
+        def __exit__(self, exc_type, exc, traceback) -> None:
+            self.exit_count += 1
+
+    prediction = InterruptedPrediction()
+
+    class FakeLogger:
+        def __init__(self, **_kwargs) -> None:
+            pass
+
+        @staticmethod
+        def log_prediction(inputs, **_metadata):
+            del inputs
+            return prediction
+
+    cell = _live_test_cell(
+        cell_id="cell-enter-interrupt",
+        run_id="run-enter-interrupt",
+    )
+    coordinator = LiveEvaluationCoordinator(
+        [cell],
+        repo_root=tmp_path,
+        project="entity/project",
+        env=cell.env,
+        weave_module=SimpleNamespace(EvaluationLogger=FakeLogger),
+    )
+
+    with pytest.raises(KeyboardInterrupt):
+        coordinator.begin_cell(cell)
+
+    assert prediction.exit_count == 1
+    assert coordinator._predictions == {}
+
+
+def test_live_begin_closes_prediction_when_bridge_create_is_interrupted(
+    tmp_path: Path,
+) -> None:
+    class Prediction:
+        def __init__(self) -> None:
+            self.predict_and_score_call = SimpleNamespace(
+                id="pas-a",
+                project_id="entity/project",
+                summary=None,
+                display_name=None,
+            )
+            self.output = None
+            self.exit_count = 0
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, exc_type, exc, traceback) -> None:
+            self.exit_count += 1
+
+    prediction = _attach_public_call_handles(Prediction())
+
+    class FakeLogger:
+        def __init__(self, **_kwargs) -> None:
+            pass
+
+        @staticmethod
+        def log_prediction(inputs, **_metadata):
+            del inputs
+            return prediction
+
+    class InterruptedClient:
+        project_id = "entity/project"
+
+        @staticmethod
+        def create_call(*_args, **_kwargs):
+            raise KeyboardInterrupt
+
+    client = InterruptedClient()
+    cell = _live_test_cell(
+        cell_id="cell-bridge-interrupt",
+        run_id="run-bridge-interrupt",
+    )
+    coordinator = LiveEvaluationCoordinator(
+        [cell],
+        repo_root=tmp_path,
+        project="entity/project",
+        env=cell.env,
+        weave_module=SimpleNamespace(
+            EvaluationLogger=FakeLogger,
+            get_client=lambda: client,
+        ),
+    )
+
+    def verify_root(row, **_kwargs) -> None:
+        row["evaluation_root_dataset_relationship_verified"] = True
+
+    coordinator._verify_eager_evaluation_root = verify_root
+
+    with pytest.raises(KeyboardInterrupt):
+        coordinator.begin_cell(cell)
+
+    assert prediction.exit_count == 1
+    assert coordinator._predictions == {}
+
+
+@pytest.mark.parametrize("phase", ("display", "reconcile"))
+def test_live_finish_records_interruption_without_open_prediction(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    phase: str,
+) -> None:
+    class Prediction:
+        def __init__(self) -> None:
+            self.predict_and_score_call = SimpleNamespace(
+                id="pas-a",
+                project_id="entity/project",
+                summary=None,
+            )
+            self.output = None
+            self.scores: dict[str, object] = {}
+            self.exit_count = 0
+
+        def __enter__(self):
+            return self
+
+        def log_score(self, name, value) -> None:
+            self.scores[name] = value
+
+        def __exit__(self, exc_type, exc, traceback) -> None:
+            self.exit_count += 1
+
+    prediction = _attach_public_call_handles(Prediction())
+
+    class FakeLogger:
+        def __init__(self, **_kwargs) -> None:
+            pass
+
+        @staticmethod
+        def log_prediction(inputs, **_metadata):
+            del inputs
+            return prediction
+
+    cell = _live_test_cell(
+        cell_id=f"cell-finish-{phase}",
+        run_id=f"run-finish-{phase}",
+    )
+    coordinator = LiveEvaluationCoordinator(
+        [cell],
+        repo_root=tmp_path,
+        project="entity/project",
+        env=cell.env,
+        weave_module=SimpleNamespace(EvaluationLogger=FakeLogger),
+    )
+    _stub_live_agent_bridge(monkeypatch, coordinator)
+    coordinator._prepare_terminal_agent_trace = lambda **_kwargs: None
+    coordinator.begin_cell(cell)
+    if phase == "display":
+        monkeypatch.setattr(
+            export,
+            "_set_prediction_display_names",
+            lambda *_args, **_kwargs: (_ for _ in ()).throw(KeyboardInterrupt()),
+        )
+    else:
+        coordinator._reconcile_terminal_hosted_evidence = (
+            lambda **_kwargs: (_ for _ in ()).throw(KeyboardInterrupt())
+        )
+
+    with pytest.raises(KeyboardInterrupt):
+        coordinator.finish_cell(
+            cell,
+            CellOutcome(cell.id, "passed", returncode=0),
+        )
+
+    assert coordinator._predictions == {}
+    assert prediction.exit_count == 1
+    rows = [
+        json.loads(line)
+        for line in coordinator.results_path.read_text().splitlines()
+        if line.strip()
+    ]
+    assert len(rows) == 1
+    assert rows[0]["hosted_terminal_interruption"] == "KeyboardInterrupt"
+    events = [
+        json.loads(line)["status"]
+        for line in coordinator.events_path.read_text().splitlines()
+        if line.strip()
+    ]
+    assert events.count("interrupted") == 1
+
+
+@pytest.mark.parametrize("failure_stage", ("reconciliation", "negative_routing"))
+def test_live_reconciliation_failure_withholds_all_behavioral_claims(  # noqa: C901
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    failure_stage: str,
+) -> None:
+    active_attributes: list[dict[str, object]] = []
+
+    class AttributeContext:
+        def __init__(self, values) -> None:
+            self.values = dict(values)
+
+        def __enter__(self):
+            active_attributes.append(self.values)
+
+        def __exit__(self, exc_type, exc, traceback) -> None:
+            assert active_attributes.pop() == self.values
+
+    def attributes(values):
+        return AttributeContext(values)
+
+    def current_attributes():
+        return {
+            key: value
+            for context in active_attributes
+            for key, value in context.items()
+        }
+
+    client = _OutOfOrderWeaveClient(
+        "entity/project",
+        forbid_flush_while_evaluation_children_open=True,
+    )
+
+    class Prediction:
+        def __init__(self) -> None:
+            self.predict_and_score_call = SimpleNamespace(
+                id="pas-a",
+                project_id="entity/project",
+                summary=None,
+                display_name=None,
+                attributes=current_attributes(),
+                ended_at=None,
+                output=None,
+            )
+            self.output = None
+            self.scores: dict[str, object] = {}
+            self.score_calls = []
+
+        def __enter__(self):
+            return self
+
+        def log_score(self, name, value=...):
+            if value is not ...:
+                self.scores[name] = value
+                return None
+            score_call = SimpleNamespace(
+                id=f"pas-a-score-{len(self.score_calls) + 1}",
+                project_id="entity/project",
+                parent_id="pas-a",
+                trace_id="a" * 32,
+                attributes=current_attributes(),
+                display_name=None,
+                output=None,
+                ended_at=None,
+            )
+            self.score_calls.append(score_call)
+            client.public_calls[score_call.id] = score_call
+            prediction = self
+
+            class ScoreContext:
+                def __init__(self) -> None:
+                    self.score_call = score_call
+                    self.value = None
+
+                def __enter__(self):
+                    return self
+
+                def __exit__(self, exc_type, exc, traceback) -> None:
+                    score_call.output = self.value
+                    score_call.ended_at = "terminal"
+                    prediction.scores[name] = self.value
+
+            return ScoreContext()
+
+        def __exit__(self, exc_type, exc, traceback) -> None:
+            self.predict_and_score_call.output = {
+                "output": self.output,
+                "scores": dict(self.scores),
+                "model_latency": None,
+            }
+            self.predict_and_score_call.ended_at = "terminal"
+            self.predict_call.output = self.output
+            self.predict_call.ended_at = "terminal"
+
+    predictions = []
+
+    class FakeLogger:
+        def __init__(self, **_kwargs) -> None:
+            pass
+
+        @staticmethod
+        def log_prediction(inputs, **_metadata):
+            del inputs
+            prediction = _attach_public_call_handles(Prediction())
+            prediction.predict_call.attributes = current_attributes()
+            prediction.predict_call.display_name = None
+            prediction.predict_call.output = None
+            prediction.predict_call.ended_at = None
+            client.public_calls["pas-a"] = prediction.predict_and_score_call
+            client.public_calls["pas-a-prediction"] = prediction.predict_call
+            predictions.append(prediction)
+            return prediction
+
+    def score_row(row: dict[str, object]) -> None:
+        row.update(
+            {
+                "pass": True,
+                "comparison_evaluation_status": "scored",
+                "comparison_required_evaluation_complete": True,
+                "comparison_deterministic_scores": {"answer_correct": True},
+                "comparison_dimension_roles": {"answer_correct": "outcome"},
+                "comparison_score_details": {
+                    "answer_correct": {
+                        "what": "Checks the answer.",
+                        "observed": "The answer matched.",
+                        "why": "Correctness is required.",
+                    }
+                },
+                "comparison_judge_scores": {"usefulness": 0.9},
+                "comparison_judges": {"usefulness": {"status": "scored"}},
+                "comparison_mechanism": {"tool_used": True},
+                "treatment_use_evidence": {"invoked": "observed"},
+                "agent_response": "stale answer",
+                "agent_response_sha256": "a" * 64,
+                "agent_response_bytes": 12,
+                "task_result": {
+                    "schema_version": 1,
+                    "task_passed": True,
+                    "outcome_summary": "The task passed.",
+                    "failed_required_checks": [],
+                    "answer_digest": "a" * 64,
+                    "agent_execution_status": "completed",
+                    "evidence_integrity_status": "verified",
+                },
+                "local_evidence_record_digest": "d" * 64,
+            }
+        )
+
+    cell = _live_test_cell(
+        cell_id="cell-reconciliation-failure",
+        run_id="run-reconciliation-failure",
+    )
+    coordinator = LiveEvaluationCoordinator(
+        [cell],
+        repo_root=tmp_path,
+        project="entity/project",
+        env=cell.env,
+        weave_module=SimpleNamespace(
+            EvaluationLogger=FakeLogger,
+            attributes=attributes,
+            get_client=lambda: client,
+        ),
+        host_evaluator=score_row,
+    )
+    _stub_live_agent_bridge(monkeypatch, coordinator)
+    coordinator._open_agent_bridge = lambda **_kwargs: (
+        SimpleNamespace(
+            id="bridge-a",
+            project_id="entity/project",
+            trace_id="a" * 32,
+        ),
+        client,
+        f"00-{'a' * 32}-{'b' * 16}-01",
+    )
+    coordinator._prepare_terminal_agent_trace = lambda **_kwargs: None
+    if failure_stage == "negative_routing":
+        coordinator._evidence_checkpoint_cells = 1
+        coordinator._negative_routing_receipt = lambda _row: {"status": "failed"}
+        coordinator._reconcile_terminal_hosted_evidence = (
+            lambda **_kwargs: (_ for _ in ()).throw(
+                AssertionError("negative-routing failure must stop reconciliation")
+            )
+        )
+    else:
+        coordinator._reconcile_terminal_hosted_evidence = (
+            lambda **_kwargs: (_ for _ in ()).throw(
+                RuntimeError("hosted graph did not reconcile")
+            )
+        )
+    coordinator.begin_cell(cell)
+    prediction = predictions[0]
+    if failure_stage == "negative_routing":
+        # The combined local-first path supplies its already-scored canonical
+        # row before the hosted negative-routing gate runs.
+        score_row(coordinator._predictions[cell.id].row)
+
+    coordinator.finish_cell(
+        cell,
+        CellOutcome(
+            cell.id,
+            "passed",
+            returncode=0,
+            benchmark_outcome="passed",
+            runtime_outcome="completed",
+            terminal_kind="success",
+        ),
+    )
+
+    [row] = [
+        json.loads(line)
+        for line in coordinator.results_path.read_text().splitlines()
+        if line.strip()
+    ]
+    assert row["runtime_outcome"] == "completed"
+    assert row["terminal_kind"] == "evidence_failure"
+    assert row["evidence_integrity_status"] == "invalid"
+    assert row["pass"] is None
+    assert row["comparison_evaluation_status"] == "unavailable"
+    assert row["comparison_required_evaluation_complete"] is False
+    for field_name in (
+        "comparison_deterministic_scores",
+        "comparison_score_details",
+        "comparison_judge_scores",
+        "comparison_judges",
+        "comparison_mechanism",
+        "treatment_use_evidence",
+        "task_result",
+        "agent_response",
+        "agent_response_sha256",
+        "agent_response_bytes",
+    ):
+        assert field_name not in row
+    assert prediction.predict_and_score_call.display_name.startswith(
+        "PROVISIONAL · "
+        + ("PASSED" if failure_stage == "reconciliation" else "UNSCORED")
+        + " ·"
+    )
+    assert prediction.output["canonical"] is False
+    assert "task_result" not in prediction.output
+    if failure_stage == "reconciliation":
+        assert prediction.output["provisional_task_observation"]["task_passed"] is True
+    else:
+        assert "provisional_task_observation" not in prediction.output
+    assert "response" not in prediction.output
+    assert prediction.output["provisional_judge_evidence"]
+    invalidation_call_id = row["weave_hosted_evidence_invalidation_call_id"]
+    invalidation = client.remote[invalidation_call_id]
+    assert invalidation["terminal"] is True
+    assert invalidation["parent_id"] is None
+    assert invalidation["output"]["canonical"] is False
+    assert invalidation["output"]["verification_status"] == "invalidated"
+    assert invalidation["output"]["invalidates"]["provisional_output_digest"] == (
+        stable_digest(prediction.predict_and_score_call.output)
+    )
+    assert invalidation["output"]["invalidates"]["provisional_scores_digest"] == (
+        stable_digest(prediction.scores)
+    )
+    assert "task_result" not in invalidation["output"]
+    assert "scalar_checks" not in invalidation["output"]
+    assert row["hosted_evidence_invalidation_status"] == "verified"
+    assert row["weave_hosted_evidence_invalidation_object_verified"] is True
+    assert row["weave_hosted_evidence_invalidation_terminal_verified"] is True
+    assert row["weave_hosted_evidence_invalidation_bindings_digest"] == (
+        stable_digest(invalidation["inputs"])
+    )
+    assert row["weave_hosted_evidence_invalidation_terminal_output_digest"] == (
+        stable_digest(invalidation["output"])
+    )
+    assert export._hosted_evidence_invalidation_verified(row)
+
+
+@pytest.mark.parametrize("write_phase", ("result", "finalized_event"))
+def test_terminal_side_effect_interruption_resumes_exactly_once(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    write_phase: str,
+) -> None:
+    class Prediction:
+        def __init__(self) -> None:
+            self.predict_and_score_call = SimpleNamespace(
+                id="pas-a",
+                project_id="entity/project",
+                summary=None,
+            )
+            self.output = None
+            self.exit_count = 0
+
+        def __enter__(self):
+            return self
+
+        @staticmethod
+        def log_score(_name, _value) -> None:
+            return None
+
+        def __exit__(self, exc_type, exc, traceback) -> None:
+            self.exit_count += 1
+
+    prediction = _attach_public_call_handles(Prediction())
+
+    class FakeLogger:
+        def __init__(self, **_kwargs) -> None:
+            pass
+
+        @staticmethod
+        def log_prediction(inputs, **_metadata):
+            del inputs
+            return prediction
+
+    cell = _live_test_cell(
+        cell_id=f"cell-side-effect-{write_phase}",
+        run_id=f"run-side-effect-{write_phase}",
+    )
+    coordinator = LiveEvaluationCoordinator(
+        [cell],
+        repo_root=tmp_path,
+        project="entity/project",
+        env=cell.env,
+        weave_module=SimpleNamespace(EvaluationLogger=FakeLogger),
+    )
+    _stub_live_agent_bridge(monkeypatch, coordinator)
+    coordinator._prepare_terminal_agent_trace = lambda **_kwargs: None
+    coordinator.begin_cell(cell)
+    if write_phase == "result":
+        append_result = coordinator._append_result
+
+        def append_then_interrupt(row):
+            append_result(row)
+            raise KeyboardInterrupt
+
+        monkeypatch.setattr(coordinator, "_append_result", append_then_interrupt)
+    else:
+        append_event = coordinator._append_event
+
+        def append_then_interrupt(status, **values):
+            append_event(status, **values)
+            if status == "finalized":
+                raise KeyboardInterrupt
+
+        monkeypatch.setattr(coordinator, "_append_event", append_then_interrupt)
+
+    with pytest.raises(KeyboardInterrupt):
+        coordinator.finish_cell(
+            cell,
+            CellOutcome(cell.id, "passed", returncode=0),
+        )
+
+    results = [
+        json.loads(line)
+        for line in coordinator.results_path.read_text().splitlines()
+        if line.strip()
+    ]
+    terminal_events = [
+        json.loads(line)
+        for line in coordinator.events_path.read_text().splitlines()
+        if line.strip()
+        and json.loads(line).get("status") in export._TERMINAL_EVENT_STATUSES
+    ]
+    assert len(results) == 1
+    assert len(terminal_events) == 1
+    assert terminal_events[0]["status"] == "finalized"
+    assert "hosted_terminal_interruption" not in results[0]
+
+    monkeypatch.undo()
+    assert coordinator._recover_finalized_terminal_persistence(
+        cell=cell,
+        row=results[0],
+        call_id="pas-a",
+    )
+    assert len(coordinator.results_path.read_text().splitlines()) == 1
+    terminal_events = [
+        json.loads(line)
+        for line in coordinator.events_path.read_text().splitlines()
+        if line.strip()
+        and json.loads(line).get("status") in export._TERMINAL_EVENT_STATUSES
+    ]
+    assert len(terminal_events) == 1
+
+
+def test_terminal_ledgers_reject_conflicting_or_duplicate_logical_attempts(
+    tmp_path: Path,
+) -> None:
+    coordinator = object.__new__(LiveEvaluationCoordinator)
+    coordinator.run_id = "run-a"
+    coordinator.results_path = tmp_path / "results.jsonl"
+    coordinator.events_path = tmp_path / "events.jsonl"
+    coordinator._event_lock = threading.RLock()
+    row = {
+        "run_id": "run-a",
+        "cell_id": "cell-a",
+        "attempt_id": "attempt-a",
+        "candidate_id": "candidate-a",
+    }
+
+    coordinator._append_result(row)
+    with pytest.raises(RuntimeError, match="conflicts with the persisted"):
+        coordinator._append_result({**row, "candidate_id": "candidate-b"})
+    with coordinator.results_path.open("a", encoding="utf-8") as handle:
+        handle.write(json.dumps(row, sort_keys=True) + "\n")
+    with pytest.raises(RuntimeError, match="duplicate logical attempts"):
+        coordinator._terminal_result_is_persisted(row)
+
+    event_values = {
+        "cell_id": "event-cell",
+        "attempt_id": "event-attempt",
+        "candidate_id": "candidate-a",
+    }
+    coordinator._append_event("finalized", **event_values)
+    with pytest.raises(RuntimeError, match="conflicts with the persisted"):
+        coordinator._append_event("interrupted", **event_values)
+
+
+def test_terminal_evaluation_poll_does_not_flush_another_open_prediction() -> None:
+    project = "entity/project"
+    trace_id = "a" * 32
+    dataset = SimpleNamespace(
+        ref=SimpleNamespace(uri=f"weave:///{project}/object/tasks:v1")
+    )
+    evaluation = SimpleNamespace(
+        dataset=dataset,
+        ref=SimpleNamespace(uri=f"weave:///{project}/object/evaluation:v1"),
+    )
+
+    class EvaluationRef:
+        @staticmethod
+        def uri() -> str:
+            return f"weave:///{project}/object/evaluation:v1"
+
+        @staticmethod
+        def get():
+            return evaluation
+
+    evaluation_call = SimpleNamespace(
+        id="evaluation-a",
+        project_id=project,
+        parent_id=None,
+        trace_id=trace_id,
+        inputs={"self": EvaluationRef()},
+    )
+    predict_and_score = SimpleNamespace(
+        id="pas-a",
+        project_id=project,
+        parent_id=evaluation_call.id,
+        trace_id=trace_id,
+        ended_at="terminal",
+    )
+    prediction_call = SimpleNamespace(
+        id="prediction-a",
+        project_id=project,
+        parent_id=predict_and_score.id,
+        trace_id=trace_id,
+        ended_at="terminal",
+    )
+    another_open_prediction = SimpleNamespace(
+        id="pas-b",
+        project_id=project,
+        parent_id="evaluation-b",
+        trace_id="b" * 32,
+        ended_at=None,
+    )
+    calls = {
+        value.id: value
+        for value in (
+            evaluation_call,
+            predict_and_score,
+            prediction_call,
+            another_open_prediction,
+        )
+    }
+
+    class PublicClient:
+        project_id = project
+        flush_calls = 0
+
+        @staticmethod
+        def get_call(call_id):
+            return calls[call_id]
+
+        @staticmethod
+        def get(ref):
+            return ref.get()
+
+        @classmethod
+        def flush(cls):
+            cls.flush_calls += 1
+            raise AssertionError("per-cell reconciliation must not flush")
+
+    coordinator = object.__new__(LiveEvaluationCoordinator)
+    coordinator.project = project
+    coordinator.env = {}
+    coordinator.trace_timeout_sec = 0
+    coordinator._weave_requires_reactivation = False
+    coordinator.weave = SimpleNamespace(get_client=lambda: PublicClient)
+    coordinator._datasets = {"scope-a": dataset}
+    active = export._LivePrediction(
+        session=SimpleNamespace(candidate={"evaluation_scope_id": "scope-a"}),
+        prediction=SimpleNamespace(
+            evaluate_call=evaluation_call,
+            predict_and_score_call=predict_and_score,
+            predict_call=prediction_call,
+        ),
+        bridge_call=None,
+        bridge_client=PublicClient,
+        row={},
+        opened_monotonic=0.0,
+    )
+    row = {"agent_execution_status": "not_started"}
+
+    coordinator._reconcile_terminal_hosted_evidence(
+        active=active,
+        cell=SimpleNamespace(),
+        row=row,
+        predict_and_score_call_id=predict_and_score.id,
+        native_root=None,
+    )
+
+    assert row["evaluation_prediction_graph_verified"] is True
+    assert row["evaluation_children_terminal_verified"] is True
+    assert another_open_prediction.ended_at is None
+    assert PublicClient.flush_calls == 0
+
+
+def test_public_terminal_call_poll_stops_immediately_when_cancelled() -> None:
+    cancellation = threading.Event()
+    cancellation.set()
+
+    class PublicClient:
+        project_id = "entity/project"
+        get_calls = 0
+
+        @classmethod
+        def get_call(cls, _call_id):
+            cls.get_calls += 1
+            raise AssertionError("cancelled poll must not call Weave")
+
+    coordinator = object.__new__(LiveEvaluationCoordinator)
+    coordinator.project = "entity/project"
+    coordinator.env = {}
+    coordinator.weave = SimpleNamespace(get_client=lambda: PublicClient)
+    coordinator.trace_timeout_sec = 60
+    coordinator._weave_requires_reactivation = False
+    coordinator._cancellation_event = cancellation
+
+    with pytest.raises(export._TracePollingCancelled):
+        coordinator._wait_for_public_terminal_call(
+            client=PublicClient,
+            call_id="call-a",
+            phase="test Call",
+        )
+
+    assert PublicClient.get_calls == 0
+
+
+def test_terminal_evaluation_root_requires_exact_terminal_root() -> None:
+    local_root = SimpleNamespace(
+        id="evaluation-a",
+        project_id="entity/project",
+        parent_id=None,
+        trace_id="a" * 32,
+    )
+    remote_root = SimpleNamespace(
+        id="evaluation-a",
+        project_id="entity/project",
+        parent_id=None,
+        trace_id="a" * 32,
+        ended_at=None,
+    )
+
+    class PublicClient:
+        project_id = "entity/project"
+
+        @staticmethod
+        def get_call(_call_id):
+            return remote_root
+
+    coordinator = object.__new__(LiveEvaluationCoordinator)
+    coordinator.project = "entity/project"
+    coordinator.env = {}
+    coordinator.weave = SimpleNamespace(get_client=lambda: PublicClient)
+    coordinator.trace_timeout_sec = 0
+    coordinator._weave_requires_reactivation = False
+    coordinator._cancellation_event = threading.Event()
+    session = export._LiveCandidate(
+        candidate={"candidate_id": "candidate-a"},
+        logger=SimpleNamespace(),
+        evaluation_call=local_root,
+    )
+
+    with pytest.raises(RuntimeError, match="Evaluation root was not published"):
+        coordinator._verify_terminal_evaluation_root(session)
+
+
 def _stub_live_agent_bridge(
     monkeypatch: pytest.MonkeyPatch,
     coordinator: LiveEvaluationCoordinator,
 ) -> None:
+    def verified_eager_root(row, **_kwargs) -> None:
+        row.update(
+            {
+                "evaluation_root_object_verified": True,
+                "evaluation_root_dataset_relationship_verified": True,
+                "evaluation_root_call_authoritatively_verified": True,
+                "evaluation_children_local_identity_verified": True,
+                "evaluation_prediction_graph_status": (
+                    "pending_terminal_reconciliation"
+                ),
+            }
+        )
+
+    coordinator._verify_eager_evaluation_root = verified_eager_root
+    coordinator._flush_after_evaluation_roots_close = lambda: None
+    coordinator._verify_terminal_evaluation_root = lambda _session: None
+    coordinator._reconcile_terminal_hosted_evidence = lambda **_kwargs: None
+
     def verified_graph(row, **_kwargs) -> None:
         row["evaluation_prediction_graph_verified"] = True
 
@@ -2509,16 +5395,19 @@ def test_live_cancellation_closes_open_prediction_once_without_trace_polling(
         def __exit__(self, exc_type, exc, traceback) -> None:
             self.exit_count += 1
 
-    class FakeLogger:
+    class FakeLogger(_PublicEvaluationLoggerMixin):
         def __init__(self, **kwargs) -> None:
             self.__dict__.update(kwargs)
             self.failed = None
             loggers.append(self)
 
-        def log_prediction(self, inputs):
+        def log_prediction(self, inputs, **_metadata):
             prediction = FakePrediction(f"call-{len(predictions) + 1}")
             predictions.append(prediction)
-            return prediction
+            return _attach_public_call_handles(
+                prediction,
+                dataset=getattr(self, "dataset", None),
+            )
 
         def fail(self, exception) -> None:
             self.failed = exception
@@ -2571,7 +5460,8 @@ def test_live_cancellation_closes_open_prediction_once_without_trace_polling(
 
     assert publication.failures == ()
     assert predictions[0].exit_count == 1
-    assert predictions[0].output["status"] == "cancelled"
+    assert predictions[0].output["provisional_status"] == "cancelled"
+    assert predictions[0].output["canonical"] is False
     assert predictions[0].output["trace_link_status"] == "cancelled"
     assert predictions[0].output["trace_link_reason"] == "operator cancellation"
     assert all(logger.failed is not None for logger in loggers)
@@ -2611,12 +5501,12 @@ def test_live_cancellation_during_trace_fetch_closes_prediction_once(
 
     prediction = FakePrediction()
 
-    class FakeLogger:
+    class FakeLogger(_PublicEvaluationLoggerMixin):
         def __init__(self, **kwargs) -> None:
             self.failed = None
 
-        def log_prediction(self, inputs):
-            return prediction
+        def log_prediction(self, inputs, **_metadata):
+            return _attach_public_call_handles(prediction)
 
         def fail(self, exception) -> None:
             self.failed = exception
@@ -2673,7 +5563,8 @@ def test_live_cancellation_during_trace_fetch_closes_prediction_once(
 
     assert not worker.is_alive()
     assert prediction.exit_count == 1
-    assert prediction.output["status"] == "cancelled"
+    assert prediction.output["provisional_status"] == "cancelled"
+    assert prediction.output["canonical"] is False
     assert prediction.output["trace_link_status"] == "cancelled"
     statuses = [
         json.loads(line)["status"]
@@ -2722,14 +5613,17 @@ def test_pre_agent_setup_failure_skips_trace_poll_and_reports_observability_fail
 
     prediction = FakePrediction()
 
-    class FakeLogger:
+    class FakeLogger(_PublicEvaluationLoggerMixin):
         ui_url = None
 
         def __init__(self, **kwargs) -> None:
             self.__dict__.update(kwargs)
 
-        def log_prediction(self, inputs):
-            return prediction
+        def log_prediction(self, inputs, **_metadata):
+            return _attach_public_call_handles(
+                prediction,
+                dataset=getattr(self, "dataset", None),
+            )
 
         def log_summary(self) -> None:
             pass
@@ -3113,17 +6007,17 @@ def test_mcp_proxy_events_export_exact_tool_and_project_scope(
                         "max_evals": 20,
                         "run_id": "maint-r18-06",
                         "keys": ["_step", "latency_ms"],
-                            "samples": 5,
-                            "parent_filter_digest": "a" * 64,
-                            "parent_filter_count": 1,
-                            "columns": [
+                        "samples": 5,
+                        "parent_filter_digest": "a" * 64,
+                        "parent_filter_count": 1,
+                        "columns": [
                             "id",
                             "config.attempt_label",
                             "summary.latency_ms",
                         ],
-                            "filters": {
-                                "limit": 6,
-                                "op_name_contains": "predict_and_score",
+                        "filters": {
+                            "limit": 6,
+                            "op_name_contains": "predict_and_score",
                             "private_query": "must-not-be-exported",
                         },
                     },
@@ -3136,9 +6030,7 @@ def test_mcp_proxy_events_export_exact_tool_and_project_scope(
                     "request_id": "summary-1",
                     "arguments": {
                         "scope": {
-                            "project_ref": (
-                                "wandb/fugue-mcp-release-qualification-v1"
-                            )
+                            "project_ref": ("wandb/fugue-mcp-release-qualification-v1")
                         }
                     },
                 },
@@ -3191,9 +6083,7 @@ def test_mcp_proxy_events_export_exact_tool_and_project_scope(
         "query_wandb_tool",
         "summarize_evaluation_tool",
     ]
-    assert calls[0]["queried_project"] == (
-        "wandb/fugue-mcp-release-qualification-v1"
-    )
+    assert calls[0]["queried_project"] == ("wandb/fugue-mcp-release-qualification-v1")
     assert calls[0]["resource"] == "run"
     assert calls[0]["response_mode"] == "items"
     assert calls[0]["target_x"] == 3
@@ -3212,9 +6102,7 @@ def test_mcp_proxy_events_export_exact_tool_and_project_scope(
     ]
     assert calls[0]["limit"] == 6
     assert calls[0]["parent_filter_count"] == 1
-    assert calls[0]["op_name_filter"] == {
-        "op_name_contains": ["predict_and_score"]
-    }
+    assert calls[0]["op_name_filter"] == {"op_name_contains": ["predict_and_score"]}
     assert calls[0]["terminal_status"] == "succeeded"
     assert calls[0]["successful"] is True
     assert calls[0]["response_metadata_verified"] is True
@@ -3734,6 +6622,7 @@ def test_agent_hierarchy_ignores_auxiliary_span_conversation_identity() -> None:
                     "fugue.execution_fingerprint": "e" * 64,
                     "fugue.comparison_example_id": "example-a",
                     "fugue.trial_index": 1,
+                    "weave.eval.run_id": "evaluation-root",
                     "weave.eval.predict_and_score_call_id": "prediction-1",
                 },
             },
@@ -3744,6 +6633,8 @@ def test_agent_hierarchy_ignores_auxiliary_span_conversation_identity() -> None:
                 "attributes": {
                     "gen_ai.operation.name": "chat",
                     "gen_ai.conversation.id": "native-conversation",
+                    "weave.eval.run_id": "evaluation-root",
+                    "weave.eval.predict_and_score_call_id": "prediction-1",
                 },
             },
             {
@@ -3773,6 +6664,7 @@ def test_agent_hierarchy_ignores_auxiliary_span_conversation_identity() -> None:
                     "fugue.execution_fingerprint": "e" * 64,
                     "fugue.comparison_example_id": "example-a",
                     "fugue.trial_index": 1,
+                    "weave.eval.run_id": "evaluation-root",
                     "weave.eval.predict_and_score_call_id": "prediction-1",
                 },
             },
@@ -3806,6 +6698,7 @@ def test_agent_evidence_keeps_otel_span_and_weave_call_identities_separate() -> 
         "fugue.execution_fingerprint": "e" * 64,
         "fugue.comparison_example_id": "example-a",
         "fugue.trial_index": 1,
+        "weave.eval.run_id": "evaluation-root",
         "weave.eval.predict_and_score_call_id": "prediction-and-score-1",
     }
     otel_root = {
@@ -3861,6 +6754,7 @@ def test_agent_evidence_joins_cross_transport_receipt_without_call_impersonation
         "fugue.execution_fingerprint": "e" * 64,
         "fugue.comparison_example_id": "example-a",
         "fugue.trial_index": 1,
+        "weave.eval.run_id": "evaluation-root",
         "weave.eval.predict_and_score_call_id": "prediction-and-score-1",
     }
     otel_root = {
@@ -4028,11 +6922,7 @@ def _verified_checkpoint_links(destination: Mapping[str, object]) -> dict[str, o
 
 def test_first_cell_evidence_checkpoint_requires_real_graph_and_host_scorer() -> None:
     destination = export.trace_destination_identity(
-        {
-            "FUGUE_WEAVE_PROJECT": (
-                "wandb/fugue-mcp-release-qualification-v1"
-            )
-        }
+        {"FUGUE_WEAVE_PROJECT": ("wandb/fugue-mcp-release-qualification-v1")}
     )
     valid = {
         **_verified_checkpoint_links(destination),
@@ -4044,7 +6934,9 @@ def test_first_cell_evidence_checkpoint_requires_real_graph_and_host_scorer() ->
         "evaluation_prediction_graph_verified": True,
         "agent_graph_verified": True,
         "conversation_correlation_verified": True,
+        "weave_hosted_evidence_receipt_terminal_verified": True,
         "trace_link_status": "linked",
+        "weave_eval_span_link_status": "complete",
         "weave_agent_root_call_id": "agent-call",
         "otel_root_span_id": "b" * 16,
         "host_evaluator_status": "passed",
@@ -4077,9 +6969,7 @@ def test_first_cell_evidence_checkpoint_requires_real_graph_and_host_scorer() ->
     advisory_judge_unavailable = {
         **valid,
         "comparison_judge_checkpoint_status": "advisory_unavailable",
-        "comparison_judge_checkpoint_unavailable": [
-            "maintainer-actionability"
-        ],
+        "comparison_judge_checkpoint_unavailable": ["maintainer-actionability"],
     }
     assert (
         export._live_evidence_checkpoint_failures(
@@ -4092,9 +6982,7 @@ def test_first_cell_evidence_checkpoint_requires_real_graph_and_host_scorer() ->
     required_judge_unavailable = {
         **valid,
         "comparison_judge_checkpoint_status": "failed",
-        "comparison_judge_checkpoint_unavailable": [
-            "maintainer-actionability"
-        ],
+        "comparison_judge_checkpoint_unavailable": ["maintainer-actionability"],
         "comparison_judge_checkpoint_required_unavailable": [
             "maintainer-actionability"
         ],
@@ -4109,8 +6997,9 @@ def test_first_cell_evidence_checkpoint_requires_real_graph_and_host_scorer() ->
     )
 
 
-def test_evidence_checkpoint_covers_every_planned_cell_and_cancels_after_late_failure(
-) -> None:
+def test_evidence_checkpoint_covers_every_planned_cell_and_cancels_after_late_failure() -> (
+    None
+):
     destination = export.trace_destination_identity(
         {"FUGUE_WEAVE_PROJECT": "wandb/qualification"}
     )
@@ -4128,9 +7017,7 @@ def test_evidence_checkpoint_covers_every_planned_cell_and_cancels_after_late_fa
     }
     coordinator._negative_routing_receipt = lambda row: {"status": "passed"}
     events: list[tuple[str, dict[str, object]]] = []
-    coordinator._append_event = (
-        lambda status, **values: events.append((status, values))
-    )
+    coordinator._append_event = lambda status, **values: events.append((status, values))
     cell = SimpleNamespace(id="cell-a")
     valid = {
         **_verified_checkpoint_links(destination),
@@ -4144,7 +7031,9 @@ def test_evidence_checkpoint_covers_every_planned_cell_and_cancels_after_late_fa
         "evaluation_prediction_graph_verified": True,
         "agent_graph_verified": True,
         "conversation_correlation_verified": True,
+        "weave_hosted_evidence_receipt_terminal_verified": True,
         "trace_link_status": "linked",
+        "weave_eval_span_link_status": "complete",
         "weave_agent_root_call_id": "agent-call",
         "otel_root_span_id": "b" * 16,
     }
@@ -4179,7 +7068,9 @@ def test_evidence_checkpoint_covers_every_planned_cell_and_cancels_after_late_fa
     assert "evidence_checkpoint_status" not in after_limit
 
 
-def test_evaluation_evidence_accepts_canonical_object_refs_not_python_identity() -> None:
+def test_evaluation_evidence_accepts_canonical_object_refs_not_python_identity() -> (
+    None
+):
     class Ref:
         def __init__(self, uri: str) -> None:
             self._uri = uri
@@ -4200,19 +7091,14 @@ def test_evaluation_evidence_accepts_canonical_object_refs_not_python_identity()
     evaluation_call = SimpleNamespace(
         id="evaluation-call",
         project_id=project,
-        inputs={"self": Ref(evaluation_uri)},
+        inputs={"self": evaluation},
         ref=Ref(f"weave:///{project}/call/evaluation-call"),
-    )
-    logger = SimpleNamespace(
-        _pseudo_evaluation=evaluation,
-        _evaluate_call=evaluation_call,
-        ui_url=f"https://wandb.ai/{project}/r/call/evaluation-call",
     )
     row: dict[str, object] = {}
 
     export._apply_evaluation_evidence(
         row,
-        logger=logger,
+        evaluation_call=evaluation_call,
         dataset=dataset,
         project=project,
     )
@@ -4341,6 +7227,7 @@ def test_claude_native_agent_call_requires_verified_bridge_ancestry() -> None:
                 "span_id": "b" * 16,
                 "otel_parent_span_id": "f" * 16,
                 "eval_predict_and_score_call_id": "predict-and-score",
+                "eval_run_id": "evaluation",
                 "weave_call_id": agent_call_id,
                 "weave_call_parent_id": bridge_id,
                 "weave_call_project_id": "entity/project",
@@ -4427,42 +7314,11 @@ def test_authoritative_graph_recovers_a_transient_bridge_close_poll_timeout() ->
     assert row["weave_agent_bridge_close_poll_error"] == "ReadTimeout"
     assert "weave_agent_bridge_close_error" not in row
 
+    row["weave_authoritative_call_graph"][2]["terminal"] = False
+    export._verify_authoritative_agent_graph(row)
 
-def test_authoritative_call_state_retries_a_transient_read_timeout() -> None:
-    calls = 0
-
-    def summary_fetcher(**_kwargs):
-        nonlocal calls
-        calls += 1
-        if calls == 1:
-            raise httpx.ReadTimeout("temporary trace API timeout")
-        return {
-            "run-key": {
-                "weave_authoritative_call_graph": [
-                    {
-                        "call_id": "bridge",
-                        "project_id": "entity/project",
-                        "terminal": True,
-                    }
-                ]
-            }
-        }
-
-    coordinator = object.__new__(LiveEvaluationCoordinator)
-    coordinator.project = "entity/project"
-    coordinator.trace_timeout_sec = 1
-    coordinator.env = {}
-    coordinator._summary_fetcher = summary_fetcher
-    coordinator._cancellation_event = threading.Event()
-
-    coordinator._wait_for_authoritative_call_state(
-        row={"run_key": "run-key"},
-        call_id="bridge",
-        terminal=True,
-        phase="bridge close",
-    )
-
-    assert calls == 2
+    assert row["weave_authoritative_call_graph_verified"] is False
+    assert "prediction terminal state" in row["weave_authoritative_call_graph_error"]
 
 
 def test_invalid_authoritative_graph_does_not_recover_bridge_close() -> None:
@@ -4725,6 +7581,446 @@ def test_completed_evaluation_preserves_planned_dataset_identity(
     )
 
 
+def test_completed_evaluation_preserves_host_authored_presentation(
+    tmp_path: Path,
+) -> None:
+    presentation = TaskPresentationV1(
+        task_id="task-a",
+        title="Readable task title",
+        public_prompt=(
+            PublicPromptPartV1(order=1, text="Inspect the public fixture."),
+        ),
+        required_output="Return one bounded JSON object.",
+        public_acceptance_criteria=("The JSON object is valid.",),
+    )
+    trial_dir = tmp_path / "jobs" / "job" / "trial"
+    (trial_dir / "agent").mkdir(parents=True)
+    (trial_dir / "result.json").write_text(
+        json.dumps(
+            {
+                "task_name": "fugue/task-a",
+                "trial_name": "trial",
+                "verifier_result": {"rewards": {"reward": 1.0}},
+            }
+        )
+    )
+    # The trusted run plan, not a missing or trial-controlled runtime value,
+    # owns the public presentation fields.
+    (trial_dir / "agent" / "fugue-meta.json").write_text(
+        json.dumps(
+            {
+                "candidate_id": "candidate-a",
+                "trial_index": 1,
+                "arm_label": "Untrusted runtime arm",
+                "treatment_summary": "Untrusted runtime treatment.",
+                "task_title": "Untrusted runtime title",
+                "task_presentation": {
+                    **presentation.to_dict(),
+                    "title": "Untrusted runtime title",
+                },
+                "task_definition_digest": "f" * 64,
+            }
+        )
+    )
+    cell = PlannedCell(
+        id="cell-a",
+        run_id="run-a",
+        run_name="run-a",
+        workload_id="coding",
+        task_id="task-a",
+        harness="claude-code",
+        context_system_id="none",
+        variant_id="baseline",
+        model_provider="anthropic",
+        model="anthropic/claude-sonnet-5",
+        trial_index=1,
+        comparison_example_id="example-a",
+        candidate_id="candidate-a",
+        execution_fingerprint="execution-a",
+        config_path=tmp_path / "config.json",
+        result_path=tmp_path / "jobs" / "job" / "result.json",
+        command=("harbor", "run"),
+        env={},
+        n_attempts=1,
+        evaluation_asset_lock_sha256="e" * 64,
+        run_snapshot_sha256="a" * 64,
+        arm_label="W&B MCP main at 53b199a5",
+        treatment_summary="Exact locked baseline treatment.",
+        task_presentation=presentation,
+    )
+    planned = export._planned_evaluation_row(cell)
+
+    outcome = CellOutcome(
+        cell.id,
+        "passed",
+        returncode=0,
+        benchmark_outcome="passed",
+        runtime_outcome="completed",
+        terminal_kind="success",
+    )
+    row = export._completed_evaluation_row(cell, outcome, planned)
+
+    assert row["arm_label"] == cell.arm_label
+    assert row["treatment_summary"] == cell.treatment_summary
+    assert row["task_title"] == presentation.title
+    assert row["task_presentation"] == presentation.to_dict()
+    assert row["task_definition_digest"] == presentation.task_definition_digest
+
+    coordinator = export.GeneratedEvaluationCoordinator(
+        [cell],
+        repo_root=tmp_path,
+        env={},
+        evidence_mode="local",
+    )
+    overlay = coordinator.begin_cell(cell)
+    assert overlay is not None
+    completed = coordinator.finish_cell(cell, outcome)
+    assert completed is not None
+    assert completed["arm_label"] == cell.arm_label
+    assert completed["treatment_summary"] == cell.treatment_summary
+    assert completed["task_presentation"] == presentation.to_dict()
+    assert completed["local_evidence_record_digest"]
+
+
+def test_pre_agent_evidence_failure_stays_invalid_and_unscored(
+    tmp_path: Path,
+) -> None:
+    cell = replace(
+        _live_test_cell(cell_id="cell-pre-agent", run_id="run-pre-agent"),
+        result_path=tmp_path / "missing" / "result.json",
+        expected_evidence_paths=("src/expected.py",),
+    )
+    row = export._completed_evaluation_row(
+        cell,
+        CellOutcome(
+            cell.id,
+            "failed",
+            error="required live-evidence initialization failed",
+            benchmark_outcome="unscored",
+            runtime_outcome="not_started",
+            terminal_kind="evidence_failure",
+        ),
+        export._planned_evaluation_row(cell),
+    )
+    export._set_adapter_outcome(row)
+
+    assert row["runtime_outcome"] == "not_started"
+    assert row["benchmark_outcome"] == "unscored"
+    assert row["terminal_kind"] == "evidence_failure"
+    assert row["pass"] is None
+    assert row["evidence_integrity_status"] == "invalid"
+    assert row["adapter_outcome"]["execution"]["state"] == "not_started"
+    assert "evidence_recall" not in row
+    assert "citation_correctness" not in row
+    assert "task_passed" not in export._evaluation_scores(row)
+
+    task_result = export._task_result(row)
+    assert task_result == {
+        "schema_version": 1,
+        "task_passed": None,
+        "outcome_summary": (
+            "Fugue withheld the task verdict because its evidence is invalid."
+        ),
+        "failed_required_checks": [],
+        "answer_digest": None,
+        "agent_execution_status": "not_started",
+        "evidence_integrity_status": "invalid",
+    }
+
+
+def test_typed_not_started_outcome_overrides_legacy_failed_status() -> None:
+    row = {
+        "status": "failed",
+        "runtime_outcome": "not_started",
+        "pass": False,
+        "reward": 0.0,
+        "judge_overall": 0.0,
+        "context_registered": True,
+        "context_query_count": 3,
+        "episode_count": 2,
+        "weave_tool_call_count": 4,
+    }
+
+    assert export._behavioral_task_output_available(row) is False
+    assert export._evaluation_scores(row) == {}
+
+
+def test_nonbehavioral_live_output_is_unscored_and_has_no_answer() -> None:
+    row = {
+        "record_type": "trial",
+        "execution_kind": "agent",
+        "task_id": "task-a",
+        "status": "failed",
+        "runtime_outcome": "not_started",
+        "pass": False,
+        "agent_response": "stale partial answer",
+        "agent_response_sha256": "a" * 64,
+        "agent_response_bytes": 20,
+        "trace_content": "full",
+    }
+    prediction = SimpleNamespace(
+        predict_and_score_call=SimpleNamespace(display_name=None),
+        predict_call=SimpleNamespace(display_name=None),
+    )
+
+    export._set_prediction_display_names(prediction, row, terminal=True)
+    output = export._evaluation_output(row)
+
+    assert prediction.predict_and_score_call.display_name.startswith(
+        "UNSCORED ·"
+    )
+    assert prediction.predict_call.display_name.startswith(
+        "Agent execution (no scored answer) ·"
+    )
+    assert "task_result" not in output
+    assert "response" not in output
+    assert "response_sha256" not in output
+    assert "response_bytes" not in output
+    assert output["judge_evidence"]["status"] == "not_applicable"
+
+
+def test_fatal_evidence_terminal_overrides_completed_runtime_for_scoring() -> None:
+    row = {
+        "record_type": "trial",
+        "execution_kind": "agent",
+        "task_id": "task-a",
+        "status": "failed",
+        "runtime_outcome": "completed",
+        "terminal_kind": "evidence_failure",
+        "benchmark_outcome": "passed",
+        "pass": True,
+        "reward": 1.0,
+        "comparison_deterministic_scores": {"answer_correct": True},
+        "comparison_judge_scores": {"usefulness": 0.9},
+        "comparison_mechanism": {"assigned_skill_opened": "observed"},
+        "treatment_use_evidence": {"invoked": "observed"},
+        "agent_response": "partial result retained only in the receipt",
+        "trace_content": "full",
+        "evidence_integrity_status": "invalid",
+    }
+
+    assert export._behavioral_task_output_available(row) is False
+    export._withhold_nonbehavioral_task_evaluation(row)
+    output = export._evaluation_output(row)
+
+    assert row["runtime_outcome"] == "completed"
+    assert row["pass"] is None
+    assert export._evaluation_scores(row) == {}
+    assert "comparison_deterministic_scores" not in row
+    assert "comparison_judge_scores" not in row
+    assert "comparison_mechanism" not in row
+    assert "treatment_use_evidence" not in row
+    assert "task_result" not in output
+    assert "response" not in output
+    assert output["agent_execution_status"] == "completed"
+    assert output["judge_evidence"]["status"] == "not_applicable"
+
+
+def test_runner_start_failure_skips_deterministic_and_judge_evaluation(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    case = {
+        "id": "case-a",
+        "instruction": "Return one result.",
+        "source_refs": [{"id": "seed:1", "sha256": "a" * 64}],
+        "expected": {"facts": ["private fact"]},
+        "scorer_dimensions": ["correctness"],
+    }
+    rubric = {
+        "id": "suite-a",
+        "dimensions": [
+            {"id": "correctness", "criterion": "correct", "threshold": 0.7}
+        ],
+    }
+    cell = PlannedCell(
+        id="cell-runner-start",
+        run_id="run-runner-start",
+        run_name="run-runner-start",
+        workload_id="capabilities",
+        task_id="case-a",
+        harness="claude-code",
+        context_system_id="none",
+        variant_id="baseline",
+        model_provider="anthropic",
+        model="anthropic/claude-test",
+        trial_index=1,
+        comparison_example_id="example-a",
+        candidate_id="candidate-a",
+        execution_fingerprint="execution-a",
+        config_path=tmp_path / "config.json",
+        result_path=tmp_path / "jobs" / "missing" / "result.json",
+        command=("harbor", "run"),
+        env={"FUGUE_DATASET": "generated/suite-a"},
+        n_attempts=1,
+        evaluation_case=case,
+        evaluation_rubrics=(rubric,),
+        evaluation_asset_lock_sha256="e" * 64,
+        run_snapshot_sha256="a" * 64,
+    )
+    generated_calls: list[object] = []
+    host_calls: list[object] = []
+    monkeypatch.setattr(
+        export,
+        "apply_generated_evaluation",
+        lambda *_args, **_kwargs: generated_calls.append(object()),
+    )
+    coordinator = GeneratedEvaluationCoordinator(
+        [cell],
+        repo_root=tmp_path,
+        env={},
+        host_evaluator=lambda _row: host_calls.append(object()),
+        evidence_mode="local",
+    )
+
+    overlay = coordinator.begin_cell(cell)
+    assert overlay is not None
+    row = coordinator.finish_cell(
+        cell,
+        CellOutcome(
+            cell.id,
+            "failed",
+            returncode=1,
+            error="Harbor exited before Agent execution",
+            benchmark_outcome="unscored",
+            runtime_outcome="not_started",
+            terminal_kind="runner_start_failure",
+        ),
+    )
+
+    assert row is not None
+    assert generated_calls == []
+    assert host_calls == []
+    assert row["runtime_outcome"] == "not_started"
+    assert row["benchmark_outcome"] == "unscored"
+    assert row["pass"] is None
+    assert row["comparison_evaluation_status"] == "unavailable"
+    assert row["comparison_required_evaluation_complete"] is False
+    assert row["host_evaluator_status"] == "not_applicable"
+    assert row["adapter_outcome"]["rubric_evaluation"]["state"] == (
+        "not_applicable"
+    )
+    assert "comparison_deterministic_scores" not in row
+    assert "comparison_judges" not in row
+    assert "comparison_judge_scores" not in row
+    assert "task_result" not in row
+    assert row["local_evidence_integrity"] != "resolved"
+    prediction = json.loads(
+        next(
+            (
+                tmp_path
+                / ".fugue/runtime/run-runner-start/evidence/predictions"
+            ).glob("*.json")
+        ).read_text(encoding="utf-8")
+    )
+    assert "task_result" not in prediction
+    assert prediction["adapter_outcome"]["rubric_evaluation"]["state"] == (
+        "not_applicable"
+    )
+
+
+def test_interrupted_execution_does_not_publish_nested_trial_scores(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    cell = replace(
+        _live_test_cell(cell_id="cell-interrupted", run_id="run-interrupted"),
+        result_path=tmp_path / "jobs" / "interrupted" / "result.json",
+    )
+    nested_result = cell.result_path.parent / "trial-a" / "result.json"
+    monkeypatch.setattr(export, "_trial_result_paths", lambda _path: [nested_result])
+    monkeypatch.setattr(
+        export,
+        "_row_from_trial",
+        lambda _path: {
+            "candidate_id": cell.candidate_id,
+            "trial_index": cell.trial_index,
+            "reward": 1.0,
+            "pass": True,
+            "judge_overall": 0.9,
+            "evaluation_correctness": 0.8,
+            "prompt_injection_safe_and_useful": 1.0,
+            "prompt_injection_action_gate_blocked": 1.0,
+            "prompt_injection_classification": "safe_and_useful",
+            "artifact_schema_valid": 1.0,
+            "comparison_deterministic_scores": {"answer_correct": True},
+            "comparison_judge_scores": {"usefulness": 0.9},
+        },
+    )
+
+    row = export._completed_evaluation_row(
+        cell,
+        CellOutcome(
+            cell.id,
+            "failed",
+            returncode=1,
+            error="Harbor ended after Agent evidence but before a job result",
+            benchmark_outcome="unscored",
+            runtime_outcome="interrupted",
+            terminal_kind="execution_failure",
+        ),
+        export._planned_evaluation_row(cell),
+    )
+    export._set_adapter_outcome(row)
+
+    assert row["pass"] is None
+    assert row["evaluation_judge_status"] == "not_applicable"
+    assert row["nonbehavioral_suppressed_score_fields"] == [
+        "artifact_schema_valid",
+        "evaluation_correctness",
+        "judge_overall",
+        "prompt_injection_action_gate_blocked",
+        "prompt_injection_classification",
+        "prompt_injection_safe_and_useful",
+        "reward",
+    ]
+    assert "reward" not in row
+    assert "judge_overall" not in row
+    assert "evaluation_correctness" not in row
+    assert "prompt_injection_safe_and_useful" not in row
+    assert "prompt_injection_action_gate_blocked" not in row
+    assert "prompt_injection_classification" not in row
+    assert "artifact_schema_valid" not in row
+    assert "comparison_deterministic_scores" not in row
+    assert "comparison_judge_scores" not in row
+    scores = export._evaluation_scores(row)
+    assert "reward" not in scores
+    assert "judge_overall" not in scores
+    assert "evaluation_correctness" not in scores
+    assert "task_passed" not in scores
+    assert not any(name.startswith(("outcome__", "judge__")) for name in scores)
+    assert row["adapter_outcome"]["deterministic_verification"]["state"] == (
+        "unscored"
+    )
+    assert row["adapter_outcome"]["rubric_evaluation"]["state"] == (
+        "not_applicable"
+    )
+
+
+def test_agent_timeout_remains_a_behavioral_terminal_for_scoring(
+    tmp_path: Path,
+) -> None:
+    cell = replace(
+        _live_test_cell(cell_id="cell-timeout", run_id="run-timeout"),
+        result_path=tmp_path / "missing" / "result.json",
+    )
+
+    row = export._completed_evaluation_row(
+        cell,
+        CellOutcome(
+            cell.id,
+            "failed",
+            benchmark_outcome="unscored",
+            runtime_outcome="timed_out",
+            terminal_kind="agent_timeout",
+        ),
+        export._planned_evaluation_row(cell),
+    )
+
+    assert row["runtime_outcome"] == "timed_out"
+    assert row["pass"] is False
+
+
 def test_generated_evaluation_scope_is_shared_and_rubric_sensitive() -> None:
     case = {
         "id": "case-a",
@@ -4874,7 +8170,17 @@ def test_local_generated_evaluation_runs_scoring_without_changing_outcome(
         ),
     )
 
-    coordinator.finish_cell(cell, CellOutcome(cell.id, "passed", returncode=0))
+    coordinator.finish_cell(
+        cell,
+        CellOutcome(
+            cell.id,
+            "passed",
+            returncode=0,
+            benchmark_outcome="passed",
+            runtime_outcome="completed",
+            terminal_kind="success",
+        ),
+    )
 
     result = json.loads(
         (tmp_path / ".fugue/runtime/run-a/evaluation-results.jsonl").read_text()
@@ -5133,9 +8439,7 @@ def _write_realistic_local_harness_transcript(
                 }
             )
             + "\n"
-            + json.dumps(
-                {"type": "tool_call", "name": "read_file", "arguments": {}}
-            )
+            + json.dumps({"type": "tool_call", "name": "read_file", "arguments": {}})
             + "\n"
         )
         return path.name
@@ -5163,9 +8467,7 @@ def _write_realistic_local_harness_transcript(
                     "type": "assistant",
                     "sessionId": session_id,
                     "message": {
-                        "content": [
-                            {"type": "tool_use", "name": "Read", "input": {}}
-                        ]
+                        "content": [{"type": "tool_use", "name": "Read", "input": {}}]
                     },
                 }
             )
@@ -5340,9 +8642,7 @@ def test_each_local_harness_finalizes_one_complete_five_link_manifest(
     receipt = json.loads(agent_receipt_path.read_text())
     assert receipt["status"] == "resolved"
     assert receipt["native_weave_call"] is False
-    assert receipt["transcript_artifact"]["path"].endswith(
-        expected_transcript_name
-    )
+    assert receipt["transcript_artifact"]["path"].endswith(expected_transcript_name)
 
 
 def _local_agent_receipt_fixture(
@@ -5594,9 +8894,7 @@ def test_local_agent_receipt_rejects_response_digest_mismatch(
         response_sha256="f" * 64,
     )
     (Path(str(row["trial_dir"])) / "agent" / "trajectory.json").write_text(
-        json.dumps(
-            {"steps": [{"source": "assistant", "message": "bounded answer"}]}
-        )
+        json.dumps({"steps": [{"source": "assistant", "message": "bounded answer"}]})
     )
 
     receipt = export._local_agent_receipt(tmp_path, cell, row)
@@ -5711,7 +9009,7 @@ def test_weave_publication_never_republishes_finalized_live_predictions(
 def test_weave_publication_fails_transactionally(tmp_path: Path, monkeypatch) -> None:
     failed = []
 
-    class FakeLogger:
+    class FakeLogger(_PublicEvaluationLoggerMixin):
         ui_url = None
 
         def __init__(self, **kwargs) -> None:
@@ -5788,7 +9086,7 @@ def test_publication_ledger_rejects_prediction_overlap_across_evaluations(
 ) -> None:
     published: list[str] = []
 
-    class FakeLogger:
+    class FakeLogger(_PublicEvaluationLoggerMixin):
         ui_url = "https://wandb.invalid/evaluation"
 
         def __init__(self, **kwargs) -> None:
@@ -6070,9 +9368,7 @@ def test_agent_root_accepts_external_bridge_parent_but_excludes_nested_agent() -
     )
 
     assert summary["otel_root_span_ids"] == ["a" * 16]
-    assert [root["span_id"] for root in summary["weave_root_spans"]] == [
-        "a" * 16
-    ]
+    assert [root["span_id"] for root in summary["weave_root_spans"]] == ["a" * 16]
 
 
 def test_observed_identity_accepts_benchmark_task_namespace() -> None:
@@ -6565,28 +9861,28 @@ def test_agent_spans_are_authoritative_when_calls_repeat_same_activity() -> None
     }
     summary = _summarize_spans(
         [
-                {
-                    **shared_tool,
-                    "span_id": "otel-tool",
-                    "_fugue_evidence_source": export._WEAVE_AGENT_SPAN_SOURCE,
-                },
-                {
-                    **shared_tool,
-                    "id": "weave-call",
-                    "_fugue_evidence_source": export._WEAVE_CALL_SOURCE,
-                },
-                {
-                    **shared_chat,
-                    "span_id": "otel-chat",
-                    "_fugue_evidence_source": export._WEAVE_AGENT_SPAN_SOURCE,
-                },
-                {
-                    **shared_chat,
-                    "id": "weave-chat-call",
-                    "_fugue_evidence_source": export._WEAVE_CALL_SOURCE,
-                },
-            ]
-        )
+            {
+                **shared_tool,
+                "span_id": "otel-tool",
+                "_fugue_evidence_source": export._WEAVE_AGENT_SPAN_SOURCE,
+            },
+            {
+                **shared_tool,
+                "id": "weave-call",
+                "_fugue_evidence_source": export._WEAVE_CALL_SOURCE,
+            },
+            {
+                **shared_chat,
+                "span_id": "otel-chat",
+                "_fugue_evidence_source": export._WEAVE_AGENT_SPAN_SOURCE,
+            },
+            {
+                **shared_chat,
+                "id": "weave-chat-call",
+                "_fugue_evidence_source": export._WEAVE_CALL_SOURCE,
+            },
+        ]
+    )
 
     assert summary["weave_span_count"] == 2
     assert summary["weave_tool_call_count"] == 1

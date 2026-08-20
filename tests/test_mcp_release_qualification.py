@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import hashlib
 import json
 import runpy
 from contextlib import contextmanager
@@ -12,6 +13,7 @@ import pytest
 import yaml
 
 import fugue.bench.comparison as comparison_module
+import fugue.bench.legacy_v3_admission as legacy_admission_module
 from fugue.bench import mcp_release_qualification
 from fugue.bench.analysis_contracts import (
     EvidenceDriftCheckV1,
@@ -1863,6 +1865,67 @@ def _prerequisite_v3_result(
         evidence_topology=topology,
     )
     assert isinstance(result, ComparisonResultV3)
+    # This fixture models an exact, operator-reviewed hosted-only V3 result.
+    # Give the exact canonical test bytes an explicit external admission so
+    # later prerequisite reads exercise the same fail-closed legacy boundary
+    # as packaged historical artifacts.
+    historical = result.to_dict()
+    lineage = historical["cohort_lineage"]
+    lineage.pop("lineage_digest")
+    lineage.pop("attempt_projection_contract_version")
+    lineage["lineage_digest"] = stable_digest(lineage)
+    for pair in historical["paired_cases"]:
+        for arm in ("baseline", "candidate"):
+            attempt = pair.get(arm)
+            if isinstance(attempt, dict):
+                attempt["infrastructure"].pop(
+                    "operational_projection_version",
+                    None,
+                )
+    historical["qualification_digest"] = (
+        comparison_module._comparison_qualification_digest(historical)
+    )
+    historical["result_digest"] = historical["qualification_digest"]
+    serialized = json.dumps(historical, sort_keys=True)
+    admission = {
+        "schema_version": 1,
+        "result_file_sha256": hashlib.sha256(serialized.encode()).hexdigest(),
+        "comparison_id": comparison_id,
+        "result_digest": historical["result_digest"],
+        "qualification_digest": historical["qualification_digest"],
+        "preview_digest": historical["preview_digest"],
+        "result_source": historical["source"],
+        "source_project": source_project,
+        "result_project": result_project,
+        "source_lock_digest": topology.source_lock_digest,
+        "evidence_topology_digest": topology.topology_digest,
+        "aligned_analysis_digest": historical["aligned_analysis"]["analysis_digest"],
+        "reviewed_provenance": {
+            "kind": "test-reviewed-hosted-result",
+            "digest": "1" * 64,
+            "review_status": "reviewed",
+            "preview_artifact_sha256": "2" * 64,
+            "spec_digest": "3" * 64,
+        },
+    }
+    admission["admission_digest"] = stable_digest(admission)
+    registry_value = {
+        "schema_version": 1,
+        "kind": "legacy-hosted-v3-admission-registry",
+        "admissions": [admission],
+    }
+    registry_value["registry_digest"] = stable_digest(registry_value)
+    registry = (
+        legacy_admission_module.legacy_hosted_v3_admission_registry_from_dict(
+            registry_value
+        )
+    )
+    monkeypatch.setattr(
+        legacy_admission_module,
+        "load_packaged_legacy_hosted_v3_admission_registry",
+        lambda: registry,
+    )
+    result = comparison_module.comparison_result_from_json(serialized)
     assert result.behavioral_summary.status == "improved"
     assert result.integrity["status"] == "reconciled"
     assert all(item.status == "valid" for item in result.task_validity)

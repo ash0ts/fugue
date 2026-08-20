@@ -8,11 +8,13 @@ from concurrent.futures import ThreadPoolExecutor
 from dataclasses import replace
 from pathlib import Path
 from types import SimpleNamespace
+from typing import Any
 
 import httpx
 import pytest
 import yaml
 
+from fugue.bench import export as bench_export
 from fugue.bench.candidates import attempt_id, attempt_identity, stable_digest
 from fugue.bench.comparison import (
     COMPARISON_RUNTIME_ROOT,
@@ -22,8 +24,10 @@ from fugue.bench.comparison import (
     ComparisonResultV3,
     ComparisonSpecV1,
     DecisionAttestationV1,
+    _analyze_aligned_pairs,
     _apply_decision_attestation,
     _approved_comparison_execution_lock,
+    _archive_rejected_local_result,
     _bind_local_execution_evidence,
     _canonical_decision_gate_policies,
     _comparison_qualification_digest,
@@ -46,9 +50,11 @@ from fugue.bench.comparison import (
     _resume_approved_comparison_lock,
     _safe_comparison_score_details,
     _sanitized_scorer_review,
+    _score_and_bind_exported_comparison_rows,
     _score_deterministic_output,
     _scorer_revisions_v3,
     _v3_canonical_attempt_rows,
+    _verify_finalization_source_drift,
     _weave_attempt_evidence_links,
     analyze_comparison_rows,
     check_comparison,
@@ -534,6 +540,410 @@ def test_comparison_keeps_public_tasks_and_private_labels_separate(
     spec = comparison_from_dict(raw, repo_root=tmp_path, source=tmp_path)
     with pytest.raises(ValueError, match="unknown public task .*field"):
         check_comparison(spec, repo_root=tmp_path)
+
+
+def test_pre_agent_evidence_failure_has_no_behavioral_or_judge_scores() -> None:
+    root = Path.cwd()
+    spec = load_comparison(EXAMPLE / "comparison.yaml", repo_root=root)
+    judge = ComparisonEvaluatorV1(
+        id="advisory-review",
+        type="llm_judge",
+        required=False,
+        profile="wandb/anthropic/claude-opus-4-8",
+        rubric="Assess the response.",
+        dimensions=("usefulness",),
+    )
+
+    def unexpected_judge_request(**_kwargs: object):
+        raise AssertionError("a pre-Agent failure must not call the judge")
+
+    scored = score_comparison_rows(
+        replace(spec, evaluators=(*spec.evaluators, judge)),
+        [
+            {
+                "task_id": "expense-limit",
+                "trial_index": 1,
+                "variant_id": "baseline",
+                "harness": "codex",
+                "status": "failed",
+                "runtime_outcome": "not_started",
+                "benchmark_outcome": "unscored",
+                "terminal_kind": "evidence_failure",
+                "evidence_integrity_status": "invalid",
+                # Reproduce the stale false verdict emitted by the failed live run.
+                "pass": False,
+                "comparison_deterministic_scores": {
+                    "fact-and-source.answer_present": False,
+                },
+                "comparison_dimension_roles": {
+                    "fact-and-source.answer_present": "outcome",
+                },
+                "comparison_score_details": {
+                    "fact-and-source.answer_present": {"observed": "missing"},
+                },
+                "comparison_judge_scores": {"advisory-review.usefulness": 0.0},
+                "task_result": {
+                    "schema_version": 1,
+                    "task_passed": False,
+                    "outcome_summary": "The task did not pass.",
+                    "failed_required_checks": [
+                        {
+                            "id": "fact-and-source.answer_present",
+                            "label": "Answer Present",
+                            "critical": True,
+                        }
+                    ],
+                    "answer_digest": None,
+                    "agent_execution_status": "failed",
+                    "evidence_integrity_status": "incomplete",
+                },
+            }
+        ],
+        repo_root=root,
+        env={"ANTHROPIC_API_KEY": "unused-test-value"},
+        judge_request=unexpected_judge_request,
+    )[0]
+
+    assert scored["pass"] is None
+    assert scored["benchmark_pass"] is None
+    assert scored["comparison_evaluation_status"] == "unavailable"
+    assert scored["comparison_required_evaluation_complete"] is False
+    assert scored["comparison_evaluation_reason"] == (
+        "Agent execution did not start; no behavioral output is available to score"
+    )
+    assert scored["evidence_integrity_status"] == "invalid"
+    assert "comparison_deterministic_scores" not in scored
+    assert "comparison_dimension_roles" not in scored
+    assert "comparison_score_details" not in scored
+    assert "comparison_judge_scores" not in scored
+    assert "comparison_judges" not in scored
+    assert "task_result" not in scored
+
+
+def test_export_wrapper_and_projection_withhold_typed_nonbehavioral_claims() -> None:
+    root = Path.cwd()
+    spec = load_comparison(EXAMPLE / "comparison.yaml", repo_root=root)
+    stale = {
+        "task_id": "expense-limit",
+        "task_name": "Expense limit",
+        "trial_index": 1,
+        "variant_id": "baseline",
+        "harness": "codex",
+        "status": "failed",
+        "runtime_outcome": "not_started",
+        "terminal_kind": "runner_start_failure",
+        "comparison_evaluation_status": "unavailable",
+        "comparison_required_evaluation_complete": False,
+        "pass": True,
+        "comparison_deterministic_scores": {"answer_correct": True},
+        "comparison_dimension_roles": {"answer_correct": "outcome"},
+        "comparison_score_details": {"answer_correct": {"observed": "stale"}},
+        "comparison_mechanism": {"assigned_skill_opened": True},
+        "comparison_judge_scores": {"usefulness": 0.9},
+        "comparison_judges": {"usefulness": {"status": "scored"}},
+        "treatment_use_evidence": {"invoked": "observed"},
+        "reward": 1.0,
+        "judge_overall": 0.9,
+        "evaluation_correctness": 1.0,
+        "prompt_injection_safe_and_useful": 1.0,
+        "artifact_schema_valid": 1.0,
+        "agent_response": "stale partial answer",
+        "task_result": {
+            "schema_version": 1,
+            "task_passed": True,
+            "outcome_summary": "Stale pass.",
+            "failed_required_checks": [],
+            "answer_digest": None,
+            "agent_execution_status": "completed",
+            "evidence_integrity_status": "verified",
+        },
+    }
+
+    [row] = _score_and_bind_exported_comparison_rows(
+        spec=spec,
+        rows=[stale],
+        repo_root=root,
+        env={},
+        approved_comparison={},
+        source_pre_run_drift=None,
+        source_checkpoint_drift=None,
+        source_post_run_drift=None,
+        release_note_coverage=(),
+        infrastructure_receipt=None,
+    )
+
+    assert row["pass"] is None
+    assert row["comparison_evaluation_status"] == "unavailable"
+    assert "comparison_deterministic_scores" not in row
+    assert "comparison_dimension_roles" not in row
+    assert "comparison_score_details" not in row
+    assert "comparison_mechanism" not in row
+    assert "comparison_judge_scores" not in row
+    assert "comparison_judges" not in row
+    assert "treatment_use_evidence" not in row
+    assert "reward" not in row
+    assert "judge_overall" not in row
+    assert "evaluation_correctness" not in row
+    assert "prompt_injection_safe_and_useful" not in row
+    assert "artifact_schema_valid" not in row
+    assert "task_result" not in row
+    projection = local_result_row_projection_v1(row)
+    assert projection["execution_status"] == "not_started"
+    assert projection["passed"] is None
+    assert projection["scores"] == {}
+    assert projection["score_explanations"] == {}
+    assert projection["sanitized_answer_excerpt"] is None
+    assert "score_details" not in projection
+    assert "judge_reviews" not in projection
+    assert "task_result" not in projection
+
+
+def test_weave_required_local_row_needs_verified_hosted_decision_receipt() -> None:
+    root = Path.cwd()
+    local_spec = load_comparison(EXAMPLE / "comparison.yaml", repo_root=root)
+    spec = replace(
+        local_spec,
+        execution=replace(local_spec.execution, evidence_mode="weave_required"),
+    )
+    behavioral = {
+        "task_id": "expense-limit",
+        "task_name": "Expense limit",
+        "trial_index": 1,
+        "variant_id": "baseline",
+        "harness": "codex",
+        "run_id": "run-a",
+        "cell_id": "cell-a",
+        "attempt_id": "b" * 64,
+        "trace_project": "wandb/result-project",
+        "trace_receipt": {"app_base_url": "https://wandb.ai"},
+        "weave_evaluation_root_call_id": "evaluation",
+        "eval_predict_and_score_call_id": "predict-and-score",
+        "weave_prediction_call_id": "prediction",
+        "weave_dataset_ref": (
+            "weave:///wandb/result-project/object/tasks:v1"
+        ),
+        "weave_agent_bridge_call_id": "bridge",
+        "weave_agent_root_call_id": "agent-receipt",
+        "status": "passed",
+        "runtime_outcome": "completed",
+        "terminal_kind": "success",
+        "local_evidence_record_digest": "d" * 64,
+        "pass": True,
+        "comparison_evaluation_status": "scored",
+        "comparison_required_evaluation_complete": True,
+        "comparison_deterministic_scores": {"answer_correct": True},
+        "comparison_dimension_roles": {"answer_correct": "outcome"},
+        "task_result": {
+            "schema_version": 1,
+            "task_passed": True,
+            "outcome_summary": "The task passed.",
+            "failed_required_checks": [],
+            "answer_digest": "a" * 64,
+            "agent_execution_status": "completed",
+            "evidence_integrity_status": "verified",
+        },
+    }
+
+    [missing] = _score_and_bind_exported_comparison_rows(
+        spec=spec,
+        rows=[behavioral],
+        repo_root=root,
+        env={},
+        approved_comparison={},
+        source_pre_run_drift=None,
+        source_checkpoint_drift=None,
+        source_post_run_drift=None,
+        release_note_coverage=(),
+        infrastructure_receipt=None,
+    )
+    assert missing["terminal_kind"] == "evidence_failure"
+    assert missing["pass"] is None
+    assert missing["comparison_evaluation_status"] == "unavailable"
+    assert "comparison_deterministic_scores" not in missing
+    assert "task_result" not in missing
+
+    canonical_payload = bench_export._canonical_hosted_task_result(behavioral)
+    receipt_call_id = bench_export._hosted_evidence_verification_call_id(
+        behavioral
+    )
+    provisional_score_set_digest = stable_digest(
+        bench_export._provisional_evaluation_scores(behavioral)
+    )
+    hosted_bindings = {
+        "schema_version": 1,
+        "attempt_id": behavioral["attempt_id"],
+        "evaluation_root_call_id": behavioral[
+            "weave_evaluation_root_call_id"
+        ],
+        "predict_and_score_call_id": behavioral[
+            "eval_predict_and_score_call_id"
+        ],
+        "prediction_call_id": behavioral["weave_prediction_call_id"],
+        "dataset_ref": behavioral["weave_dataset_ref"],
+        "agent_bridge_call_id": behavioral["weave_agent_bridge_call_id"],
+        "agent_receipt_call_id": behavioral["weave_agent_root_call_id"],
+        "evidence_project": behavioral["trace_project"],
+        "canonical_local_record_digest": behavioral[
+            "local_evidence_record_digest"
+        ],
+        "provisional_predict_and_score_output_digest": "1" * 64,
+        "provisional_score_set_digest": provisional_score_set_digest,
+        "provisional_score_call_set_digest": "3" * 64,
+        "canonical_payload_digest": stable_digest(canonical_payload),
+    }
+    hosted = {
+        **behavioral,
+        "hosted_decision_contract_version": 1,
+        "hosted_evidence_verification_status": "verified",
+        "hosted_task_result_canonical": True,
+        "terminal_hosted_visibility_verified": True,
+        "weave_hosted_evidence_receipt_object_verified": True,
+        "weave_hosted_evidence_receipt_terminal_verified": True,
+        "weave_provisional_call_verification_status": "verified",
+        "task_verdict_owner": "post_close_hosted_evidence_verification_receipt",
+        "weave_hosted_evidence_receipt_call_id": receipt_call_id,
+        "weave_hosted_evidence_receipt_ref": bench_export._weave_call_ref(
+            "wandb/result-project", receipt_call_id
+        ),
+        "weave_hosted_evidence_receipt_url": bench_export._weave_call_url(
+            "wandb/result-project", receipt_call_id
+        ),
+        "weave_provisional_predict_and_score_output_digest": "1" * 64,
+        "weave_provisional_score_set_digest": provisional_score_set_digest,
+        "weave_provisional_score_call_set_digest": "3" * 64,
+        "weave_hosted_evidence_receipt_bindings_digest": stable_digest(
+            hosted_bindings
+        ),
+        "weave_hosted_canonical_task_result_digest": stable_digest(
+            canonical_payload["task_result"]
+        ),
+        "weave_hosted_canonical_score_set_digest": stable_digest(
+            canonical_payload["scalar_checks"]
+        ),
+        "weave_hosted_canonical_payload_digest": stable_digest(canonical_payload),
+        "weave_hosted_canonical_payload": canonical_payload,
+    }
+    [accepted] = _score_and_bind_exported_comparison_rows(
+        spec=spec,
+        rows=[hosted],
+        repo_root=root,
+        env={},
+        approved_comparison={},
+        source_pre_run_drift=None,
+        source_checkpoint_drift=None,
+        source_post_run_drift=None,
+        release_note_coverage=(),
+        infrastructure_receipt=None,
+    )
+    assert accepted["pass"] is True
+    assert accepted["comparison_evaluation_status"] == "scored"
+    assert accepted["comparison_deterministic_scores"] == {"answer_correct": True}
+    assert accepted["task_result"]["task_passed"] is True
+
+
+def test_two_not_started_arms_form_an_incomplete_pair_without_dimensions() -> None:
+    rows = [
+        {
+            "attempt_id": arm[0] * 64,
+            "attempt_identity": {
+                "task_id": "task-a",
+                "arm": arm,
+                "harness": "codex",
+                "attempt": 1,
+                "candidate": f"candidate-{arm}",
+                "runtime": "runtime-a",
+            },
+            "task_id": "task-a",
+            "task_name": "Task A",
+            "trial_index": 1,
+            "variant_id": arm,
+            "harness": "codex",
+            "candidate_id": f"candidate-{arm}",
+            "execution_fingerprint": "runtime-a",
+            "status": "failed",
+            "runtime_outcome": "not_started",
+            "terminal_kind": "runner_start_failure",
+            "comparison_evaluation_status": "unavailable",
+            "comparison_required_evaluation_complete": False,
+            "pass": None,
+        }
+        for arm in ("baseline", "candidate")
+    ]
+
+    analysis = _analyze_aligned_pairs(rows, result_schema_version=3)
+
+    assert analysis.incomplete == 1
+    assert len(analysis.v3) == 1
+    assert analysis.v3[0].status == "incomplete"
+    assert analysis.v3[0].dimension_changes == ()
+    assert analysis.v3[0].baseline is not None
+    assert analysis.v3[0].baseline.execution_status == "not_started"
+    assert analysis.v3[0].candidate is not None
+    assert analysis.v3[0].candidate.execution_status == "not_started"
+    with pytest.raises(
+        ValueError,
+        match="nonbehavioral attempt cannot contain task or judge results",
+    ):
+        replace(analysis.v3[0].baseline, scores={"stale": True})
+
+
+def test_completed_fatal_integrity_terminal_has_no_behavioral_claims() -> None:
+    root = Path.cwd()
+    spec = load_comparison(EXAMPLE / "comparison.yaml", repo_root=root)
+    stale = {
+        "task_id": "expense-limit",
+        "trial_index": 1,
+        "variant_id": "baseline",
+        "harness": "codex",
+        "status": "failed",
+        "runtime_outcome": "completed",
+        "terminal_kind": "evidence_failure",
+        "evidence_integrity_status": "invalid",
+        "pass": True,
+        "reward": 1.0,
+        "comparison_deterministic_scores": {"answer_correct": True},
+        "comparison_dimension_roles": {"answer_correct": "outcome"},
+        "comparison_judge_scores": {"usefulness": 0.9},
+        "comparison_mechanism": {"assigned_skill_opened": "observed"},
+        "treatment_use_evidence": {"invoked": "observed"},
+        "task_result": {
+            "schema_version": 1,
+            "task_passed": True,
+            "outcome_summary": "Stale pass.",
+            "failed_required_checks": [],
+            "answer_digest": None,
+            "agent_execution_status": "completed",
+            "evidence_integrity_status": "verified",
+        },
+    }
+
+    [row] = _score_and_bind_exported_comparison_rows(
+        spec=spec,
+        rows=[stale],
+        repo_root=root,
+        env={},
+        approved_comparison={},
+        source_pre_run_drift=None,
+        source_checkpoint_drift=None,
+        source_post_run_drift=None,
+        release_note_coverage=(),
+        infrastructure_receipt=None,
+    )
+    projection = local_result_row_projection_v1(row)
+
+    assert row["runtime_outcome"] == "completed"
+    assert row["pass"] is None
+    assert row["comparison_evaluation_status"] == "unavailable"
+    assert "reward" not in row
+    assert "comparison_deterministic_scores" not in row
+    assert "comparison_judge_scores" not in row
+    assert "comparison_mechanism" not in row
+    assert "treatment_use_evidence" not in row
+    assert "task_result" not in row
+    assert projection["execution_status"] == "completed"
+    assert projection["passed"] is None
+    assert projection["scores"] == {}
+    assert "task_result" not in projection
 
 
 def test_replay_scores_aligned_improvements_and_regressions() -> None:
@@ -1294,6 +1704,616 @@ def test_v2_decision_requires_exact_human_attestation() -> None:
     assert mismatched.decision.status == "invalid"
 
 
+def _strip_current_v3_attempt_contract(attempt: dict[str, Any]) -> None:
+    infrastructure = attempt["infrastructure"]
+    infrastructure.pop("operational_projection_version", None)
+    hosted_contract_fields = {
+        "hosted_decision_contract_version",
+        "hosted_task_result_canonical",
+        "hosted_evidence_verification_status",
+        "hosted_evidence_verification_owner",
+        "hosted_evidence_invalidation_status",
+        "task_verdict_owner",
+        "terminal_hosted_visibility_verified",
+        "weave_provisional_call_verification_status",
+        "weave_provisional_predict_and_score_output_digest",
+        "weave_provisional_score_set_digest",
+        "weave_provisional_score_call_set_digest",
+    }
+    for field_name in tuple(infrastructure):
+        if field_name.startswith("weave_hosted_") or (
+            field_name in hosted_contract_fields
+        ):
+            infrastructure.pop(field_name, None)
+
+
+def _downgrade_current_v3_to_hosted_legacy(
+    result: ComparisonResultV3,
+) -> dict[str, Any]:
+    payload = result.to_dict()
+    lineage = payload["cohort_lineage"]
+    lineage.pop("lineage_digest")
+    lineage.pop("attempt_projection_contract_version")
+    lineage["lineage_digest"] = stable_digest(lineage)
+    payload["local_evidence"] = None
+    payload["local_chain_integrity"] = "not_applicable"
+    payload["task_catalogue"] = []
+    for pair in payload["paired_cases"]:
+        for arm in ("baseline", "candidate"):
+            attempt = pair.get(arm)
+            if not isinstance(attempt, dict):
+                continue
+            attempt["evidence_links"] = attempt["infrastructure"].pop(
+                "hosted_evidence_links"
+            )
+            attempt["evidence_status"] = attempt["infrastructure"].pop(
+                "hosted_evidence_status"
+            )
+            for field_name in (
+                "local_evidence_record_digest",
+                "local_prediction_row_sha256",
+                "local_result_row_projection_digest",
+                "task_presentation",
+                "task_result",
+                "arm_label",
+                "treatment_summary",
+            ):
+                attempt.pop(field_name, None)
+            _strip_current_v3_attempt_contract(attempt)
+    return payload
+
+
+def _assert_v3_legacy_usage_alias_round_trip(
+    *,
+    tmp_path: Path,
+    spec: ComparisonSpecV1,
+    preview_digest: str,
+    rows: list[dict[str, object]],
+    source_project: str,
+    result_project: str,
+    approved: dict[str, Any],
+) -> None:
+    legacy_usage_alias_rows = json.loads(json.dumps(rows))
+    for row in legacy_usage_alias_rows:
+        row.pop("usage", None)
+        row["input_tokens"] = None
+        row["output_tokens"] = None
+        row["n_input_tokens"] = 123_456
+        row["n_output_tokens"] = 789
+        row["usage_reconciliation_status"] = None
+    result = analyze_comparison_rows(
+        comparison_id=spec.id,
+        preview_digest=preview_digest,
+        rows=legacy_usage_alias_rows,
+        source="v3-run",
+        expected_evidence_project=result_project,
+        expected_source_evidence_project=source_project,
+        approved_comparison=approved,
+        result_schema_version=3,
+        study_intent="mcp_release_maintenance",
+    )
+    assert result.operational_summary["input_tokens"] is None
+    assert result.operational_summary["output_tokens"] is None
+    assert result.operational_summary["usage_rows"] == 0
+    assert all(
+        attempt is not None
+        and attempt.input_tokens is None
+        and attempt.output_tokens is None
+        for pair in result.paired_cases
+        for attempt in (pair.baseline, pair.candidate)
+    )
+    destination = tmp_path / "v3-legacy-usage-alias-result"
+    destination.mkdir()
+    (destination / "attempts.jsonl").write_text(
+        "\n".join(
+            json.dumps(row, sort_keys=True) for row in legacy_usage_alias_rows
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+    write_comparison_result(result, destination=destination)
+    assert read_comparison_result(destination / "result.json") == result
+
+    rejected = _json_value_for_test(result.to_dict())
+    rejected["operational_summary"]["input_tokens"] = 987_654
+    rejected["operational_summary"]["output_tokens"] = 321
+    rejected["operational_summary"]["usage_rows"] = len(legacy_usage_alias_rows)
+    rejected["qualification_digest"] = _comparison_qualification_digest(rejected)
+    rejected["result_digest"] = rejected["qualification_digest"]
+    rejected_path = destination / "result.json"
+    rejected_path.write_text(json.dumps(rejected), encoding="utf-8")
+    rejected_sha256 = hashlib.sha256(rejected_path.read_bytes()).hexdigest()
+
+    archived = _archive_rejected_local_result(
+        rejected_path,
+        destination=destination,
+        recomputed=result,
+    )
+
+    assert archived == {
+        "path": f"rejected-results/{rejected_sha256}.result.json",
+        "sha256": rejected_sha256,
+        "qualification_digest": rejected["qualification_digest"],
+    }
+    assert (destination / archived["path"]).read_bytes() == rejected_path.read_bytes()
+
+
+def _json_value_for_test(value: object) -> Any:
+    return json.loads(json.dumps(value, sort_keys=True))
+
+
+def test_local_finalization_source_drift_requires_the_exact_approved_lock() -> None:
+    approved = {
+        "source_lock_digest": "a" * 64,
+        "evidence_checkpoint_cells": 1,
+    }
+    matched = {
+        "status": "matched",
+        "expected_digest": "a" * 64,
+        "observed_digest": "a" * 64,
+    }
+    rows = [
+        {
+            "attempt_id": "b" * 64,
+            "source_pre_run_drift": matched,
+            "source_checkpoint_drift": matched,
+            "source_post_run_drift": matched,
+        }
+    ]
+
+    assert len(_verify_finalization_source_drift(rows, approved=approved)) == 64
+
+    rows[0]["source_post_run_drift"] = {
+        **matched,
+        "observed_digest": "c" * 64,
+    }
+    with pytest.raises(ValueError, match="source_post_run_drift"):
+        _verify_finalization_source_drift(rows, approved=approved)
+
+
+def test_host_only_finalizer_rebuilds_once_without_execution(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import fugue.bench.comparison as comparison_module
+    from fugue.bench.comparison_execution import (
+        compile_comparison_execution_binding,
+        execution_stage_authorizations,
+    )
+    from fugue.bench.execution import CellOutcome
+    from fugue.bench.execution_recovery import (
+        CanonicalizationObservationV1,
+        CleanupObservationV1,
+        CostObservationV1,
+        ExecutionRecoveryController,
+    )
+    from fugue.bench.files import atomic_write_json
+    from fugue.bench.library import (
+        ExperimentSpec,
+        experiment_from_yaml,
+        experiment_to_yaml,
+    )
+
+    run_id = "completed-local-run"
+    preview_digest = "b" * 64
+    comparison_id = "synthetic-finalization"
+    attempt_ids = (stable_digest({"attempt": 1}), stable_digest({"attempt": 2}))
+    expected_cells = [
+        {
+            "attempt_id": attempt_id_value,
+            "task_id": "task",
+            "variant_id": variant,
+            "harness": "claude-code",
+            "trial_index": 1,
+            "applicable": True,
+            "skip_reason": "",
+        }
+        for attempt_id_value, variant in zip(
+            attempt_ids, ("baseline", "candidate"), strict=True
+        )
+    ]
+    binding = compile_comparison_execution_binding(
+        comparison_id=comparison_id,
+        expected_cells=expected_cells,
+        concurrency=1,
+        checkpoint_cells=1,
+        maximum_cost_usd=2.0,
+        reserve_per_attempt_usd=0.5,
+        maximum_infrastructure_replacements=0,
+    )
+    approved = {
+        "comparison_id": comparison_id,
+        "spec_digest": "c" * 64,
+        "preview_digest": preview_digest,
+        "evidence_mode": "local",
+        "evidence_checkpoint_cells": 0,
+        "source_lock_digest": "",
+        "qualification_input_digests": {},
+        "expected_cells": expected_cells,
+        "execution_schedule": binding.to_dict(),
+        "execution_schedule_digest": binding.binding_digest,
+    }
+    spec = SimpleNamespace(
+        schema_version=3,
+        id=comparison_id,
+        spec_digest="c" * 64,
+        execution=SimpleNamespace(
+            evidence_mode="local",
+            source_evidence_project=None,
+            research_id="synthetic-research",
+        ),
+        decision_policy=None,
+        supersedes=(),
+    )
+    comparison_path = tmp_path / "comparison.yaml"
+    comparison_path.write_text("schema_version: 3\n", encoding="utf-8")
+    run_dir = tmp_path / ".fugue" / "runtime" / run_id
+    run_dir.mkdir(parents=True)
+    frozen_experiment = ExperimentSpec(
+        id=comparison_id,
+        title="Synthetic finalization",
+        evidence_mode="local",
+    )
+    frozen_body = experiment_to_yaml(frozen_experiment)
+    (run_dir / "experiment.yaml").write_text(frozen_body, encoding="utf-8")
+    frozen_definition = experiment_from_yaml(frozen_body).to_dict()
+    input_lock = {
+        "schema_version": 1,
+        "run_id": run_id,
+        "request": {"approved_comparison": approved},
+        "experiment": frozen_definition,
+        "resolved_experiment_sha256": stable_digest(frozen_definition),
+        "runtime": {
+            "fugue_distribution": {
+                "schema_version": 2,
+                "kind": "installed_distribution",
+                "digest": "d" * 64,
+            }
+        },
+        "evaluation_asset_lock_sha256": "e" * 64,
+        "snapshot_sha256": "",
+        "lock_sha256": "",
+    }
+    snapshot_sha256 = stable_digest(input_lock)
+    input_lock["snapshot_sha256"] = snapshot_sha256
+    input_lock["lock_sha256"] = snapshot_sha256
+    atomic_write_json(run_dir / "input-lock.json", input_lock)
+
+    journal_path = run_dir / "comparison-execution.jsonl"
+    controller = ExecutionRecoveryController(
+        journal_path,
+        controller_id=f"comparison-{run_id}",
+        schedule=binding.schedule,
+    )
+    for authorization in execution_stage_authorizations(
+        binding,
+        preview_digest=preview_digest,
+        approval_digest="f" * 64,
+    ):
+        controller.authorize_stage(authorization)
+        while True:
+            decision = controller.admit(stage_id=authorization.stage_id)
+            if decision.status == "complete":
+                break
+            assert decision.status == "admitted"
+            for physical in decision.physical_executions:
+                controller.started(physical, observed_harbor_resources=())
+                controller.finalize(
+                    physical,
+                    terminal_kind="success",
+                    result_reference=f"results/{physical.physical_execution_id}.json",
+                    cleanup=CleanupObservationV1(
+                        verified=True,
+                        scope_verified=True,
+                        post_run_inventory=True,
+                        receipt_reference=f"cleanup/{physical.physical_execution_id}",
+                    ),
+                    cost=CostObservationV1(
+                        actual_cost_micro_usd=100,
+                        authoritative=True,
+                        source="synthetic-receipt",
+                        receipt_reference=f"cost/{physical.physical_execution_id}",
+                    ),
+                    cell_outcome=CellOutcome(
+                        cell_id=f"cell-{physical.logical_attempt_id[:12]}",
+                        status="passed",
+                        runtime_outcome="completed",
+                        terminal_kind="success",
+                    ),
+                )
+                controller.select_canonical(
+                    physical,
+                    CanonicalizationObservationV1(
+                        kind="synthetic-local-evidence",
+                        status="verified",
+                        reference=f"evidence/{physical.physical_execution_id}",
+                        evidence_digest=stable_digest(
+                            {"physical_execution_id": physical.physical_execution_id}
+                        ),
+                    ),
+                )
+    recovery = controller.snapshot()
+    assert recovery.complete
+    atomic_write_json(
+        run_dir / "run.json",
+        {
+            "status": "passed",
+            "experiment_id": comparison_id,
+            "snapshot_sha256": snapshot_sha256,
+            "cell_count": binding.logical_cell_count,
+            "comparison_execution": {
+                "binding_digest": binding.binding_digest,
+                "schedule_digest": binding.schedule.schedule_digest,
+                "event_chain_digest": recovery.event_chain_digest,
+                "controller_id": recovery.controller_id,
+                "journal": journal_path.relative_to(tmp_path).as_posix(),
+                "logical_attempt_count": recovery.logical_attempt_count,
+                "physical_execution_count": len(recovery.physical_executions),
+                "canonical_result_count": len(recovery.canonical_results),
+                "complete": True,
+            },
+        },
+    )
+    checkpoint_ids = tuple(
+        item.logical_attempt_id
+        for item in binding.schedule.logical_attempts
+        if item.stage_id == "checkpoint"
+    )
+    checkpoint_rows = {
+        attempt_id_value: {"attempt_id": attempt_id_value, "pass": True}
+        for attempt_id_value in checkpoint_ids
+    }
+    checkpoint_unsigned = {
+        "schema_version": 1,
+        "run_id": run_id,
+        "schedule_digest": binding.schedule.schedule_digest,
+        "checkpoint_attempt_ids": list(checkpoint_ids),
+        "checkpoint_row_digests": {
+            attempt_id_value: stable_digest(checkpoint_rows[attempt_id_value])
+            for attempt_id_value in checkpoint_ids
+        },
+        "source_drift": None,
+    }
+    atomic_write_json(
+        run_dir / "comparison-checkpoint.json",
+        {
+            **checkpoint_unsigned,
+            "receipt_digest": stable_digest(checkpoint_unsigned),
+        },
+    )
+
+    manifest_path = run_dir / "evidence" / "manifest.json"
+    manifest_path.parent.mkdir(parents=True)
+    manifest_path.write_text("{}\n", encoding="utf-8")
+    records = tuple(
+        SimpleNamespace(attempt_id=value, record_digest=str(index) * 64)
+        for index, value in enumerate(attempt_ids, start=1)
+    )
+    manifest = SimpleNamespace(
+        status="complete",
+        run_id=run_id,
+        planned_attempt_ids=tuple(sorted(attempt_ids)),
+        terminal_attempt_ids=tuple(sorted(attempt_ids)),
+        run_snapshot_sha256=snapshot_sha256,
+        evaluation_asset_lock_sha256="e" * 64,
+        attempt_records=records,
+        manifest_digest="1" * 64,
+        attempt_record_set_digest="2" * 64,
+    )
+    store_calls: list[str] = []
+
+    class SyntheticStore:
+        def __init__(self, repo_root: Path, selected_run_id: str) -> None:
+            assert repo_root == tmp_path
+            assert selected_run_id == run_id
+            self.manifest_path = manifest_path
+
+        def read_manifest(self) -> object:
+            store_calls.append("manifest")
+            return manifest
+
+        def read_attempt(self, attempt_id_value: str) -> object:
+            store_calls.append(attempt_id_value)
+            return next(
+                item for item in records if item.attempt_id == attempt_id_value
+            )
+
+    destination = tmp_path / ".fugue" / "results" / "comparisons" / preview_digest
+    destination.mkdir(parents=True)
+    rows = [
+        {"attempt_id": attempt_id_value, "run_id": run_id}
+        for attempt_id_value in attempt_ids
+    ]
+    (destination / "attempts.jsonl").write_text(
+        "".join(json.dumps(row, sort_keys=True) + "\n" for row in rows),
+        encoding="utf-8",
+    )
+
+    class SyntheticResult:
+        def __init__(self) -> None:
+            unsigned = {
+                "schema_version": 3,
+                "comparison_id": comparison_id,
+                "preview_digest": preview_digest,
+                "source": run_id,
+                "operational_summary": {
+                    "input_tokens": None,
+                    "output_tokens": None,
+                    "usage_rows": 0,
+                },
+            }
+            digest = _comparison_qualification_digest(unsigned)
+            self.payload = {
+                **unsigned,
+                "qualification_digest": digest,
+                "result_digest": digest,
+            }
+            self.result_digest = digest
+
+        def to_dict(self) -> dict[str, Any]:
+            return _json_value_for_test(self.payload)
+
+    result = SyntheticResult()
+    rejected = result.to_dict()
+    rejected["operational_summary"] = {
+        "input_tokens": 1000,
+        "output_tokens": 100,
+        "usage_rows": 2,
+    }
+    rejected["qualification_digest"] = _comparison_qualification_digest(rejected)
+    rejected["result_digest"] = rejected["qualification_digest"]
+    atomic_write_json(destination / "result.json", rejected)
+    rejected_sha256 = hashlib.sha256(
+        (destination / "result.json").read_bytes()
+    ).hexdigest()
+
+    def read_result(path: Path) -> SyntheticResult:
+        payload = json.loads(path.read_text(encoding="utf-8"))
+        if payload != result.to_dict():
+            raise ValueError("synthetic rejected partial")
+        return result
+
+    def write_result(
+        selected: SyntheticResult,
+        *,
+        destination: Path,
+    ) -> tuple[Path, Path]:
+        assert selected is result
+        atomic_write_json(destination / "result.json", selected.to_dict())
+        (destination / "result.md").write_text("# Synthetic result\n", encoding="utf-8")
+        atomic_write_json(destination / "reproduction.json", {"verified": True})
+        return destination / "result.json", destination / "result.md"
+
+    forbidden_calls: list[str] = []
+
+    def forbidden(*_args: object, **_kwargs: object) -> object:
+        forbidden_calls.append("called")
+        raise AssertionError("host-only finalization invoked paid work")
+
+    publication_events: list[str] = []
+
+    def publish(**kwargs: object) -> None:
+        assert (destination / "local-result-finalization.json").is_file()
+        assert read_result(Path(str(kwargs["json_path"]))) is result
+        publication_events.append("after-canonical-validation")
+        atomic_write_json(
+            tmp_path / ".fugue" / "results" / "comparisons" / "latest.json",
+            {"result_digest": result.result_digest},
+        )
+
+    monkeypatch.setattr(comparison_module, "ComparisonResultV3", SyntheticResult)
+    monkeypatch.setattr(
+        comparison_module, "_verify_approved_comparison_execution_lock", lambda _x: None
+    )
+    monkeypatch.setattr(comparison_module, "_verified_approved_inputs", lambda *_a, **_k: {})
+    monkeypatch.setattr(
+        comparison_module,
+        "_qualification_input_readiness",
+        lambda *_a, **_k: ({}, []),
+    )
+    monkeypatch.setattr(
+        comparison_module, "_bound_v3_release_note_coverage", lambda *_a, **_k: ()
+    )
+    monkeypatch.setattr(comparison_module, "LocalEvidenceStore", SyntheticStore)
+    monkeypatch.setattr(
+        comparison_module,
+        "_local_comparison_prediction_row",
+        lambda *, attempt_id, **_kwargs: checkpoint_rows[attempt_id],
+    )
+    monkeypatch.setattr(
+        comparison_module,
+        "_bind_local_execution_evidence",
+        lambda selected_rows, **_kwargs: store_calls.append(
+            f"bound:{len(selected_rows)}"
+        ),
+    )
+    monkeypatch.setattr(
+        comparison_module, "analyze_comparison_rows", lambda **_kwargs: result
+    )
+    monkeypatch.setattr(comparison_module, "write_comparison_result", write_result)
+    monkeypatch.setattr(comparison_module, "read_comparison_result", read_result)
+    monkeypatch.setattr(comparison_module, "_publish_comparison_result", publish)
+    monkeypatch.setattr(comparison_module, "execute_comparison", forbidden)
+    monkeypatch.setattr(
+        comparison_module, "_score_and_bind_exported_comparison_rows", forbidden
+    )
+    monkeypatch.setattr(comparison_module, "_request_comparison_judge", forbidden)
+    monkeypatch.setattr(
+        "fugue.bench.runtime_provenance.resolve_fugue_distribution_provenance",
+        lambda: {"schema_version": 2, "kind": "finalizer", "digest": "3" * 64},
+    )
+
+    finalized, result_path, markdown_path, receipt_path = (
+        comparison_module.finalize_local_comparison_result(
+            spec,
+            comparison_path=comparison_path,
+            run_id=run_id,
+            repo_root=tmp_path,
+        )
+    )
+    assert finalized is result
+    assert read_result(result_path) is result
+    assert markdown_path.read_text(encoding="utf-8") == "# Synthetic result\n"
+    assert publication_events == ["after-canonical-validation"]
+    assert forbidden_calls == []
+    assert store_calls.count("manifest") == 1
+    assert set(attempt_ids) <= set(store_calls)
+    archived = destination / "rejected-results" / f"{rejected_sha256}.result.json"
+    assert archived.is_file()
+    receipt = json.loads(receipt_path.read_text(encoding="utf-8"))
+    assert receipt["execution_distribution"]["digest"] == "d" * 64
+    assert receipt["finalizer_distribution"]["digest"] == "3" * 64
+    assert receipt["bindings"]["execution_schedule"]["event_chain_digest"] == (
+        recovery.event_chain_digest
+    )
+
+    immutable_paths = (
+        journal_path,
+        destination / "attempts.jsonl",
+        result_path,
+        markdown_path,
+        destination / "reproduction.json",
+        receipt_path,
+        archived,
+    )
+    before = {path: hashlib.sha256(path.read_bytes()).hexdigest() for path in immutable_paths}
+    second = comparison_module.finalize_local_comparison_result(
+        spec,
+        comparison_path=comparison_path,
+        run_id=run_id,
+        repo_root=tmp_path,
+    )
+    after = {path: hashlib.sha256(path.read_bytes()).hexdigest() for path in immutable_paths}
+    assert second[0] is result
+    assert before == after
+    assert publication_events == [
+        "after-canonical-validation",
+        "after-canonical-validation",
+    ]
+
+    tamper_targets = (
+        markdown_path,
+        manifest_path,
+        journal_path,
+        run_dir / "comparison-checkpoint.json",
+    )
+    for target in tamper_targets:
+        original = target.read_bytes()
+        target.write_bytes(original + b" ")
+        with pytest.raises((ValueError, RuntimeError)):
+            comparison_module.finalize_local_comparison_result(
+                spec,
+                comparison_path=comparison_path,
+                run_id=run_id,
+                repo_root=tmp_path,
+            )
+        target.write_bytes(original)
+    assert publication_events == [
+        "after-canonical-validation",
+        "after-canonical-validation",
+    ]
+
+
 def test_v3_result_round_trips_source_topology_and_canonical_view(
     tmp_path: Path,
 ) -> None:
@@ -1342,8 +2362,17 @@ def test_v3_result_round_trips_source_topology_and_canonical_view(
         "observed_digest": source_digest,
     }
     result_base = "https://wandb.ai/wandb/result-project/weave"
+    local_binding = {
+        "local_evidence_manifest_digest": "1" * 64,
+        "local_evidence_manifest_file_sha256": "2" * 64,
+        "local_evidence_plan_digest": "3" * 64,
+        "local_evidence_attempt_record_set_digest": "4" * 64,
+        "local_evidence_prediction_row_set_digest": "5" * 64,
+        "local_evidence_run_receipt_digest": "6" * 64,
+        "local_evidence_run_receipt_file_sha256": "7" * 64,
+    }
     rows: list[dict[str, object]] = []
-    for cell in approved["expected_cells"]:
+    for index, cell in enumerate(approved["expected_cells"], start=1):
         variant = str(cell["variant_id"])
         passed = variant == "candidate"
         row = _decision_row(
@@ -1371,6 +2400,13 @@ def test_v3_result_round_trips_source_topology_and_canonical_view(
         )
         row.pop("candidate_digest", None)
         row["run_id"] = "v3-run"
+        row["cell_id"] = f"cell-{index}"
+        # Current deterministic Evaluation rows use ``scored``. The result
+        # reader separately retains the historical ``completed`` spelling.
+        row["comparison_evaluation_status"] = "scored"
+        row["comparison_required_evaluation_complete"] = True
+        row["runtime_outcome"] = "completed"
+        row["terminal_kind"] = "success"
         row["trace_project"] = result_project
         row["trace_receipt"] = approved["evidence_destination"]
         row["approved_comparison"] = approved
@@ -1422,6 +2458,7 @@ def test_v3_result_round_trips_source_topology_and_canonical_view(
         row["weave_dataset_id"] = (
             "weave:///wandb/result-project/object/release-dataset:v1"
         )
+        row["weave_dataset_ref"] = row["weave_dataset_id"]
         row["eval_predict_and_score_url"] = f"{result_base}/calls/{call_prefix}-eval"
         row["eval_predict_and_score_call_id"] = f"{call_prefix}-eval"
         row["eval_predict_and_score_ref"] = (
@@ -1429,16 +2466,117 @@ def test_v3_result_round_trips_source_topology_and_canonical_view(
         )
         row["prediction_url"] = f"{result_base}/calls/{call_prefix}-prediction"
         row["prediction_call_id"] = f"{call_prefix}-prediction"
+        row["weave_prediction_call_id"] = f"{call_prefix}-prediction"
         row["weave_prediction_ref"] = (
             f"weave:///wandb/result-project/call/{call_prefix}-prediction"
         )
         row["agent_url"] = f"{result_base}/calls/{call_prefix}-agent"
         row["native_agent_root_call_id"] = f"{call_prefix}-agent"
+        row["weave_agent_root_call_id"] = f"{call_prefix}-agent"
+        row["weave_agent_bridge_call_id"] = f"{call_prefix}-bridge"
         row["weave_agent_root_ref"] = (
             f"weave:///wandb/result-project/call/{call_prefix}-agent"
         )
         row["weave_agent_root_evidence_kind"] = "native_weave_call_v1"
         row["weave_agent_root_is_native_call"] = True
+        attempt = str(row["attempt_id"])
+        row["local_evidence_record_digest"] = f"{index:x}" * 64
+        row["local_evidence_prediction_row_sha256"] = f"{index + 4:x}" * 64
+        row.update(local_binding)
+        row["local_evidence_links"] = [
+            {
+                "kind": kind,
+                "status": "resolved",
+                "system": "local_artifact",
+                "ref": f"fugue://local-evidence/{attempt}/{kind}",
+            }
+            for kind in (
+                "evaluation_root",
+                "prediction_and_score",
+                "prediction",
+                "agent_root",
+                "dataset",
+            )
+        ]
+        canonical_payload = bench_export._canonical_hosted_task_result(row)
+        row["task_result"] = canonical_payload["task_result"]
+        provisional_output_digest = stable_digest(
+            {"kind": "provisional-output", "index": index}
+        )
+        provisional_score_set_digest = stable_digest(
+            bench_export._provisional_evaluation_scores(row)
+        )
+        provisional_score_call_set_digest = stable_digest(
+            {"kind": "provisional-score-calls", "index": index}
+        )
+        receipt_call_id = bench_export._hosted_evidence_verification_call_id(row)
+        hosted_bindings = {
+            "schema_version": 1,
+            "attempt_id": attempt,
+            "evaluation_root_call_id": row["weave_evaluation_root_call_id"],
+            "predict_and_score_call_id": row[
+                "eval_predict_and_score_call_id"
+            ],
+            "prediction_call_id": row["weave_prediction_call_id"],
+            "dataset_ref": row["weave_dataset_id"],
+            "agent_bridge_call_id": row["weave_agent_bridge_call_id"],
+            "agent_receipt_call_id": row["weave_agent_root_call_id"],
+            "evidence_project": result_project,
+            "canonical_local_record_digest": row[
+                "local_evidence_record_digest"
+            ],
+            "provisional_predict_and_score_output_digest": (
+                provisional_output_digest
+            ),
+            "provisional_score_set_digest": provisional_score_set_digest,
+            "provisional_score_call_set_digest": (
+                provisional_score_call_set_digest
+            ),
+            "canonical_payload_digest": stable_digest(canonical_payload),
+        }
+        row.update(
+            {
+                "hosted_decision_contract_version": 1,
+                "hosted_evidence_verification_status": "verified",
+                "hosted_task_result_canonical": True,
+                "terminal_hosted_visibility_verified": True,
+                "weave_hosted_evidence_receipt_object_verified": True,
+                "weave_hosted_evidence_receipt_terminal_verified": True,
+                "weave_provisional_call_verification_status": "verified",
+                "task_verdict_owner": (
+                    "post_close_hosted_evidence_verification_receipt"
+                ),
+                "weave_hosted_evidence_receipt_call_id": receipt_call_id,
+                "weave_hosted_evidence_receipt_ref": (
+                    bench_export._weave_call_ref(result_project, receipt_call_id)
+                ),
+                "weave_hosted_evidence_receipt_url": (
+                    bench_export._weave_call_url(result_project, receipt_call_id)
+                ),
+                "weave_provisional_predict_and_score_output_digest": (
+                    provisional_output_digest
+                ),
+                "weave_provisional_score_set_digest": (
+                    provisional_score_set_digest
+                ),
+                "weave_provisional_score_call_set_digest": (
+                    provisional_score_call_set_digest
+                ),
+                "weave_hosted_evidence_receipt_bindings_digest": stable_digest(
+                    hosted_bindings
+                ),
+                "weave_hosted_canonical_task_result_digest": stable_digest(
+                    canonical_payload["task_result"]
+                ),
+                "weave_hosted_canonical_score_set_digest": stable_digest(
+                    canonical_payload["scalar_checks"]
+                ),
+                "weave_hosted_canonical_payload_digest": stable_digest(
+                    canonical_payload
+                ),
+                "weave_hosted_canonical_payload": canonical_payload,
+            }
+        )
         rows.append(row)
 
     result = analyze_comparison_rows(
@@ -1459,6 +2597,7 @@ def test_v3_result_round_trips_source_topology_and_canonical_view(
     assert result.evidence_topology.source_destination.project_slug == (source_project)
     assert result.evidence_topology.result_destination.project_slug == (result_project)
     assert result.behavioral_summary.status == "improved"
+    assert result.required_evaluations_incomplete == 0
     assert result.supersedes[0].result_digest == "6" * 64
     assert result.task_validity[0].status == "valid"
     assert result.paired_cases[0].dimension_changes[0].role == "outcome"
@@ -1468,6 +2607,10 @@ def test_v3_result_round_trips_source_topology_and_canonical_view(
     assert result.paired_cases[0].candidate.usage_reconciliation_status == "resolved"
     projected_view = build_comparison_evaluation_view(result.to_dict())
     projected_candidate = projected_view.paired_cases[0]["candidate"]
+    assert projected_view.evidence_backend == result.evidence_backend
+    assert projected_view.publication_status == result.publication_status
+    assert projected_view.local_chain_integrity == result.local_chain_integrity
+    assert projected_view.hosted_chain_integrity == result.hosted_chain_integrity
     [comparison_rows_link] = [
         link
         for link in projected_view.evidence_links
@@ -1484,15 +2627,6 @@ def test_v3_result_round_trips_source_topology_and_canonical_view(
     assert projected_candidate["usage_reconciliation_status"] == "resolved"
 
     dual_chain_rows = json.loads(json.dumps(rows))
-    local_binding = {
-        "local_evidence_manifest_digest": "1" * 64,
-        "local_evidence_manifest_file_sha256": "2" * 64,
-        "local_evidence_plan_digest": "3" * 64,
-        "local_evidence_attempt_record_set_digest": "4" * 64,
-        "local_evidence_prediction_row_set_digest": "5" * 64,
-        "local_evidence_run_receipt_digest": "6" * 64,
-        "local_evidence_run_receipt_file_sha256": "7" * 64,
-    }
     for index, row in enumerate(dual_chain_rows, start=1):
         attempt = str(row["attempt_id"])
         row["run_id"] = "v3-run"
@@ -1504,7 +2638,7 @@ def test_v3_result_round_trips_source_topology_and_canonical_view(
                 "kind": kind,
                 "status": "resolved",
                 "system": "local_artifact",
-                "ref": f"fugue://evidence/{attempt}/{kind}",
+                "ref": f"fugue://local-evidence/{attempt}/{kind}",
             }
             for kind in (
                 "evaluation_root",
@@ -1567,6 +2701,45 @@ def test_v3_result_round_trips_source_topology_and_canonical_view(
     write_comparison_result(dual_chain, destination=dual_chain_destination)
     assert read_comparison_result(dual_chain_destination / "result.json") == dual_chain
 
+    historical_local = dual_chain.to_dict()
+    historical_lineage = historical_local["cohort_lineage"]
+    historical_lineage.pop("lineage_digest")
+    historical_lineage.pop("attempt_projection_contract_version")
+    historical_lineage["lineage_digest"] = stable_digest(historical_lineage)
+    for pair in historical_local["paired_cases"]:
+        for arm in ("baseline", "candidate"):
+            attempt = pair.get(arm)
+            if isinstance(attempt, dict):
+                _strip_current_v3_attempt_contract(attempt)
+    historical_local["qualification_digest"] = _comparison_qualification_digest(
+        historical_local
+    )
+    historical_local["result_digest"] = historical_local["qualification_digest"]
+    historical_local_path = dual_chain_destination / "historical-local-result.json"
+    historical_local_path.write_text(
+        json.dumps(historical_local),
+        encoding="utf-8",
+    )
+    with pytest.raises(ValueError, match="not in the reviewed admission registry"):
+        read_comparison_result(historical_local_path)
+
+    downgraded_hosted = _downgrade_current_v3_to_hosted_legacy(dual_chain)
+    downgraded_hosted["judge_summary"]["status"] = "scored"
+    downgraded_hosted["judge_summary"]["unavailable_attempts"] = 0
+    downgraded_hosted["qualification_digest"] = _comparison_qualification_digest(
+        downgraded_hosted
+    )
+    downgraded_hosted["result_digest"] = downgraded_hosted[
+        "qualification_digest"
+    ]
+    downgraded_hosted_path = dual_chain_destination / "downgraded-hosted-result.json"
+    downgraded_hosted_path.write_text(
+        json.dumps(downgraded_hosted, sort_keys=True),
+        encoding="utf-8",
+    )
+    with pytest.raises(ValueError, match="not in the reviewed admission registry"):
+        read_comparison_result(downgraded_hosted_path)
+
     role_drift = json.loads(json.dumps(rows))
     candidate_row = next(row for row in role_drift if row["variant_id"] == "candidate")
     candidate_row["comparison_dimension_roles"]["release.factual_correctness"] = (
@@ -1594,6 +2767,483 @@ def test_v3_result_round_trips_source_topology_and_canonical_view(
     write_comparison_result(result, destination=destination)
     assert read_comparison_result(destination / "result.json") == result
 
+    legacy_completed_rows = json.loads(json.dumps(rows))
+    for row in legacy_completed_rows:
+        row["comparison_evaluation_status"] = "completed"
+    current_completed_result = analyze_comparison_rows(
+        comparison_id=spec.id,
+        preview_digest=preview.preview_digest,
+        rows=legacy_completed_rows,
+        source="v3-run",
+        expected_evidence_project=result_project,
+        expected_source_evidence_project=source_project,
+        approved_comparison=approved,
+        result_schema_version=3,
+        study_intent="mcp_release_maintenance",
+    )
+    assert current_completed_result.required_evaluations_incomplete == 0
+    assert current_completed_result.cohort_lineage[
+        "attempt_projection_contract_version"
+    ] == 1
+    legacy_completed_destination = tmp_path / "v3-legacy-completed-result"
+    legacy_completed_destination.mkdir()
+    (legacy_completed_destination / "attempts.jsonl").write_text(
+        "\n".join(json.dumps(row, sort_keys=True) for row in legacy_completed_rows)
+        + "\n",
+        encoding="utf-8",
+    )
+    with pytest.raises(ValueError, match="required evaluation total disagrees"):
+        write_comparison_result(
+            current_completed_result,
+            destination=legacy_completed_destination,
+        )
+    historical_completed = current_completed_result.to_dict()
+    lineage = historical_completed["cohort_lineage"]
+    lineage.pop("lineage_digest")
+    lineage.pop("attempt_projection_contract_version")
+    lineage["lineage_digest"] = stable_digest(lineage)
+    historical_completed["qualification_digest"] = (
+        _comparison_qualification_digest(historical_completed)
+    )
+    historical_completed["result_digest"] = historical_completed[
+        "qualification_digest"
+    ]
+    historical_path = legacy_completed_destination / "historical-result.json"
+    historical_path.write_text(json.dumps(historical_completed), encoding="utf-8")
+    with pytest.raises(ValueError, match="not in the reviewed admission registry"):
+        read_comparison_result(historical_path)
+
+    timed_out_rows = json.loads(json.dumps(rows))
+    for row in timed_out_rows:
+        row.update(
+            {
+                "status": "failed",
+                "runtime_outcome": "timed_out",
+                "terminal_kind": "agent_timeout",
+                "benchmark_outcome": "failed",
+                # Provider payloads can deserialize exact integral counts as
+                # floats. V3 must preserve their integer count semantics.
+                "input_tokens": 111.0,
+                "output_tokens": 22.0,
+            }
+        )
+        row.pop("usage", None)
+        task_result = dict(row["task_result"])
+        task_result["agent_execution_status"] = "timed_out"
+        row["task_result"] = task_result
+        canonical_payload = bench_export._canonical_hosted_task_result(row)
+        row["weave_hosted_canonical_task_result_digest"] = stable_digest(
+            canonical_payload["task_result"]
+        )
+        row["weave_hosted_canonical_score_set_digest"] = stable_digest(
+            canonical_payload["scalar_checks"]
+        )
+        row["weave_hosted_canonical_payload_digest"] = stable_digest(
+            canonical_payload
+        )
+        row["weave_hosted_canonical_payload"] = canonical_payload
+        hosted_bindings = {
+            "schema_version": 1,
+            "attempt_id": row["attempt_id"],
+            "evaluation_root_call_id": row["weave_evaluation_root_call_id"],
+            "predict_and_score_call_id": row["eval_predict_and_score_call_id"],
+            "prediction_call_id": row["weave_prediction_call_id"],
+            "dataset_ref": row["weave_dataset_id"],
+            "agent_bridge_call_id": row["weave_agent_bridge_call_id"],
+            "agent_receipt_call_id": row["weave_agent_root_call_id"],
+            "evidence_project": result_project,
+            "canonical_local_record_digest": row[
+                "local_evidence_record_digest"
+            ],
+            "provisional_predict_and_score_output_digest": row[
+                "weave_provisional_predict_and_score_output_digest"
+            ],
+            "provisional_score_set_digest": row[
+                "weave_provisional_score_set_digest"
+            ],
+            "provisional_score_call_set_digest": row[
+                "weave_provisional_score_call_set_digest"
+            ],
+            "canonical_payload_digest": stable_digest(canonical_payload),
+        }
+        row["weave_hosted_evidence_receipt_bindings_digest"] = stable_digest(
+            hosted_bindings
+        )
+    timed_out_result = analyze_comparison_rows(
+        comparison_id=spec.id,
+        preview_digest=preview.preview_digest,
+        rows=timed_out_rows,
+        source="v3-run",
+        expected_evidence_project=result_project,
+        expected_source_evidence_project=source_project,
+        approved_comparison=approved,
+        result_schema_version=3,
+        study_intent="mcp_release_maintenance",
+    )
+    assert timed_out_result.operational_summary["execution_states"] == {
+        "timed_out": timed_out_result.rows
+    }
+    assert timed_out_result.operational_summary["input_tokens"] == (
+        111 * timed_out_result.rows
+    )
+    assert timed_out_result.operational_summary["output_tokens"] == (
+        22 * timed_out_result.rows
+    )
+    assert all(
+        attempt is not None
+        and attempt.execution_status == "timed_out"
+        and type(attempt.input_tokens) is int
+        and type(attempt.output_tokens) is int
+        for pair in timed_out_result.paired_cases
+        for attempt in (pair.baseline, pair.candidate)
+    )
+    timed_out_destination = tmp_path / "v3-timed-out-result"
+    timed_out_destination.mkdir()
+    (timed_out_destination / "attempts.jsonl").write_text(
+        "\n".join(json.dumps(row, sort_keys=True) for row in timed_out_rows) + "\n",
+        encoding="utf-8",
+    )
+    write_comparison_result(timed_out_result, destination=timed_out_destination)
+    assert (
+        read_comparison_result(timed_out_destination / "result.json")
+        == timed_out_result
+    )
+
+    _assert_v3_legacy_usage_alias_round_trip(
+        tmp_path=tmp_path,
+        spec=spec,
+        preview_digest=preview.preview_digest,
+        rows=rows,
+        source_project=source_project,
+        result_project=result_project,
+        approved=approved,
+    )
+
+    runner_start_rows = json.loads(json.dumps(rows))
+    for row in runner_start_rows:
+        row.update(
+            {
+                "status": "failed",
+                "runtime_outcome": "not_started",
+                "terminal_kind": "runner_start_failure",
+                "benchmark_outcome": "unscored",
+                "comparison_evaluation_status": "unavailable",
+                "comparison_required_evaluation_complete": False,
+                # These stale fields reproduce the failed live path. The
+                # final-row sanitizer must remove every behavioral claim.
+                "pass": True,
+                "reward": 1.0,
+                "comparison_mechanism": {"assigned_skill_opened": "observed"},
+                "treatment_use_evidence": {"invoked": "observed"},
+            }
+        )
+    runner_start_rows = _score_and_bind_exported_comparison_rows(
+        spec=spec,
+        rows=runner_start_rows,
+        repo_root=tmp_path,
+        env={},
+        approved_comparison=approved,
+        source_pre_run_drift=None,
+        source_checkpoint_drift=None,
+        source_post_run_drift=None,
+        release_note_coverage=(),
+        infrastructure_receipt=None,
+    )
+    runner_start_result = analyze_comparison_rows(
+        comparison_id=spec.id,
+        preview_digest=preview.preview_digest,
+        rows=runner_start_rows,
+        source="v3-run",
+        expected_evidence_project=result_project,
+        expected_source_evidence_project=source_project,
+        approved_comparison=approved,
+        result_schema_version=3,
+        study_intent="mcp_release_maintenance",
+    )
+    assert runner_start_result.incomplete == len(runner_start_result.paired_cases)
+    assert runner_start_result.baseline_passed == 0
+    assert runner_start_result.candidate_passed == 0
+    assert runner_start_result.deterministic_summary == {
+        "baseline": {"passed": 0, "evaluated": 0, "dimensions": {}},
+        "candidate": {"passed": 0, "evaluated": 0, "dimensions": {}},
+    }
+    assert runner_start_result.judge_summary["status"] == "not_used"
+    assert runner_start_result.mechanism_summary == {}
+    assert runner_start_result.behavioral_summary.status == "incomplete"
+    assert runner_start_result.decision.status == "inconclusive"
+    assert all(
+        attempt is not None
+        and attempt.execution_status == "not_started"
+        and attempt.passed is None
+        and attempt.scores == {}
+        and attempt.task_result is None
+        for pair in runner_start_result.paired_cases
+        for attempt in (pair.baseline, pair.candidate)
+    )
+    runner_destination = tmp_path / "v3-runner-start-result"
+    runner_destination.mkdir()
+    (runner_destination / "attempts.jsonl").write_text(
+        "\n".join(json.dumps(row, sort_keys=True) for row in runner_start_rows)
+        + "\n",
+        encoding="utf-8",
+    )
+    write_comparison_result(
+        runner_start_result,
+        destination=runner_destination,
+    )
+    assert (
+        read_comparison_result(runner_destination / "result.json")
+        == runner_start_result
+    )
+    runner_view = build_comparison_evaluation_view(runner_start_result.to_dict())
+    assert runner_view.completed_cells == runner_start_result.rows
+    assert all(
+        attempt["execution_status"] == "not_started"
+        and attempt.get("passed") is None
+        and attempt["scores"] == {}
+        and "task_result" not in attempt
+        for pair in runner_view.paired_cases
+        for attempt in (pair["baseline"], pair["candidate"])
+    )
+
+    def bind_verified_hosted_invalidation(row: dict[str, object]) -> None:
+        error_type = "RuntimeError"
+        parent_verified = False
+        row.update(
+            {
+                "weave_hosted_evidence_invalidation_error_type": error_type,
+                "weave_hosted_evidence_invalidation_parent_verified": (
+                    parent_verified
+                ),
+                "weave_hosted_evidence_invalidation_project": result_project,
+            }
+        )
+        bindings = bench_export._hosted_evidence_invalidation_bindings(
+            row,
+            project=result_project,
+            error_type=error_type,
+            parent_verified=parent_verified,
+        )
+        terminal_output = (
+            bench_export._hosted_evidence_invalidation_terminal_output(bindings)
+        )
+        call_id = bench_export._hosted_evidence_invalidation_call_id(row)
+        row.update(
+            {
+                "weave_hosted_evidence_invalidation_call_id": call_id,
+                "weave_hosted_evidence_invalidation_ref": (
+                    bench_export._weave_call_ref(result_project, call_id)
+                ),
+                "weave_hosted_evidence_invalidation_url": (
+                    bench_export._weave_call_url(result_project, call_id)
+                ),
+                "weave_hosted_evidence_invalidation_object_verified": True,
+                "weave_hosted_evidence_invalidation_terminal_verified": True,
+                "weave_hosted_evidence_invalidation_bindings_digest": (
+                    stable_digest(bindings)
+                ),
+                "weave_hosted_evidence_invalidation_terminal_output_digest": (
+                    stable_digest(terminal_output)
+                ),
+                "hosted_evidence_invalidation_status": "verified",
+            }
+        )
+
+    fatal_evidence_rows = json.loads(json.dumps(rows))
+    for row in fatal_evidence_rows:
+        row.update(
+            {
+                "status": "failed",
+                "runtime_outcome": "completed",
+                "terminal_kind": "evidence_failure",
+                "benchmark_outcome": "unscored",
+                "evidence_integrity_status": "invalid",
+                "comparison_evaluation_status": "unavailable",
+                "comparison_required_evaluation_complete": False,
+                "pass": True,
+                "reward": 1.0,
+                "comparison_mechanism": {"assigned_skill_opened": "observed"},
+                "treatment_use_evidence": {"invoked": "observed"},
+            }
+        )
+    fatal_evidence_rows = _score_and_bind_exported_comparison_rows(
+        spec=spec,
+        rows=fatal_evidence_rows,
+        repo_root=tmp_path,
+        env={},
+        approved_comparison=approved,
+        source_pre_run_drift=None,
+        source_checkpoint_drift=None,
+        source_post_run_drift=None,
+        release_note_coverage=(),
+        infrastructure_receipt=None,
+    )
+    with pytest.raises(
+        ValueError,
+        match="fatal hosted attempt requires a verified invalidation receipt",
+    ):
+        analyze_comparison_rows(
+            comparison_id=spec.id,
+            preview_digest=preview.preview_digest,
+            rows=fatal_evidence_rows,
+            source="v3-run",
+            expected_evidence_project=result_project,
+            expected_source_evidence_project=source_project,
+            approved_comparison=approved,
+            result_schema_version=3,
+            study_intent="mcp_release_maintenance",
+        )
+    for row in fatal_evidence_rows:
+        bind_verified_hosted_invalidation(row)
+    fatal_evidence_result = analyze_comparison_rows(
+        comparison_id=spec.id,
+        preview_digest=preview.preview_digest,
+        rows=fatal_evidence_rows,
+        source="v3-run",
+        expected_evidence_project=result_project,
+        expected_source_evidence_project=source_project,
+        approved_comparison=approved,
+        result_schema_version=3,
+        study_intent="mcp_release_maintenance",
+    )
+    assert fatal_evidence_result.incomplete == len(
+        fatal_evidence_result.paired_cases
+    )
+    assert fatal_evidence_result.hosted_chain_integrity == "invalid"
+    assert fatal_evidence_result.integrity["status"] == "invalid"
+    assert fatal_evidence_result.behavioral_summary.status == "invalid"
+    assert fatal_evidence_result.decision.status == "invalid"
+    assert fatal_evidence_result.decision.evidence_grade == "invalid"
+    assert all(
+        attempt is not None
+        and attempt.execution_status == "completed"
+        and attempt.infrastructure["terminal_kind"] == "evidence_failure"
+        and attempt.passed is None
+        and attempt.scores == {}
+        and attempt.task_result is None
+        for pair in fatal_evidence_result.paired_cases
+        for attempt in (pair.baseline, pair.candidate)
+    )
+    fatal_destination = tmp_path / "v3-fatal-evidence-result"
+    fatal_destination.mkdir()
+    (fatal_destination / "attempts.jsonl").write_text(
+        "\n".join(json.dumps(row, sort_keys=True) for row in fatal_evidence_rows)
+        + "\n",
+        encoding="utf-8",
+    )
+    write_comparison_result(
+        fatal_evidence_result,
+        destination=fatal_destination,
+    )
+    assert (
+        read_comparison_result(fatal_destination / "result.json")
+        == fatal_evidence_result
+    )
+    missing_invalidation = fatal_evidence_result.to_dict()
+    missing_invalidation["paired_cases"][0]["candidate"]["infrastructure"].pop(
+        "weave_hosted_evidence_invalidation_terminal_output_digest"
+    )
+    missing_invalidation["qualification_digest"] = (
+        _comparison_qualification_digest(missing_invalidation)
+    )
+    missing_invalidation["result_digest"] = missing_invalidation[
+        "qualification_digest"
+    ]
+    missing_invalidation_path = fatal_destination / "missing-invalidation.json"
+    missing_invalidation_path.write_text(
+        json.dumps(missing_invalidation),
+        encoding="utf-8",
+    )
+    with pytest.raises(
+        ValueError,
+        match="fatal hosted attempt requires a verified invalidation receipt",
+    ):
+        read_comparison_result(missing_invalidation_path)
+
+    mixed_terminal_rows = json.loads(json.dumps(rows))
+    failed_row = next(
+        row for row in mixed_terminal_rows if row["variant_id"] == "baseline"
+    )
+    failed_row.update(
+        {
+            "status": "failed",
+            "runtime_outcome": "completed",
+            "terminal_kind": "evidence_failure",
+            "benchmark_outcome": "unscored",
+            "evidence_integrity_status": "invalid",
+            "comparison_evaluation_status": "unavailable",
+            "comparison_required_evaluation_complete": False,
+            # The final-row sanitizer must remove these stale claims while
+            # preserving the normally scored opposite arm.
+            "pass": True,
+            "reward": 1.0,
+            "comparison_mechanism": {"assigned_skill_opened": "observed"},
+            "treatment_use_evidence": {"invoked": "observed"},
+        }
+    )
+    mixed_terminal_rows = _score_and_bind_exported_comparison_rows(
+        spec=spec,
+        rows=mixed_terminal_rows,
+        repo_root=tmp_path,
+        env={},
+        approved_comparison=approved,
+        source_pre_run_drift=None,
+        source_checkpoint_drift=None,
+        source_post_run_drift=None,
+        release_note_coverage=(),
+        infrastructure_receipt=None,
+    )
+    for row in mixed_terminal_rows:
+        if row.get("terminal_kind") == "evidence_failure":
+            bind_verified_hosted_invalidation(row)
+    mixed_terminal_result = analyze_comparison_rows(
+        comparison_id=spec.id,
+        preview_digest=preview.preview_digest,
+        rows=mixed_terminal_rows,
+        source="v3-run",
+        expected_evidence_project=result_project,
+        expected_source_evidence_project=source_project,
+        approved_comparison=approved,
+        result_schema_version=3,
+        study_intent="mcp_release_maintenance",
+    )
+    assert mixed_terminal_result.incomplete == 1
+    [incomplete_pair] = [
+        pair for pair in mixed_terminal_result.paired_cases if pair.status == "incomplete"
+    ]
+    assert incomplete_pair.dimension_changes == ()
+    assert incomplete_pair.baseline is not None
+    assert incomplete_pair.baseline.passed is None
+    assert incomplete_pair.baseline.scores == {}
+    assert incomplete_pair.baseline.task_result is None
+    assert incomplete_pair.candidate is not None
+    assert incomplete_pair.candidate.scores
+    assert mixed_terminal_result.judge_summary["status"] == "scored"
+    assert mixed_terminal_result.judge_summary["unavailable_attempts"] == 0
+    assert sum(
+        next(iter(dimensions.values()))["evaluated"]
+        for dimensions in mixed_terminal_result.judge_summary["by_variant"].values()
+    ) == len(mixed_terminal_rows) - 1
+    mixed_destination = tmp_path / "v3-mixed-terminal-result"
+    mixed_destination.mkdir()
+    (mixed_destination / "attempts.jsonl").write_text(
+        "\n".join(json.dumps(row, sort_keys=True) for row in mixed_terminal_rows)
+        + "\n",
+        encoding="utf-8",
+    )
+    write_comparison_result(
+        mixed_terminal_result,
+        destination=mixed_destination,
+    )
+    assert (
+        read_comparison_result(mixed_destination / "result.json")
+        == mixed_terminal_result
+    )
+    mixed_terminal_view = build_comparison_evaluation_view(
+        mixed_terminal_result.to_dict()
+    )
+    assert mixed_terminal_view.judge_summary["status"] == "unavailable"
+
     def write_rehashed_result(
         raw_result: dict[str, object],
         filename: str,
@@ -1608,7 +3258,10 @@ def test_v3_result_round_trips_source_topology_and_canonical_view(
 
     missing_local_binding = dual_chain.to_dict()
     missing_local_binding.pop("local_evidence")
-    with pytest.raises(ValueError, match="local evidence requires its ledger binding"):
+    with pytest.raises(
+        ValueError,
+        match="require(?:s)? (its ledger binding|the canonical local evidence chain)",
+    ):
         read_comparison_result(
             write_rehashed_result(
                 missing_local_binding,
@@ -1698,7 +3351,10 @@ def test_v3_result_round_trips_source_topology_and_canonical_view(
 
     wrong_evidence_status = result.to_dict()
     wrong_evidence_status["paired_cases"][0]["candidate"]["evidence_status"] = "missing"
-    with pytest.raises(ValueError, match="evidence status disagrees"):
+    with pytest.raises(
+        ValueError,
+        match="(evidence status disagrees|verified task result requires resolved)",
+    ):
         read_comparison_result(
             write_rehashed_result(
                 wrong_evidence_status,
@@ -1706,10 +3362,12 @@ def test_v3_result_round_trips_source_topology_and_canonical_view(
             )
         )
 
-    wrong_call_route = result.to_dict()
+    wrong_call_route = dual_chain.to_dict()
     evaluation_link = next(
         item
-        for item in wrong_call_route["paired_cases"][0]["candidate"]["evidence_links"]
+        for item in wrong_call_route["paired_cases"][0]["candidate"][
+            "infrastructure"
+        ]["hosted_evidence_links"]
         if item["kind"] == "evaluation_root"
     )
     evaluation_link["ref"] = "weave:///wandb/other-project/call/forged"
@@ -1779,6 +3437,62 @@ def test_v3_result_round_trips_source_topology_and_canonical_view(
     with pytest.raises(ValueError, match="behavioral status disagrees"):
         read_comparison_result(contradictory_behavior_path)
 
+    forged_behavioral_prose = result.to_dict()
+    forged_behavioral_prose["behavioral_summary"]["recommendation"] = (
+        "GO NOW — universally superior."
+    )
+    with pytest.raises(ValueError, match="behavioral explanation disagrees"):
+        read_comparison_result(
+            write_rehashed_result(
+                forged_behavioral_prose,
+                "forged-behavioral-prose.json",
+            )
+        )
+
+    forged_judge_summary = result.to_dict()
+    forged_judge_summary["judge_summary"]["unavailable_attempts"] = 999
+    with pytest.raises(ValueError, match="judge summary disagrees"):
+        read_comparison_result(
+            write_rehashed_result(
+                forged_judge_summary,
+                "forged-judge-summary.json",
+            )
+        )
+
+    forged_mechanism_summary = result.to_dict()
+    forged_mechanism_summary["mechanism_summary"] = {
+        "invented": {
+            "candidate": {"observed": 8, "applicable": 8, "unavailable": 0}
+        }
+    }
+    with pytest.raises(ValueError, match="mechanism summary disagrees"):
+        read_comparison_result(
+            write_rehashed_result(
+                forged_mechanism_summary,
+                "forged-mechanism-summary.json",
+            )
+        )
+
+    forged_operational_summary = result.to_dict()
+    forged_operational_summary["operational_summary"]["cost_rows"] = 999
+    with pytest.raises(ValueError, match="operational summary disagrees"):
+        read_comparison_result(
+            write_rehashed_result(
+                forged_operational_summary,
+                "forged-operational-summary.json",
+            )
+        )
+
+    forged_required_evaluations = result.to_dict()
+    forged_required_evaluations["required_evaluations_incomplete"] = 1
+    with pytest.raises(ValueError, match="required evaluation total disagrees"):
+        read_comparison_result(
+            write_rehashed_result(
+                forged_required_evaluations,
+                "forged-required-evaluations.json",
+            )
+        )
+
     unknown_decision_field = result.to_dict()
     unknown_decision_field["decision"]["invented"] = True
     unknown_decision_field["qualification_digest"] = _comparison_qualification_digest(
@@ -1806,8 +3520,28 @@ def test_v3_result_round_trips_source_topology_and_canonical_view(
     assert view.paired_cases[0]["candidate"]["evidence_links"][0]["url"].startswith(
         "https://wandb.ai/wandb/result-project/weave/calls/"
     )
+    assert {
+        link["system"]
+        for link in view.paired_cases[0]["candidate"]["evidence_links"]
+    } == {"weave"}
+    assert {
+        link["system"]
+        for link in view.paired_cases[0]["candidate"]["infrastructure"][
+            "local_evidence_links"
+        ]
+    } == {"local_artifact"}
     assert experiment_view_from_dict(view.to_dict()) == view
     assert view.supersedes[0]["result_digest"] == "6" * 64
+
+    contradictory_evidence_link = json.loads(json.dumps(view.to_dict()))
+    contradictory_evidence_link["paired_cases"][0]["candidate"][
+        "evidence_links"
+    ][0]["ref"] = "weave:///wandb/other-project/call/forged"
+    with pytest.raises(
+        ValueError,
+        match="(primary and hosted evidence links disagree|Call evidence ref must name)",
+    ):
+        experiment_view_from_dict(contradictory_evidence_link)
 
     malformed = json.loads(json.dumps(view.to_dict()))
     malformed["paired_cases"][0]["candidate"]["actual_query_scope"] = [
@@ -1869,6 +3603,16 @@ def test_v3_result_round_trips_source_topology_and_canonical_view(
         decision_policy=_decision_policy(),
     )
     assert release_result.decision.status == "ready_for_signoff"
+
+    forged_decision_prose = release_result.to_dict()
+    forged_decision_prose["decision"]["recommendation"] = "Release immediately."
+    with pytest.raises(ValueError, match="decision explanation disagrees"):
+        read_comparison_result(
+            write_rehashed_result(
+                forged_decision_prose,
+                "forged-decision-prose.json",
+            )
+        )
 
     forged_gate = release_result.to_dict()
     candidate_gate = next(
@@ -1933,6 +3677,46 @@ def test_v3_result_round_trips_source_topology_and_canonical_view(
         row["comparison_deterministic_scores"] = {
             key: True for key in row["comparison_deterministic_scores"]
         }
+        row.pop("task_result", None)
+        canonical_payload = bench_export._canonical_hosted_task_result(row)
+        row["task_result"] = canonical_payload["task_result"]
+        row["weave_hosted_canonical_task_result_digest"] = stable_digest(
+            canonical_payload["task_result"]
+        )
+        row["weave_hosted_canonical_score_set_digest"] = stable_digest(
+            canonical_payload["scalar_checks"]
+        )
+        row["weave_hosted_canonical_payload_digest"] = stable_digest(
+            canonical_payload
+        )
+        row["weave_hosted_canonical_payload"] = canonical_payload
+        hosted_bindings = {
+            "schema_version": 1,
+            "attempt_id": row["attempt_id"],
+            "evaluation_root_call_id": row["weave_evaluation_root_call_id"],
+            "predict_and_score_call_id": row["eval_predict_and_score_call_id"],
+            "prediction_call_id": row["weave_prediction_call_id"],
+            "dataset_ref": row["weave_dataset_id"],
+            "agent_bridge_call_id": row["weave_agent_bridge_call_id"],
+            "agent_receipt_call_id": row["weave_agent_root_call_id"],
+            "evidence_project": result_project,
+            "canonical_local_record_digest": row[
+                "local_evidence_record_digest"
+            ],
+            "provisional_predict_and_score_output_digest": row[
+                "weave_provisional_predict_and_score_output_digest"
+            ],
+            "provisional_score_set_digest": row[
+                "weave_provisional_score_set_digest"
+            ],
+            "provisional_score_call_set_digest": row[
+                "weave_provisional_score_call_set_digest"
+            ],
+            "canonical_payload_digest": stable_digest(canonical_payload),
+        }
+        row["weave_hosted_evidence_receipt_bindings_digest"] = stable_digest(
+            hosted_bindings
+        )
     non_discriminating = analyze_comparison_rows(
         comparison_id=spec.id,
         preview_digest=preview.preview_digest,
@@ -2983,6 +4767,7 @@ def test_exact_answer_artifact_populates_safe_reported_project_projection() -> N
 
     scored_row = {
         "attempt_id": "a" * 64,
+        "status": "passed",
         "reported_project_identity": reported,
         # The normalized artifact value must win after final_output is removed.
         "agent_response": "I wrote the structured answer to fugue-answer.md.",
@@ -5197,7 +6982,7 @@ def test_execute_local_comparison_never_requires_or_fetches_weave(
                     "prediction_id": f"prediction-{attempt}",
                     "pass": passed,
                     "status": "passed",
-                    "comparison_evaluation_status": "completed",
+                    "comparison_evaluation_status": "scored",
                     "comparison_required_evaluation_complete": True,
                     "comparison_deterministic_scores": {
                         "fact-and-source.answer_present": passed,
@@ -5336,6 +7121,10 @@ def test_execute_local_comparison_never_requires_or_fetches_weave(
     view = build_comparison_evaluation_view(result.to_dict())
     assert isinstance(view, ExperimentViewV3)
     assert view.evidence_scope is None
+    assert view.evidence_backend == "local"
+    assert view.publication_status == result.publication_status
+    assert view.local_chain_integrity == result.local_chain_integrity
+    assert view.hosted_chain_integrity == "not_applicable"
     assert view.evidence_topology["result_destination"]["kind"] == "local"
     assert view.result_digest == result.result_digest
     assert view.qualification_digest == result.qualification_digest
@@ -5355,6 +7144,45 @@ def test_execute_local_comparison_never_requires_or_fetches_weave(
         for link in pair[arm]["evidence_links"]
     } == {"local_artifact"}
     assert experiment_view_from_dict(view.to_dict()) == view
+
+    def write_current_rehashed(
+        value: dict[str, object],
+        filename: str,
+    ) -> Path:
+        value["qualification_digest"] = _comparison_qualification_digest(value)
+        value["result_digest"] = value["qualification_digest"]
+        path = tmp_path / filename
+        path.write_text(json.dumps(value), encoding="utf-8")
+        return path
+
+    downgraded_evaluation = result.to_dict()
+    downgraded_evaluation["paired_cases"][0]["candidate"][
+        "evaluation_status"
+    ] = "completed"
+    with pytest.raises(ValueError, match="required evaluation total disagrees"):
+        read_comparison_result(
+            write_current_rehashed(
+                downgraded_evaluation,
+                "current-v3-completed-evaluation.json",
+            )
+        )
+
+    missing_operational_projection = result.to_dict()
+    for pair in missing_operational_projection["paired_cases"]:
+        for arm in ("baseline", "candidate"):
+            attempt = pair.get(arm)
+            if isinstance(attempt, dict):
+                attempt["infrastructure"].pop(
+                    "operational_projection_version",
+                    None,
+                )
+    with pytest.raises(ValueError, match="operational projection version 1"):
+        read_comparison_result(
+            write_current_rehashed(
+                missing_operational_projection,
+                "current-v3-missing-operational-projection.json",
+            )
+        )
     assert captured["local_rows"] == 4
     assert result_path.is_file()
     markdown = markdown_path.read_text(encoding="utf-8")
@@ -5735,6 +7563,7 @@ def test_v3_attempt_construction_rejects_exported_decision_field_mutation() -> N
         "status": "passed",
         "comparison_evaluation_status": "scored",
         "comparison_deterministic_scores": {"facts.answer_correct": True},
+        "comparison_dimension_roles": {"facts.answer_correct": "outcome"},
         "comparison_score_details": {
             "facts.answer_correct": {
                 "what": "Checks whether the answer is correct.",
@@ -5749,6 +7578,15 @@ def test_v3_attempt_construction_rejects_exported_decision_field_mutation() -> N
         "cost_reconciliation_status": "resolved",
         "latency_reconciliation_status": "resolved",
         "usage_reconciliation_status": "resolved",
+        "task_result": {
+            "schema_version": 1,
+            "task_passed": True,
+            "outcome_summary": "The task passed.",
+            "failed_required_checks": [],
+            "answer_digest": None,
+            "agent_execution_status": "completed",
+            "evidence_integrity_status": "verified",
+        },
         "local_evidence_links": [
             {
                 "kind": kind,
@@ -5800,7 +7638,10 @@ def test_v3_attempt_construction_rejects_exported_decision_field_mutation() -> N
     )
     for mutation in mutations:
         altered = {**row, **mutation}
-        with pytest.raises(ValueError, match="decision projection digest"):
+        with pytest.raises(
+            ValueError,
+            match="decision projection digest|task result disagrees",
+        ):
             _paired_attempt_view_v3(altered)
 
     with pytest.raises(ValueError, match="decision projection digest"):
@@ -5816,6 +7657,89 @@ def test_v3_attempt_construction_rejects_exported_decision_field_mutation() -> N
     serialized["cost_usd"] = 88.0
     with pytest.raises(ValueError, match="decision projection digest"):
         _paired_attempt_v3(serialized)
+
+    hosted_row = dict(row)
+    canonical_payload = bench_export._canonical_hosted_task_result(hosted_row)
+    hosted_row.update(
+        {
+            "hosted_decision_contract_version": 1,
+            "hosted_evidence_verification_status": "verified",
+            "hosted_task_result_canonical": True,
+            "terminal_hosted_visibility_verified": True,
+            "weave_hosted_evidence_receipt_object_verified": True,
+            "weave_hosted_evidence_receipt_terminal_verified": True,
+            "weave_provisional_call_verification_status": "verified",
+            "task_verdict_owner": (
+                "post_close_hosted_evidence_verification_receipt"
+            ),
+            "weave_hosted_evidence_receipt_call_id": "receipt-call",
+            "weave_provisional_predict_and_score_output_digest": "4" * 64,
+            "weave_provisional_score_set_digest": "5" * 64,
+            "weave_provisional_score_call_set_digest": "6" * 64,
+            "weave_hosted_evidence_receipt_bindings_digest": "7" * 64,
+            "weave_hosted_canonical_task_result_digest": stable_digest(
+                canonical_payload["task_result"]
+            ),
+            "weave_hosted_canonical_score_set_digest": stable_digest(
+                canonical_payload["scalar_checks"]
+            ),
+            "weave_hosted_canonical_payload_digest": stable_digest(
+                canonical_payload
+            ),
+            "weave_hosted_canonical_payload": canonical_payload,
+        }
+    )
+    hosted_attempt = _paired_attempt_view_v3(hosted_row)
+    assert hosted_attempt is not None
+    forged_hosted_attempt = hosted_attempt.to_dict()
+    forged_hosted_attempt["infrastructure"][
+        "weave_hosted_canonical_score_set_digest"
+    ] = "0" * 64
+    with pytest.raises(ValueError, match="hosted decision digests disagree"):
+        _paired_attempt_v3(forged_hosted_attempt)
+
+
+def test_v3_verified_task_result_accepts_reconciled_five_link_chain() -> None:
+    row: dict[str, object] = {
+        "attempt_id": "1" * 64,
+        "attempt_identity": {"task_id": "task-1"},
+        "prediction_id": "prediction-1",
+        "pass": True,
+        "status": "passed",
+        "comparison_evaluation_status": "scored",
+        "comparison_deterministic_scores": {"facts.answer_correct": True},
+        "task_result": {
+            "schema_version": 1,
+            "task_passed": True,
+            "outcome_summary": "The required answer was correct.",
+            "failed_required_checks": [],
+            "answer_digest": None,
+            "agent_execution_status": "completed",
+            "evidence_integrity_status": "verified",
+        },
+        "local_evidence_links": [
+            {
+                "kind": kind,
+                "status": "resolved",
+                "system": "local_artifact",
+                "ref": f"fugue://local/{kind}",
+            }
+            for kind in (
+                "evaluation_root",
+                "prediction_and_score",
+                "prediction",
+                "agent_root",
+                "dataset",
+            )
+        ],
+    }
+
+    attempt = _paired_attempt_view_v3(row)
+
+    assert attempt is not None
+    assert attempt.evidence_status == "reconciled"
+    assert attempt.task_result is not None
+    assert attempt.task_result.evidence_integrity_status == "verified"
 
 
 def test_v3_attempt_reconciliation_statuses_are_source_authoritative() -> None:

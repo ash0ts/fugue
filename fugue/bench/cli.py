@@ -176,6 +176,15 @@ def _parser() -> FugueArgumentParser:
             "run retains its original immutable approval and stage locks."
         ),
     )
+    action.add_argument(
+        "--finalize",
+        metavar="RUN_ID",
+        help=(
+            "Finalize an already-complete local run from immutable host "
+            "artifacts without running an Agent, model, judge, scorer, or "
+            "new physical execution."
+        ),
+    )
     compare.add_argument("--approval")
     compare.add_argument(
         "--fetch-weave",
@@ -1101,12 +1110,40 @@ def _comparison_compare(args: argparse.Namespace) -> int:
         ComparisonPublicationError,
         check_comparison,
         execute_comparison,
+        finalize_local_comparison_result,
         load_comparison,
         preview_comparison,
     )
 
     root, comparison = _comparison_cli_context(args)
     spec = load_comparison(comparison, repo_root=root)
+    if args.finalize:
+        result, json_path, markdown_path, receipt_path = (
+            finalize_local_comparison_result(
+                spec,
+                comparison_path=comparison,
+                run_id=args.finalize,
+                repo_root=root,
+            )
+        )
+        if args.json:
+            print(
+                json.dumps(
+                    {
+                        "schema_version": 1,
+                        "status": "finalized",
+                        "finalization_receipt": receipt_path.relative_to(root).as_posix(),
+                        "behavioral_result": result.to_dict(),
+                    },
+                    indent=2,
+                    sort_keys=True,
+                )
+            )
+        else:
+            CONSOLE.print(Markdown(markdown_path.read_text(encoding="utf-8")))
+            CONSOLE.print(f"\nResult JSON: {json_path}")
+            CONSOLE.print(f"Finalization receipt: {receipt_path}")
+        return _comparison_result_exit_code(result)
     operator = OperatorService(root, args.env_file)
     if args.prepare:
         return _comparison_prepare(
@@ -1272,16 +1309,20 @@ def _comparison_compare(args: argparse.Namespace) -> int:
             CONSOLE.print(f"Publication receipt: {publication_error.receipt_path}")
     if publication_error is not None:
         return 3
+    return _comparison_result_exit_code(result)
+
+
+def _comparison_result_exit_code(result: object) -> int:
     behavioral = getattr(result, "behavioral_summary", None)
     if (
-        result.incomplete
-        or result.required_evaluations_incomplete
+        getattr(result, "incomplete", False)
+        or getattr(result, "required_evaluations_incomplete", False)
         or getattr(behavioral, "status", "") in {"invalid", "incomplete"}
     ):
         return 3
     return (
         1
-        if result.regressed
+        if getattr(result, "regressed", 0)
         or getattr(result, "mixed", 0)
         or getattr(behavioral, "status", "") in {"regressed", "mixed"}
         else 0
@@ -1566,6 +1607,7 @@ def _publish_local_result(args: argparse.Namespace) -> int:
         MissingWeaveExtraError,
         StudyPublicationScopeV1,
         publish_local_result_to_weave,
+        verify_comparison_result_local_evidence,
         weave_publication_target_from_environment,
         weave_publisher_from_environment,
     )
@@ -1608,6 +1650,29 @@ def _publish_local_result(args: argparse.Namespace) -> int:
         if args.receipt is not None
         else None
     )
+    effective_receipt_path = (
+        receipt_path
+        if receipt_path is not None
+        else result_path.with_name("weave-publication-receipt.json")
+    )
+    research_store = None
+    if study_scope is not None:
+        from fugue.research.store import StudyStore
+
+        research_database = root / ".fugue" / "research.db"
+        if not research_database.is_file():
+            raise LocalResultPublicationError(
+                "scoped Weave publication requires the existing local Research database"
+            )
+        manifest = verify_comparison_result_local_evidence(result, manifest_path)
+        research_store = StudyStore(root)
+        research_store.validate_weave_publication_projection(
+            research_id=study_scope.research_id,
+            experiment_id=study_scope.study_id,
+            result_digest=result.result_digest,
+            qualification_digest=result.qualification_digest,
+            attempt_ids=manifest.planned_attempt_ids,
+        )
     privacy_notice = (
         "Privacy boundary: publishing sends sanitized result and evidence-chain "
         "projections to the selected W&B project. Raw local transcript and "
@@ -1624,12 +1689,19 @@ def _publish_local_result(args: argparse.Namespace) -> int:
         )
     env = load_env(args.env_file)
     try:
-        publisher = weave_publisher_from_environment(env)
         target = weave_publication_target_from_environment(
             args.project,
             env,
             study_scope=study_scope,
         )
+        if effective_receipt_path.is_file():
+
+            def publisher(*_args: Any, **_kwargs: Any) -> Any:
+                raise AssertionError(
+                    "an existing publication receipt must not invoke the publisher"
+                )
+        else:
+            publisher = weave_publisher_from_environment(env)
         receipt = publish_local_result_to_weave(
             result_path,
             manifest_path,
@@ -1650,6 +1722,23 @@ def _publish_local_result(args: argparse.Namespace) -> int:
         else:
             CONSOLE.print(f"[fugue.coral]Blocked:[/] {exc}")
         return 2
+    if research_store is not None:
+        from fugue.research.records import weave_publication_evidence_from_receipt
+
+        result_bytes = result_path.read_bytes()
+        manifest_bytes = manifest_path.read_bytes()
+        receipt_bytes = effective_receipt_path.read_bytes()
+        research_store.record_weave_publication_evidence(
+            weave_publication_evidence_from_receipt(receipt.to_dict())
+        )
+        if (
+            result_path.read_bytes() != result_bytes
+            or manifest_path.read_bytes() != manifest_bytes
+            or effective_receipt_path.read_bytes() != receipt_bytes
+        ):
+            raise LocalResultPublicationError(
+                "Research delivery mutated immutable publication source bytes"
+            )
     if args.json:
         print(json.dumps(receipt.to_dict(), indent=2, sort_keys=True))
     else:
@@ -1817,7 +1906,10 @@ def _publish_research_index(args: argparse.Namespace) -> int:
 def _publish_research_report(args: argparse.Namespace) -> int:
     from fugue.bench.research_report import (
         ResearchIndexReportError,
+        build_research_index_report_publication_evidence,
+        build_research_index_report_study_memberships,
         publish_research_index_report,
+        verify_research_index_report_publication,
     )
     from fugue.bench.wandb_research_report import (
         MissingWandbReportExtraError,
@@ -1845,16 +1937,64 @@ def _publish_research_report(args: argparse.Namespace) -> int:
         if args.receipt is not None
         else None
     )
+    effective_receipt_path = receipt_path or index_path.with_name(
+        "research-index-report-publication-receipt.json"
+    )
     env = load_env(args.env_file)
     try:
-        publisher = wandb_research_report_publisher_from_environment(env)
-        receipt = publish_research_index_report(
+        secret_values = secrets_from_env(env)
+        research_id, memberships = build_research_index_report_study_memberships(
             index_path,
             index_receipt_path,
-            publisher,
-            receipt_path=receipt_path,
-            secret_values=secrets_from_env(env),
+            secret_values=secret_values,
         )
+        research_database = root / ".fugue" / "research.db"
+        if not research_database.is_file():
+            raise ResearchIndexReportError(
+                "Research Report publication requires the existing local Research "
+                "database"
+            )
+        from fugue.research.store import StudyStore
+
+        research_store = StudyStore(root)
+        research_store.validate_research_index_report_memberships(
+            research_id=research_id,
+            memberships=memberships,
+        )
+        if effective_receipt_path.is_file():
+            receipt = verify_research_index_report_publication(
+                index_path,
+                index_receipt_path,
+                effective_receipt_path,
+                secret_values=secret_values,
+            )
+        else:
+            publisher = wandb_research_report_publisher_from_environment(env)
+            receipt = publish_research_index_report(
+                index_path,
+                index_receipt_path,
+                publisher,
+                receipt_path=receipt_path,
+                secret_values=secret_values,
+            )
+        publication = build_research_index_report_publication_evidence(
+            index_path,
+            index_receipt_path,
+            effective_receipt_path,
+            secret_values=secret_values,
+        )
+        index_bytes = index_path.read_bytes()
+        index_receipt_bytes = index_receipt_path.read_bytes()
+        report_receipt_bytes = effective_receipt_path.read_bytes()
+        research_store.record_research_index_report_publication_evidence(publication)
+        if (
+            index_path.read_bytes() != index_bytes
+            or index_receipt_path.read_bytes() != index_receipt_bytes
+            or effective_receipt_path.read_bytes() != report_receipt_bytes
+        ):
+            raise ResearchIndexReportError(
+                "Research delivery mutated immutable index or Report source bytes"
+            )
     except MissingWandbReportExtraError as exc:
         payload = {
             "schema_version": 1,
@@ -2668,6 +2808,7 @@ def _tui(args: argparse.Namespace) -> int:
 def _component_mcp(args: argparse.Namespace) -> int:
     if args.mcp_action == "prepare-wandb-release":
         from fugue.reference_studies.wandb_mcp import (
+            HUMAN_READABLE_COMPARISON_NAME,
             prepare_wandb_mcp_reference_study,
         )
 
@@ -2691,12 +2832,22 @@ def _component_mcp(args: argparse.Namespace) -> int:
             raise RuntimeError(
                 "W&B MCP preparation did not materialize a runnable comparison"
             )
+        if HUMAN_READABLE_COMPARISON_NAME not in artifact_paths:
+            raise RuntimeError(
+                "W&B MCP preparation did not materialize the human-readable "
+                "evidence canary"
+            )
         comparison_path = (
             args.repo_root.resolve() / str(payload["destination"]) / "comparison.yaml"
         )
         payload.update(
             candidate_sha=str(payload["source_commit"]),
             comparison_path=comparison_path.as_posix(),
+            human_readable_comparison_path=(
+                args.repo_root.resolve()
+                / str(payload["destination"])
+                / HUMAN_READABLE_COMPARISON_NAME
+            ).as_posix(),
         )
         print(json.dumps(payload, indent=2, sort_keys=True))
         return 0
