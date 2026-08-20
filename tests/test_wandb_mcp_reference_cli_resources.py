@@ -230,7 +230,7 @@ def test_packaged_comparison_is_local_and_reference_bound() -> None:
     template = yaml.safe_load(_resource_text("comparison.yaml.template"))
     assert template["schema_version"] == 3
     assert template["id"] == (
-        "mcp-main-vs-0-4-{{CANDIDATE_SHORT}}-harbor-canary-v12"
+        "mcp-main-vs-0-4-{{CANDIDATE_SHORT}}-harbor-canary-v13"
     )
     assert template["execution"]["evidence_mode"] == "local"
     assert template["execution"]["environment"] == {"type": "docker"}
@@ -250,7 +250,8 @@ def test_packaged_comparison_is_local_and_reference_bound() -> None:
             ),
             "reason": (
                 "V11 measured the same locked revisions and tasks under the prior "
-                "evidence-presentation contract; V12 validates the current canonical "
+                "evidence-presentation contract; V12 stopped as infrastructure-invalid "
+                "before producing a canonical result, and V13 validates the repaired canonical "
                 "local evidence and human-readable publication path without pooling "
                 "the runs."
             ),

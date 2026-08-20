@@ -123,8 +123,8 @@
     },
     {
       "path": "reference-studies/wandb-mcp/comparison.yaml.template",
-      "sha256": "bc1a11690c7f83469184aa4a7f5cdf94250693d8ad5240e962c0902c87c12c39",
-      "size_bytes": 5210
+      "sha256": "0365b89a6f7d23b8d6dd089732e653ebe032c1a9c199ace60456538fb5db5d4f",
+      "size_bytes": 5290
     },
     {
       "path": "reference-studies/wandb-mcp/configs/fugue/task-authoring/profiles.yaml",

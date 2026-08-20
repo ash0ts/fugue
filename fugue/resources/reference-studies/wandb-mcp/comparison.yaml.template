@@ -1,5 +1,5 @@
 schema_version: 3
-id: mcp-main-vs-0-4-{{CANDIDATE_SHORT}}-harbor-canary-v12
+id: mcp-main-vs-0-4-{{CANDIDATE_SHORT}}-harbor-canary-v13
 question: Does the exact W&B MCP staging/0.4.0 commit improve or preserve factual, bounded maintainer work relative to the exact main baseline on the four locked release-canary behaviors?
 taskset:
   tasks: tasks.jsonl
@@ -13,7 +13,7 @@ candidate:
 changed: [integrations]
 supersedes:
   - result_digest: 09e9a30fd9ab3e53e98461273ec49c580af807b687bfbb3a327589f401e8424e
-    reason: V11 measured the same locked revisions and tasks under the prior evidence-presentation contract; V12 validates the current canonical local evidence and human-readable publication path without pooling the runs.
+    reason: V11 measured the same locked revisions and tasks under the prior evidence-presentation contract; V12 stopped as infrastructure-invalid before producing a canonical result, and V13 validates the repaired canonical local evidence and human-readable publication path without pooling the runs.
   - result_digest: e062f5b392a36d9ebd97adc3ab58b6e253cdd9dd943381342d51d76303bbcf38
     reason: V10 compared the same locked tasks against the earlier 5c6cc1c9 staging candidate; this Study freezes the current staging head under a new candidate, preview, approval, and Study identity.
 evaluators:
@@ -91,7 +91,7 @@ execution:
   evidence_mode: local
   environment: {type: docker}
 decision_policy:
-  release_target: W&B MCP staging/0.4.0 V12 local behavioral and human-readable publication canary; Python package, managed-service, and Helm release gates are separate
+  release_target: W&B MCP staging/0.4.0 V13 local behavioral and human-readable publication canary; Python package, managed-service, and Helm release gates are separate
   candidate_sha: "{{CANDIDATE_SHA}}"
   minimum_evidence_grade: A
   human_signoff_required: true

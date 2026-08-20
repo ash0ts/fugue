@@ -7581,6 +7581,107 @@ def test_completed_evaluation_preserves_planned_dataset_identity(
     )
 
 
+def test_completed_evaluation_preserves_host_authored_presentation(
+    tmp_path: Path,
+) -> None:
+    presentation = TaskPresentationV1(
+        task_id="task-a",
+        title="Readable task title",
+        public_prompt=(
+            PublicPromptPartV1(order=1, text="Inspect the public fixture."),
+        ),
+        required_output="Return one bounded JSON object.",
+        public_acceptance_criteria=("The JSON object is valid.",),
+    )
+    trial_dir = tmp_path / "jobs" / "job" / "trial"
+    (trial_dir / "agent").mkdir(parents=True)
+    (trial_dir / "result.json").write_text(
+        json.dumps(
+            {
+                "task_name": "fugue/task-a",
+                "trial_name": "trial",
+                "verifier_result": {"rewards": {"reward": 1.0}},
+            }
+        )
+    )
+    # The trusted run plan, not a missing or trial-controlled runtime value,
+    # owns the public presentation fields.
+    (trial_dir / "agent" / "fugue-meta.json").write_text(
+        json.dumps(
+            {
+                "candidate_id": "candidate-a",
+                "trial_index": 1,
+                "arm_label": "Untrusted runtime arm",
+                "treatment_summary": "Untrusted runtime treatment.",
+                "task_title": "Untrusted runtime title",
+                "task_presentation": {
+                    **presentation.to_dict(),
+                    "title": "Untrusted runtime title",
+                },
+                "task_definition_digest": "f" * 64,
+            }
+        )
+    )
+    cell = PlannedCell(
+        id="cell-a",
+        run_id="run-a",
+        run_name="run-a",
+        workload_id="coding",
+        task_id="task-a",
+        harness="claude-code",
+        context_system_id="none",
+        variant_id="baseline",
+        model_provider="anthropic",
+        model="anthropic/claude-sonnet-5",
+        trial_index=1,
+        comparison_example_id="example-a",
+        candidate_id="candidate-a",
+        execution_fingerprint="execution-a",
+        config_path=tmp_path / "config.json",
+        result_path=tmp_path / "jobs" / "job" / "result.json",
+        command=("harbor", "run"),
+        env={},
+        n_attempts=1,
+        evaluation_asset_lock_sha256="e" * 64,
+        run_snapshot_sha256="a" * 64,
+        arm_label="W&B MCP main at 53b199a5",
+        treatment_summary="Exact locked baseline treatment.",
+        task_presentation=presentation,
+    )
+    planned = export._planned_evaluation_row(cell)
+
+    outcome = CellOutcome(
+        cell.id,
+        "passed",
+        returncode=0,
+        benchmark_outcome="passed",
+        runtime_outcome="completed",
+        terminal_kind="success",
+    )
+    row = export._completed_evaluation_row(cell, outcome, planned)
+
+    assert row["arm_label"] == cell.arm_label
+    assert row["treatment_summary"] == cell.treatment_summary
+    assert row["task_title"] == presentation.title
+    assert row["task_presentation"] == presentation.to_dict()
+    assert row["task_definition_digest"] == presentation.task_definition_digest
+
+    coordinator = export.GeneratedEvaluationCoordinator(
+        [cell],
+        repo_root=tmp_path,
+        env={},
+        evidence_mode="local",
+    )
+    overlay = coordinator.begin_cell(cell)
+    assert overlay is not None
+    completed = coordinator.finish_cell(cell, outcome)
+    assert completed is not None
+    assert completed["arm_label"] == cell.arm_label
+    assert completed["treatment_summary"] == cell.treatment_summary
+    assert completed["task_presentation"] == presentation.to_dict()
+    assert completed["local_evidence_record_digest"]
+
+
 def test_pre_agent_evidence_failure_stays_invalid_and_unscored(
     tmp_path: Path,
 ) -> None:

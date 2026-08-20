@@ -271,7 +271,7 @@ def test_default_materializer_builds_a_complete_check_ready_bundle(
     comparison = (destination / "comparison.yaml").read_text(encoding="utf-8")
     assert "{{" not in comparison
     assert COMMIT in comparison
-    assert f"mcp-main-vs-0-4-{COMMIT[:7]}-harbor-canary-v12" in comparison
+    assert f"mcp-main-vs-0-4-{COMMIT[:7]}-harbor-canary-v13" in comparison
     assert f"wandb-mcp-main-{_BASELINE_FOR_TEST[:12]}" in comparison
     assert f"wandb-mcp-staging-{COMMIT[:12]}" in comparison
     assert "evidence_lock: source-evidence.lock.json" in comparison
@@ -502,7 +502,7 @@ def test_default_materializer_builds_a_complete_check_ready_bundle(
     arbitrary_subset_path = destination / "arbitrary-local-subset.yaml"
     arbitrary_subset_path.write_text(
         comparison.replace(
-            f"id: mcp-main-vs-0-4-{COMMIT[:7]}-harbor-canary-v12",
+            f"id: mcp-main-vs-0-4-{COMMIT[:7]}-harbor-canary-v13",
             "id: arbitrary-local-subset",
         )
         .replace("tasks: tasks.jsonl", f"tasks: {HUMAN_READABLE_TASKS_NAME}")
