@@ -62,6 +62,12 @@ from fugue.research.records import (
     ResearchRecordPublisher,
     ResearchRecordSink,
     ResearchRelationshipV1,
+    WeaveHostedEvidenceRefV1,
+    WeavePublicationEvidenceV1,
+    WeavePublicationScopeEvidenceV1,
+    WeavePublicationTargetEvidenceV1,
+    weave_publication_evidence_from_dict,
+    weave_publication_evidence_from_receipt,
 )
 from fugue.research.service import ExperimentHandle, ResearchService, ResearchWorker
 from fugue.research.traces import TraceAuditService, TraceSourceRegistry
@@ -123,6 +129,12 @@ __all__ = [
     "TraceAuditV1",
     "TraceSourceRefV1",
     "TraceSourceRegistry",
+    "WeaveHostedEvidenceRefV1",
+    "WeavePublicationEvidenceV1",
+    "WeavePublicationScopeEvidenceV1",
+    "WeavePublicationTargetEvidenceV1",
+    "weave_publication_evidence_from_dict",
+    "weave_publication_evidence_from_receipt",
     "build_trace_audit_draft",
     "experiment_view_from_dict",
 ]

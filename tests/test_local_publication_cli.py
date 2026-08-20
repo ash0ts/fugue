@@ -170,6 +170,25 @@ def test_publish_weave_cli_binds_explicit_research_and_study_scope(
     result_path, result = _result_fixture(tmp_path, manifest)
     _patch_result_readers(monkeypatch, result)
     observed = []
+    validations = []
+    deliveries = []
+
+    research_database = tmp_path / ".fugue" / "research.db"
+    research_database.parent.mkdir(parents=True, exist_ok=True)
+    research_database.write_bytes(b"existing Research database")
+
+    class FakeStudyStore:
+        def __init__(self, root: Path) -> None:
+            assert root == tmp_path
+
+        def validate_weave_publication_projection(self, **kwargs) -> None:
+            validations.append(kwargs)
+
+        def record_weave_publication_evidence(self, publication_evidence):
+            deliveries.append(publication_evidence)
+            return publication_evidence
+
+    monkeypatch.setattr("fugue.research.store.StudyStore", FakeStudyStore)
 
     def factory(_env):
         def publisher(_result, _manifest, target):
@@ -208,6 +227,104 @@ def test_publish_weave_cli_binds_explicit_research_and_study_scope(
         "schema_version": 1,
         "study_id": "prompt-change-live-v1",
     }
+    assert validations == [
+        {
+            "research_id": "fugue-standalone-lab-v1",
+            "experiment_id": "prompt-change-live-v1",
+            "result_digest": result.result_digest,
+            "qualification_digest": result.qualification_digest,
+            "attempt_ids": manifest.planned_attempt_ids,
+        }
+    ]
+    assert len(deliveries) == 1
+    assert deliveries[0].receipt_digest == payload["receipt_digest"]
+    assert deliveries[0].attempt_ids == manifest.planned_attempt_ids
+
+
+def test_scoped_publish_retry_delivers_existing_receipt_without_republishing(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    manifest_path, manifest = _canonical_manifest(tmp_path)
+    result_path, result = _result_fixture(tmp_path, manifest)
+    _patch_result_readers(monkeypatch, result)
+    research_database = tmp_path / ".fugue" / "research.db"
+    research_database.parent.mkdir(parents=True, exist_ok=True)
+    research_database.write_bytes(b"existing Research database")
+    publisher_factory_calls = 0
+    publisher_calls = 0
+    delivery_calls = 0
+    delivered = []
+
+    def factory(_env):
+        nonlocal publisher_factory_calls
+        publisher_factory_calls += 1
+
+        def publisher(_result, _manifest, target):
+            nonlocal publisher_calls
+            publisher_calls += 1
+            return _outcome(manifest, target)
+
+        return publisher
+
+    class FakeStudyStore:
+        def __init__(self, root: Path) -> None:
+            assert root == tmp_path
+
+        def validate_weave_publication_projection(self, **_kwargs) -> None:
+            return None
+
+        def record_weave_publication_evidence(self, publication_evidence):
+            nonlocal delivery_calls
+            delivery_calls += 1
+            if delivery_calls == 1:
+                raise RuntimeError("simulated Research delivery interruption")
+            delivered.append(publication_evidence)
+            return publication_evidence
+
+    monkeypatch.setattr(publication, "weave_publisher_from_environment", factory)
+    monkeypatch.setattr("fugue.research.store.StudyStore", FakeStudyStore)
+    arguments = [
+        "publish",
+        "weave",
+        result_path.as_posix(),
+        "--project",
+        "wandb/fugue-experiments",
+        "--research-id",
+        "fugue-standalone-lab-v1",
+        "--study-id",
+        "prompt-change-live-v1",
+        "--json",
+        "--repo-root",
+        tmp_path.as_posix(),
+        "--env-file",
+        (tmp_path / "missing.env").as_posix(),
+    ]
+    result_before = result_path.read_bytes()
+    manifest_before = manifest_path.read_bytes()
+
+    with pytest.raises(
+        RuntimeError,
+        match="simulated Research delivery interruption",
+    ):
+        main(arguments)
+
+    receipt_path = result_path.with_name("weave-publication-receipt.json")
+    receipt_before = receipt_path.read_bytes()
+    capsys.readouterr()
+
+    assert main(arguments) == 0
+    payload = json.loads(capsys.readouterr().out)
+
+    assert publisher_factory_calls == 1
+    assert publisher_calls == 1
+    assert delivery_calls == 2
+    assert len(delivered) == 1
+    assert delivered[0].receipt_digest == payload["receipt_digest"]
+    assert result_path.read_bytes() == result_before
+    assert manifest_path.read_bytes() == manifest_before
+    assert receipt_path.read_bytes() == receipt_before
 
 
 def test_publish_weave_cli_rejects_study_without_research(

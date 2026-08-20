@@ -1607,6 +1607,7 @@ def _publish_local_result(args: argparse.Namespace) -> int:
         MissingWeaveExtraError,
         StudyPublicationScopeV1,
         publish_local_result_to_weave,
+        verify_comparison_result_local_evidence,
         weave_publication_target_from_environment,
         weave_publisher_from_environment,
     )
@@ -1649,6 +1650,29 @@ def _publish_local_result(args: argparse.Namespace) -> int:
         if args.receipt is not None
         else None
     )
+    effective_receipt_path = (
+        receipt_path
+        if receipt_path is not None
+        else result_path.with_name("weave-publication-receipt.json")
+    )
+    research_store = None
+    if study_scope is not None:
+        from fugue.research.store import StudyStore
+
+        research_database = root / ".fugue" / "research.db"
+        if not research_database.is_file():
+            raise LocalResultPublicationError(
+                "scoped Weave publication requires the existing local Research database"
+            )
+        manifest = verify_comparison_result_local_evidence(result, manifest_path)
+        research_store = StudyStore(root)
+        research_store.validate_weave_publication_projection(
+            research_id=study_scope.research_id,
+            experiment_id=study_scope.study_id,
+            result_digest=result.result_digest,
+            qualification_digest=result.qualification_digest,
+            attempt_ids=manifest.planned_attempt_ids,
+        )
     privacy_notice = (
         "Privacy boundary: publishing sends sanitized result and evidence-chain "
         "projections to the selected W&B project. Raw local transcript and "
@@ -1665,12 +1689,19 @@ def _publish_local_result(args: argparse.Namespace) -> int:
         )
     env = load_env(args.env_file)
     try:
-        publisher = weave_publisher_from_environment(env)
         target = weave_publication_target_from_environment(
             args.project,
             env,
             study_scope=study_scope,
         )
+        if effective_receipt_path.is_file():
+
+            def publisher(*_args: Any, **_kwargs: Any) -> Any:
+                raise AssertionError(
+                    "an existing publication receipt must not invoke the publisher"
+                )
+        else:
+            publisher = weave_publisher_from_environment(env)
         receipt = publish_local_result_to_weave(
             result_path,
             manifest_path,
@@ -1691,6 +1722,23 @@ def _publish_local_result(args: argparse.Namespace) -> int:
         else:
             CONSOLE.print(f"[fugue.coral]Blocked:[/] {exc}")
         return 2
+    if research_store is not None:
+        from fugue.research.records import weave_publication_evidence_from_receipt
+
+        result_bytes = result_path.read_bytes()
+        manifest_bytes = manifest_path.read_bytes()
+        receipt_bytes = effective_receipt_path.read_bytes()
+        research_store.record_weave_publication_evidence(
+            weave_publication_evidence_from_receipt(receipt.to_dict())
+        )
+        if (
+            result_path.read_bytes() != result_bytes
+            or manifest_path.read_bytes() != manifest_bytes
+            or effective_receipt_path.read_bytes() != receipt_bytes
+        ):
+            raise LocalResultPublicationError(
+                "Research delivery mutated immutable publication source bytes"
+            )
     if args.json:
         print(json.dumps(receipt.to_dict(), indent=2, sort_keys=True))
     else:

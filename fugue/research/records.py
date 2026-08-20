@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import os
+import re
 from collections.abc import Iterable, Mapping
 from dataclasses import asdict, dataclass, field, replace
 from datetime import datetime
@@ -13,6 +14,10 @@ import httpx
 from filelock import FileLock
 
 from fugue.bench.candidates import stable_digest
+from fugue.model_plane import (
+    EvidenceDestinationV1,
+    evidence_destination_from_dict,
+)
 from fugue.research.contracts import (
     RESEARCH_SCHEMA_VERSION,
     AttributionV1,
@@ -128,6 +133,19 @@ _PUBLIC_SELECTOR_KEYS = {
     "run_id",
     "trace_id",
 }
+_WEAVE_HOSTED_KINDS = frozenset(
+    {
+        "evaluation_root",
+        "prediction_and_score",
+        "prediction",
+        "agent_evidence_receipt",
+        "dataset",
+    }
+)
+_WEAVE_CALL_KINDS = _WEAVE_HOSTED_KINDS - {"dataset"}
+_WEAVE_SLUG_PART = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$")
+_WEAVE_STUDY_ID = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._:-]{0,255}$")
+_WEAVE_OBJECT_ID = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._:@+-]{0,511}$")
 
 
 @dataclass(frozen=True)
@@ -184,6 +202,99 @@ class ResearchLogEventV1:
             key: item
             for key, item in value.items()
             if item not in (None, "", (), [], {})
+        }
+
+
+@dataclass(frozen=True)
+class WeavePublicationScopeEvidenceV1:
+    research_id: str
+    study_id: str
+    schema_version: Literal[1] = RESEARCH_SCHEMA_VERSION
+
+    def to_dict(self) -> dict[str, Any]:
+        return asdict(self)
+
+
+@dataclass(frozen=True)
+class WeavePublicationTargetEvidenceV1:
+    entity: str
+    project: str
+    study_scope: WeavePublicationScopeEvidenceV1
+    destination: EvidenceDestinationV1
+    schema_version: Literal[1] = RESEARCH_SCHEMA_VERSION
+
+    @property
+    def project_slug(self) -> str:
+        return f"{self.entity}/{self.project}"
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "schema_version": self.schema_version,
+            "entity": self.entity,
+            "project": self.project,
+            "study_scope": self.study_scope.to_dict(),
+            "destination": self.destination.to_dict(),
+        }
+
+
+@dataclass(frozen=True)
+class WeaveHostedEvidenceRefV1:
+    attempt_id: str
+    kind: Literal[
+        "evaluation_root",
+        "prediction_and_score",
+        "prediction",
+        "agent_evidence_receipt",
+        "dataset",
+    ]
+    object_id: str
+    ref: str
+    system: Literal["weave"] = "weave"
+    native_agent_call: Literal[False] = False
+
+    def to_dict(self) -> dict[str, Any]:
+        return asdict(self)
+
+
+@dataclass(frozen=True)
+class WeavePublicationEvidenceV1:
+    """Public, digest-bound delivery evidence for one verified Weave receipt."""
+
+    publication_id: str
+    receipt_digest: str
+    target: WeavePublicationTargetEvidenceV1
+    result_digest: str
+    qualification_digest: str
+    result_file_sha256: str
+    local_manifest_digest: str
+    local_manifest_file_sha256: str
+    hosted_objects: tuple[WeaveHostedEvidenceRefV1, ...]
+    publisher_id: str
+    publisher_revision: str
+    status: Literal["published"]
+    published_at: str
+    schema_version: Literal[1] = RESEARCH_SCHEMA_VERSION
+
+    @property
+    def attempt_ids(self) -> tuple[str, ...]:
+        return tuple(sorted({item.attempt_id for item in self.hosted_objects}))
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "schema_version": self.schema_version,
+            "publication_id": self.publication_id,
+            "receipt_digest": self.receipt_digest,
+            "target": self.target.to_dict(),
+            "result_digest": self.result_digest,
+            "qualification_digest": self.qualification_digest,
+            "result_file_sha256": self.result_file_sha256,
+            "local_manifest_digest": self.local_manifest_digest,
+            "local_manifest_file_sha256": self.local_manifest_file_sha256,
+            "hosted_objects": [item.to_dict() for item in self.hosted_objects],
+            "publisher_id": self.publisher_id,
+            "publisher_revision": self.publisher_revision,
+            "status": self.status,
+            "published_at": self.published_at,
         }
 
 
@@ -385,6 +496,235 @@ def experiment_view_manifest_from_dict(
     return ExperimentViewManifestV1(**unsigned, manifest_digest=manifest_digest)
 
 
+def weave_publication_evidence_from_receipt(
+    raw: Mapping[str, Any],
+) -> WeavePublicationEvidenceV1:
+    """Project one fully verified receipt into bounded public Research evidence."""
+
+    fields = {
+        "schema_version",
+        "publication_id",
+        "target",
+        "result_digest",
+        "qualification_digest",
+        "result_file_sha256",
+        "local_manifest_digest",
+        "local_manifest_file_sha256",
+        "hosted_objects",
+        "publisher_id",
+        "publisher_revision",
+        "status",
+        "published_at",
+        "receipt_digest",
+    }
+    unknown = set(raw) - fields
+    missing = fields - set(raw)
+    if unknown or missing:
+        raise ValueError("Weave publication receipt fields are incomplete or unknown")
+    receipt_digest = _sha256_digest(raw.get("receipt_digest"), "receipt_digest")
+    unsigned = {key: value for key, value in raw.items() if key != "receipt_digest"}
+    if stable_digest(unsigned) != receipt_digest:
+        raise ValueError("Weave publication receipt digest does not recompute")
+    target = _weave_publication_target(raw.get("target"))
+    hosted_objects: list[WeaveHostedEvidenceRefV1] = []
+    for item in _sequence(raw.get("hosted_objects"), "hosted_objects"):
+        value = dict(_mapping(item, "hosted object"))
+        object_target = _weave_publication_target(value.pop("target", None))
+        if object_target != target:
+            raise ValueError("hosted object target disagrees with publication target")
+        hosted_objects.append(_weave_hosted_evidence_ref(value, target=target))
+    return weave_publication_evidence_from_dict(
+        {
+            "schema_version": raw.get("schema_version"),
+            "publication_id": raw.get("publication_id"),
+            "receipt_digest": receipt_digest,
+            "target": target.to_dict(),
+            "result_digest": raw.get("result_digest"),
+            "qualification_digest": raw.get("qualification_digest"),
+            "result_file_sha256": raw.get("result_file_sha256"),
+            "local_manifest_digest": raw.get("local_manifest_digest"),
+            "local_manifest_file_sha256": raw.get("local_manifest_file_sha256"),
+            "hosted_objects": [item.to_dict() for item in hosted_objects],
+            "publisher_id": raw.get("publisher_id"),
+            "publisher_revision": raw.get("publisher_revision"),
+            "status": raw.get("status"),
+            "published_at": raw.get("published_at"),
+        }
+    )
+
+
+def weave_publication_evidence_from_dict(
+    raw: Mapping[str, Any],
+) -> WeavePublicationEvidenceV1:
+    fields = {
+        item.name for item in WeavePublicationEvidenceV1.__dataclass_fields__.values()
+    }
+    unknown = set(raw) - fields
+    missing = fields - set(raw)
+    if unknown or missing:
+        raise ValueError("Weave publication evidence fields are incomplete or unknown")
+    if raw.get("schema_version") != RESEARCH_SCHEMA_VERSION:
+        raise ValueError("unsupported Weave publication evidence schema")
+    target = _weave_publication_target(raw.get("target"))
+    hosted_objects = tuple(
+        _weave_hosted_evidence_ref(item, target=target)
+        for item in _sequence(raw.get("hosted_objects"), "hosted_objects")
+    )
+    if not hosted_objects:
+        raise ValueError("Weave publication evidence requires hosted objects")
+    if (
+        tuple(sorted(hosted_objects, key=lambda item: (item.attempt_id, item.kind)))
+        != hosted_objects
+    ):
+        raise ValueError(
+            "Weave publication evidence objects are not canonically sorted"
+        )
+    observed = {(item.attempt_id, item.kind) for item in hosted_objects}
+    if len(observed) != len(hosted_objects):
+        raise ValueError("Weave publication evidence contains duplicate objects")
+    attempt_ids = tuple(sorted({item.attempt_id for item in hosted_objects}))
+    expected = {
+        (attempt_id, kind) for attempt_id in attempt_ids for kind in _WEAVE_HOSTED_KINDS
+    }
+    if observed != expected:
+        raise ValueError(
+            "Weave publication evidence requires one exact five-object chain "
+            "per attempt"
+        )
+    result_digest = _sha256_digest(raw.get("result_digest"), "result_digest")
+    local_manifest_digest = _sha256_digest(
+        raw.get("local_manifest_digest"), "local_manifest_digest"
+    )
+    publication_id = _sha256_digest(raw.get("publication_id"), "publication_id")
+    expected_publication_id = stable_digest(
+        {
+            "schema_version": RESEARCH_SCHEMA_VERSION,
+            "target": target.to_dict(),
+            "result_digest": result_digest,
+            "local_manifest_digest": local_manifest_digest,
+        }
+    )
+    if publication_id != expected_publication_id:
+        raise ValueError("Weave publication evidence identity does not recompute")
+    if raw.get("status") != "published":
+        raise ValueError("Weave publication evidence is not published")
+    published_at = _timestamp(raw.get("published_at"))
+    evidence = WeavePublicationEvidenceV1(
+        schema_version=RESEARCH_SCHEMA_VERSION,
+        publication_id=publication_id,
+        receipt_digest=_sha256_digest(raw.get("receipt_digest"), "receipt_digest"),
+        target=target,
+        result_digest=result_digest,
+        qualification_digest=_sha256_digest(
+            raw.get("qualification_digest"), "qualification_digest"
+        ),
+        result_file_sha256=_sha256_digest(
+            raw.get("result_file_sha256"), "result_file_sha256"
+        ),
+        local_manifest_digest=local_manifest_digest,
+        local_manifest_file_sha256=_sha256_digest(
+            raw.get("local_manifest_file_sha256"),
+            "local_manifest_file_sha256",
+        ),
+        hosted_objects=hosted_objects,
+        publisher_id=_text(raw.get("publisher_id"), "publisher_id", 1000),
+        publisher_revision=_text(
+            raw.get("publisher_revision"), "publisher_revision", 1000
+        ),
+        status="published",
+        published_at=published_at,
+    )
+    reconstructed_receipt = evidence.to_dict()
+    receipt_digest = reconstructed_receipt.pop("receipt_digest")
+    reconstructed_receipt["hosted_objects"] = [
+        {**item.to_dict(), "target": target.to_dict()}
+        for item in evidence.hosted_objects
+    ]
+    if stable_digest(reconstructed_receipt) != receipt_digest:
+        raise ValueError("Weave publication receipt digest does not recompute")
+    return evidence
+
+
+def _weave_publication_target(raw: Any) -> WeavePublicationTargetEvidenceV1:
+    value = dict(_mapping(raw, "Weave publication target"))
+    fields = {"schema_version", "entity", "project", "study_scope", "destination"}
+    if set(value) != fields or value.get("schema_version") != RESEARCH_SCHEMA_VERSION:
+        raise ValueError("Weave publication target fields are incomplete or unknown")
+    entity = _text(value.get("entity"), "Weave entity", 128)
+    project = _text(value.get("project"), "Weave project", 128)
+    if not _WEAVE_SLUG_PART.fullmatch(entity) or not _WEAVE_SLUG_PART.fullmatch(
+        project
+    ):
+        raise ValueError("Weave publication target is invalid")
+    scope_value = dict(_mapping(value.get("study_scope"), "Study publication scope"))
+    if set(scope_value) != {"schema_version", "research_id", "study_id"} or (
+        scope_value.get("schema_version") != RESEARCH_SCHEMA_VERSION
+    ):
+        raise ValueError("Study publication scope fields are incomplete or unknown")
+    research_id = _text(scope_value.get("research_id"), "research_id", 256)
+    study_id = _text(scope_value.get("study_id"), "study_id", 256)
+    if not _WEAVE_STUDY_ID.fullmatch(research_id) or not _WEAVE_STUDY_ID.fullmatch(
+        study_id
+    ):
+        raise ValueError("Study publication scope is invalid")
+    destination = evidence_destination_from_dict(
+        _mapping(value.get("destination"), "Weave publication destination")
+    )
+    if destination.entity != entity or destination.project != project:
+        raise ValueError("Weave target and destination disagree")
+    return WeavePublicationTargetEvidenceV1(
+        entity=entity,
+        project=project,
+        study_scope=WeavePublicationScopeEvidenceV1(
+            research_id=research_id,
+            study_id=study_id,
+        ),
+        destination=destination,
+    )
+
+
+def _weave_hosted_evidence_ref(
+    raw: Any,
+    *,
+    target: WeavePublicationTargetEvidenceV1,
+) -> WeaveHostedEvidenceRefV1:
+    value = dict(_mapping(raw, "hosted evidence object"))
+    fields = {
+        "attempt_id",
+        "kind",
+        "object_id",
+        "ref",
+        "system",
+        "native_agent_call",
+    }
+    if set(value) != fields:
+        raise ValueError("hosted evidence object fields are incomplete or unknown")
+    attempt_id = _sha256_digest(value.get("attempt_id"), "attempt_id")
+    kind = str(value.get("kind") or "")
+    if kind not in _WEAVE_HOSTED_KINDS:
+        raise ValueError("hosted evidence kind is invalid")
+    if value.get("system") != "weave":
+        raise ValueError("hosted evidence system must be weave")
+    if value.get("native_agent_call") is not False:
+        raise ValueError(
+            "a published local Agent receipt is not a native Weave Agent call"
+        )
+    object_id = _text(value.get("object_id"), "hosted object id", 512)
+    if not _WEAVE_OBJECT_ID.fullmatch(object_id):
+        raise ValueError("hosted evidence object id is invalid")
+    object_type = "call" if kind in _WEAVE_CALL_KINDS else "object"
+    expected_ref = f"weave:///{target.project_slug}/{object_type}/{object_id}"
+    ref = _text(value.get("ref"), "hosted evidence ref", 2000)
+    if ref != expected_ref:
+        raise ValueError("hosted evidence ref disagrees with its exact Weave target")
+    return WeaveHostedEvidenceRefV1(
+        attempt_id=attempt_id,
+        kind=kind,  # type: ignore[arg-type]
+        object_id=object_id,
+        ref=ref,
+    )
+
+
 def research_log_event_from_dict(
     raw: Mapping[str, Any], *, require_digest: bool = True
 ) -> ResearchLogEventV1:
@@ -436,6 +776,7 @@ def research_log_event_from_dict(
     experiment_view = event.summary.get("experiment_view")
     experiment_view_page = event.summary.get("experiment_view_page")
     experiment_view_manifest = event.summary.get("experiment_view_manifest")
+    weave_publication = event.summary.get("weave_publication")
     experiment_payloads = sum(
         item is not None
         for item in (experiment_view, experiment_view_page, experiment_view_manifest)
@@ -462,6 +803,11 @@ def research_log_event_from_dict(
         experiment_view_manifest_from_dict(experiment_view_manifest)
         if event.state not in {"completed", "failed", "cancelled"}:
             raise ValueError("experiment manifests must declare a terminal Study state")
+    _validate_weave_publication_event(
+        event,
+        weave_publication=weave_publication,
+        experiment_payloads=experiment_payloads,
+    )
     unsigned = event.to_dict()
     unsigned.pop("event_digest", None)
     if (
@@ -479,6 +825,48 @@ def research_log_event_from_dict(
 
 def sign_research_log_event(event: ResearchLogEventV1) -> ResearchLogEventV1:
     return research_log_event_from_dict(event.to_dict(), require_digest=False)
+
+
+def _validate_weave_publication_event(
+    event: ResearchLogEventV1,
+    *,
+    weave_publication: Any,
+    experiment_payloads: int,
+) -> None:
+    if weave_publication is None:
+        return
+    if experiment_payloads:
+        raise ValueError(
+            "Weave publication evidence cannot replace an experiment projection"
+        )
+    if not isinstance(weave_publication, Mapping):
+        raise ValueError("summary.weave_publication must be an object")
+    publication = weave_publication_evidence_from_dict(weave_publication)
+    scope = publication.target.study_scope
+    if (
+        event.research_id != scope.research_id
+        or event.study_id != scope.study_id
+        or event.classification != "evidence"
+        or event.state != "completed"
+    ):
+        raise ValueError(
+            "Weave publication evidence disagrees with its Research event scope"
+        )
+    expected_evidence = ResearchEvidenceRefV1(
+        system="weave",
+        kind="weave_publication_receipt",
+        ref=f"weave-publication:{publication.publication_id}",
+        digest=publication.receipt_digest,
+        version=str(publication.schema_version),
+        selector={
+            "entity": publication.target.entity,
+            "project": publication.target.project,
+        },
+    )
+    if event.evidence != (expected_evidence,):
+        raise ValueError(
+            "Weave publication event evidence ref disagrees with its receipt"
+        )
 
 
 def event_state(value: str) -> ResearchLogState:

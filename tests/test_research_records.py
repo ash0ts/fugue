@@ -13,6 +13,13 @@ import pytest
 from fugue.bench.analysis_contracts import aligned_analysis_from_dict
 from fugue.bench.candidates import attempt_id as canonical_attempt_id
 from fugue.bench.candidates import stable_digest
+from fugue.bench.local_publication import (
+    StudyPublicationScopeV1,
+    WeaveHostedObjectRefV1,
+    WeavePublicationReceiptV1,
+    WeavePublicationTargetV1,
+)
+from fugue.model_plane import default_evidence_destination
 from fugue.research.contracts import (
     RESEARCH_SCHEMA_VERSION,
     ExperimentPreviewV1,
@@ -39,11 +46,15 @@ from fugue.research.records import (
     public_evidence_selector,
     research_log_event_from_dict,
     sign_research_log_event,
+    weave_publication_evidence_from_dict,
+    weave_publication_evidence_from_receipt,
 )
 from fugue.research.store import StudyStore, _paged_terminal_experiment_view
 
 _A = "a" * 64
 _B = "b" * 64
+_C = "c" * 64
+_D = "d" * 64
 
 
 def _store(tmp_path: Path) -> StudyStore:
@@ -244,6 +255,261 @@ def _large_terminal_v3_view(*, pair_count: int = 96) -> ExperimentViewV3:
     view = experiment_view_from_dict(raw)
     assert isinstance(view, ExperimentViewV3)
     return view
+
+
+def _published_v3_view(*, pair_count: int = 4) -> ExperimentViewV3:
+    view = _large_terminal_v3_view(pair_count=pair_count)
+    return replace(
+        view,
+        result_digest=_A,
+        qualification_digest=_B,
+        evidence_links=(
+            {
+                "kind": "comparison_rows",
+                "system": "fugue",
+                "ref": "20260820T023521-83a3add82a",
+            },
+            {
+                "kind": "comparison_result",
+                "system": "fugue",
+                "ref": f".fugue/results/comparisons/{_C}/result.json",
+                "digest": _A,
+            },
+        ),
+    )
+
+
+def _weave_publication_receipt(
+    view: ExperimentViewV3,
+    *,
+    research_id: str = "research-1",
+    study_id: str = "study-1",
+    result_digest: str | None = None,
+    qualification_digest: str | None = None,
+    published_at: str = "2026-08-20T12:00:00+00:00",
+) -> WeavePublicationReceiptV1:
+    target = WeavePublicationTargetV1(
+        entity="wandb",
+        project="fugue-result-project",
+        study_scope=StudyPublicationScopeV1(
+            research_id=research_id,
+            study_id=study_id,
+        ),
+        destination=default_evidence_destination("wandb/fugue-result-project"),
+    )
+    attempt_ids = tuple(
+        sorted(
+            str(attempt["attempt_id"])
+            for pair in view.paired_cases
+            for arm in ("baseline", "candidate")
+            if isinstance((attempt := pair.get(arm)), dict)
+        )
+    )
+    objects: list[WeaveHostedObjectRefV1] = []
+    for attempt_id in attempt_ids:
+        for kind in (
+            "evaluation_root",
+            "prediction_and_score",
+            "prediction",
+            "agent_evidence_receipt",
+            "dataset",
+        ):
+            object_id = f"{kind}-{attempt_id[:16]}"
+            object_type = "object" if kind == "dataset" else "call"
+            objects.append(
+                WeaveHostedObjectRefV1(
+                    attempt_id=attempt_id,
+                    kind=kind,
+                    target=target,
+                    object_id=object_id,
+                    ref=(f"weave:///{target.project_slug}/{object_type}/{object_id}"),
+                )
+            )
+    selected_result_digest = result_digest or _A
+    publication_id = stable_digest(
+        {
+            "schema_version": 1,
+            "target": target.to_dict(),
+            "result_digest": selected_result_digest,
+            "local_manifest_digest": _D,
+        }
+    )
+    return WeavePublicationReceiptV1(
+        publication_id=publication_id,
+        target=target,
+        result_digest=selected_result_digest,
+        qualification_digest=qualification_digest or _B,
+        result_file_sha256="e" * 64,
+        local_manifest_digest=_D,
+        local_manifest_file_sha256="f" * 64,
+        hosted_objects=tuple(
+            sorted(objects, key=lambda item: (item.attempt_id, item.kind))
+        ),
+        publisher_id="fugue-weave-publisher",
+        publisher_revision="publisher-revision-v1",
+        status="published",
+        published_at=published_at,
+    )
+
+
+def test_weave_publication_evidence_recomputes_the_original_receipt() -> None:
+    view = _published_v3_view()
+    receipt = _weave_publication_receipt(view)
+    evidence = weave_publication_evidence_from_receipt(receipt.to_dict())
+
+    assert weave_publication_evidence_from_dict(evidence.to_dict()) == evidence
+    assert len(evidence.attempt_ids) == 8
+    assert len(evidence.hosted_objects) == 40
+    assert all(item.native_agent_call is False for item in evidence.hosted_objects)
+
+    mutated = evidence.to_dict()
+    mutated["publisher_revision"] = "unbound-revision"
+    with pytest.raises(ValueError, match="receipt digest does not recompute"):
+        weave_publication_evidence_from_dict(mutated)
+
+
+def test_weave_publication_evidence_requires_exact_public_object_shape() -> None:
+    receipt = _weave_publication_receipt(_published_v3_view())
+    incomplete = replace(
+        receipt,
+        hosted_objects=receipt.hosted_objects[:-1],
+        receipt_digest="",
+    )
+
+    with pytest.raises(ValueError, match="exact five-object chain"):
+        weave_publication_evidence_from_receipt(incomplete.to_dict())
+
+    cross_transport = receipt.to_dict()
+    cross_transport["hosted_objects"][0]["native_agent_call"] = True
+    cross_transport.pop("receipt_digest")
+    cross_transport["receipt_digest"] = stable_digest(cross_transport)
+    with pytest.raises(ValueError, match="not a native Weave Agent call"):
+        weave_publication_evidence_from_receipt(cross_transport)
+
+
+def test_store_records_one_idempotent_weave_publication_event(tmp_path: Path) -> None:
+    store = _store(tmp_path)
+    view = _published_v3_view()
+    terminal = store.record_experiment_view_event(
+        research_id="research-1",
+        experiment_id="study-1",
+        producer_event_id="study-1-result",
+        classification="result",
+        state="completed",
+        message="Published the canonical terminal result.",
+        view=view,
+    )
+    publication = weave_publication_evidence_from_receipt(
+        _weave_publication_receipt(view).to_dict()
+    )
+
+    delivered = store.record_weave_publication_evidence(publication)
+
+    assert delivered.classification == "evidence"
+    assert delivered.state == "completed"
+    assert delivered.research_id == "research-1"
+    assert delivered.study_id == "study-1"
+    assert delivered.summary == {"weave_publication": publication.to_dict()}
+    assert delivered.evidence[0].ref == (
+        f"weave-publication:{publication.publication_id}"
+    )
+    assert delivered.evidence[0].digest == publication.receipt_digest
+    assert delivered.evidence[0].selector == {
+        "entity": "wandb",
+        "project": "fugue-result-project",
+    }
+    assert not delivered.evidence[0].ref.startswith("/")
+    assert research_log_event_from_dict(delivered.to_dict()) == delivered
+    assert terminal in store.research_log_events()
+
+    before = tuple(store.research_log_events())
+    assert store.record_weave_publication_evidence(publication) == delivered
+    assert tuple(store.research_log_events()) == before
+
+
+def test_store_rejects_conflicting_weave_publication_receipt(tmp_path: Path) -> None:
+    store = _store(tmp_path)
+    view = _published_v3_view()
+    store.record_experiment_view_event(
+        research_id="research-1",
+        experiment_id="study-1",
+        producer_event_id="study-1-result",
+        classification="result",
+        state="completed",
+        message="Published the canonical terminal result.",
+        view=view,
+    )
+    receipt = _weave_publication_receipt(view)
+    store.record_weave_publication_evidence(
+        weave_publication_evidence_from_receipt(receipt.to_dict())
+    )
+    conflicting = replace(
+        receipt,
+        published_at="2026-08-20T12:01:00+00:00",
+        receipt_digest="",
+    )
+
+    with pytest.raises(ResearchError, match="another receipt"):
+        store.record_weave_publication_evidence(
+            weave_publication_evidence_from_receipt(conflicting.to_dict())
+        )
+
+
+@pytest.mark.parametrize(
+    "publication",
+    (
+        lambda view: _weave_publication_receipt(view, study_id="another-study"),
+        lambda view: _weave_publication_receipt(view, result_digest=_C),
+        lambda view: _weave_publication_receipt(view, qualification_digest=_C),
+        lambda _view: _weave_publication_receipt(_published_v3_view(pair_count=1)),
+    ),
+    ids=("scope", "result", "qualification", "attempt-set"),
+)
+def test_store_rejects_publication_that_disagrees_with_terminal_projection(
+    tmp_path: Path,
+    publication,
+) -> None:
+    store = _store(tmp_path)
+    view = _published_v3_view()
+    store.record_experiment_view_event(
+        research_id="research-1",
+        experiment_id="study-1",
+        producer_event_id="study-1-result",
+        classification="result",
+        state="completed",
+        message="Published the canonical terminal result.",
+        view=view,
+    )
+
+    with pytest.raises(ResearchError, match="projection"):
+        store.record_weave_publication_evidence(
+            weave_publication_evidence_from_receipt(publication(view).to_dict())
+        )
+
+
+def test_weave_publication_event_rejects_private_summary_fields(tmp_path: Path) -> None:
+    store = _store(tmp_path)
+    view = _published_v3_view()
+    store.record_experiment_view_event(
+        research_id="research-1",
+        experiment_id="study-1",
+        producer_event_id="study-1-result",
+        classification="result",
+        state="completed",
+        message="Published the canonical terminal result.",
+        view=view,
+    )
+    delivered = store.record_weave_publication_evidence(
+        weave_publication_evidence_from_receipt(
+            _weave_publication_receipt(view).to_dict()
+        )
+    )
+    raw = delivered.to_dict()
+    raw.pop("event_digest")
+    raw["summary"]["weave_publication"]["credentials"] = "must-not-publish"
+
+    with pytest.raises(ValueError, match="private field"):
+        research_log_event_from_dict(raw, require_digest=False)
 
 
 def test_research_log_contract_is_strict_and_content_addressed() -> None:

@@ -59,6 +59,7 @@ from fugue.research.records import (
     ResearchEvidenceRefV1,
     ResearchLogEventV1,
     ResearchRelationshipV1,
+    WeavePublicationEvidenceV1,
     event_state,
     experiment_view_manifest_from_dict,
     experiment_view_page_from_dict,
@@ -66,6 +67,7 @@ from fugue.research.records import (
     public_evidence_selector,
     research_log_event_from_dict,
     sign_research_log_event,
+    weave_publication_evidence_from_dict,
 )
 
 _RESULT_PROJECTION_VERSION = 3
@@ -2208,6 +2210,246 @@ class StudyStore:
                 for row in rows
             ],
         }
+
+    def validate_weave_publication_projection(
+        self,
+        *,
+        research_id: str,
+        experiment_id: str,
+        result_digest: str,
+        qualification_digest: str,
+        attempt_ids: Iterable[str],
+    ) -> None:
+        """Verify the existing terminal result before any hosted publication."""
+
+        research_id = validate_id(research_id, kind="study id")
+        experiment_id = validate_id(experiment_id, kind="experiment id")
+        self.get_study(research_id)
+        expected_attempt_ids = tuple(sorted(str(item) for item in attempt_ids))
+        if not expected_attempt_ids or len(set(expected_attempt_ids)) != len(
+            expected_attempt_ids
+        ):
+            raise ResearchError(
+                "publication_projection_invalid",
+                "Weave publication requires unique canonical attempt identities",
+                category="evidence",
+            )
+        with self._connect() as conn:
+            self._validate_weave_publication_projection(
+                conn,
+                research_id=research_id,
+                experiment_id=experiment_id,
+                result_digest=result_digest,
+                qualification_digest=qualification_digest,
+                attempt_ids=expected_attempt_ids,
+            )
+
+    def record_weave_publication_evidence(
+        self,
+        publication: WeavePublicationEvidenceV1,
+    ) -> ResearchLogEventV1:
+        """Append one idempotent delivery event for a verified hosted receipt."""
+
+        accepted = weave_publication_evidence_from_dict(publication.to_dict())
+        scope = accepted.target.study_scope
+        self.get_study(scope.research_id)
+        producer_identity = stable_digest(
+            {
+                "schema_version": RESEARCH_SCHEMA_VERSION,
+                "publication_id": accepted.publication_id,
+                "receipt_digest": accepted.receipt_digest,
+            }
+        )
+        producer_event_id = (
+            f"fugue:{scope.research_id}:{scope.study_id}:"
+            f"weave-publication-{producer_identity}"
+        )
+        evidence = (
+            ResearchEvidenceRefV1(
+                system="weave",
+                kind="weave_publication_receipt",
+                ref=f"weave-publication:{accepted.publication_id}",
+                digest=accepted.receipt_digest,
+                version=str(accepted.schema_version),
+                selector={
+                    "entity": accepted.target.entity,
+                    "project": accepted.target.project,
+                },
+            ),
+        )
+        with self._connect() as conn:
+            conn.execute("BEGIN IMMEDIATE")
+            self._validate_weave_publication_projection(
+                conn,
+                research_id=scope.research_id,
+                experiment_id=scope.study_id,
+                result_digest=accepted.result_digest,
+                qualification_digest=accepted.qualification_digest,
+                attempt_ids=accepted.attempt_ids,
+            )
+            rows = conn.execute(
+                "SELECT event_json FROM research_log_events ORDER BY sequence"
+            ).fetchall()
+            for row in rows:
+                raw = json.loads(row["event_json"])
+                summary = raw.get("summary")
+                if not isinstance(summary, Mapping) or not isinstance(
+                    summary.get("weave_publication"), Mapping
+                ):
+                    continue
+                prior = weave_publication_evidence_from_dict(
+                    summary["weave_publication"]
+                )
+                if (
+                    prior.publication_id == accepted.publication_id
+                    and prior != accepted
+                ):
+                    raise ResearchError(
+                        "publication_conflict",
+                        "Weave publication identity is bound to another receipt",
+                        category="conflict",
+                    )
+            event = self._append_research_log_event(
+                conn,
+                producer_event_id=producer_event_id,
+                research_id=scope.research_id,
+                study_id=scope.study_id,
+                classification="evidence",
+                state="completed",
+                message=(
+                    "Verified Weave publication evidence was attached to the "
+                    "unchanged local result."
+                ),
+                evidence=evidence,
+                summary={"weave_publication": accepted.to_dict()},
+            )
+            conn.commit()
+        return event
+
+    def _validate_weave_publication_projection(
+        self,
+        conn: sqlite3.Connection,
+        *,
+        research_id: str,
+        experiment_id: str,
+        result_digest: str,
+        qualification_digest: str,
+        attempt_ids: tuple[str, ...],
+    ) -> None:
+        projections = self._published_terminal_evaluation_views(
+            conn,
+            research_id=research_id,
+            experiment_id=experiment_id,
+        )
+        if not projections:
+            raise ResearchError(
+                "publication_projection_not_found",
+                "scoped Weave publication requires an existing terminal result "
+                "projection",
+                category="evidence",
+            )
+        for view in projections:
+            projected_attempt_ids = tuple(
+                sorted(
+                    str(attempt.get("attempt_id") or "")
+                    for pair in view.paired_cases
+                    for arm in ("baseline", "candidate")
+                    if isinstance((attempt := pair.get(arm)), Mapping)
+                )
+            )
+            result_links = [
+                link
+                for link in view.evidence_links
+                if link.get("kind") == "comparison_result"
+                and link.get("system") == "fugue"
+            ]
+            if (
+                view.result_digest != result_digest
+                or view.qualification_digest != qualification_digest
+                or projected_attempt_ids != attempt_ids
+                or len(result_links) != 1
+                or result_links[0].get("digest") != result_digest
+            ):
+                raise ResearchError(
+                    "publication_projection_conflict",
+                    "Weave publication disagrees with the existing terminal "
+                    "result projection",
+                    category="conflict",
+                )
+
+    @staticmethod
+    def _published_terminal_evaluation_views(
+        conn: sqlite3.Connection,
+        *,
+        research_id: str,
+        experiment_id: str,
+    ) -> tuple[ExperimentViewV3, ...]:
+        rows = conn.execute(
+            "SELECT event_json FROM research_log_events ORDER BY sequence"
+        ).fetchall()
+        views: list[ExperimentViewV3] = []
+        pages: dict[str, dict[int, ExperimentViewPageV1]] = {}
+        manifests: list[ExperimentViewManifestV1] = []
+        for row in rows:
+            event = research_log_event_from_dict(json.loads(row["event_json"]))
+            if event.research_id != research_id or event.study_id != experiment_id:
+                continue
+            raw_view = event.summary.get("experiment_view")
+            if isinstance(raw_view, Mapping):
+                view = experiment_view_from_dict(raw_view)
+                if isinstance(view, ExperimentViewV3) and event.state == "completed":
+                    views.append(view)
+            raw_page = event.summary.get("experiment_view_page")
+            if isinstance(raw_page, Mapping):
+                page = experiment_view_page_from_dict(raw_page)
+                pages.setdefault(page.page_set_id, {})[page.page_index] = page
+            raw_manifest = event.summary.get("experiment_view_manifest")
+            if isinstance(raw_manifest, Mapping) and event.state == "completed":
+                manifests.append(experiment_view_manifest_from_dict(raw_manifest))
+        for manifest in manifests:
+            selected = pages.get(manifest.page_set_id, {})
+            if set(selected) != set(range(manifest.page_count)):
+                raise ResearchError(
+                    "publication_projection_incomplete",
+                    "terminal result projection is missing a bound evidence page",
+                    category="evidence",
+                )
+            attempts = [
+                dict(item)
+                for index in range(manifest.page_count)
+                for item in selected[index].attempts
+            ]
+            paired_cases = [
+                dict(item)
+                for index in range(manifest.page_count)
+                for item in selected[index].paired_cases
+            ]
+            full_projection = {
+                **manifest.projection,
+                "attempts": attempts,
+                "paired_cases": paired_cases,
+            }
+            if (
+                len(attempts) != manifest.attempt_count
+                or len(paired_cases) != manifest.paired_case_count
+                or stable_digest(full_projection) != manifest.projection_digest
+            ):
+                raise ResearchError(
+                    "publication_projection_invalid",
+                    "terminal result projection pages do not reconcile",
+                    category="evidence",
+                )
+            fugue_projection = dict(full_projection)
+            fugue_projection.pop("attempts", None)
+            view = experiment_view_from_dict(fugue_projection)
+            if not isinstance(view, ExperimentViewV3):
+                raise ResearchError(
+                    "publication_projection_invalid",
+                    "terminal result projection is not ComparisonResultV3",
+                    category="evidence",
+                )
+            views.append(view)
+        return tuple(views)
 
     def record_experiment_view_event(
         self,
