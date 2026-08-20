@@ -212,6 +212,33 @@ def _task_result_display_verdict(task_result: Mapping[str, Any] | None) -> str:
     return "INVALID"
 
 
+def _failed_required_check_ids(
+    task_result: Mapping[str, Any] | None,
+) -> list[str]:
+    if task_result is None:
+        return []
+    failed_checks = task_result.get("failed_required_checks")
+    if not isinstance(failed_checks, Sequence) or isinstance(
+        failed_checks, (str, bytes, bytearray)
+    ):
+        raise LocalResultPublicationError(
+            "comparison task result failed checks must be a sequence"
+        )
+    blocker_ids: set[str] = set()
+    for item in failed_checks:
+        if not isinstance(item, Mapping):
+            raise LocalResultPublicationError(
+                "comparison task result failed check must be an object"
+            )
+        blocker_id = str(item.get("id") or "").strip()
+        if not blocker_id:
+            raise LocalResultPublicationError(
+                "comparison task result failed check requires an id"
+            )
+        blocker_ids.add(blocker_id)
+    return sorted(blocker_ids)
+
+
 def _attempt_task_result(attempt: Any) -> dict[str, Any] | None:
     if _attempt_is_nonbehavioral(attempt):
         # A nonbehavioral terminal deliberately has no task verdict. Ignore a
@@ -990,6 +1017,7 @@ def _publish_with_active_weave_sdk(
         published_scores = _published_scores(attempt, dimension_roles)
         score_details = _attempt_score_details(attempt)
         judge_evidence = _published_judge_evidence(attempt)
+        failed_required_check_ids = _failed_required_check_ids(task_result)
         objects.append(
             WeaveHostedObjectRefV1(
                 attempt_id=attempt_id,
@@ -1019,6 +1047,7 @@ def _publish_with_active_weave_sdk(
             "fugue.arm": arm,
             "fugue.arm_label": arm_label,
             "fugue.treatment_summary": treatment_summary,
+            "fugue.failed_required_check_ids": failed_required_check_ids,
             **(
                 {
                     "fugue.task_verdict": (
@@ -1111,6 +1140,29 @@ def _publish_with_active_weave_sdk(
             ),
             "native_agent_call": False,
         }
+        root_display_name = (
+            "Published evaluation record: "
+            f"{_task_result_display_verdict(task_result)} · {task_title} · "
+            f"{arm_label} · Attempt {pair.attempt}"
+        )
+        predict_and_score_display_name = (
+            "Published scored attempt: "
+            f"{_task_result_display_verdict(task_result)}"
+            f" · {task_title} · {arm_label} · Attempt {pair.attempt}"
+        )
+        prediction_display_name = (
+            "Published prediction record: "
+            + (
+                f"Agent execution (no scored answer) · {task_title} · "
+                if _attempt_is_nonbehavioral(attempt)
+                else f"Agent answer · {task_title} · "
+            )
+            + f"{arm_label} · Attempt {pair.attempt}"
+        )
+        agent_receipt_display_name = (
+            f"Receipt: Agent execution · {task_title} · "
+            f"{arm_label} · Attempt {pair.attempt}"
+        )
         root = _ensure_weave_call_started(
             client,
             target=target,
@@ -1120,9 +1172,7 @@ def _publish_with_active_weave_sdk(
             op="fugue.local_evaluation",
             inputs=root_inputs,
             attributes=attributes,
-            display_name=(
-                f"Published evaluation record: {result.comparison_id} · {arm_label}"
-            ),
+            display_name=root_display_name,
         )
         predict_and_score = _ensure_weave_call_started(
             client,
@@ -1133,11 +1183,7 @@ def _publish_with_active_weave_sdk(
             op="fugue.local_predict_and_score",
             inputs=predict_and_score_inputs,
             attributes=attributes,
-            display_name=(
-                f"Published scored attempt: "
-                f"{_task_result_display_verdict(task_result)}"
-                f" · {task_title} · {arm_label} · Attempt {pair.attempt}"
-            ),
+            display_name=predict_and_score_display_name,
             parent=root,
         )
         prediction = _ensure_weave_call_started(
@@ -1149,15 +1195,7 @@ def _publish_with_active_weave_sdk(
             op="fugue.local_prediction",
             inputs=prediction_inputs,
             attributes=attributes,
-            display_name=(
-                "Published prediction record: "
-                + (
-                    f"Agent execution (no scored answer) · {task_title} · "
-                    if _attempt_is_nonbehavioral(attempt)
-                    else f"Agent answer · {task_title} · "
-                )
-                + f"{arm_label} · Attempt {pair.attempt}"
-            ),
+            display_name=prediction_display_name,
             parent=predict_and_score,
         )
         agent_receipt = _ensure_weave_call_started(
@@ -1173,10 +1211,7 @@ def _publish_with_active_weave_sdk(
                 "fugue.evidence.kind": "local_agent_cross_transport_receipt_v1",
                 "fugue.native_agent_call": False,
             },
-            display_name=(
-                f"Receipt: Agent execution · {task_title} · "
-                f"{arm_label} · Attempt {pair.attempt}"
-            ),
+            display_name=agent_receipt_display_name,
             parent=prediction,
         )
         call_specs = (
@@ -1191,6 +1226,7 @@ def _publish_with_active_weave_sdk(
                     "fugue.evidence.kind": "local_agent_cross_transport_receipt_v1",
                     "fugue.native_agent_call": False,
                 },
+                agent_receipt_display_name,
             ),
             (
                 "prediction",
@@ -1199,6 +1235,7 @@ def _publish_with_active_weave_sdk(
                 prediction_output,
                 predict_and_score,
                 attributes,
+                prediction_display_name,
             ),
             (
                 "prediction_and_score",
@@ -1207,6 +1244,7 @@ def _publish_with_active_weave_sdk(
                 predict_and_score_output,
                 root,
                 attributes,
+                predict_and_score_display_name,
             ),
             (
                 "evaluation_root",
@@ -1215,13 +1253,22 @@ def _publish_with_active_weave_sdk(
                 root_output,
                 None,
                 attributes,
+                root_display_name,
             ),
         )
         # Weave 0.53.6 uses calls-complete batching by default.  An open Call
         # exists only in the local batch processor until its matching end is
         # queued, and flush() waits for that end.  Build and close the complete
         # chain first, then flush it once as paired start/end records.
-        for _kind, call, _inputs, output, _parent, _attributes in call_specs:
+        for (
+            _kind,
+            call,
+            _inputs,
+            output,
+            _parent,
+            _attributes,
+            _display_name,
+        ) in call_specs:
             _finish_or_verify_weave_call(client, call, output)
         client.flush()
 
@@ -1229,7 +1276,15 @@ def _publish_with_active_weave_sdk(
         # published outcome. Local Call objects and flush completion are not
         # evidence that the exact project persisted a finished chain.
         readback: dict[str, Any] = {}
-        for kind, call, inputs, output, parent, expected_attributes in call_specs:
+        for (
+            kind,
+            call,
+            inputs,
+            output,
+            parent,
+            expected_attributes,
+            expected_display_name,
+        ) in call_specs:
             call_id = str(getattr(call, "id", "") or "")
             matches = _read_back_weave_publication_calls(
                 client,
@@ -1259,6 +1314,7 @@ def _publish_with_active_weave_sdk(
                 parent_id=(str(getattr(parent, "id", "") or "") if parent else None),
                 inputs=inputs,
                 attributes=expected_attributes,
+                display_name=expected_display_name,
                 output=output,
                 require_finished=True,
             )
@@ -1299,7 +1355,7 @@ def _publish_with_active_weave_sdk(
         target=target,
         objects=tuple(sorted(objects, key=_object_sort_key)),
         publisher_id="fugue-local-result-weave",
-        publisher_revision=f"v3-public-query-readback+weave-{version}",
+        publisher_revision=f"v4-blocker-filter-display-readback+weave-{version}",
     )
 
 
@@ -1362,6 +1418,7 @@ def _ensure_weave_call_started(
         parent_id=(str(getattr(parent, "id", "") or "") if parent else None),
         inputs=inputs,
         attributes=expected_attributes,
+        display_name=display_name,
         output=None,
         require_finished=False,
     )
@@ -1473,6 +1530,7 @@ def _verify_weave_call(
     parent_id: str | None,
     inputs: Mapping[str, Any],
     attributes: Mapping[str, Any],
+    display_name: str,
     output: Mapping[str, Any] | None,
     require_finished: bool,
 ) -> None:
@@ -1485,6 +1543,10 @@ def _verify_weave_call(
         raise RuntimeError("published Weave Call lost its evidence parent")
     if not _canonical_values_equal(getattr(call, "inputs", None), inputs):
         raise RuntimeError("published Weave Call inputs disagree with local evidence")
+    if getattr(call, "display_name", None) != display_name:
+        raise RuntimeError(
+            "published Weave Call display name disagrees with local evidence"
+        )
     observed_attributes = _mapping_value(getattr(call, "attributes", None))
     missing_or_changed = {
         key: value

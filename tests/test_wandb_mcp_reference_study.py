@@ -57,7 +57,9 @@ TREE = "d" * 40
 BLOB = "e" * 40
 RELEASE_NOTES = b"# W&B MCP 0.4.0\n\nA frozen release note.\n"
 _BASELINE_FOR_TEST = "53b199a5f4af29aa82077e2c7f1e2c5e5e0c2ca0"
-_V11_AGENT_INSTRUCTION_SHA256 = {
+# Adding host-side presentation metadata must not change the Agent-visible task
+# bytes qualified by V11 and reused unchanged by V13.
+_V11_V13_AGENT_INSTRUCTION_SHA256 = {
     "run-inventory-projection": (
         "7a12301f01fe739936c941c106ae5f743efb5863cb35969b59151a85757b66a9"
     ),
@@ -378,12 +380,26 @@ def test_default_materializer_builds_a_complete_check_ready_bundle(
         task_id: hashlib.sha256(
             (rendered_tasks / task_id / "instruction.md").read_bytes()
         ).hexdigest()
-        for task_id in _V11_AGENT_INSTRUCTION_SHA256
-    } == _V11_AGENT_INSTRUCTION_SHA256
+        for task_id in _V11_V13_AGENT_INSTRUCTION_SHA256
+    } == _V11_V13_AGENT_INSTRUCTION_SHA256
     presented = {str(item["id"]): item for item in public_cases}
-    for task_id in ("run-inventory-projection", "evaluation-summary-accuracy"):
+    for task_id in _V11_V13_AGENT_INSTRUCTION_SHA256:
         assert presented[task_id]["required_output"]
         assert presented[task_id]["public_acceptance_criteria"]
+    added_metadata = json.dumps(
+        {
+            task_id: {
+                "required_output": presented[task_id]["required_output"],
+                "public_acceptance_criteria": presented[task_id][
+                    "public_acceptance_criteria"
+                ],
+            }
+            for task_id in ("exact-history-target", "filtered-failure-triage")
+        },
+        sort_keys=True,
+    )
+    assert "4200" not in added_metadata
+    assert "maint-r18-04" not in added_metadata
     assert human_spec.id != full_spec.id
     assert human_spec.taskset.tasks == HUMAN_READABLE_TASKS_NAME
     assert human_spec.taskset.private_labels == HUMAN_READABLE_PRIVATE_LABELS_NAME

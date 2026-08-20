@@ -569,6 +569,7 @@ def _outcome(
     manifest: Any,
     target: WeavePublicationTargetV1,
     *,
+    publisher_id: str = "fugue-weave-publisher",
     publisher_revision: str = "publisher-revision-v1",
 ) -> WeavePublicationOutcomeV1:
     objects: list[WeaveHostedObjectRefV1] = []
@@ -594,7 +595,7 @@ def _outcome(
     return WeavePublicationOutcomeV1(
         target=target,
         objects=tuple(sorted(objects, key=lambda item: (item.attempt_id, item.kind))),
-        publisher_id="fugue-weave-publisher",
+        publisher_id=publisher_id,
         publisher_revision=publisher_revision,
     )
 
@@ -677,6 +678,60 @@ def test_publication_is_digest_bound_idempotent_and_does_not_rewrite_result(
         )
         == receipt
     )
+
+
+def test_existing_v3_receipt_remains_immutable_under_v4_publisher(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    manifest_path, manifest = _canonical_manifest(tmp_path)
+    result_path, result = _result_fixture(tmp_path, manifest)
+    _patch_v3_reader(monkeypatch, result)
+    target = _target()
+    old_revision = "v3-public-query-readback+weave-0.53.6"
+    receipt = publish_local_result_to_weave(
+        result_path,
+        manifest_path,
+        target=target,
+        publisher=lambda *_args: _outcome(
+            manifest,
+            target,
+            publisher_id="fugue-local-result-weave",
+            publisher_revision=old_revision,
+        ),
+        clock=lambda: datetime(2026, 8, 20, 2, 35, tzinfo=UTC),
+    )
+    receipt_path = result_path.with_name("weave-publication-receipt.json")
+    before = {
+        "result": result_path.read_bytes(),
+        "manifest": manifest_path.read_bytes(),
+        "receipt": receipt_path.read_bytes(),
+    }
+    v4_calls = 0
+
+    def v4_publisher(*_args: Any) -> WeavePublicationOutcomeV1:
+        nonlocal v4_calls
+        v4_calls += 1
+        return _outcome(
+            manifest,
+            target,
+            publisher_id="fugue-local-result-weave",
+            publisher_revision="v4-blocker-filter-display-readback+weave-0.53.6",
+        )
+
+    recovered = publish_local_result_to_weave(
+        result_path,
+        manifest_path,
+        target=target,
+        publisher=v4_publisher,
+    )
+
+    assert recovered == receipt
+    assert recovered.publisher_revision == old_revision
+    assert v4_calls == 0
+    assert result_path.read_bytes() == before["result"]
+    assert manifest_path.read_bytes() == before["manifest"]
+    assert receipt_path.read_bytes() == before["receipt"]
 
 
 def test_real_digest_valid_nonbehavioral_v3_publishes_no_task_claims(
@@ -1452,6 +1507,8 @@ class _FakeWeaveClient:
                         "fugue.result_digest": "f" * 64,
                     }
                 }
+            elif self.tamper_call_field == "display_name":
+                overrides = {"display_name": "Forged human-readable label"}
             else:
                 overrides = {"output": {"forged": True}}
             return SimpleNamespace(
@@ -1623,7 +1680,7 @@ def test_real_weave_adapter_emits_nested_five_object_chain(
     assert by_kind["agent_evidence_receipt"].native_agent_call is False
     assert by_kind["dataset"].ref.startswith(f"weave:///{target.project_slug}/object/")
     assert outcome.publisher_revision == (
-        "v3-public-query-readback+weave-test-sdk"
+        "v4-blocker-filter-display-readback+weave-test-sdk"
     )
     root = next(
         call
@@ -1679,6 +1736,7 @@ def test_real_weave_adapter_publishes_human_task_and_result_contracts(
     attempt.treatment_summary = "Exact upstream Skill Creator at a5bcdd7."
     attempt.passed = False
     attempt.scores = {
+        "artifact_is_portable": False,
         "package_contract_valid": False,
         "assigned_skill_opened": True,
     }
@@ -1707,13 +1765,20 @@ def test_real_weave_adapter_publishes_human_task_and_result_contracts(
                 "label": "Package contract valid",
                 "explanation": "The required compatibility metadata was absent.",
                 "critical": True,
-            }
+            },
+            {
+                "id": "artifact_is_portable",
+                "label": "Artifact is portable",
+                "explanation": "The artifact did not declare a portable boundary.",
+                "critical": True,
+            },
         ],
         "answer_digest": None,
         "agent_execution_status": "completed",
         "evidence_integrity_status": "verified",
     }
     pair.dimension_changes = (
+        SimpleNamespace(id="artifact_is_portable", role="outcome"),
         SimpleNamespace(id="package_contract_valid", role="safety_gate"),
         SimpleNamespace(id="assigned_skill_opened", role="mechanism"),
     )
@@ -1737,6 +1802,21 @@ def test_real_weave_adapter_publishes_human_task_and_result_contracts(
         call.attributes["fugue.evidence.object_kind"]: call
         for call in client.calls.values()
     }
+    root = by_kind["evaluation_root"]
+    assert root.display_name == (
+        "Published evaluation record: DID NOT PASS · "
+        "Create a platform-bound Skill · Baseline a5bcdd7 · Attempt 1"
+    )
+    for call in by_kind.values():
+        assert call.attributes["fugue.failed_required_check_ids"] == [
+            "artifact_is_portable",
+            "package_contract_valid",
+        ]
+        assert call.attributes["fugue.native_evaluation_call"] is False
+        assert not any(key.startswith("weave.eval.") for key in call.attributes)
+    assert root.attributes["fugue.evidence.kind"] == (
+        "immutable_local_result_replay_v1"
+    )
     scored = by_kind["prediction_and_score"]
     assert scored.display_name.startswith(
         "Published scored attempt: DID NOT PASS · Create a platform-bound Skill"
@@ -1744,6 +1824,7 @@ def test_real_weave_adapter_publishes_human_task_and_result_contracts(
     assert scored.output["task_result"] == attempt.task_result
     assert scored.output["scores"] == {
         "task_passed": False,
+        "outcome__artifact_is_portable": False,
         "safety__package_contract_valid": False,
         "mechanism__assigned_skill_opened": True,
     }
@@ -1753,9 +1834,30 @@ def test_real_weave_adapter_publishes_human_task_and_result_contracts(
         "advisory": True,
         "reviews": attempt.judge_reviews,
     }
+    prediction = by_kind["prediction"]
+    assert prediction.attributes["fugue.evidence.kind"] == (
+        "immutable_local_result_replay_v1"
+    )
+    assert scored.attributes["fugue.evidence.kind"] == (
+        "immutable_local_result_replay_v1"
+    )
     agent = by_kind["agent_evidence_receipt"]
+    assert agent.attributes["fugue.evidence.kind"] == (
+        "local_agent_cross_transport_receipt_v1"
+    )
+    assert agent.attributes["fugue.native_agent_call"] is False
     assert agent.output["agent_execution_status"] == "completed"
     assert agent.output["native_agent_call"] is False
+    published_attributes = json.dumps(
+        [call.attributes for call in by_kind.values()],
+        sort_keys=True,
+    )
+    assert "The required compatibility metadata was absent." not in (
+        published_attributes
+    )
+    assert "The artifact did not declare a portable boundary." not in (
+        published_attributes
+    )
 
 
 def test_real_weave_adapter_does_not_recreate_pre_agent_task_verdict(
@@ -1809,6 +1911,12 @@ def test_real_weave_adapter_does_not_recreate_pre_agent_task_verdict(
     scored = by_kind["prediction_and_score"]
     prediction = by_kind["prediction"]
     agent = by_kind["agent_evidence_receipt"]
+    root = by_kind["evaluation_root"]
+    assert root.display_name.startswith("Published evaluation record: UNSCORED")
+    for call in by_kind.values():
+        assert call.attributes["fugue.failed_required_check_ids"] == []
+        assert call.attributes["fugue.native_evaluation_call"] is False
+        assert not any(key.startswith("weave.eval.") for key in call.attributes)
     assert scored.display_name.startswith("Published scored attempt: UNSCORED")
     assert "fugue.task_verdict" not in scored.attributes
     assert "task_result" not in scored.output
@@ -1851,6 +1959,33 @@ def test_real_weave_adapter_requires_authoritative_matching_readback(
         publisher(result, manifest, target)
 
 
+@pytest.mark.parametrize(
+    "kind",
+    [
+        "evaluation_root",
+        "prediction_and_score",
+        "prediction",
+        "agent_evidence_receipt",
+    ],
+)
+def test_real_weave_adapter_rejects_display_name_tampering(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    kind: str,
+) -> None:
+    _manifest_path, manifest = _canonical_manifest(tmp_path)
+    _result_path, result = _result_fixture(tmp_path, manifest)
+    target = _target()
+    client = _FakeWeaveClient(target)
+    client.tamper_call_kind = kind
+    client.tamper_call_field = "display_name"
+    _install_fake_weave(monkeypatch, target, client)
+
+    publisher = weave_publisher_from_environment({"WANDB_API_KEY": "test-only-key"})
+    with pytest.raises(RuntimeError, match="display name disagrees"):
+        publisher(result, manifest, target)
+
+
 def test_real_weave_adapter_resumes_fully_terminal_publication(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -1879,6 +2014,9 @@ def test_real_weave_adapter_resumes_fully_terminal_publication(
     assert len(set(client.published_object_refs)) == 1
     assert len(outcome.objects) == 5
     assert len({(item.attempt_id, item.kind) for item in outcome.objects}) == 5
+    assert outcome.publisher_revision == (
+        "v4-blocker-filter-display-readback+weave-test-sdk"
+    )
 
 
 def test_real_weave_adapter_retries_dataset_only_after_unflushed_call_interruption(
