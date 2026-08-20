@@ -581,7 +581,11 @@ def _outcome(
             "agent_evidence_receipt",
             "dataset",
         ):
-            object_id = f"{kind}-{current_attempt[:16]}"
+            object_id = (
+                f"public-tasks:{current_attempt}"
+                if kind == "dataset"
+                else f"{kind}-{current_attempt[:16]}"
+            )
             object_type = "object" if kind == "dataset" else "call"
             objects.append(
                 WeaveHostedObjectRefV1(
@@ -617,6 +621,63 @@ def _target(
         },
         study_scope=study_scope,
     )
+
+
+@pytest.mark.parametrize(
+    "object_id",
+    (
+        "public-tasks",
+        "public-tasks:",
+        ":content-revision",
+        "public-tasks:short",
+        "public-tasks:production",
+        "public-tasks:" + "A" * 64,
+        "public-tasks:latest",
+        "public-tasks:v12",
+        "public:tasks:content-revision",
+    ),
+)
+def test_dataset_ref_requires_one_immutable_content_revision(
+    object_id: str,
+) -> None:
+    target = _target()
+
+    with pytest.raises(ValueError, match="hosted evidence object id|Dataset object id"):
+        WeaveHostedObjectRefV1(
+            attempt_id="a" * 64,
+            kind="dataset",
+            target=target,
+            object_id=object_id,
+            ref=f"weave:///{target.project_slug}/object/{object_id}",
+        )
+
+
+@pytest.mark.parametrize(
+    "revision",
+    (
+        "TcUUXpoEZYyEf4ApwOfMRRptPGeVFVdhJgkHJAqzhz4",
+        "a" * 64,
+    ),
+)
+def test_dataset_ref_accepts_only_supported_content_hashes(revision: str) -> None:
+    target = _target()
+    object_id = f"public-tasks:{revision}"
+
+    hosted = WeaveHostedObjectRefV1(
+        attempt_id="a" * 64,
+        kind="dataset",
+        target=target,
+        object_id=object_id,
+        ref=f"weave:///{target.project_slug}/object/{object_id}",
+    )
+
+    assert hosted.object_id == object_id
+
+
+@pytest.mark.parametrize("schema_version", (True, 1.0))
+def test_literal_schema_one_rejects_bool_and_float(schema_version: object) -> None:
+    with pytest.raises(ValueError, match="unsupported target schema"):
+        publication._literal_one(schema_version, "target")
 
 
 def _patch_v3_reader(
@@ -1149,6 +1210,43 @@ def test_publication_receipt_rejects_digest_tampering(tmp_path: Path) -> None:
 
     with pytest.raises(ValueError, match="receipt digest does not match"):
         read_weave_publication_receipt(path)
+
+
+@pytest.mark.parametrize("suffix", ("/", "//"))
+def test_publication_receipt_rejects_noncanonical_persisted_destination(
+    suffix: str,
+) -> None:
+    target = _target()
+    attempt = "a" * 64
+    outcome = _outcome(SimpleNamespace(planned_attempt_ids=(attempt,)), target)
+    result_digest = "b" * 64
+    manifest_digest = "c" * 64
+    receipt = WeavePublicationReceiptV1(
+        publication_id=stable_digest(
+            {
+                "schema_version": 1,
+                "target": target.to_dict(),
+                "result_digest": result_digest,
+                "local_manifest_digest": manifest_digest,
+            }
+        ),
+        target=target,
+        result_digest=result_digest,
+        qualification_digest="d" * 64,
+        result_file_sha256="e" * 64,
+        local_manifest_digest=manifest_digest,
+        local_manifest_file_sha256="f" * 64,
+        hosted_objects=outcome.objects,
+        publisher_id=outcome.publisher_id,
+        publisher_revision=outcome.publisher_revision,
+        status="published",
+        published_at="2026-08-17T12:00:00+00:00",
+    )
+    raw = receipt.to_dict()
+    raw["target"]["destination"]["app_base_url"] += suffix
+
+    with pytest.raises(ValueError, match="unsafe path|canonical values"):
+        weave_publication_receipt_from_dict(raw)
 
 
 def test_legacy_project_only_receipt_is_readable_but_cannot_be_republished(

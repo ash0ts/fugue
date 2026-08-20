@@ -59,6 +59,7 @@ _HOSTED_KINDS = frozenset(
 )
 _CALL_KINDS = _HOSTED_KINDS - {"dataset"}
 _HEX_SHA256 = re.compile(r"^[0-9a-f]{64}$")
+_WEAVE_CONTENT_HASH = re.compile(r"^(?:[A-Za-z0-9]{43}|[0-9a-f]{64})$")
 _SLUG_PART = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$")
 _OBJECT_ID = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._:@+-]{0,511}$")
 _STUDY_ID = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._:-]{0,255}$")
@@ -441,6 +442,8 @@ class WeaveHostedObjectRefV1:
             )
         if not _OBJECT_ID.fullmatch(self.object_id):
             raise ValueError("invalid hosted evidence object id")
+        if self.kind == "dataset":
+            _immutable_dataset_object_id(self.object_id)
         object_type = "call" if self.kind in _CALL_KINDS else "object"
         expected_ref = (
             f"weave:///{self.target.project_slug}/{object_type}/{self.object_id}"
@@ -1690,12 +1693,27 @@ def _weave_object_id(
     if not _OBJECT_ID.fullmatch(object_id):
         raise RuntimeError("published Weave object has an invalid identity")
     if object_type == "object":
-        _name, separator, digest = object_id.rpartition(":")
-        if not separator or digest == "latest" or re.fullmatch(r"v\d+", digest):
+        try:
+            _immutable_dataset_object_id(object_id)
+        except ValueError as exc:
             raise RuntimeError(
                 "published Weave object ref is not an immutable content revision"
-            )
+            ) from exc
     return object_id
+
+
+def _immutable_dataset_object_id(value: str) -> None:
+    """Require the exact immutable ``name:content-revision`` Weave identity."""
+
+    if value.count(":") != 1:
+        raise ValueError(
+            "hosted Dataset object id must contain one name and content revision"
+        )
+    name, revision = value.split(":", 1)
+    if not name or not _WEAVE_CONTENT_HASH.fullmatch(revision):
+        raise ValueError(
+            "hosted Dataset object id must use a positive content hash"
+        )
 
 
 def _read_complete_manifest(
@@ -2133,13 +2151,16 @@ def _target_from_mapping(raw: Any) -> WeavePublicationTargetV1:
         if raw_destination is not None
         else None
     )
-    return WeavePublicationTargetV1(
+    target = WeavePublicationTargetV1(
         schema_version=_literal_one(value["schema_version"], "target"),
         entity=str(value["entity"]),
         project=str(value["project"]),
         study_scope=scope,
         destination=destination,
     )
+    if value != target.to_dict():
+        raise ValueError("persisted Weave target must use its canonical values")
+    return target
 
 
 def _require_current_publication_destination(
@@ -2213,7 +2234,7 @@ def _strict_fields(value: Mapping[str, Any], allowed: set[str], label: str) -> N
 
 
 def _literal_one(raw: Any, label: str) -> Literal[1]:
-    if raw != 1:
+    if type(raw) is not int or raw != 1:
         raise ValueError(f"unsupported {label} schema")
     return 1
 

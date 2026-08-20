@@ -3,10 +3,12 @@ from __future__ import annotations
 import hashlib
 import json
 import os
+import re
+import unicodedata
 from collections.abc import Mapping
 from dataclasses import dataclass
 from typing import Literal
-from urllib.parse import urlparse
+from urllib.parse import unquote, urlparse, urlsplit
 
 Provider = Literal["wandb", "openai", "anthropic"]
 ToolResultModality = Literal["text", "image"]
@@ -39,6 +41,10 @@ DEFAULT_WEAVE_TRACE_BASE_URL = "https://trace.wandb.ai"
 DEFAULT_WANDB_APP_BASE_URL = "https://wandb.ai"
 EVIDENCE_DESTINATION_DIGEST_ENV = "FUGUE_EVIDENCE_DESTINATION_DIGEST"
 EVIDENCE_DESTINATION_JSON_ENV = "FUGUE_EVIDENCE_DESTINATION_JSON"
+_EVIDENCE_SLUG_PART = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]*$")
+_INVALID_EVIDENCE_ENDPOINT_PERCENT_ESCAPE = re.compile(
+    r"%(?![0-9A-Fa-f]{2})"
+)
 
 # GLM-5.2 rejected image-bearing tool results through both bridge protocols in
 # the release canary. Keep this model-specific: other W&B routes may be visual.
@@ -76,23 +82,33 @@ class EvidenceDestinationV1:
     schema_version: int = EVIDENCE_DESTINATION_SCHEMA_VERSION
 
     def __post_init__(self) -> None:
-        if self.schema_version != EVIDENCE_DESTINATION_SCHEMA_VERSION:
-            raise ValueError("unsupported evidence destination schema version")
         if (
-            not self.entity
-            or not self.project
-            or "/" in self.entity
-            or "/" in self.project
+            type(self.schema_version) is not int
+            or self.schema_version != EVIDENCE_DESTINATION_SCHEMA_VERSION
+        ):
+            raise ValueError("unsupported evidence destination schema version")
+        if not isinstance(self.entity, str) or not _EVIDENCE_SLUG_PART.fullmatch(
+            self.entity
         ):
             raise ValueError(
                 "evidence destination requires an exact W&B entity/project"
             )
-        for label, value in (
-            ("API", self.api_base_url),
-            ("trace", self.trace_base_url),
-            ("application", self.app_base_url),
+        if not isinstance(self.project, str) or not _EVIDENCE_SLUG_PART.fullmatch(
+            self.project
         ):
-            _validated_evidence_base_url(value, label=label)
+            raise ValueError(
+                "evidence destination requires an exact W&B entity/project"
+            )
+        for field_name, label in (
+            ("api_base_url", "API"),
+            ("trace_base_url", "trace"),
+            ("app_base_url", "application"),
+        ):
+            normalized = _validated_evidence_base_url(
+                getattr(self, field_name),
+                label=label,
+            )
+            object.__setattr__(self, field_name, normalized)
 
     @property
     def project_slug(self) -> str:
@@ -178,18 +194,22 @@ def evidence_destination_from_dict(
         raise ValueError(
             "missing evidence destination field(s): " + ", ".join(missing)
         )
+    schema_version = value.get(
+        "schema_version",
+        EVIDENCE_DESTINATION_SCHEMA_VERSION,
+    )
+    if (
+        type(schema_version) is not int
+        or schema_version != EVIDENCE_DESTINATION_SCHEMA_VERSION
+    ):
+        raise ValueError("unsupported evidence destination schema version")
     destination = EvidenceDestinationV1(
         entity=str(value["entity"]),
         project=str(value["project"]),
         api_base_url=str(value["api_base_url"]),
         trace_base_url=str(value["trace_base_url"]),
         app_base_url=str(value["app_base_url"]),
-        schema_version=int(
-            value.get(
-                "schema_version",
-                EVIDENCE_DESTINATION_SCHEMA_VERSION,
-            )
-        ),
+        schema_version=schema_version,
     )
     supplied_project_slug = str(value.get("project_slug") or "")
     if supplied_project_slug and supplied_project_slug != destination.project_slug:
@@ -591,19 +611,75 @@ def _derived_trace_base_url(api_base_url: str, *, public_base: str) -> str:
 
 
 def _validated_evidence_base_url(value: str, *, label: str) -> str:
-    normalized = str(value or "").strip().rstrip("/")
-    parsed = urlparse(normalized)
+    if not isinstance(value, str):
+        raise ValueError(f"evidence {label} base URL must be a string")
+    if len(value) > 2000:
+        raise ValueError(
+            f"evidence {label} base URL must contain at most 2000 characters"
+        )
+    if any(
+        character.isspace() or unicodedata.category(character) == "Cc"
+        for character in value
+    ):
+        raise ValueError(
+            f"evidence {label} base URL must not contain whitespace or "
+            "control characters"
+        )
+    try:
+        parsed = urlsplit(value)
+        hostname = parsed.hostname
+        port = parsed.port
+    except ValueError as exc:
+        raise ValueError(
+            f"evidence {label} base URL has an invalid authority or port"
+        ) from exc
+    if port is not None and not 1 <= port <= 65535:
+        raise ValueError(
+            f"evidence {label} base URL has an invalid authority or port"
+        )
+    normalized = value.rstrip("/")
+    loopback = hostname in {"127.0.0.1", "localhost", "::1"}
+    path = parsed.path
     if (
         parsed.scheme not in {"http", "https"}
-        or not parsed.hostname
+        or (parsed.scheme == "http" and not loopback)
+        or not hostname
         or parsed.username is not None
         or parsed.password is not None
         or parsed.query
         or parsed.fragment
+        or "\\" in path
+        or "//" in path
+        or _INVALID_EVIDENCE_ENDPOINT_PERCENT_ESCAPE.search(path)
     ):
         raise ValueError(
-            f"evidence {label} base URL must be an absolute, credential-free "
-            "HTTP(S) URL without query or fragment"
+            f"evidence {label} base URL requires HTTPS or loopback HTTP "
+            "without credentials, query, fragment, or an unsafe path"
+        )
+    decoded = path
+    for _ in range(len(path) + 1):
+        if (
+            "\\" in decoded
+            or any(
+                ord(character) < 32 or ord(character) == 127
+                for character in decoded
+            )
+            or any(part in {".", ".."} for part in decoded.split("/"))
+        ):
+            raise ValueError(
+                f"evidence {label} base URL contains a traversal path"
+            )
+        next_decoded = unquote(decoded)
+        if next_decoded == decoded:
+            break
+        if next_decoded.count("/") != decoded.count("/"):
+            raise ValueError(
+                f"evidence {label} base URL contains an encoded separator"
+            )
+        decoded = next_decoded
+    else:  # pragma: no cover - each decode consumes a percent escape
+        raise ValueError(
+            f"evidence {label} base URL path decoding did not converge"
         )
     return normalized
 

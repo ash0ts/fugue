@@ -95,7 +95,8 @@ def _sources(
         target=target,
         run_url="https://wandb.ai/wandb/research-index/runs/index-run-1",
         artifact_url=(
-            "https://wandb.ai/wandb/research-index/artifacts/research-index/v1"
+            "https://wandb.ai/wandb/research-index/artifacts/"
+            "study-index/research-index/v1"
         ),
     )
     monkeypatch.setattr(report_module, "read_research_index", lambda _path: index)
@@ -460,6 +461,40 @@ def test_report_url_must_bind_exact_project_and_report_id() -> None:
             report_url=(
                 "https://wandb.ai/wandb/other-project/reports/community--report-123"
             ),
+            report_api="wandb-workspaces.reports.v2",
+            report_api_version="0.4.5",
+            api_stability="public_preview",
+            readback_projection_digest="a" * 64,
+            rendered_content_digest="b" * 64,
+            readback_status="reconciled",
+            publisher_id="publisher",
+            publisher_revision="v1",
+        )
+
+
+@pytest.mark.parametrize(
+    "report_url",
+    (
+        "https://wandb.ai/wandb/research-index/reports/..",
+        "https://wandb.ai/wandb/research-index/reports/%2e%2e",
+        "https://wandb.ai/wandb/research-index/reports/%252e%252e",
+        "https://wandb.ai/wandb/research-index/reports\\..\\name--report-123",
+        "https://wandb.ai/wandb/research-index/reports//name--report-123",
+        "https://wandb.ai/wandb/research-index/reports/name--report-123/extra",
+    ),
+)
+def test_report_url_rejects_noncanonical_resource_paths(report_url: str) -> None:
+    target = ResearchIndexPublicationTargetV1(
+        project="wandb/research-index",
+        api_base_url="https://api.wandb.ai",
+        app_base_url="https://wandb.ai",
+    )
+
+    with pytest.raises(ValueError, match="unsafe|canonical|exact Report"):
+        ResearchIndexReportPublicationOutcomeV1(
+            target=target,
+            report_id="report-123",
+            report_url=report_url,
             report_api="wandb-workspaces.reports.v2",
             report_api_version="0.4.5",
             api_stability="public_preview",

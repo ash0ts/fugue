@@ -1,0 +1,68 @@
+{
+  "index": {
+    "artifact_url": "https://wandb.ai/wandb/fugue-mcp-release-qualification-v1/artifacts/study-index/fugue-research-index-fugue-mcp-release-qualification-v1-9195d2db09db/v0",
+    "index_digest": "9195d2db09dbdd1b93bdc2a25bd6458323f13d34bd8fed8b9b9c5d53a771bf56",
+    "index_file_sha256": "bf49909c51ea47ff507ec875bfecac529f4650636b643c5b4a09f9590e0c8795",
+    "publication_id": "83d283e659a974e4e6bfd5d52feb9c422a5d585ff70930c2d97a8d1dd571ed56",
+    "published_at": "2026-08-20T04:19:25.852964+00:00",
+    "publisher_id": "fugue-wandb-research-index",
+    "publisher_revision": "v1+wandb-0.28.1",
+    "receipt_digest": "7273e279c3c1049d4a698797d7cd0cb451d63c2b67c5b4aee0ebf26602f5270d",
+    "receipt_file_sha256": "bc7bedbba33cc490e366f299443509398df5b41f17ad67dd77332f946871c857",
+    "report_status": "unavailable",
+    "report_url": null,
+    "run_url": "https://wandb.ai/wandb/fugue-mcp-release-qualification-v1/runs/a794ebdd1766672e33b326de7ed1af27",
+    "status": "published"
+  },
+  "report": {
+    "access_mode": "project_settings",
+    "api_stability": "public_preview",
+    "current_pointer_status": "not_managed",
+    "index_digest": "9195d2db09dbdd1b93bdc2a25bd6458323f13d34bd8fed8b9b9c5d53a771bf56",
+    "index_file_sha256": "bf49909c51ea47ff507ec875bfecac529f4650636b643c5b4a09f9590e0c8795",
+    "index_publication_id": "83d283e659a974e4e6bfd5d52feb9c422a5d585ff70930c2d97a8d1dd571ed56",
+    "index_publication_receipt_digest": "7273e279c3c1049d4a698797d7cd0cb451d63c2b67c5b4aee0ebf26602f5270d",
+    "index_publication_receipt_file_sha256": "bc7bedbba33cc490e366f299443509398df5b41f17ad67dd77332f946871c857",
+    "projection_digest": "51f613458d8cd3c5c9e257e152587dc0d6be64a70c9531b524f74b36045cb1c0",
+    "published_at": "2026-08-20T04:19:45.757553+00:00",
+    "publisher_id": "fugue-wandb-research-report",
+    "publisher_revision": "v1+wandb-0.28.1+wandb-workspaces-0.4.5",
+    "readback_projection_digest": "51f613458d8cd3c5c9e257e152587dc0d6be64a70c9531b524f74b36045cb1c0",
+    "readback_status": "reconciled",
+    "receipt_digest": "5761662773ffb6afe13974d269970bb62527456189c61d9d57f0b6d059a32e41",
+    "receipt_file_sha256": "96a83fcbbaeb093d94e5107c5936b931c5c9131fa58ab11af0757dc656249dee",
+    "rendered_content_digest": "4605e33549785b31f72d80838238ab79cb0eb8588f06e63273dd3975b42d1bd5",
+    "renderer_id": "fugue-wandb-research-report",
+    "renderer_revision": "v1",
+    "report_api": "wandb-workspaces.reports.v2",
+    "report_api_version": "0.4.5",
+    "report_id": "VmlldzoxNzc2ODMwMw==",
+    "report_publication_id": "5d603ede118468f39da9cce2897cb774b498155d33f2b71874708cdd1c2a3c9b",
+    "report_url": "https://wandb.ai/wandb/fugue-mcp-release-qualification-v1/reports/Fugue-Research-W-B-MCP-0.4-release-qualification-·-51f613458d8c--VmlldzoxNzc2ODMwMw==",
+    "share_link_action": "not_requested",
+    "status": "published_and_reconciled"
+  },
+  "research_id": "fugue-mcp-release-qualification-v1",
+  "schema_version": 1,
+  "studies": [
+    {
+      "attempt_count": 8,
+      "attempt_ids_digest": "05f565cc715caeb8c27f20f6cd30ad2fb2c683dd5c4b2b9efba07324ee85f7f1",
+      "qualification_digest": "aa5fa4557fc0391f8b7d2bc39b35663025deb5aaf12635843387d3a95c758df9",
+      "result_digest": "aa5fa4557fc0391f8b7d2bc39b35663025deb5aaf12635843387d3a95c758df9",
+      "result_file_sha256": "fc17f5b63a740d52fad6660a79e5265a4b08279d6a7664549da8e5024a8479d1",
+      "study_id": "mcp-main-vs-0-4-b50534a-harbor-canary-v13",
+      "weave_project": "wandb/fugue-mcp-release-qualification-v1",
+      "weave_publication_id": "a47a51b8c55b5eacebb8e44b423c350c2b5dde448b07980745b4eb0c013d6b78",
+      "weave_receipt_digest": "b4009452cb1cbb87d23031906dc9c794b3995e1631a6dd66c5b63a72926d27f9"
+    }
+  ],
+  "target": {
+    "api_base_url": "https://api.wandb.ai",
+    "app_base_url": "https://wandb.ai",
+    "backend": "wandb",
+    "destination_digest": "3aa31faaff2ccf40c65b23f9e072f71ce84813e076ee3dba7577df910102323d",
+    "project": "wandb/fugue-mcp-release-qualification-v1",
+    "schema_version": 1
+  }
+}

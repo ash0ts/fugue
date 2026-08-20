@@ -29,6 +29,15 @@ from fugue.bench.research_index import (
     read_research_index_publication_receipt,
     write_research_index,
 )
+from fugue.bench.research_report import (
+    ResearchIndexReportError,
+    ResearchIndexReportPublicationOutcomeV1,
+    build_research_index_report_publication_evidence,
+    publish_research_index_report,
+)
+from fugue.research.records import (
+    research_index_report_publication_evidence_from_dict,
+)
 
 _KINDS = (
     "agent_evidence_receipt",
@@ -50,6 +59,34 @@ def _publication_target(
         api_base_url=api_base_url,
         app_base_url=app_base_url,
     )
+
+
+@pytest.mark.parametrize(
+    ("field", "value"),
+    (
+        ("api_base_url", " https://api.wandb.ai"),
+        ("api_base_url", "https://api.wandb.ai\t"),
+        ("api_base_url", "https://api.wandb.ai/v1"),
+        ("api_base_url", "https://api.wandb.ai/"),
+        ("api_base_url", "https://api.wandb.ai:99999"),
+        ("api_base_url", "https://api.wandb.ai\\v1"),
+        ("app_base_url", "https://wandb.ai/projects"),
+        ("app_base_url", "https://wandb.ai/"),
+    ),
+)
+def test_publication_target_requires_exact_https_origins(
+    field: str,
+    value: str,
+) -> None:
+    values = {
+        "project": "wandb/community-studies",
+        "api_base_url": "https://api.wandb.ai",
+        "app_base_url": "https://wandb.ai",
+    }
+    values[field] = value
+
+    with pytest.raises(ValueError, match="normalized safe HTTPS URL"):
+        ResearchIndexPublicationTargetV1(**values)
 
 
 @dataclass(frozen=True)
@@ -81,7 +118,11 @@ class _FakeComparisonResultV3:
     hosted_chain_integrity: str = "not_applicable"
 
 
-def _result(comparison_id: str) -> _FakeComparisonResultV3:
+def _result(
+    comparison_id: str,
+    *,
+    pair_count: int = 1,
+) -> _FakeComparisonResultV3:
     baseline_definition = {"arm": "baseline", "study": comparison_id}
     candidate_definition = {"arm": "candidate", "study": comparison_id}
     baseline_id = stable_digest(baseline_definition)
@@ -90,18 +131,23 @@ def _result(comparison_id: str) -> _FakeComparisonResultV3:
         comparison_id=comparison_id,
         result_digest=stable_digest({"result": comparison_id}),
         qualification_digest=stable_digest({"qualification": comparison_id}),
-        rows=2,
-        paired_cases=(
+        rows=pair_count * 2,
+        paired_cases=tuple(
             _FakePair(
                 baseline=_FakeAttempt(
-                    stable_digest({"attempt": comparison_id + "-b"}),
+                    stable_digest(
+                        {"attempt": f"{comparison_id}-pair-{index}-baseline"}
+                    ),
                     {"candidate": baseline_id, "harness": "claude-code"},
                 ),
                 candidate=_FakeAttempt(
-                    stable_digest({"attempt": comparison_id + "-c"}),
+                    stable_digest(
+                        {"attempt": f"{comparison_id}-pair-{index}-candidate"}
+                    ),
                     {"candidate": candidate_id, "harness": "claude-code"},
                 ),
-            ),
+            )
+            for index in range(pair_count)
         ),
         candidate_definitions={
             baseline_id: baseline_definition,
@@ -141,7 +187,11 @@ def _hosted_objects(
     for pair in result.paired_cases:
         for attempt in (pair.baseline, pair.candidate):
             for kind in kinds:
-                object_id = f"{attempt.attempt_id[:12]}-{kind}"
+                object_id = (
+                    f"public-tasks:{attempt.attempt_id}"
+                    if kind == "dataset"
+                    else f"{attempt.attempt_id[:12]}-{kind}"
+                )
                 object_type = "object" if kind == "dataset" else "call"
                 values.append(
                     WeaveHostedObjectRefV1(
@@ -216,9 +266,10 @@ def _source_pair(
     comparison_id: str,
     research_id: str = "skill-upgrade-research-v1",
     study_id: str | None = None,
+    pair_count: int = 1,
     **receipt_changes,
 ) -> tuple[ResearchIndexSourceV1, _FakeComparisonResultV3]:
-    result = _result(comparison_id)
+    result = _result(comparison_id, pair_count=pair_count)
     result_path = tmp_path / f"{comparison_id}-result.json"
     receipt_path = tmp_path / f"{comparison_id}-receipt.json"
     result_bytes = _write_result(result_path, result)
@@ -707,7 +758,7 @@ def test_optional_publication_is_digest_bound_idempotent_and_preserves_index(
             run_url="https://wandb.ai/wandb/community-studies/runs/index-v1",
             artifact_url=(
                 "https://wandb.ai/wandb/community-studies/artifacts/"
-                "research-index/v1"
+                "study-index/research-index/v1"
             ),
             report_url="https://wandb.ai/wandb/community-studies/reports/v1",
             report_status="published",
@@ -754,7 +805,10 @@ def test_optional_publication_rejects_changed_project_and_index_bytes(
             publisher=lambda *_args: ResearchIndexPublicationOutcomeV1(
                 target=_publication_target("wandb/another-project"),
                 run_url="https://wandb.ai/wandb/another-project/runs/index-v1",
-                artifact_url="https://wandb.ai/wandb/another-project/artifacts/v1",
+                artifact_url=(
+                    "https://wandb.ai/wandb/another-project/artifacts/"
+                    "study-index/research-index/v1"
+                ),
                 report_url=None,
                 report_status="unavailable",
                 publisher_id="fake",
@@ -767,7 +821,10 @@ def test_optional_publication_rejects_changed_project_and_index_bytes(
         return ResearchIndexPublicationOutcomeV1(
             target=target,
             run_url="https://wandb.ai/wandb/community-studies/runs/index-v1",
-            artifact_url="https://wandb.ai/wandb/community-studies/artifacts/v1",
+            artifact_url=(
+                "https://wandb.ai/wandb/community-studies/artifacts/"
+                "study-index/research-index/v1"
+            ),
             report_url=None,
             report_status="unavailable",
             publisher_id="fake",
@@ -779,4 +836,244 @@ def test_optional_publication_rejects_changed_project_and_index_bytes(
             index_path,
             target=target,
             publisher=mutating_publisher,
+        )
+
+
+@pytest.mark.parametrize(
+    ("field", "url"),
+    (
+        ("run", "https://wandb.ai/wandb/another-project/runs/index-v1"),
+        (
+            "artifact",
+            "https://wandb.ai/wandb/another-project/artifacts/"
+            "study-index/research-index/v1",
+        ),
+        ("report", "https://wandb.ai/wandb/another-project/reports/index-v1"),
+    ),
+)
+def test_publication_urls_bind_the_exact_project_path(
+    field: str,
+    url: str,
+) -> None:
+    target = _publication_target()
+    values = {
+        "run_url": "https://wandb.ai/wandb/community-studies/runs/index-v1",
+        "artifact_url": (
+            "https://wandb.ai/wandb/community-studies/artifacts/"
+            "study-index/research-index/v1"
+        ),
+        "report_url": "https://wandb.ai/wandb/community-studies/reports/index-v1",
+    }
+    values[f"{field}_url"] = url
+    with pytest.raises(ValueError, match="target project path"):
+        ResearchIndexPublicationOutcomeV1(
+            target=target,
+            **values,
+            report_status="published",
+            publisher_id="publisher",
+            publisher_revision="v1",
+        )
+
+
+@pytest.mark.parametrize(
+    ("field", "url"),
+    (
+        (
+            "run",
+            "https://wandb.ai/wandb/community-studies/runs/..",
+        ),
+        (
+            "run",
+            "https://wandb.ai/wandb/community-studies/runs/%2e%2e",
+        ),
+        (
+            "run",
+            "https://wandb.ai/wandb/community-studies/runs/%252e%252e",
+        ),
+        (
+            "run",
+            "https://wandb.ai/wandb/community-studies/runs\\..\\index-v1",
+        ),
+        (
+            "run",
+            "https://wandb.ai/wandb/community-studies/runs//index-v1",
+        ),
+        (
+            "run",
+            "https://wandb.ai/wandb/community-studies/runs/index-v1/extra",
+        ),
+        (
+            "artifact",
+            "https://wandb.ai/wandb/community-studies/artifacts/"
+            "research-index/v1",
+        ),
+        (
+            "artifact",
+            "https://wandb.ai/wandb/community-studies/artifacts/"
+            "study-index/research-index/latest",
+        ),
+        (
+            "report",
+            "https://wandb.ai/wandb/community-studies/reports/index-v1/extra",
+        ),
+    ),
+)
+def test_publication_urls_reject_noncanonical_resource_paths(
+    field: str,
+    url: str,
+) -> None:
+    target = _publication_target()
+    values = {
+        "run_url": "https://wandb.ai/wandb/community-studies/runs/index-v1",
+        "artifact_url": (
+            "https://wandb.ai/wandb/community-studies/artifacts/"
+            "study-index/research-index/v1"
+        ),
+        "report_url": "https://wandb.ai/wandb/community-studies/reports/index-v1",
+    }
+    values[f"{field}_url"] = url
+
+    with pytest.raises(ValueError, match="unsafe|canonical|target project path"):
+        ResearchIndexPublicationOutcomeV1(
+            target=target,
+            **values,
+            report_status="published",
+            publisher_id="publisher",
+            publisher_revision="v1",
+        )
+
+
+def test_v13_shaped_index_and_report_receipts_build_exact_research_evidence(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    source = _source_pair(
+        tmp_path,
+        comparison_id="mcp-main-vs-0-4-v13",
+        research_id="fugue-mcp-release-qualification-v1",
+        study_id="mcp-main-vs-0-4-v13",
+        pair_count=4,
+    )
+    _patch_results(monkeypatch, [source])
+    index = build_research_index(
+        research_id="fugue-mcp-release-qualification-v1",
+        title="MCP 0.4 release qualification",
+        objective="Compare four paired tasks across the exact revisions.",
+        sources=[source[0]],
+    )
+    index_path = tmp_path / "index.json"
+    write_research_index(index_path, index)
+    target = _publication_target("wandb/fugue-mcp-research-v13")
+    index_receipt_path = tmp_path / "index-receipt.json"
+    index_receipt = publish_research_index(
+        index_path,
+        target=target,
+        publisher=lambda *_args: ResearchIndexPublicationOutcomeV1(
+            target=target,
+            run_url=(
+                "https://wandb.ai/wandb/fugue-mcp-research-v13/runs/index-v13"
+            ),
+            artifact_url=(
+                "https://wandb.ai/wandb/fugue-mcp-research-v13/artifacts/"
+                "study-index/research-index/v13"
+            ),
+            report_url=None,
+            report_status="unavailable",
+            publisher_id="index-publisher",
+            publisher_revision="v1",
+        ),
+        receipt_path=index_receipt_path,
+        clock=lambda: datetime(2026, 8, 20, 12, 0, tzinfo=UTC),
+    )
+    report_receipt_path = tmp_path / "report-receipt.json"
+
+    def report_publisher(projection, **_expected):
+        report_id = "report-v13"
+        return ResearchIndexReportPublicationOutcomeV1(
+            target=projection.target,
+            report_id=report_id,
+            report_url=(
+                "https://wandb.ai/wandb/fugue-mcp-research-v13/reports/"
+                f"mcp-qualification--{report_id}"
+            ),
+            report_api=projection.report_api,
+            report_api_version=projection.report_api_version,
+            api_stability=projection.api_stability,
+            readback_projection_digest=projection.projection_digest,
+            rendered_content_digest=stable_digest(
+                {"rendered": projection.projection_digest}
+            ),
+            readback_status="reconciled",
+            publisher_id="report-publisher",
+            publisher_revision="v1",
+        )
+
+    report_receipt = publish_research_index_report(
+        index_path,
+        index_receipt_path,
+        report_publisher,
+        receipt_path=report_receipt_path,
+        clock=lambda: datetime(2026, 8, 20, 12, 5, tzinfo=UTC),
+    )
+    source_bytes = tuple(
+        path.read_bytes()
+        for path in (index_path, index_receipt_path, report_receipt_path)
+    )
+
+    evidence = build_research_index_report_publication_evidence(
+        index_path,
+        index_receipt_path,
+        report_receipt_path,
+    )
+
+    assert research_index_report_publication_evidence_from_dict(
+        evidence.to_dict()
+    ) == evidence
+    assert evidence.index.publication_id == index_receipt.publication_id
+    assert evidence.index.receipt_digest == index_receipt.receipt_digest
+    assert evidence.report.report_publication_id == (
+        report_receipt.report_publication_id
+    )
+    assert evidence.report.receipt_digest == report_receipt.receipt_digest
+    assert evidence.report.readback_projection_digest == (
+        evidence.report.projection_digest
+    )
+    assert len(evidence.studies) == 1
+    assert evidence.studies[0].attempt_count == 8
+    assert evidence.studies[0].study_id == "mcp-main-vs-0-4-v13"
+    assert tuple(
+        path.read_bytes()
+        for path in (index_path, index_receipt_path, report_receipt_path)
+    ) == source_bytes
+    assert "visibility" not in json.dumps(evidence.to_dict()).lower()
+
+    mutated = evidence.to_dict()
+    mutated["report"]["report_url"] = (
+        "https://wandb.ai/wandb/another-project/reports/"
+        "mcp-qualification--report-v13"
+    )
+    with pytest.raises(ValueError, match="target project"):
+        research_index_report_publication_evidence_from_dict(mutated)
+
+    import fugue.bench.research_report as research_report_module
+
+    original_reader = (
+        research_report_module.read_research_index_report_publication_receipt
+    )
+
+    def mutate_report_receipt(path: Path):
+        receipt = original_reader(path)
+        path.write_bytes(path.read_bytes() + b" ")
+        return receipt
+
+    monkeypatch.setattr(
+        research_report_module,
+        "read_research_index_report_publication_receipt",
+        mutate_report_receipt,
+    )
+    with pytest.raises(ResearchIndexReportError, match="changed during Report"):
+        build_research_index_report_publication_evidence(
+            index_path,
+            index_receipt_path,
+            report_receipt_path,
         )

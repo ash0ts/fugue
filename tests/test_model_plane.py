@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+from pathlib import Path
 
 import pytest
 
@@ -11,7 +12,9 @@ from fugue.model_plane import (
     EVIDENCE_DESTINATION_DIGEST_ENV,
     EVIDENCE_DESTINATION_JSON_ENV,
     EvidenceDestinationV1,
+    default_evidence_destination,
     evidence_destination_environment,
+    evidence_destination_from_dict,
     inference_project_slug,
     missing_model_env,
     missing_trace_env,
@@ -321,7 +324,7 @@ def test_wandb_inference_and_weave_credentials_are_independent() -> None:
         "FUGUE_WEAVE_API_KEY": "local-trace-key",
         "FUGUE_WANDB_INFERENCE_PROJECT": "wandb/fugue-experiments",
         "FUGUE_WEAVE_PROJECT": "ashah-weights-biases/loop-engineering-demo",
-        "FUGUE_WEAVE_BASE_URL": "http://api.wandb.test",
+        "FUGUE_WEAVE_BASE_URL": "https://api.wandb.test",
     }
 
     assert provider_api_key(route, env) == "cloud-model-key"
@@ -331,8 +334,8 @@ def test_wandb_inference_and_weave_credentials_are_independent() -> None:
         "entity": "ashah-weights-biases",
         "project": "loop-engineering-demo",
         "project_slug": "ashah-weights-biases/loop-engineering-demo",
-        "api_base_url": "http://api.wandb.test",
-        "trace_base_url": "http://api.wandb.test/traces",
+        "api_base_url": "https://api.wandb.test",
+        "trace_base_url": "https://api.wandb.test/traces",
         "app_base_url": "https://wandb.ai",
         "destination_digest": trace_destination_identity(env)[
             "destination_digest"
@@ -348,7 +351,7 @@ def test_local_evidence_tls_mode_is_explicitly_propagated() -> None:
     env = {
         "FUGUE_WEAVE_PROJECT": "ashah-weights-biases/loop-engineering-demo",
         "FUGUE_WEAVE_BASE_URL": "https://api.wandb.test",
-        "FUGUE_WEAVE_TRACE_SERVER_URL": "http://host.docker.internal:6345",
+        "FUGUE_WEAVE_TRACE_SERVER_URL": "http://127.0.0.1:6345",
         "WANDB_INSECURE_DISABLE_SSL": "true",
         "WEAVE_INSECURE_DISABLE_SSL": "true",
     }
@@ -367,27 +370,92 @@ def test_local_evidence_tls_mode_is_explicitly_propagated() -> None:
             "ashah-weights-biases/loop-engineering-demo"
         ),
         "FUGUE_WEAVE_TRACE_SERVER_URL": (
-            "http://host.docker.internal:6345"
+            "http://127.0.0.1:6345"
         ),
         "WANDB_ENTITY": "ashah-weights-biases",
         "WANDB_PROJECT": "loop-engineering-demo",
         "WEAVE_PROJECT": "ashah-weights-biases/loop-engineering-demo",
         "WANDB_BASE_URL": "https://api.wandb.test",
         "WANDB_APP_BASE_URL": "https://wandb.ai",
-        "WF_TRACE_SERVER_URL": "http://host.docker.internal:6345",
+        "WF_TRACE_SERVER_URL": "http://127.0.0.1:6345",
         "WANDB_INSECURE_DISABLE_SSL": "true",
         "WEAVE_INSECURE_DISABLE_SSL": "true",
     }
 
 
 def test_evidence_destination_rejects_credential_bearing_endpoint() -> None:
-    with pytest.raises(ValueError, match="credential-free"):
+    with pytest.raises(ValueError, match="without credentials"):
         EvidenceDestinationV1(
             entity="wandb",
             project="fugue",
             api_base_url="https://user:secret@example.test",
             trace_base_url="https://trace.example.test",
             app_base_url="https://app.example.test",
+        )
+
+
+def test_evidence_destination_matches_the_console_endpoint_parity_fixture() -> None:
+    fixture = json.loads(
+        (
+            Path(__file__).parent
+            / "fixtures"
+            / "evidence-destination-console-parity-v1.json"
+        ).read_text(encoding="utf-8")
+    )
+    assert fixture["schema_version"] == 1
+
+    for case in fixture["accepted"]:
+        destination = EvidenceDestinationV1(
+            entity="wandb",
+            project="endpoint-parity",
+            api_base_url=case["api_base_url"],
+            trace_base_url=case["trace_base_url"],
+            app_base_url=case["app_base_url"],
+        )
+        assert {
+            "api_base_url": destination.api_base_url,
+            "trace_base_url": destination.trace_base_url,
+            "app_base_url": destination.app_base_url,
+        } == case["canonical"]
+
+    defaults = fixture["accepted"][0]["canonical"]
+    for case in fixture["rejected"]:
+        endpoints = {**defaults, case["field"]: case["value"]}
+        with pytest.raises(ValueError, match=case["error"]):
+            EvidenceDestinationV1(
+                entity="wandb",
+                project="endpoint-parity",
+                **endpoints,
+            )
+
+    with pytest.raises(ValueError, match="at most 2000"):
+        EvidenceDestinationV1(
+            entity="wandb",
+            project="endpoint-parity",
+            api_base_url="https://selfhost.example/" + "a" * 2000,
+            trace_base_url=defaults["trace_base_url"],
+            app_base_url=defaults["app_base_url"],
+        )
+
+
+@pytest.mark.parametrize("schema_version", (True, 1.0))
+def test_evidence_destination_rejects_noninteger_schema_one(
+    schema_version: object,
+) -> None:
+    values = default_evidence_destination("wandb/endpoint-parity").to_dict()
+    values["schema_version"] = schema_version
+
+    with pytest.raises(ValueError, match="schema version"):
+        evidence_destination_from_dict(values)
+
+    with pytest.raises(ValueError, match="schema version"):
+        EvidenceDestinationV1(
+            entity="wandb",
+            project="endpoint-parity",
+            api_base_url="https://api.wandb.ai",
+            trace_base_url="https://trace.wandb.ai",
+            app_base_url="https://wandb.ai",
+            schema_version=schema_version,  # type: ignore[arg-type]
         )
 
 

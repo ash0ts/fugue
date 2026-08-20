@@ -1,0 +1,124 @@
+{
+  "accepted": [
+    {
+      "api_base_url": "https://api.wandb.ai",
+      "app_base_url": "https://wandb.ai",
+      "canonical": {
+        "api_base_url": "https://api.wandb.ai",
+        "app_base_url": "https://wandb.ai",
+        "trace_base_url": "https://trace.wandb.ai"
+      },
+      "label": "current-v13-cloud",
+      "trace_base_url": "https://trace.wandb.ai"
+    },
+    {
+      "api_base_url": "https://selfhost.example/wandb/api/",
+      "app_base_url": "https://selfhost.example/wandb/app/",
+      "canonical": {
+        "api_base_url": "https://selfhost.example/wandb/api",
+        "app_base_url": "https://selfhost.example/wandb/app",
+        "trace_base_url": "https://selfhost.example/wandb/traces"
+      },
+      "label": "canonicalized-self-hosted-paths",
+      "trace_base_url": "https://selfhost.example/wandb/traces/"
+    },
+    {
+      "api_base_url": "http://127.0.0.1:8080/api",
+      "app_base_url": "http://localhost:8080/app",
+      "canonical": {
+        "api_base_url": "http://127.0.0.1:8080/api",
+        "app_base_url": "http://localhost:8080/app",
+        "trace_base_url": "http://[::1]:8080/traces"
+      },
+      "label": "loopback-http",
+      "trace_base_url": "http://[::1]:8080/traces"
+    }
+  ],
+  "rejected": [
+    {
+      "error": "HTTPS or loopback HTTP",
+      "field": "api_base_url",
+      "label": "remote-http",
+      "value": "http://selfhost.example/wandb/api"
+    },
+    {
+      "error": "traversal path",
+      "field": "trace_base_url",
+      "label": "raw-traversal",
+      "value": "https://selfhost.example/wandb/traces/../admin"
+    },
+    {
+      "error": "traversal path",
+      "field": "trace_base_url",
+      "label": "encoded-traversal",
+      "value": "https://selfhost.example/wandb/traces/%252e%252e/admin"
+    },
+    {
+      "error": "encoded separator",
+      "field": "app_base_url",
+      "label": "encoded-separator",
+      "value": "https://selfhost.example/wandb/%252foutside"
+    },
+    {
+      "error": "unsafe path",
+      "field": "api_base_url",
+      "label": "double-slash",
+      "value": "https://selfhost.example/wandb//api"
+    },
+    {
+      "error": "unsafe path",
+      "field": "api_base_url",
+      "label": "backslash",
+      "value": "https://selfhost.example/wandb\\api"
+    },
+    {
+      "error": "unsafe path",
+      "field": "api_base_url",
+      "label": "invalid-percent-escape",
+      "value": "https://selfhost.example/wandb/%zz"
+    },
+    {
+      "error": "without credentials",
+      "field": "api_base_url",
+      "label": "query",
+      "value": "https://selfhost.example/wandb/api?access_token=secret"
+    },
+    {
+      "error": "without credentials",
+      "field": "api_base_url",
+      "label": "credentials",
+      "value": "https://user:secret@selfhost.example/wandb/api"
+    },
+    {
+      "error": "whitespace or control characters",
+      "field": "api_base_url",
+      "label": "leading-whitespace",
+      "value": " https://selfhost.example/wandb/api"
+    },
+    {
+      "error": "whitespace or control characters",
+      "field": "api_base_url",
+      "label": "authority-tab",
+      "value": "https://selfhost.example\t.evil/wandb/api"
+    },
+    {
+      "error": "whitespace or control characters",
+      "field": "trace_base_url",
+      "label": "authority-newline",
+      "value": "https://selfhost.example\n.evil/wandb/traces"
+    },
+    {
+      "error": "invalid authority or port",
+      "field": "app_base_url",
+      "label": "out-of-range-port",
+      "value": "https://selfhost.example:99999/wandb/app"
+    },
+    {
+      "error": "invalid authority or port",
+      "field": "app_base_url",
+      "label": "nonnumeric-port",
+      "value": "https://selfhost.example:notaport/wandb/app"
+    }
+  ],
+  "schema_version": 1
+}

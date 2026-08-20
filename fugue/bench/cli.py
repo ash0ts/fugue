@@ -1906,7 +1906,10 @@ def _publish_research_index(args: argparse.Namespace) -> int:
 def _publish_research_report(args: argparse.Namespace) -> int:
     from fugue.bench.research_report import (
         ResearchIndexReportError,
+        build_research_index_report_publication_evidence,
+        build_research_index_report_study_memberships,
         publish_research_index_report,
+        verify_research_index_report_publication,
     )
     from fugue.bench.wandb_research_report import (
         MissingWandbReportExtraError,
@@ -1934,16 +1937,64 @@ def _publish_research_report(args: argparse.Namespace) -> int:
         if args.receipt is not None
         else None
     )
+    effective_receipt_path = receipt_path or index_path.with_name(
+        "research-index-report-publication-receipt.json"
+    )
     env = load_env(args.env_file)
     try:
-        publisher = wandb_research_report_publisher_from_environment(env)
-        receipt = publish_research_index_report(
+        secret_values = secrets_from_env(env)
+        research_id, memberships = build_research_index_report_study_memberships(
             index_path,
             index_receipt_path,
-            publisher,
-            receipt_path=receipt_path,
-            secret_values=secrets_from_env(env),
+            secret_values=secret_values,
         )
+        research_database = root / ".fugue" / "research.db"
+        if not research_database.is_file():
+            raise ResearchIndexReportError(
+                "Research Report publication requires the existing local Research "
+                "database"
+            )
+        from fugue.research.store import StudyStore
+
+        research_store = StudyStore(root)
+        research_store.validate_research_index_report_memberships(
+            research_id=research_id,
+            memberships=memberships,
+        )
+        if effective_receipt_path.is_file():
+            receipt = verify_research_index_report_publication(
+                index_path,
+                index_receipt_path,
+                effective_receipt_path,
+                secret_values=secret_values,
+            )
+        else:
+            publisher = wandb_research_report_publisher_from_environment(env)
+            receipt = publish_research_index_report(
+                index_path,
+                index_receipt_path,
+                publisher,
+                receipt_path=receipt_path,
+                secret_values=secret_values,
+            )
+        publication = build_research_index_report_publication_evidence(
+            index_path,
+            index_receipt_path,
+            effective_receipt_path,
+            secret_values=secret_values,
+        )
+        index_bytes = index_path.read_bytes()
+        index_receipt_bytes = index_receipt_path.read_bytes()
+        report_receipt_bytes = effective_receipt_path.read_bytes()
+        research_store.record_research_index_report_publication_evidence(publication)
+        if (
+            index_path.read_bytes() != index_bytes
+            or index_receipt_path.read_bytes() != index_receipt_bytes
+            or effective_receipt_path.read_bytes() != report_receipt_bytes
+        ):
+            raise ResearchIndexReportError(
+                "Research delivery mutated immutable index or Report source bytes"
+            )
     except MissingWandbReportExtraError as exc:
         payload = {
             "schema_version": 1,
