@@ -44,6 +44,7 @@ from fugue.bench.comparison_execution import (
     ComparisonExecutionBindingV1,
     compile_comparison_execution_binding,
     execution_binding_from_approved,
+    recovery_journal_path,
     verify_comparison_execution_binding,
     verify_resume_stage_authorizations,
 )
@@ -51,14 +52,22 @@ from fugue.bench.evaluation_semantics import (
     behavioral_task_output_available,
     nonbehavioral_score_field_names,
 )
-from fugue.bench.execution_recovery import ExecutionFinalizationPending
+from fugue.bench.execution_recovery import (
+    ExecutionFinalizationPending,
+    ExecutionRecoveryController,
+)
 from fugue.bench.files import atomic_write_json
 from fugue.bench.legacy_v3_admission import (
     LegacyHostedV3AdmissionRegistryV1,
     LegacyHostedV3AdmissionV1,
     require_legacy_hosted_v3_admission,
 )
-from fugue.bench.library import ExperimentSpec, experiment_from_data, validate_id
+from fugue.bench.library import (
+    ExperimentSpec,
+    experiment_from_data,
+    experiment_from_yaml,
+    validate_id,
+)
 from fugue.bench.local_evidence import (
     LocalEvidenceDestinationV1,
     LocalEvidenceStore,
@@ -4323,7 +4332,15 @@ def analyze_comparison_rows(
         for row in normalized
         if row.get("comparison_required_evaluation_complete") is False
     )
-    operational = _operational_summary(normalized)
+    operational = _operational_summary(
+        normalized,
+        # ComparisonResultV3 persists the normalized token fields in its
+        # digest-bound attempt projection. Legacy ``n_*`` aliases remain a
+        # useful input for V2 and diagnostic summaries, but promoting them in
+        # V3 would let an aggregate claim usage that its canonical attempts do
+        # not contain and cannot reproduce after reload.
+        include_legacy_token_aliases=result_schema_version < 3,
+    )
     evidence_statuses = [_attempt_evidence_status(row) for row in normalized]
     hosted_evidence_statuses = [
         (
@@ -11725,7 +11742,10 @@ def _verify_v3_attempt_derived_summaries(
         raise ValueError(
             "ComparisonResultV3 mechanism summary disagrees with canonical attempts"
         )
-    expected_operational = _operational_summary(canonical_rows)
+    expected_operational = _operational_summary(
+        canonical_rows,
+        include_legacy_token_aliases=False,
+    )
     if result.operational_summary != expected_operational:
         raise ValueError(
             "ComparisonResultV3 operational summary disagrees with canonical attempts: "
@@ -13886,6 +13906,8 @@ def _mcp_tool_usage_counts(row: Mapping[str, Any]) -> dict[str, int]:
 
 def _operational_summary(
     rows: Sequence[Mapping[str, Any]],
+    *,
+    include_legacy_token_aliases: bool = True,
 ) -> dict[str, Any]:
     execution: dict[str, int] = {}
     evidence: dict[str, int] = {}
@@ -13954,11 +13976,11 @@ def _operational_summary(
         row_output = _token_count_or_none(row.get("output_tokens"))
         if row_input is None:
             row_input = _token_count_or_none(usage.get("input_tokens"))
-        if row_input is None:
+        if row_input is None and include_legacy_token_aliases:
             row_input = _token_count_or_none(row.get("n_input_tokens"))
         if row_output is None:
             row_output = _token_count_or_none(usage.get("output_tokens"))
-        if row_output is None:
+        if row_output is None and include_legacy_token_aliases:
             row_output = _token_count_or_none(row.get("n_output_tokens"))
         if row_input is not None and row_output is not None:
             input_tokens += row_input
@@ -14378,6 +14400,779 @@ def _publish_comparison_result(
     )
     if publication_error is not None:
         raise publication_error
+
+
+def finalize_local_comparison_result(  # noqa: C901 - one fail-closed recovery boundary
+    spec: ComparisonSpecV1,
+    *,
+    comparison_path: Path,
+    run_id: str,
+    repo_root: Path,
+    publish_research: bool = True,
+) -> tuple[ComparisonResultV3, Path, Path, Path]:
+    """Finish a completed local run without executing or scoring any cell.
+
+    This recovery path consumes only immutable host artifacts. It deliberately
+    does not construct an OperatorService, resolve credentials, export a run,
+    invoke a scorer or judge, or admit a physical execution.
+    """
+
+    run_id = validate_id(run_id, kind="run id")
+    root = repo_root.resolve()
+    if spec.schema_version < 3:
+        raise ValueError("local result finalization requires a V3 comparison")
+    if spec.execution.evidence_mode != "local":
+        raise ValueError("local result finalization supports local evidence only")
+
+    spec_path = _safe_input_path(comparison_path, root, "comparison")
+    run_dir = root / ".fugue" / "runtime" / run_id
+    input_lock_path = run_dir / INPUT_LOCK_NAME
+    experiment_path = run_dir / "experiment.yaml"
+    run_manifest_path = run_dir / "run.json"
+    for path, label in (
+        (input_lock_path, "run input lock"),
+        (experiment_path, "frozen experiment"),
+        (run_manifest_path, "run manifest"),
+    ):
+        _require_finalization_file(path, label)
+
+    input_lock = _load_json_object(input_lock_path, "run input lock")
+    if not verify_snapshot(input_lock):
+        raise ValueError("run input lock digest does not match")
+    if input_lock.get("run_id") != run_id:
+        raise ValueError("run input lock belongs to another run")
+    request = _mapping(input_lock.get("request"), "run input lock request")
+    approved = _mapping(
+        request.get("approved_comparison"),
+        "run approved comparison lock",
+    )
+    _verify_approved_comparison_execution_lock(approved)
+    if approved.get("evidence_mode") != "local":
+        raise ValueError("run approved comparison is not local evidence")
+    if approved.get("comparison_id") != spec.id:
+        raise ValueError("run approved comparison targets another comparison")
+    if approved.get("spec_digest") != spec.spec_digest:
+        raise ValueError("current comparison spec differs from the approved run")
+    preview_digest = str(approved.get("preview_digest") or "")
+    binding = execution_binding_from_approved(approved)
+    _verified_approved_inputs(approved, repo_root=root)
+    expected_qualification_inputs = {
+        str(name): str(digest)
+        for name, digest in _mapping(
+            approved.get("qualification_input_digests"),
+            "approved qualification input digests",
+        ).items()
+    }
+    observed_qualification_inputs, qualification_blockers = (
+        _qualification_input_readiness(spec, repo_root=root)
+    )
+    if qualification_blockers or (
+        observed_qualification_inputs != expected_qualification_inputs
+    ):
+        details = "; ".join(qualification_blockers) or "digest mismatch"
+        raise ValueError(
+            "approved source and qualification locks did not re-verify: " + details
+        )
+    release_note_coverage = _bound_v3_release_note_coverage(
+        spec,
+        readiness={
+            "qualification_input_digests": expected_qualification_inputs,
+        },
+        repo_root=root,
+    )
+
+    frozen_experiment = experiment_from_yaml(
+        experiment_path.read_text(encoding="utf-8")
+    )
+    frozen_definition = frozen_experiment.to_dict()
+    if (
+        frozen_definition != input_lock.get("experiment")
+        or stable_digest(frozen_definition)
+        != input_lock.get("resolved_experiment_sha256")
+        or frozen_experiment.id != spec.id
+    ):
+        raise ValueError("frozen experiment disagrees with the immutable run lock")
+
+    journal_path = recovery_journal_path(root, run_id)
+    _require_finalization_file(journal_path, "comparison execution journal")
+    journal_sha256 = _sha256_path(journal_path)
+    controller = ExecutionRecoveryController(
+        journal_path,
+        controller_id=f"comparison-{run_id}"[:200],
+        schedule=binding.schedule,
+    )
+    recovery = controller.snapshot()
+    if _sha256_path(journal_path) != journal_sha256:
+        raise RuntimeError("host-only finalization changed the execution journal")
+    scheduled_ids = {
+        item.logical_attempt_id for item in binding.schedule.logical_attempts
+    }
+    if (
+        not recovery.complete
+        or recovery.fatal_reasons
+        or recovery.active_physical_execution_ids
+        or set(recovery.canonical_results) != scheduled_ids
+        or len(recovery.physical_executions)
+        > binding.schedule.maximum_physical_executions
+    ):
+        raise RuntimeError(
+            "comparison execution is not complete and safe for host-only finalization"
+        )
+    for logical_id, physical_id in recovery.canonical_results.items():
+        physical = recovery.physical_executions.get(physical_id)
+        canonical_count = sum(
+            int(
+                state.canonical
+                and state.identity.logical_attempt_id == logical_id
+            )
+            for state in recovery.physical_executions.values()
+        )
+        if (
+            physical is None
+            or canonical_count != 1
+            or not physical.canonical
+            or physical.identity.logical_attempt_id != logical_id
+            or not physical.started
+            or physical.terminal_kind
+            not in {"success", "task_failure", "agent_timeout", "cancelled"}
+            or not physical.fully_reconciled
+            or physical.canonical_reconciliation is None
+            or physical.remaining_harbor_resources
+        ):
+            raise RuntimeError(
+                "comparison execution has an unreconciled canonical physical result"
+            )
+    if any(
+        state.active or not state.fully_reconciled
+        for state in recovery.physical_executions.values()
+    ):
+        raise RuntimeError(
+            "comparison execution retains an unreconciled physical execution"
+        )
+
+    run_manifest = _load_json_object(run_manifest_path, "run manifest")
+    execution_summary = _mapping(
+        run_manifest.get("comparison_execution"),
+        "run comparison execution summary",
+    )
+    if (
+        run_manifest.get("status") != "passed"
+        or run_manifest.get("experiment_id") != spec.id
+        or run_manifest.get("snapshot_sha256") != input_lock.get("snapshot_sha256")
+        or int(run_manifest.get("cell_count") or 0) != binding.logical_cell_count
+        or execution_summary.get("binding_digest") != binding.binding_digest
+        or execution_summary.get("schedule_digest")
+        != binding.schedule.schedule_digest
+        or execution_summary.get("event_chain_digest")
+        != recovery.event_chain_digest
+        or execution_summary.get("controller_id") != recovery.controller_id
+        or execution_summary.get("journal")
+        != journal_path.relative_to(root).as_posix()
+        or int(execution_summary.get("logical_attempt_count") or 0)
+        != recovery.logical_attempt_count
+        or int(execution_summary.get("physical_execution_count") or 0)
+        != len(recovery.physical_executions)
+        or execution_summary.get("complete") is not True
+        or int(execution_summary.get("canonical_result_count") or 0)
+        != len(scheduled_ids)
+    ):
+        raise RuntimeError("run manifest does not describe the completed execution")
+
+    store = LocalEvidenceStore(root, run_id)
+    manifest = store.read_manifest()
+    if (
+        manifest.status != "complete"
+        or manifest.run_id != run_id
+        or set(manifest.planned_attempt_ids) != scheduled_ids
+        or set(manifest.terminal_attempt_ids) != scheduled_ids
+        or manifest.run_snapshot_sha256 != input_lock.get("snapshot_sha256")
+        or manifest.evaluation_asset_lock_sha256
+        != input_lock.get("evaluation_asset_lock_sha256")
+    ):
+        raise RuntimeError("local evidence manifest does not bind the completed run")
+    for record in manifest.attempt_records:
+        attempt_record = store.read_attempt(record.attempt_id)
+        if attempt_record.record_digest != record.record_digest:
+            raise RuntimeError("local attempt record disagrees with its manifest")
+    checkpoint_binding = _verify_finalization_checkpoint(
+        approved=approved,
+        binding=binding,
+        repo_root=root,
+        run_id=run_id,
+    )
+
+    destination = root / COMPARISON_RESULT_ROOT / preview_digest
+    attempts_path = destination / "attempts.jsonl"
+    _require_finalization_file(attempts_path, "final exported attempts")
+    attempts_bytes = attempts_path.read_bytes()
+    attempts_sha256 = hashlib.sha256(attempts_bytes).hexdigest()
+    rows = _read_jsonl(attempts_path, "comparison attempt rows")
+    rows_before_binding = _json_value(rows)
+    if {str(row.get("attempt_id") or "") for row in rows} != scheduled_ids:
+        raise RuntimeError("final exported attempts disagree with the schedule")
+    if any(str(row.get("run_id") or "") != run_id for row in rows):
+        raise RuntimeError("final exported attempts belong to another run")
+    _bind_local_execution_evidence(rows, repo_root=root, run_id=run_id)
+    if rows != rows_before_binding:
+        raise RuntimeError(
+            "final exported attempts require mutation before result construction"
+        )
+    source_drift_digest = _verify_finalization_source_drift(rows, approved=approved)
+
+    result = analyze_comparison_rows(
+        comparison_id=spec.id,
+        preview_digest=preview_digest,
+        rows=rows,
+        source=run_id,
+        expected_evidence_project=None,
+        approved_comparison=approved,
+        decision_policy=spec.decision_policy,
+        expected_source_evidence_project=spec.execution.source_evidence_project,
+        result_schema_version=3,
+        study_intent=_approved_study_intent(approved),
+        release_note_coverage=release_note_coverage,
+        supersedes=spec.supersedes,
+    )
+    if not isinstance(result, ComparisonResultV3):  # pragma: no cover - fixed call
+        raise RuntimeError("local finalization did not construct ComparisonResultV3")
+
+    receipt_path = destination / "local-result-finalization.json"
+    existing_receipt = _read_local_finalization_receipt(receipt_path)
+    if existing_receipt is not None:
+        _verify_existing_local_finalization(
+            existing_receipt,
+            result=result,
+            result_path=destination / "result.json",
+            run_id=run_id,
+            preview_digest=preview_digest,
+            spec_digest=spec.spec_digest,
+            input_lock_sha256=_sha256_path(input_lock_path),
+            attempts_sha256=attempts_sha256,
+            journal_sha256=journal_sha256,
+            journal_chain_digest=recovery.event_chain_digest,
+            manifest_digest=manifest.manifest_digest,
+            source_drift_digest=source_drift_digest,
+            qualification_inputs_digest=stable_digest(
+                expected_qualification_inputs
+            ),
+            release_note_coverage_digest=stable_digest(
+                [dict(item) for item in release_note_coverage]
+            ),
+            checkpoint_binding=checkpoint_binding,
+            repo_root=root,
+        )
+        _publish_comparison_result(
+            spec=spec,
+            result=result,
+            json_path=destination / "result.json",
+            markdown_path=destination / "result.md",
+            destination=destination,
+            publication_path=destination / "research-publication.json",
+            projection=None,
+            publish_research=publish_research,
+            repo_root=root,
+        )
+        return (
+            result,
+            destination / "result.json",
+            destination / "result.md",
+            receipt_path,
+        )
+
+    prior_result_path = destination / "result.json"
+    if approved.get("source_lock_digest") and not prior_result_path.is_file():
+        raise ValueError(
+            "source-backed finalization requires the prior digest-bound result "
+            "envelope to preserve its execution-time drift checks"
+        )
+    rejected_partial = _archive_rejected_local_result(
+        prior_result_path,
+        destination=destination,
+        recomputed=result,
+    )
+    destination.parent.mkdir(parents=True, exist_ok=True)
+    with tempfile.TemporaryDirectory(
+        dir=destination.parent,
+        prefix=f".{preview_digest[:12]}.finalize-",
+    ) as temporary:
+        staged = Path(temporary) / "result"
+        staged.mkdir()
+        _write_immutable_bytes(
+            staged / "attempts.jsonl",
+            attempts_bytes,
+            expected_sha256=attempts_sha256,
+            mode=0o600,
+            label="staged final attempts",
+        )
+        staged_json, _staged_markdown = write_comparison_result(
+            result,
+            destination=staged,
+        )
+        if read_comparison_result(staged_json).to_dict() != result.to_dict():
+            raise RuntimeError("staged comparison result did not round-trip")
+        for name in ("result.json", "result.md", "reproduction.json"):
+            _atomic_bytes(destination / name, (staged / name).read_bytes())
+
+    json_path = destination / "result.json"
+    markdown_path = destination / "result.md"
+    if read_comparison_result(json_path).to_dict() != result.to_dict():
+        raise RuntimeError("canonical comparison result did not round-trip")
+
+    from fugue.bench.runtime_provenance import (
+        resolve_fugue_distribution_provenance,
+    )
+
+    runtime = _mapping(input_lock.get("runtime"), "run runtime provenance")
+    execution_distribution = _mapping(
+        runtime.get("fugue_distribution"),
+        "run Fugue distribution provenance",
+    )
+    rejected_archives = _rejected_local_result_archives(destination)
+    if rejected_partial is not None and rejected_partial not in rejected_archives:
+        raise RuntimeError("rejected partial result archive was not preserved")
+    unsigned_receipt: dict[str, Any] = {
+        "schema_version": 1,
+        "kind": "local_comparison_result_finalization",
+        "comparison_id": spec.id,
+        "run_id": run_id,
+        "preview_digest": preview_digest,
+        "spec_digest": spec.spec_digest,
+        "bindings": {
+            "comparison_spec": {
+                "path": spec_path.relative_to(root).as_posix(),
+                "sha256": _sha256_path(spec_path),
+            },
+            "run_manifest": {
+                "path": run_manifest_path.relative_to(root).as_posix(),
+                "sha256": _sha256_path(run_manifest_path),
+            },
+            "input_lock": {
+                "path": input_lock_path.relative_to(root).as_posix(),
+                "sha256": _sha256_path(input_lock_path),
+                "snapshot_sha256": input_lock["snapshot_sha256"],
+            },
+            "frozen_experiment": {
+                "path": experiment_path.relative_to(root).as_posix(),
+                "sha256": _sha256_path(experiment_path),
+                "resolved_experiment_sha256": input_lock[
+                    "resolved_experiment_sha256"
+                ],
+            },
+            "execution_schedule": {
+                "binding_digest": binding.binding_digest,
+                "schedule_digest": binding.schedule.schedule_digest,
+                "journal_path": journal_path.relative_to(root).as_posix(),
+                "journal_sha256": journal_sha256,
+                "event_chain_digest": recovery.event_chain_digest,
+                "logical_attempts": len(scheduled_ids),
+                "physical_executions": len(recovery.physical_executions),
+            },
+            "attempts": {
+                "path": attempts_path.relative_to(root).as_posix(),
+                "sha256": attempts_sha256,
+                "row_count": len(rows),
+                "attempt_id_set_digest": stable_digest(sorted(scheduled_ids)),
+                "source_drift_digest": source_drift_digest,
+            },
+            "local_evidence": {
+                "path": store.manifest_path.relative_to(root).as_posix(),
+                "sha256": _sha256_path(store.manifest_path),
+                "manifest_digest": manifest.manifest_digest,
+                "attempt_record_set_digest": manifest.attempt_record_set_digest,
+            },
+            "qualification_inputs": {
+                "digests": expected_qualification_inputs,
+                "digest": stable_digest(expected_qualification_inputs),
+                "release_note_coverage_digest": stable_digest(
+                    [dict(item) for item in release_note_coverage]
+                ),
+            },
+            "checkpoint": checkpoint_binding,
+        },
+        "execution_distribution": execution_distribution,
+        "finalizer_distribution": resolve_fugue_distribution_provenance(),
+        "result": {
+            "path": json_path.relative_to(root).as_posix(),
+            "sha256": _sha256_path(json_path),
+            "result_digest": result.result_digest,
+            "markdown_path": markdown_path.relative_to(root).as_posix(),
+            "markdown_sha256": _sha256_path(markdown_path),
+            "reproduction_path": (
+                destination / "reproduction.json"
+            ).relative_to(root).as_posix(),
+            "reproduction_sha256": _sha256_path(
+                destination / "reproduction.json"
+            ),
+        },
+        "rejected_partial_results": rejected_archives,
+        "research_projection": {
+            "status": "separate_optional_receipt",
+            "path": (
+                destination / "research-publication.json"
+            ).relative_to(root).as_posix(),
+        },
+    }
+    receipt = {
+        **unsigned_receipt,
+        "receipt_digest": stable_digest(unsigned_receipt),
+    }
+    atomic_write_json(receipt_path, receipt)
+    _verify_existing_local_finalization(
+        receipt,
+        result=result,
+        result_path=json_path,
+        run_id=run_id,
+        preview_digest=preview_digest,
+        spec_digest=spec.spec_digest,
+        input_lock_sha256=_sha256_path(input_lock_path),
+        attempts_sha256=attempts_sha256,
+        journal_sha256=journal_sha256,
+        journal_chain_digest=recovery.event_chain_digest,
+        manifest_digest=manifest.manifest_digest,
+        source_drift_digest=source_drift_digest,
+        qualification_inputs_digest=stable_digest(expected_qualification_inputs),
+        release_note_coverage_digest=stable_digest(
+            [dict(item) for item in release_note_coverage]
+        ),
+        checkpoint_binding=checkpoint_binding,
+        repo_root=root,
+    )
+    _publish_comparison_result(
+        spec=spec,
+        result=result,
+        json_path=json_path,
+        markdown_path=markdown_path,
+        destination=destination,
+        publication_path=destination / "research-publication.json",
+        projection=None,
+        publish_research=publish_research,
+        repo_root=root,
+    )
+    return result, json_path, markdown_path, receipt_path
+
+
+def _require_finalization_file(path: Path, label: str) -> None:
+    if not path.is_file() or path.is_symlink():
+        raise ValueError(f"host-only finalization requires an immutable {label}")
+
+
+def _verify_finalization_checkpoint(
+    *,
+    approved: Mapping[str, Any],
+    binding: ComparisonExecutionBindingV1,
+    repo_root: Path,
+    run_id: str,
+) -> dict[str, Any] | None:
+    checkpoint_ids = tuple(
+        item.logical_attempt_id
+        for item in binding.schedule.logical_attempts
+        if item.stage_id == "checkpoint"
+    )
+    if not checkpoint_ids:
+        if int(approved.get("evidence_checkpoint_cells") or 0):
+            raise ValueError("approved checkpoint has no scheduled attempts")
+        return None
+    path = repo_root / ".fugue" / "runtime" / run_id / "comparison-checkpoint.json"
+    _require_finalization_file(path, "comparison checkpoint receipt")
+    receipt = _load_json_object(path, "comparison checkpoint receipt")
+    supplied = str(receipt.get("receipt_digest") or "")
+    unsigned = {key: value for key, value in receipt.items() if key != "receipt_digest"}
+    row_digests = {
+        attempt_id_value: stable_digest(row)
+        for attempt_id_value in checkpoint_ids
+        if (
+            row := _local_comparison_prediction_row(
+                repo_root=repo_root,
+                run_id=run_id,
+                attempt_id=attempt_id_value,
+            )
+        )
+        is not None
+    }
+    expected_drift = {
+        "status": "matched",
+        "expected_digest": str(approved.get("source_lock_digest") or ""),
+        "observed_digest": str(approved.get("source_lock_digest") or ""),
+    }
+    if (
+        supplied != stable_digest(unsigned)
+        or receipt.get("run_id") != run_id
+        or receipt.get("schedule_digest") != binding.schedule.schedule_digest
+        or receipt.get("checkpoint_attempt_ids") != list(checkpoint_ids)
+        or receipt.get("checkpoint_row_digests") != row_digests
+        or len(row_digests) != len(checkpoint_ids)
+        or (
+            approved.get("source_lock_digest")
+            and receipt.get("source_drift") != expected_drift
+        )
+    ):
+        raise ValueError("comparison checkpoint receipt does not re-verify")
+    return {
+        "path": path.relative_to(repo_root).as_posix(),
+        "sha256": _sha256_path(path),
+        "receipt_digest": supplied,
+        "checkpoint_row_set_digest": stable_digest(row_digests),
+    }
+
+
+def _verify_finalization_source_drift(
+    rows: Sequence[Mapping[str, Any]],
+    *,
+    approved: Mapping[str, Any],
+) -> str:
+    """Bind the prior source checks to the frozen lock and final attempts.
+
+    The finalizer intentionally does not query a changing hosted source. It
+    re-verifies every locally frozen source/qualification artifact above, then
+    requires the recorded pre-run, checkpoint, and post-run checks to name the
+    exact approved source-lock digest. The finalization receipt commits to this
+    projection and the complete attempts file hash.
+    """
+
+    source_lock_digest = str(approved.get("source_lock_digest") or "")
+    if not source_lock_digest:
+        return stable_digest([])
+    fields = ["source_pre_run_drift", "source_post_run_drift"]
+    if int(approved.get("evidence_checkpoint_cells") or 0):
+        fields.insert(1, "source_checkpoint_drift")
+    projected: list[dict[str, Any]] = []
+    expected = {
+        "status": "matched",
+        "expected_digest": source_lock_digest,
+        "observed_digest": source_lock_digest,
+    }
+    for row in rows:
+        item: dict[str, Any] = {"attempt_id": str(row.get("attempt_id") or "")}
+        for field_name in fields:
+            observed = row.get(field_name)
+            if not isinstance(observed, Mapping) or dict(observed) != expected:
+                raise ValueError(
+                    f"{field_name} does not match the approved source lock"
+                )
+            item[field_name] = expected
+        projected.append(item)
+    return stable_digest(sorted(projected, key=lambda item: item["attempt_id"]))
+
+
+def _archive_rejected_local_result(
+    result_path: Path,
+    *,
+    destination: Path,
+    recomputed: ComparisonResultV3,
+) -> dict[str, str] | None:
+    if not result_path.exists():
+        return None
+    _require_finalization_file(result_path, "existing comparison result")
+    try:
+        existing = read_comparison_result(result_path)
+    except (OSError, TypeError, ValueError, RuntimeError):
+        raw = _load_json_object(result_path, "rejected comparison result")
+        supplied = str(raw.get("qualification_digest") or "")
+        if (
+            not re.fullmatch(r"[0-9a-f]{64}", supplied)
+            or raw.get("result_digest") != supplied
+            or _comparison_qualification_digest(raw) != supplied
+        ):
+            raise ValueError(
+                "rejected comparison result has no valid qualification digest"
+            ) from None
+        repaired = _json_value(raw)
+        expected = _json_value(recomputed.to_dict())
+        repaired["operational_summary"] = expected["operational_summary"]
+        repaired["qualification_digest"] = expected["qualification_digest"]
+        repaired["result_digest"] = expected["result_digest"]
+        if repaired != expected:
+            raise ValueError(
+                "rejected comparison result differs beyond the recoverable "
+                "operational summary"
+            ) from None
+        body = result_path.read_bytes()
+        sha256 = hashlib.sha256(body).hexdigest()
+        archive = destination / "rejected-results" / f"{sha256}.result.json"
+        _write_immutable_bytes(
+            archive,
+            body,
+            expected_sha256=sha256,
+            mode=0o600,
+            label="rejected partial result archive",
+        )
+        return {
+            "path": archive.relative_to(destination).as_posix(),
+            "sha256": sha256,
+            "qualification_digest": supplied,
+        }
+    if not isinstance(existing, ComparisonResultV3) or (
+        existing.to_dict() != recomputed.to_dict()
+    ):
+        raise ValueError("existing canonical result conflicts with recomputation")
+    return None
+
+
+def _rejected_local_result_archives(destination: Path) -> list[dict[str, str]]:
+    archive_root = destination / "rejected-results"
+    if not archive_root.exists():
+        return []
+    if not archive_root.is_dir() or archive_root.is_symlink():
+        raise ValueError("rejected result archive root is invalid")
+    values: list[dict[str, str]] = []
+    for path in sorted(archive_root.glob("*.result.json")):
+        _require_finalization_file(path, "rejected partial result archive")
+        sha256 = _sha256_path(path)
+        if path.name != f"{sha256}.result.json":
+            raise ValueError("rejected partial result archive name is invalid")
+        raw = _load_json_object(path, "rejected partial result archive")
+        qualification_digest = str(raw.get("qualification_digest") or "")
+        if _comparison_qualification_digest(raw) != qualification_digest:
+            raise ValueError("rejected partial result archive digest does not match")
+        values.append(
+            {
+                "path": path.relative_to(destination).as_posix(),
+                "sha256": sha256,
+                "qualification_digest": qualification_digest,
+            }
+        )
+    return values
+
+
+def _read_local_finalization_receipt(path: Path) -> dict[str, Any] | None:
+    if not path.exists():
+        return None
+    _require_finalization_file(path, "local result finalization receipt")
+    receipt = _load_json_object(path, "local result finalization receipt")
+    supplied = str(receipt.get("receipt_digest") or "")
+    unsigned = {key: value for key, value in receipt.items() if key != "receipt_digest"}
+    if supplied != stable_digest(unsigned):
+        raise ValueError("local result finalization receipt digest does not match")
+    return receipt
+
+
+def _verify_existing_local_finalization(
+    receipt: Mapping[str, Any],
+    *,
+    result: ComparisonResultV3,
+    result_path: Path,
+    run_id: str,
+    preview_digest: str,
+    spec_digest: str,
+    input_lock_sha256: str,
+    attempts_sha256: str,
+    journal_sha256: str,
+    journal_chain_digest: str,
+    manifest_digest: str,
+    source_drift_digest: str,
+    qualification_inputs_digest: str,
+    release_note_coverage_digest: str,
+    checkpoint_binding: Mapping[str, Any] | None,
+    repo_root: Path,
+) -> None:
+    supplied = str(receipt.get("receipt_digest") or "")
+    unsigned = {key: value for key, value in receipt.items() if key != "receipt_digest"}
+    bindings = _mapping(receipt.get("bindings"), "finalization bindings")
+    input_lock = _mapping(bindings.get("input_lock"), "finalization input lock")
+    execution = _mapping(
+        bindings.get("execution_schedule"),
+        "finalization execution schedule",
+    )
+    attempts = _mapping(bindings.get("attempts"), "finalization attempts")
+    local_evidence = _mapping(
+        bindings.get("local_evidence"),
+        "finalization local evidence",
+    )
+    qualification_inputs = _mapping(
+        bindings.get("qualification_inputs"),
+        "finalization qualification inputs",
+    )
+    result_binding = _mapping(receipt.get("result"), "finalization result")
+    if (
+        supplied != stable_digest(unsigned)
+        or receipt.get("kind") != "local_comparison_result_finalization"
+        or receipt.get("run_id") != run_id
+        or receipt.get("preview_digest") != preview_digest
+        or receipt.get("spec_digest") != spec_digest
+        or input_lock.get("sha256") != input_lock_sha256
+        or execution.get("journal_sha256") != journal_sha256
+        or execution.get("event_chain_digest") != journal_chain_digest
+        or attempts.get("sha256") != attempts_sha256
+        or attempts.get("source_drift_digest") != source_drift_digest
+        or local_evidence.get("manifest_digest") != manifest_digest
+        or qualification_inputs.get("digest") != qualification_inputs_digest
+        or qualification_inputs.get("release_note_coverage_digest")
+        != release_note_coverage_digest
+        or bindings.get("checkpoint") != checkpoint_binding
+        or result_binding.get("result_digest") != result.result_digest
+        or result_binding.get("sha256") != _sha256_path(result_path)
+        or read_comparison_result(result_path).to_dict() != result.to_dict()
+    ):
+        raise ValueError("local result finalization receipt conflicts with run state")
+    for binding_name in (
+        "comparison_spec",
+        "run_manifest",
+        "input_lock",
+        "frozen_experiment",
+        "local_evidence",
+    ):
+        file_binding = _mapping(
+            bindings.get(binding_name),
+            f"finalization {binding_name} binding",
+        )
+        path = _safe_input_path(
+            Path(str(file_binding.get("path") or "")),
+            repo_root,
+            f"finalization {binding_name}",
+        )
+        _require_finalization_file(path, f"finalization {binding_name}")
+        if _sha256_path(path) != file_binding.get("sha256"):
+            raise ValueError(f"finalization {binding_name} changed")
+    for path_field, digest_field, label in (
+        ("journal_path", "journal_sha256", "execution journal"),
+        ("path", "sha256", "attempts"),
+    ):
+        file_binding = execution if label == "execution journal" else attempts
+        path = _safe_input_path(
+            Path(str(file_binding.get(path_field) or "")),
+            repo_root,
+            f"finalization {label}",
+        )
+        _require_finalization_file(path, f"finalization {label}")
+        if _sha256_path(path) != file_binding.get(digest_field):
+            raise ValueError(f"finalization {label} changed")
+    for path_field, digest_field, label in (
+        ("path", "sha256", "result JSON"),
+        ("markdown_path", "markdown_sha256", "result Markdown"),
+        ("reproduction_path", "reproduction_sha256", "reproduction receipt"),
+    ):
+        path = _safe_input_path(
+            Path(str(result_binding.get(path_field) or "")),
+            repo_root,
+            f"finalization {label}",
+        )
+        _require_finalization_file(path, f"finalization {label}")
+        if _sha256_path(path) != result_binding.get(digest_field):
+            raise ValueError(f"finalization {label} changed")
+    for item in _sequence(
+        receipt.get("rejected_partial_results") or [],
+        "rejected partial results",
+        allow_empty=True,
+    ):
+        value = _mapping(item, "rejected partial result")
+        path = repo_root / COMPARISON_RESULT_ROOT / preview_digest / str(value["path"])
+        _require_finalization_file(path, "rejected partial result archive")
+        if _sha256_path(path) != value.get("sha256"):
+            raise ValueError("rejected partial result archive changed")
+
+
+def _atomic_bytes(path: Path, value: bytes) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    temporary = path.with_name(f".{path.name}.{uuid.uuid4().hex}.tmp")
+    try:
+        descriptor = os.open(temporary, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+        with os.fdopen(descriptor, "wb") as handle:
+            handle.write(value)
+            handle.flush()
+            os.fsync(handle.fileno())
+        os.replace(temporary, path)
+    finally:
+        temporary.unlink(missing_ok=True)
 
 
 def execute_comparison(  # noqa: C901 - one governed execution transaction

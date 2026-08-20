@@ -63,6 +63,8 @@ def test_public_command_surface_is_intentionally_small() -> None:
     assert "--env-file" in subparsers.choices["run"].format_help()
     assert "--env-file" in subparsers.choices["setup"].format_help()
     compare_help = " ".join(subparsers.choices["compare"].format_help().split())
+    assert "--finalize RUN_ID" in compare_help
+    assert "without running an Agent, model, judge, scorer" in compare_help
     assert "local mode this flag does not trigger hosted evidence hydration" in (
         compare_help
     )
@@ -118,6 +120,67 @@ def test_public_command_surface_is_intentionally_small() -> None:
     assert "results or Research indexes" in root_help
     study_help = " ".join(subparsers.choices["study"].format_help().split())
     assert "scoped Weave publication receipts" in study_help
+
+
+def test_compare_finalize_bypasses_operator_and_execution(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    comparison_path = tmp_path / "comparison.yaml"
+    comparison_path.write_text("schema_version: 3\n", encoding="utf-8")
+    result_path = tmp_path / "result.json"
+    markdown_path = tmp_path / "result.md"
+    receipt_path = tmp_path / "finalization.json"
+    result_path.write_text("{}\n", encoding="utf-8")
+    markdown_path.write_text("# Finalized\n", encoding="utf-8")
+    receipt_path.write_text("{}\n", encoding="utf-8")
+    result = SimpleNamespace(
+        incomplete=False,
+        required_evaluations_incomplete=False,
+        regressed=0,
+        mixed=0,
+        behavioral_summary=SimpleNamespace(status="unchanged"),
+        to_dict=lambda: {"result_digest": "a" * 64},
+    )
+
+    def forbidden(*_args: object, **_kwargs: object) -> object:
+        raise AssertionError("finalization entered an execution or planning path")
+
+    monkeypatch.setattr(
+        "fugue.bench.comparison.load_comparison",
+        lambda *_args, **_kwargs: SimpleNamespace(),
+    )
+    monkeypatch.setattr(
+        "fugue.bench.comparison.finalize_local_comparison_result",
+        lambda *_args, **_kwargs: (
+            result,
+            result_path,
+            markdown_path,
+            receipt_path,
+        ),
+    )
+    monkeypatch.setattr("fugue.bench.cli.OperatorService", forbidden)
+    monkeypatch.setattr("fugue.bench.comparison.check_comparison", forbidden)
+    monkeypatch.setattr("fugue.bench.comparison.preview_comparison", forbidden)
+    monkeypatch.setattr("fugue.bench.comparison.execute_comparison", forbidden)
+
+    code = main(
+        [
+            "compare",
+            str(comparison_path),
+            "--finalize",
+            "completed-local-run",
+            "--repo-root",
+            str(tmp_path),
+            "--json",
+        ]
+    )
+
+    assert code == 0
+    payload = json.loads(capsys.readouterr().out)
+    assert payload["status"] == "finalized"
+    assert payload["behavioral_result"]["result_digest"] == "a" * 64
 
 
 def test_comparison_readiness_names_the_canonical_local_destination(capsys) -> None:

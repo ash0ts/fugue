@@ -27,6 +27,7 @@ from fugue.bench.comparison import (
     _analyze_aligned_pairs,
     _apply_decision_attestation,
     _approved_comparison_execution_lock,
+    _archive_rejected_local_result,
     _bind_local_execution_evidence,
     _canonical_decision_gate_policies,
     _comparison_qualification_digest,
@@ -53,6 +54,7 @@ from fugue.bench.comparison import (
     _score_deterministic_output,
     _scorer_revisions_v3,
     _v3_canonical_attempt_rows,
+    _verify_finalization_source_drift,
     _weave_attempt_evidence_links,
     analyze_comparison_rows,
     check_comparison,
@@ -1761,6 +1763,557 @@ def _downgrade_current_v3_to_hosted_legacy(
     return payload
 
 
+def _assert_v3_legacy_usage_alias_round_trip(
+    *,
+    tmp_path: Path,
+    spec: ComparisonSpecV1,
+    preview_digest: str,
+    rows: list[dict[str, object]],
+    source_project: str,
+    result_project: str,
+    approved: dict[str, Any],
+) -> None:
+    legacy_usage_alias_rows = json.loads(json.dumps(rows))
+    for row in legacy_usage_alias_rows:
+        row.pop("usage", None)
+        row["input_tokens"] = None
+        row["output_tokens"] = None
+        row["n_input_tokens"] = 123_456
+        row["n_output_tokens"] = 789
+        row["usage_reconciliation_status"] = None
+    result = analyze_comparison_rows(
+        comparison_id=spec.id,
+        preview_digest=preview_digest,
+        rows=legacy_usage_alias_rows,
+        source="v3-run",
+        expected_evidence_project=result_project,
+        expected_source_evidence_project=source_project,
+        approved_comparison=approved,
+        result_schema_version=3,
+        study_intent="mcp_release_maintenance",
+    )
+    assert result.operational_summary["input_tokens"] is None
+    assert result.operational_summary["output_tokens"] is None
+    assert result.operational_summary["usage_rows"] == 0
+    assert all(
+        attempt is not None
+        and attempt.input_tokens is None
+        and attempt.output_tokens is None
+        for pair in result.paired_cases
+        for attempt in (pair.baseline, pair.candidate)
+    )
+    destination = tmp_path / "v3-legacy-usage-alias-result"
+    destination.mkdir()
+    (destination / "attempts.jsonl").write_text(
+        "\n".join(
+            json.dumps(row, sort_keys=True) for row in legacy_usage_alias_rows
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+    write_comparison_result(result, destination=destination)
+    assert read_comparison_result(destination / "result.json") == result
+
+    rejected = _json_value_for_test(result.to_dict())
+    rejected["operational_summary"]["input_tokens"] = 987_654
+    rejected["operational_summary"]["output_tokens"] = 321
+    rejected["operational_summary"]["usage_rows"] = len(legacy_usage_alias_rows)
+    rejected["qualification_digest"] = _comparison_qualification_digest(rejected)
+    rejected["result_digest"] = rejected["qualification_digest"]
+    rejected_path = destination / "result.json"
+    rejected_path.write_text(json.dumps(rejected), encoding="utf-8")
+    rejected_sha256 = hashlib.sha256(rejected_path.read_bytes()).hexdigest()
+
+    archived = _archive_rejected_local_result(
+        rejected_path,
+        destination=destination,
+        recomputed=result,
+    )
+
+    assert archived == {
+        "path": f"rejected-results/{rejected_sha256}.result.json",
+        "sha256": rejected_sha256,
+        "qualification_digest": rejected["qualification_digest"],
+    }
+    assert (destination / archived["path"]).read_bytes() == rejected_path.read_bytes()
+
+
+def _json_value_for_test(value: object) -> Any:
+    return json.loads(json.dumps(value, sort_keys=True))
+
+
+def test_local_finalization_source_drift_requires_the_exact_approved_lock() -> None:
+    approved = {
+        "source_lock_digest": "a" * 64,
+        "evidence_checkpoint_cells": 1,
+    }
+    matched = {
+        "status": "matched",
+        "expected_digest": "a" * 64,
+        "observed_digest": "a" * 64,
+    }
+    rows = [
+        {
+            "attempt_id": "b" * 64,
+            "source_pre_run_drift": matched,
+            "source_checkpoint_drift": matched,
+            "source_post_run_drift": matched,
+        }
+    ]
+
+    assert len(_verify_finalization_source_drift(rows, approved=approved)) == 64
+
+    rows[0]["source_post_run_drift"] = {
+        **matched,
+        "observed_digest": "c" * 64,
+    }
+    with pytest.raises(ValueError, match="source_post_run_drift"):
+        _verify_finalization_source_drift(rows, approved=approved)
+
+
+def test_host_only_finalizer_rebuilds_once_without_execution(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import fugue.bench.comparison as comparison_module
+    from fugue.bench.comparison_execution import (
+        compile_comparison_execution_binding,
+        execution_stage_authorizations,
+    )
+    from fugue.bench.execution import CellOutcome
+    from fugue.bench.execution_recovery import (
+        CanonicalizationObservationV1,
+        CleanupObservationV1,
+        CostObservationV1,
+        ExecutionRecoveryController,
+    )
+    from fugue.bench.files import atomic_write_json
+    from fugue.bench.library import (
+        ExperimentSpec,
+        experiment_from_yaml,
+        experiment_to_yaml,
+    )
+
+    run_id = "completed-local-run"
+    preview_digest = "b" * 64
+    comparison_id = "synthetic-finalization"
+    attempt_ids = (stable_digest({"attempt": 1}), stable_digest({"attempt": 2}))
+    expected_cells = [
+        {
+            "attempt_id": attempt_id_value,
+            "task_id": "task",
+            "variant_id": variant,
+            "harness": "claude-code",
+            "trial_index": 1,
+            "applicable": True,
+            "skip_reason": "",
+        }
+        for attempt_id_value, variant in zip(
+            attempt_ids, ("baseline", "candidate"), strict=True
+        )
+    ]
+    binding = compile_comparison_execution_binding(
+        comparison_id=comparison_id,
+        expected_cells=expected_cells,
+        concurrency=1,
+        checkpoint_cells=1,
+        maximum_cost_usd=2.0,
+        reserve_per_attempt_usd=0.5,
+        maximum_infrastructure_replacements=0,
+    )
+    approved = {
+        "comparison_id": comparison_id,
+        "spec_digest": "c" * 64,
+        "preview_digest": preview_digest,
+        "evidence_mode": "local",
+        "evidence_checkpoint_cells": 0,
+        "source_lock_digest": "",
+        "qualification_input_digests": {},
+        "expected_cells": expected_cells,
+        "execution_schedule": binding.to_dict(),
+        "execution_schedule_digest": binding.binding_digest,
+    }
+    spec = SimpleNamespace(
+        schema_version=3,
+        id=comparison_id,
+        spec_digest="c" * 64,
+        execution=SimpleNamespace(
+            evidence_mode="local",
+            source_evidence_project=None,
+            research_id="synthetic-research",
+        ),
+        decision_policy=None,
+        supersedes=(),
+    )
+    comparison_path = tmp_path / "comparison.yaml"
+    comparison_path.write_text("schema_version: 3\n", encoding="utf-8")
+    run_dir = tmp_path / ".fugue" / "runtime" / run_id
+    run_dir.mkdir(parents=True)
+    frozen_experiment = ExperimentSpec(
+        id=comparison_id,
+        title="Synthetic finalization",
+        evidence_mode="local",
+    )
+    frozen_body = experiment_to_yaml(frozen_experiment)
+    (run_dir / "experiment.yaml").write_text(frozen_body, encoding="utf-8")
+    frozen_definition = experiment_from_yaml(frozen_body).to_dict()
+    input_lock = {
+        "schema_version": 1,
+        "run_id": run_id,
+        "request": {"approved_comparison": approved},
+        "experiment": frozen_definition,
+        "resolved_experiment_sha256": stable_digest(frozen_definition),
+        "runtime": {
+            "fugue_distribution": {
+                "schema_version": 2,
+                "kind": "installed_distribution",
+                "digest": "d" * 64,
+            }
+        },
+        "evaluation_asset_lock_sha256": "e" * 64,
+        "snapshot_sha256": "",
+        "lock_sha256": "",
+    }
+    snapshot_sha256 = stable_digest(input_lock)
+    input_lock["snapshot_sha256"] = snapshot_sha256
+    input_lock["lock_sha256"] = snapshot_sha256
+    atomic_write_json(run_dir / "input-lock.json", input_lock)
+
+    journal_path = run_dir / "comparison-execution.jsonl"
+    controller = ExecutionRecoveryController(
+        journal_path,
+        controller_id=f"comparison-{run_id}",
+        schedule=binding.schedule,
+    )
+    for authorization in execution_stage_authorizations(
+        binding,
+        preview_digest=preview_digest,
+        approval_digest="f" * 64,
+    ):
+        controller.authorize_stage(authorization)
+        while True:
+            decision = controller.admit(stage_id=authorization.stage_id)
+            if decision.status == "complete":
+                break
+            assert decision.status == "admitted"
+            for physical in decision.physical_executions:
+                controller.started(physical, observed_harbor_resources=())
+                controller.finalize(
+                    physical,
+                    terminal_kind="success",
+                    result_reference=f"results/{physical.physical_execution_id}.json",
+                    cleanup=CleanupObservationV1(
+                        verified=True,
+                        scope_verified=True,
+                        post_run_inventory=True,
+                        receipt_reference=f"cleanup/{physical.physical_execution_id}",
+                    ),
+                    cost=CostObservationV1(
+                        actual_cost_micro_usd=100,
+                        authoritative=True,
+                        source="synthetic-receipt",
+                        receipt_reference=f"cost/{physical.physical_execution_id}",
+                    ),
+                    cell_outcome=CellOutcome(
+                        cell_id=f"cell-{physical.logical_attempt_id[:12]}",
+                        status="passed",
+                        runtime_outcome="completed",
+                        terminal_kind="success",
+                    ),
+                )
+                controller.select_canonical(
+                    physical,
+                    CanonicalizationObservationV1(
+                        kind="synthetic-local-evidence",
+                        status="verified",
+                        reference=f"evidence/{physical.physical_execution_id}",
+                        evidence_digest=stable_digest(
+                            {"physical_execution_id": physical.physical_execution_id}
+                        ),
+                    ),
+                )
+    recovery = controller.snapshot()
+    assert recovery.complete
+    atomic_write_json(
+        run_dir / "run.json",
+        {
+            "status": "passed",
+            "experiment_id": comparison_id,
+            "snapshot_sha256": snapshot_sha256,
+            "cell_count": binding.logical_cell_count,
+            "comparison_execution": {
+                "binding_digest": binding.binding_digest,
+                "schedule_digest": binding.schedule.schedule_digest,
+                "event_chain_digest": recovery.event_chain_digest,
+                "controller_id": recovery.controller_id,
+                "journal": journal_path.relative_to(tmp_path).as_posix(),
+                "logical_attempt_count": recovery.logical_attempt_count,
+                "physical_execution_count": len(recovery.physical_executions),
+                "canonical_result_count": len(recovery.canonical_results),
+                "complete": True,
+            },
+        },
+    )
+    checkpoint_ids = tuple(
+        item.logical_attempt_id
+        for item in binding.schedule.logical_attempts
+        if item.stage_id == "checkpoint"
+    )
+    checkpoint_rows = {
+        attempt_id_value: {"attempt_id": attempt_id_value, "pass": True}
+        for attempt_id_value in checkpoint_ids
+    }
+    checkpoint_unsigned = {
+        "schema_version": 1,
+        "run_id": run_id,
+        "schedule_digest": binding.schedule.schedule_digest,
+        "checkpoint_attempt_ids": list(checkpoint_ids),
+        "checkpoint_row_digests": {
+            attempt_id_value: stable_digest(checkpoint_rows[attempt_id_value])
+            for attempt_id_value in checkpoint_ids
+        },
+        "source_drift": None,
+    }
+    atomic_write_json(
+        run_dir / "comparison-checkpoint.json",
+        {
+            **checkpoint_unsigned,
+            "receipt_digest": stable_digest(checkpoint_unsigned),
+        },
+    )
+
+    manifest_path = run_dir / "evidence" / "manifest.json"
+    manifest_path.parent.mkdir(parents=True)
+    manifest_path.write_text("{}\n", encoding="utf-8")
+    records = tuple(
+        SimpleNamespace(attempt_id=value, record_digest=str(index) * 64)
+        for index, value in enumerate(attempt_ids, start=1)
+    )
+    manifest = SimpleNamespace(
+        status="complete",
+        run_id=run_id,
+        planned_attempt_ids=tuple(sorted(attempt_ids)),
+        terminal_attempt_ids=tuple(sorted(attempt_ids)),
+        run_snapshot_sha256=snapshot_sha256,
+        evaluation_asset_lock_sha256="e" * 64,
+        attempt_records=records,
+        manifest_digest="1" * 64,
+        attempt_record_set_digest="2" * 64,
+    )
+    store_calls: list[str] = []
+
+    class SyntheticStore:
+        def __init__(self, repo_root: Path, selected_run_id: str) -> None:
+            assert repo_root == tmp_path
+            assert selected_run_id == run_id
+            self.manifest_path = manifest_path
+
+        def read_manifest(self) -> object:
+            store_calls.append("manifest")
+            return manifest
+
+        def read_attempt(self, attempt_id_value: str) -> object:
+            store_calls.append(attempt_id_value)
+            return next(
+                item for item in records if item.attempt_id == attempt_id_value
+            )
+
+    destination = tmp_path / ".fugue" / "results" / "comparisons" / preview_digest
+    destination.mkdir(parents=True)
+    rows = [
+        {"attempt_id": attempt_id_value, "run_id": run_id}
+        for attempt_id_value in attempt_ids
+    ]
+    (destination / "attempts.jsonl").write_text(
+        "".join(json.dumps(row, sort_keys=True) + "\n" for row in rows),
+        encoding="utf-8",
+    )
+
+    class SyntheticResult:
+        def __init__(self) -> None:
+            unsigned = {
+                "schema_version": 3,
+                "comparison_id": comparison_id,
+                "preview_digest": preview_digest,
+                "source": run_id,
+                "operational_summary": {
+                    "input_tokens": None,
+                    "output_tokens": None,
+                    "usage_rows": 0,
+                },
+            }
+            digest = _comparison_qualification_digest(unsigned)
+            self.payload = {
+                **unsigned,
+                "qualification_digest": digest,
+                "result_digest": digest,
+            }
+            self.result_digest = digest
+
+        def to_dict(self) -> dict[str, Any]:
+            return _json_value_for_test(self.payload)
+
+    result = SyntheticResult()
+    rejected = result.to_dict()
+    rejected["operational_summary"] = {
+        "input_tokens": 1000,
+        "output_tokens": 100,
+        "usage_rows": 2,
+    }
+    rejected["qualification_digest"] = _comparison_qualification_digest(rejected)
+    rejected["result_digest"] = rejected["qualification_digest"]
+    atomic_write_json(destination / "result.json", rejected)
+    rejected_sha256 = hashlib.sha256(
+        (destination / "result.json").read_bytes()
+    ).hexdigest()
+
+    def read_result(path: Path) -> SyntheticResult:
+        payload = json.loads(path.read_text(encoding="utf-8"))
+        if payload != result.to_dict():
+            raise ValueError("synthetic rejected partial")
+        return result
+
+    def write_result(
+        selected: SyntheticResult,
+        *,
+        destination: Path,
+    ) -> tuple[Path, Path]:
+        assert selected is result
+        atomic_write_json(destination / "result.json", selected.to_dict())
+        (destination / "result.md").write_text("# Synthetic result\n", encoding="utf-8")
+        atomic_write_json(destination / "reproduction.json", {"verified": True})
+        return destination / "result.json", destination / "result.md"
+
+    forbidden_calls: list[str] = []
+
+    def forbidden(*_args: object, **_kwargs: object) -> object:
+        forbidden_calls.append("called")
+        raise AssertionError("host-only finalization invoked paid work")
+
+    publication_events: list[str] = []
+
+    def publish(**kwargs: object) -> None:
+        assert (destination / "local-result-finalization.json").is_file()
+        assert read_result(Path(str(kwargs["json_path"]))) is result
+        publication_events.append("after-canonical-validation")
+        atomic_write_json(
+            tmp_path / ".fugue" / "results" / "comparisons" / "latest.json",
+            {"result_digest": result.result_digest},
+        )
+
+    monkeypatch.setattr(comparison_module, "ComparisonResultV3", SyntheticResult)
+    monkeypatch.setattr(
+        comparison_module, "_verify_approved_comparison_execution_lock", lambda _x: None
+    )
+    monkeypatch.setattr(comparison_module, "_verified_approved_inputs", lambda *_a, **_k: {})
+    monkeypatch.setattr(
+        comparison_module,
+        "_qualification_input_readiness",
+        lambda *_a, **_k: ({}, []),
+    )
+    monkeypatch.setattr(
+        comparison_module, "_bound_v3_release_note_coverage", lambda *_a, **_k: ()
+    )
+    monkeypatch.setattr(comparison_module, "LocalEvidenceStore", SyntheticStore)
+    monkeypatch.setattr(
+        comparison_module,
+        "_local_comparison_prediction_row",
+        lambda *, attempt_id, **_kwargs: checkpoint_rows[attempt_id],
+    )
+    monkeypatch.setattr(
+        comparison_module,
+        "_bind_local_execution_evidence",
+        lambda selected_rows, **_kwargs: store_calls.append(
+            f"bound:{len(selected_rows)}"
+        ),
+    )
+    monkeypatch.setattr(
+        comparison_module, "analyze_comparison_rows", lambda **_kwargs: result
+    )
+    monkeypatch.setattr(comparison_module, "write_comparison_result", write_result)
+    monkeypatch.setattr(comparison_module, "read_comparison_result", read_result)
+    monkeypatch.setattr(comparison_module, "_publish_comparison_result", publish)
+    monkeypatch.setattr(comparison_module, "execute_comparison", forbidden)
+    monkeypatch.setattr(
+        comparison_module, "_score_and_bind_exported_comparison_rows", forbidden
+    )
+    monkeypatch.setattr(comparison_module, "_request_comparison_judge", forbidden)
+    monkeypatch.setattr(
+        "fugue.bench.runtime_provenance.resolve_fugue_distribution_provenance",
+        lambda: {"schema_version": 2, "kind": "finalizer", "digest": "3" * 64},
+    )
+
+    finalized, result_path, markdown_path, receipt_path = (
+        comparison_module.finalize_local_comparison_result(
+            spec,
+            comparison_path=comparison_path,
+            run_id=run_id,
+            repo_root=tmp_path,
+        )
+    )
+    assert finalized is result
+    assert read_result(result_path) is result
+    assert markdown_path.read_text(encoding="utf-8") == "# Synthetic result\n"
+    assert publication_events == ["after-canonical-validation"]
+    assert forbidden_calls == []
+    assert store_calls.count("manifest") == 1
+    assert set(attempt_ids) <= set(store_calls)
+    archived = destination / "rejected-results" / f"{rejected_sha256}.result.json"
+    assert archived.is_file()
+    receipt = json.loads(receipt_path.read_text(encoding="utf-8"))
+    assert receipt["execution_distribution"]["digest"] == "d" * 64
+    assert receipt["finalizer_distribution"]["digest"] == "3" * 64
+    assert receipt["bindings"]["execution_schedule"]["event_chain_digest"] == (
+        recovery.event_chain_digest
+    )
+
+    immutable_paths = (
+        journal_path,
+        destination / "attempts.jsonl",
+        result_path,
+        markdown_path,
+        destination / "reproduction.json",
+        receipt_path,
+        archived,
+    )
+    before = {path: hashlib.sha256(path.read_bytes()).hexdigest() for path in immutable_paths}
+    second = comparison_module.finalize_local_comparison_result(
+        spec,
+        comparison_path=comparison_path,
+        run_id=run_id,
+        repo_root=tmp_path,
+    )
+    after = {path: hashlib.sha256(path.read_bytes()).hexdigest() for path in immutable_paths}
+    assert second[0] is result
+    assert before == after
+    assert publication_events == [
+        "after-canonical-validation",
+        "after-canonical-validation",
+    ]
+
+    tamper_targets = (
+        markdown_path,
+        manifest_path,
+        journal_path,
+        run_dir / "comparison-checkpoint.json",
+    )
+    for target in tamper_targets:
+        original = target.read_bytes()
+        target.write_bytes(original + b" ")
+        with pytest.raises((ValueError, RuntimeError)):
+            comparison_module.finalize_local_comparison_result(
+                spec,
+                comparison_path=comparison_path,
+                run_id=run_id,
+                repo_root=tmp_path,
+            )
+        target.write_bytes(original)
+    assert publication_events == [
+        "after-canonical-validation",
+        "after-canonical-validation",
+    ]
+
+
 def test_v3_result_round_trips_source_topology_and_canonical_view(
     tmp_path: Path,
 ) -> None:
@@ -2354,6 +2907,16 @@ def test_v3_result_round_trips_source_topology_and_canonical_view(
     assert (
         read_comparison_result(timed_out_destination / "result.json")
         == timed_out_result
+    )
+
+    _assert_v3_legacy_usage_alias_round_trip(
+        tmp_path=tmp_path,
+        spec=spec,
+        preview_digest=preview.preview_digest,
+        rows=rows,
+        source_project=source_project,
+        result_project=result_project,
+        approved=approved,
     )
 
     runner_start_rows = json.loads(json.dumps(rows))

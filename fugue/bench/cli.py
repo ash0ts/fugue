@@ -176,6 +176,15 @@ def _parser() -> FugueArgumentParser:
             "run retains its original immutable approval and stage locks."
         ),
     )
+    action.add_argument(
+        "--finalize",
+        metavar="RUN_ID",
+        help=(
+            "Finalize an already-complete local run from immutable host "
+            "artifacts without running an Agent, model, judge, scorer, or "
+            "new physical execution."
+        ),
+    )
     compare.add_argument("--approval")
     compare.add_argument(
         "--fetch-weave",
@@ -1101,12 +1110,40 @@ def _comparison_compare(args: argparse.Namespace) -> int:
         ComparisonPublicationError,
         check_comparison,
         execute_comparison,
+        finalize_local_comparison_result,
         load_comparison,
         preview_comparison,
     )
 
     root, comparison = _comparison_cli_context(args)
     spec = load_comparison(comparison, repo_root=root)
+    if args.finalize:
+        result, json_path, markdown_path, receipt_path = (
+            finalize_local_comparison_result(
+                spec,
+                comparison_path=comparison,
+                run_id=args.finalize,
+                repo_root=root,
+            )
+        )
+        if args.json:
+            print(
+                json.dumps(
+                    {
+                        "schema_version": 1,
+                        "status": "finalized",
+                        "finalization_receipt": receipt_path.relative_to(root).as_posix(),
+                        "behavioral_result": result.to_dict(),
+                    },
+                    indent=2,
+                    sort_keys=True,
+                )
+            )
+        else:
+            CONSOLE.print(Markdown(markdown_path.read_text(encoding="utf-8")))
+            CONSOLE.print(f"\nResult JSON: {json_path}")
+            CONSOLE.print(f"Finalization receipt: {receipt_path}")
+        return _comparison_result_exit_code(result)
     operator = OperatorService(root, args.env_file)
     if args.prepare:
         return _comparison_prepare(
@@ -1272,16 +1309,20 @@ def _comparison_compare(args: argparse.Namespace) -> int:
             CONSOLE.print(f"Publication receipt: {publication_error.receipt_path}")
     if publication_error is not None:
         return 3
+    return _comparison_result_exit_code(result)
+
+
+def _comparison_result_exit_code(result: object) -> int:
     behavioral = getattr(result, "behavioral_summary", None)
     if (
-        result.incomplete
-        or result.required_evaluations_incomplete
+        getattr(result, "incomplete", False)
+        or getattr(result, "required_evaluations_incomplete", False)
         or getattr(behavioral, "status", "") in {"invalid", "incomplete"}
     ):
         return 3
     return (
         1
-        if result.regressed
+        if getattr(result, "regressed", 0)
         or getattr(result, "mixed", 0)
         or getattr(behavioral, "status", "") in {"regressed", "mixed"}
         else 0
