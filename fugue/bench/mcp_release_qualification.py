@@ -12,14 +12,37 @@ from pathlib import Path
 from typing import Any
 
 import httpx
-import weave
 from filelock import FileLock
+
+try:
+    import weave as _weave
+except ModuleNotFoundError as exc:
+    if exc.name != "weave":
+        raise
+    _weave = None
 
 from fugue.bench.analysis_contracts import EvidenceDriftCheckV1
 from fugue.bench.candidates import stable_digest
 from fugue.bench.files import atomic_write_json
 from fugue.bench.operator import load_env
 from fugue.model_plane import trace_api_key
+
+
+class _MissingWeave:
+    def __getattr__(self, name: str) -> Any:
+        raise RuntimeError(
+            "this MCP qualification operation requires the optional "
+            "'fugue[weave]' extra"
+        )
+
+
+weave: Any = _weave if _weave is not None else _MissingWeave()
+
+
+def _weave_op(*, name: str) -> Callable[[Callable[..., Any]], Callable[..., Any]]:
+    if _weave is None:
+        return lambda function: function
+    return _weave.op(name=name)
 
 QUALIFICATION_RESULT_PROJECT = "wandb/fugue-mcp-release-qualification-v1"
 QUALIFICATION_SOURCE_PROJECT = "wandb/fugue-mcp-release-source-v2"
@@ -4667,7 +4690,7 @@ def _materialize_hosted_source(
                 )
 
 
-@weave.op(name="fugue.qualification.wandb_mcp_tool")
+@_weave_op(name="fugue.qualification.wandb_mcp_tool")
 def _seed_tool_span(
     *,
     tool_name: str,
@@ -4681,7 +4704,7 @@ def _seed_tool_span(
     }
 
 
-@weave.op(name="fugue.qualification.maintenance_agent")
+@_weave_op(name="fugue.qualification.maintenance_agent")
 def _seed_agent_conversation(
     *,
     run_id: str,
@@ -4773,7 +4796,7 @@ def _seed_agent_conversation(
     }
 
 
-@weave.op(name="fugue.qualification.baseline_evidence_model")
+@_weave_op(name="fugue.qualification.baseline_evidence_model")
 def _baseline_evidence_model(
     *,
     case_id: str,
@@ -4789,7 +4812,7 @@ def _baseline_evidence_model(
     }
 
 
-@weave.op(name="fugue.qualification.candidate_evidence_model")
+@_weave_op(name="fugue.qualification.candidate_evidence_model")
 def _candidate_evidence_model(
     *,
     case_id: str,
@@ -4805,7 +4828,7 @@ def _candidate_evidence_model(
     }
 
 
-@weave.op(name="fugue.qualification.evidence_alignment_scorer")
+@_weave_op(name="fugue.qualification.evidence_alignment_scorer")
 def _evidence_alignment_scorer(
     *,
     output: Mapping[str, Any],

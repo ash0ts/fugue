@@ -103,6 +103,14 @@ def _parser() -> FugueArgumentParser:
     )
     subparsers = parser.add_subparsers(dest="command", metavar="COMMAND")
 
+    doctor = subparsers.add_parser(
+        "doctor", help="Inspect this Fugue installation and optional capabilities"
+    )
+    doctor.add_argument("--json", action="store_true")
+    doctor.add_argument("--workspace", type=Path, default=Path.cwd())
+    doctor.add_argument("--model")
+    doctor.set_defaults(handler=_doctor)
+
     init = subparsers.add_parser(
         "init", help="Scaffold an Agent-change comparison"
     )
@@ -767,6 +775,31 @@ def _comparison_init(args: argparse.Namespace) -> int:
     path = scaffold_comparison(args.destination, force=args.force)
     CONSOLE.print(f"[fugue.success]Created[/] {path}")
     return 0
+
+
+def _doctor(args: argparse.Namespace) -> int:
+    from fugue.doctor import doctor_report
+
+    report = doctor_report(args.workspace, model=args.model)
+    if args.json:
+        print(json.dumps(report, indent=2, sort_keys=True))
+    else:
+        table = Table(title="Fugue doctor", box=box.ROUNDED)
+        table.add_column("Capability")
+        table.add_column("Status")
+        table.add_column("Detail")
+        distribution = report["distribution"]
+        table.add_row(
+            "distribution",
+            "ready" if report["ok"] else "invalid",
+            f"fugue {distribution['version']} · {distribution['digest'][:12]}",
+        )
+        for name, item in report["optional_features"].items():
+            ready = item.get("ready", item["installed"])
+            detail = item.get("version") or "install the matching Fugue extra"
+            table.add_row(name.replace("_", " "), "ready" if ready else "optional", detail)
+        CONSOLE.print(table)
+    return 0 if report["ok"] else 2
 
 
 def _comparison_check(args: argparse.Namespace) -> int:

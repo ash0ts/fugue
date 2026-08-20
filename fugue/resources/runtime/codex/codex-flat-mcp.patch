@@ -1,0 +1,57 @@
+diff --git a/codex-rs/core/src/tools/handlers/mcp.rs b/codex-rs/core/src/tools/handlers/mcp.rs
+index c9533fd..6d7a5b4 100644
+--- a/codex-rs/core/src/tools/handlers/mcp.rs
++++ b/codex-rs/core/src/tools/handlers/mcp.rs
+@@ -16,8 +16,6 @@ use crate::tools::registry::PreToolUsePayload;
+ use crate::tools::registry::ToolExecutor;
+ use crate::tools::registry::ToolTelemetryTags;
+ use codex_mcp::ToolInfo;
+-use codex_tools::ResponsesApiNamespace;
+-use codex_tools::ResponsesApiNamespaceTool;
+ use codex_tools::ToolName;
+ use codex_tools::ToolSearchInfo;
+ use codex_tools::ToolSearchSourceInfo;
+@@ -66,7 +64,7 @@ fn ensure_mcp_prefix(name: &str) -> String {
+ 
+ impl ToolExecutor<ToolInvocation> for McpHandler {
+     fn tool_name(&self) -> ToolName {
+-        self.tool_info.canonical_tool_name()
++        flat_mcp_tool_name(&self.tool_info)
+     }
+ 
+     fn spec(&self) -> ToolSpec {
+@@ -232,28 +230,13 @@ impl CoreToolRuntime for McpHandler {
+ 
+ fn create_tool_spec(tool_info: &ToolInfo) -> Result<ToolSpec, serde_json::Error> {
+     let tool_name = tool_info.canonical_tool_name();
+-    let tool = mcp_tool_to_responses_api_tool(&tool_name, &tool_info.tool)?;
+-    let description = tool_info
+-        .namespace_description
+-        .as_deref()
+-        .map(str::trim)
+-        .filter(|description| !description.is_empty())
+-        .map(str::to_string)
+-        .or_else(|| {
+-            tool_info
+-                .connector_name
+-                .as_deref()
+-                .map(str::trim)
+-                .filter(|connector_name| !connector_name.is_empty())
+-                .map(|connector_name| format!("Tools for working with {connector_name}."))
+-        })
+-        .unwrap_or_default();
++    let mut tool = mcp_tool_to_responses_api_tool(&tool_name, &tool_info.tool)?;
++    tool.name = join_tool_name(&tool_name);
++    Ok(ToolSpec::Function(tool))
++}
+ 
+-    Ok(ToolSpec::Namespace(ResponsesApiNamespace {
+-        name: tool_info.callable_namespace.clone(),
+-        description,
+-        tools: vec![ResponsesApiNamespaceTool::Function(tool)],
+-    }))
++fn flat_mcp_tool_name(tool_info: &ToolInfo) -> ToolName {
++    ToolName::plain(join_tool_name(&tool_info.canonical_tool_name()))
+ }
+ 
+ fn mcp_hook_tool_input(raw_arguments: &str) -> Value {

@@ -37,6 +37,7 @@ def test_public_command_surface_is_intentionally_small() -> None:
         if isinstance(action, cli.argparse._SubParsersAction)
     )
     assert set(subparsers.choices) == {
+        "doctor",
         "init",
         "check",
         "compare",

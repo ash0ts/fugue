@@ -17,7 +17,6 @@ dependencies = [
     "rich-argparse==1.8.0",
     "textual==8.2.8",
     "toml==0.10.2",
-    "weave==0.53.1",
 ]
 
 [project.scripts]
@@ -30,6 +29,13 @@ dev = [
     "ruff",
     "skills-ref==0.1.1",
     "vulture==2.16",
+    "weave==0.53.1",
+]
+local-runner = [
+    "harbor==0.18.0; python_version >= '3.13'",
+]
+weave = [
+    "weave==0.53.1",
 ]
 context = [
     "fastembed==0.8.0",
@@ -48,6 +54,7 @@ serve = [
     "lancedb==0.34.0",
     "mcp==1.28.1",
     "uvicorn>=0.34,<1",
+    "weave==0.53.1",
 ]
 research = [
     "fastapi>=0.115,<1",
@@ -65,12 +72,17 @@ research-worker = [
     "pydantic>=2.10,<3",
     "uvicorn>=0.34,<1",
     "wandb==0.28.1; python_version >= '3.13'",
+    "weave==0.53.1",
 ]
 
 [tool.uv]
 # The full context lab contains mem0's older OpenAI client constraint. Candidate
 # serving deliberately supports the production-safe context subset above instead.
 conflicts = [
+    [
+        { extra = "context" },
+        { extra = "local-runner" },
+    ],
     [
         { extra = "context" },
         { extra = "serve" },
@@ -80,6 +92,9 @@ conflicts = [
         { extra = "research-worker" },
     ],
 ]
+
+[tool.setuptools]
+include-package-data = false
 
 [tool.setuptools.packages.find]
 include = ["fugue*", "tools*"]
@@ -92,6 +107,22 @@ fugue = [
     "resources/source-use-replay/*.yaml",
     "resources/source-use-replay/configs/fugue/context-systems/*.yaml",
     "resources/source-use-replay/configs/fugue/skills/*/*.md",
+    "resources/context-systems/*.yaml",
+    "resources/build-provenance.json",
+    "resources/runtime/**/*.json",
+    "resources/runtime/**/*.mjs",
+    "resources/runtime/**/*.patch",
+    "resources/runtime/**/*.py",
+    "resources/runtime/**/*.sh",
+    "resources/schemas/**/*.json",
+    "resources/vendor/*.tgz",
+]
+
+[tool.setuptools.exclude-package-data]
+fugue = [
+    "resources/runtime/hermes/__pycache__/*",
+    "resources/**/__pycache__/*",
+    "resources/**/*.pyc",
 ]
 
 [tool.ruff]

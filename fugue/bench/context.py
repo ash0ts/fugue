@@ -19,6 +19,7 @@ from collections import Counter
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
 from dataclasses import asdict, dataclass, field, replace
+from importlib.resources import files
 from pathlib import Path, PurePosixPath
 from typing import Any, Literal, Protocol
 
@@ -1303,7 +1304,7 @@ def context_system_root(repo_root: Path | None = None) -> Path:
     requested = (repo_root or Path.cwd()) / CONTEXT_SYSTEMS_DIR
     if requested.exists():
         return requested
-    bundled = Path(__file__).resolve().parents[2] / CONTEXT_SYSTEMS_DIR
+    bundled = Path(str(files("fugue").joinpath("resources", "context-systems")))
     return bundled if bundled.exists() else requested
 
 

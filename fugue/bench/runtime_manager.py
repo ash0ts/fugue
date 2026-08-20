@@ -11,6 +11,11 @@ from typing import Any
 
 import yaml
 
+from fugue.bench.distribution_assets import (
+    DistributionAsset,
+    fugue_package_asset,
+    runtime_assets,
+)
 from fugue.bench.files import atomic_write_json, docker_build_command
 from fugue.bench.files import inspect_docker_image as _inspect_image
 
@@ -45,18 +50,17 @@ class ManagedMCPRuntimeSpec:
 
     @property
     def recipe_sha256(self) -> str:
-        gateway = Path(__file__).resolve().parents[1] / "mcp_gateway.py"
+        gateway = fugue_package_asset("mcp_gateway.py")
         build_assets = _runtime_build_assets(self.system_id)
         return _digest(
             {
                 "spec": asdict(self),
-                "gateway_sha256": hashlib.sha256(gateway.read_bytes()).hexdigest(),
+                "gateway_sha256": gateway.sha256,
                 "entrypoint_sha256": hashlib.sha256(
                     _gateway_entrypoint().encode()
                 ).hexdigest(),
                 "build_assets": {
-                    path.name: hashlib.sha256(path.read_bytes()).hexdigest()
-                    for path in build_assets
+                    asset.name: asset.sha256 for asset in build_assets
                 },
             }
         )
@@ -100,11 +104,8 @@ _SEMBLE_COMMAND = (
 )
 
 
-def _runtime_build_assets(system_id: str) -> tuple[Path, ...]:
-    root = Path(__file__).resolve().parents[2] / "configs/fugue/runtime" / system_id
-    if not root.is_dir():
-        return ()
-    return tuple(path for path in sorted(root.iterdir()) if path.is_file())
+def _runtime_build_assets(system_id: str) -> tuple[DistributionAsset, ...]:
+    return runtime_assets(system_id)
 
 
 def _node_runtime(
@@ -406,11 +407,11 @@ def prepare_runtime(
     build = root / "build"
     build.mkdir(parents=True, exist_ok=True)
     (build / "Dockerfile").write_text(spec.dockerfile)
-    gateway = Path(__file__).resolve().parents[1] / "mcp_gateway.py"
-    shutil.copy2(gateway, build / "mcp_gateway.py")
+    gateway = fugue_package_asset("mcp_gateway.py")
+    (build / "mcp_gateway.py").write_bytes(gateway.body)
     (build / "start-gateway").write_text(_gateway_entrypoint())
     for asset in _runtime_build_assets(system_id):
-        shutil.copy2(asset, build / asset.name)
+        (build / asset.name).write_bytes(asset.body)
     subprocess.run(
         docker_build_command(
             "--pull",

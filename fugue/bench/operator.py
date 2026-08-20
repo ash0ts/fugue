@@ -106,7 +106,10 @@ from fugue.bench.run_conformance import (
     write_harbor_run_conformance_receipt,
 )
 from fugue.bench.runtime_manager import prepare_runtime, runtime_ready, runtime_spec
-from fugue.bench.runtime_provenance import resolve_fugue_source_provenance
+from fugue.bench.runtime_provenance import (
+    resolve_fugue_distribution_provenance,
+    resolve_fugue_source_provenance,
+)
 from fugue.bench.scoring import (
     read_intervention_selection_lock,
     read_treatment_selection_lock,
@@ -1898,6 +1901,7 @@ class OperatorService:
                     ),
                     "scheduling_seed": preset.scheduling_seed,
                     "fugue_source": source_provenance,
+                    "fugue_distribution": resolve_fugue_distribution_provenance(),
                 },
             )
             candidate_id = resolved_candidate.candidate_id
@@ -2114,18 +2118,10 @@ class OperatorService:
                     else ""
                 ),
             )
-            source_commit = str(
-                (run_snapshot.runtime.get("fugue_source") or {}).get("commit") or ""
-            )
-            source_tree = str(
-                (run_snapshot.runtime.get("fugue_source") or {}).get("tree") or ""
-            )
-            source_dirty_digest = str(
-                (run_snapshot.runtime.get("fugue_source") or {}).get(
-                    "dirty_digest"
-                )
-                or ""
-            )
+            source_state = run_snapshot.runtime.get("fugue_source") or {}
+            source_commit = str(source_state.get("commit") or "")
+            source_tree = str(source_state.get("tree") or "")
+            source_dirty_digest = str(source_state.get("dirty_digest") or "")
             cells = [
                 replace(
                     cell,

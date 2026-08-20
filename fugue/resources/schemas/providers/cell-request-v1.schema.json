@@ -1,0 +1,622 @@
+{
+  "$id": "https://fugue.local/schemas/provider/cell-request-v1.json",
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "additionalProperties": false,
+  "properties": {
+    "attempt": {
+      "minimum": 1,
+      "type": "integer"
+    },
+    "budget": {
+      "additionalProperties": false,
+      "minProperties": 1,
+      "properties": {
+        "max_cost_usd": {
+          "exclusiveMinimum": 0,
+          "type": "number"
+        },
+        "max_seconds": {
+          "exclusiveMinimum": 0,
+          "type": "number"
+        },
+        "max_steps": {
+          "exclusiveMinimum": 0,
+          "type": "number"
+        }
+      },
+      "type": "object"
+    },
+    "candidate": {
+      "additionalProperties": false,
+      "properties": {
+        "agent_code": {
+          "additionalProperties": false,
+          "properties": {
+            "digest": {
+              "pattern": "^[0-9a-f]{64}$",
+              "type": "string"
+            },
+            "files": {
+              "items": {
+                "additionalProperties": false,
+                "properties": {
+                  "digest": {
+                    "pattern": "^[0-9a-f]{64}$",
+                    "type": "string"
+                  },
+                  "id": {
+                    "minLength": 1,
+                    "type": "string"
+                  },
+                  "kind": {
+                    "minLength": 1,
+                    "type": "string"
+                  },
+                  "metadata": {
+                    "type": "object"
+                  },
+                  "source": {
+                    "minLength": 1,
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "kind",
+                  "id",
+                  "digest",
+                  "source",
+                  "metadata"
+                ],
+                "type": "object"
+              },
+              "type": "array"
+            },
+            "revision": {
+              "minLength": 1,
+              "type": "string"
+            }
+          },
+          "required": [
+            "revision",
+            "digest",
+            "files"
+          ],
+          "type": "object"
+        },
+        "agent_config": {
+          "type": "object"
+        },
+        "behavior_assets": {
+          "items": {
+            "additionalProperties": false,
+            "properties": {
+              "digest": {
+                "pattern": "^[0-9a-f]{64}$",
+                "type": "string"
+              },
+              "id": {
+                "minLength": 1,
+                "type": "string"
+              },
+              "kind": {
+                "minLength": 1,
+                "type": "string"
+              },
+              "metadata": {
+                "type": "object"
+              },
+              "source": {
+                "minLength": 1,
+                "type": "string"
+              }
+            },
+            "required": [
+              "kind",
+              "id",
+              "digest",
+              "source",
+              "metadata"
+            ],
+            "type": "object"
+          },
+          "type": "array"
+        },
+        "blockers": {
+          "items": {
+            "minLength": 1,
+            "type": "string"
+          },
+          "type": "array"
+        },
+        "bundle_digest": {
+          "pattern": "^[0-9a-f]{64}$",
+          "type": "string"
+        },
+        "candidate_ref": {
+          "minLength": 1,
+          "type": "string"
+        },
+        "display_name": {
+          "minLength": 1,
+          "type": "string"
+        },
+        "mcp_servers": {
+          "items": {
+            "additionalProperties": false,
+            "properties": {
+              "digest": {
+                "pattern": "^[0-9a-f]{64}$",
+                "type": "string"
+              },
+              "id": {
+                "minLength": 1,
+                "type": "string"
+              },
+              "metadata": {
+                "type": "object"
+              },
+              "source": {
+                "minLength": 1,
+                "type": "string"
+              }
+            },
+            "required": [
+              "id",
+              "digest",
+              "source",
+              "metadata"
+            ],
+            "type": "object"
+          },
+          "type": "array"
+        },
+        "model_route": {
+          "type": "object"
+        },
+        "portability": {
+          "enum": [
+            "blocked",
+            "portable",
+            "provider_bound"
+          ]
+        },
+        "provider_id": {
+          "minLength": 1,
+          "type": "string"
+        },
+        "required_credentials": {
+          "items": {
+            "minLength": 1,
+            "type": "string"
+          },
+          "type": "array",
+          "uniqueItems": true
+        },
+        "schema_version": {
+          "const": 1
+        },
+        "skills": {
+          "items": {
+            "additionalProperties": false,
+            "properties": {
+              "digest": {
+                "pattern": "^[0-9a-f]{64}$",
+                "type": "string"
+              },
+              "id": {
+                "minLength": 1,
+                "type": "string"
+              },
+              "metadata": {
+                "type": "object"
+              },
+              "source": {
+                "minLength": 1,
+                "type": "string"
+              }
+            },
+            "required": [
+              "id",
+              "digest",
+              "source",
+              "metadata"
+            ],
+            "type": "object"
+          },
+          "type": "array"
+        }
+      },
+      "required": [
+        "schema_version",
+        "provider_id",
+        "candidate_ref",
+        "display_name",
+        "agent_config",
+        "model_route",
+        "behavior_assets",
+        "skills",
+        "mcp_servers",
+        "agent_code",
+        "required_credentials",
+        "portability",
+        "blockers",
+        "bundle_digest"
+      ],
+      "type": "object"
+    },
+    "candidate_digest": {
+      "pattern": "^[0-9a-f]{64}$",
+      "type": "string"
+    },
+    "cell_id": {
+      "minLength": 1,
+      "type": "string"
+    },
+    "credential_profile_names": {
+      "items": {
+        "minLength": 1,
+        "type": "string"
+      },
+      "type": "array",
+      "uniqueItems": true
+    },
+    "plan_digest": {
+      "pattern": "^[0-9a-f]{64}$",
+      "type": "string"
+    },
+    "preparation": {
+      "additionalProperties": false,
+      "properties": {
+        "candidate_digest": {
+          "pattern": "^[0-9a-f]{64}$",
+          "type": "string"
+        },
+        "cleanup_obligations": {
+          "items": {
+            "type": "object"
+          },
+          "type": "array"
+        },
+        "frozen_references": {
+          "items": {
+            "type": "object"
+          },
+          "type": "array"
+        },
+        "lifecycle_outputs": {
+          "items": {
+            "type": "object"
+          },
+          "type": "array"
+        },
+        "materialized_resources": {
+          "items": {
+            "type": "object"
+          },
+          "type": "array"
+        },
+        "prepared_at": {
+          "minLength": 1,
+          "type": "string"
+        },
+        "provider_id": {
+          "minLength": 1,
+          "type": "string"
+        },
+        "provider_lock_digest": {
+          "pattern": "^[0-9a-f]{64}$",
+          "type": "string"
+        },
+        "receipt_digest": {
+          "pattern": "^[0-9a-f]{64}$",
+          "type": "string"
+        },
+        "runtime_artifacts": {
+          "items": {
+            "type": "object"
+          },
+          "type": "array"
+        },
+        "schema_version": {
+          "const": 1
+        },
+        "suite_digest": {
+          "pattern": "^[0-9a-f]{64}$",
+          "type": "string"
+        }
+      },
+      "required": [
+        "schema_version",
+        "provider_id",
+        "provider_lock_digest",
+        "candidate_digest",
+        "suite_digest",
+        "frozen_references",
+        "materialized_resources",
+        "lifecycle_outputs",
+        "runtime_artifacts",
+        "cleanup_obligations",
+        "prepared_at",
+        "receipt_digest"
+      ],
+      "type": "object"
+    },
+    "preparation_receipt_digest": {
+      "pattern": "^[0-9a-f]{64}$",
+      "type": "string"
+    },
+    "provider_id": {
+      "minLength": 1,
+      "type": "string"
+    },
+    "request_digest": {
+      "pattern": "^[0-9a-f]{64}$",
+      "type": "string"
+    },
+    "runtime_lock_digest": {
+      "pattern": "^[0-9a-f]{64}$",
+      "type": "string"
+    },
+    "schema_version": {
+      "const": 1
+    },
+    "suite_digest": {
+      "pattern": "^[0-9a-f]{64}$",
+      "type": "string"
+    },
+    "task": {
+      "additionalProperties": false,
+      "properties": {
+        "blockers": {
+          "items": {
+            "minLength": 1,
+            "type": "string"
+          },
+          "type": "array"
+        },
+        "credential_names": {
+          "items": {
+            "minLength": 1,
+            "type": "string"
+          },
+          "type": "array",
+          "uniqueItems": true
+        },
+        "evaluator_ids": {
+          "items": {
+            "minLength": 1,
+            "type": "string"
+          },
+          "type": "array",
+          "uniqueItems": true
+        },
+        "id": {
+          "minLength": 1,
+          "type": "string"
+        },
+        "input": {
+          "items": {
+            "additionalProperties": false,
+            "properties": {
+              "payload": {
+                "type": "object"
+              },
+              "type": {
+                "minLength": 1,
+                "type": "string"
+              }
+            },
+            "required": [
+              "type",
+              "payload"
+            ],
+            "type": "object"
+          },
+          "minItems": 1,
+          "type": "array"
+        },
+        "integration_config": {
+          "type": "object"
+        },
+        "interaction": {
+          "additionalProperties": false,
+          "properties": {
+            "config": {
+              "type": "object"
+            },
+            "directions": {
+              "items": {
+                "minLength": 1,
+                "type": "string"
+              },
+              "type": "array"
+            },
+            "profile": {
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "turns": {
+              "items": {
+                "type": "object"
+              },
+              "type": "array"
+            },
+            "type": {
+              "minLength": 1,
+              "type": "string"
+            }
+          },
+          "required": [
+            "type",
+            "profile",
+            "turns",
+            "directions",
+            "config"
+          ],
+          "type": "object"
+        },
+        "lifecycle": {
+          "additionalProperties": false,
+          "properties": {
+            "bootstrap": {
+              "oneOf": [
+                {
+                  "additionalProperties": false,
+                  "properties": {
+                    "digest": {
+                      "pattern": "^[0-9a-f]{64}$",
+                      "type": "string"
+                    },
+                    "id": {
+                      "minLength": 1,
+                      "type": "string"
+                    },
+                    "kind": {
+                      "minLength": 1,
+                      "type": "string"
+                    },
+                    "metadata": {
+                      "type": "object"
+                    },
+                    "source": {
+                      "minLength": 1,
+                      "type": "string"
+                    }
+                  },
+                  "required": [
+                    "kind",
+                    "id",
+                    "digest",
+                    "source",
+                    "metadata"
+                  ],
+                  "type": "object"
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            },
+            "setup": {
+              "items": {
+                "additionalProperties": false,
+                "properties": {
+                  "args": {
+                    "type": "object"
+                  },
+                  "profile": {
+                    "minLength": 1,
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "profile",
+                  "args"
+                ],
+                "type": "object"
+              },
+              "type": "array"
+            },
+            "teardown": {
+              "items": {
+                "additionalProperties": false,
+                "properties": {
+                  "args": {
+                    "type": "object"
+                  },
+                  "profile": {
+                    "minLength": 1,
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "profile",
+                  "args"
+                ],
+                "type": "object"
+              },
+              "type": "array"
+            }
+          },
+          "required": [
+            "bootstrap",
+            "setup",
+            "teardown"
+          ],
+          "type": "object"
+        },
+        "metadata": {
+          "type": "object"
+        },
+        "portability": {
+          "enum": [
+            "blocked",
+            "portable",
+            "provider_bound"
+          ]
+        },
+        "stopping_policy": {
+          "items": {
+            "additionalProperties": false,
+            "properties": {
+              "limit": {
+                "exclusiveMinimum": 0,
+                "type": "number"
+              },
+              "type": {
+                "minLength": 1,
+                "type": "string"
+              }
+            },
+            "required": [
+              "type",
+              "limit"
+            ],
+            "type": "object"
+          },
+          "type": "array"
+        },
+        "title": {
+          "minLength": 1,
+          "type": "string"
+        }
+      },
+      "required": [
+        "id",
+        "title",
+        "input",
+        "interaction",
+        "stopping_policy",
+        "lifecycle",
+        "credential_names",
+        "integration_config",
+        "evaluator_ids",
+        "metadata",
+        "portability",
+        "blockers"
+      ],
+      "type": "object"
+    }
+  },
+  "required": [
+    "schema_version",
+    "provider_id",
+    "plan_digest",
+    "cell_id",
+    "candidate_digest",
+    "suite_digest",
+    "preparation_receipt_digest",
+    "candidate",
+    "preparation",
+    "task",
+    "attempt",
+    "runtime_lock_digest",
+    "credential_profile_names",
+    "budget",
+    "request_digest"
+  ],
+  "title": "cell-request",
+  "type": "object"
+}

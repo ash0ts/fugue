@@ -1,12 +1,17 @@
 from __future__ import annotations
 
 import hashlib
+import json
 import os
 import subprocess
+from importlib.metadata import PackageNotFoundError, version
+from importlib.resources import files
+from importlib.resources.abc import Traversable
 from pathlib import Path, PurePosixPath
 from typing import Any
 
 SOURCE_PROVENANCE_SCHEMA_VERSION = 1
+DISTRIBUTION_PROVENANCE_SCHEMA_VERSION = 1
 _FALLBACK_EXCLUDED_ROOTS = {
     ".fugue",
     ".git",
@@ -21,7 +26,13 @@ _FALLBACK_EXCLUDED_ROOTS = {
 
 
 def resolve_fugue_source_provenance(repo_root: Path) -> dict[str, Any]:
-    """Resolve the executing source state once for an execution plan."""
+    """Resolve user-workspace source state (legacy public name)."""
+
+    return resolve_workspace_source_provenance(repo_root)
+
+
+def resolve_workspace_source_provenance(repo_root: Path) -> dict[str, Any]:
+    """Resolve the user workspace independently of Fugue's installation."""
 
     root = repo_root.resolve()
     commit = _git(root, "rev-parse", "--verify", "HEAD")
@@ -56,6 +67,64 @@ def resolve_fugue_source_provenance(repo_root: Path) -> dict[str, Any]:
     if status:
         provenance["dirty_digest"] = _dirty_tree_digest(root, status)
     return provenance
+
+
+def resolve_fugue_distribution_provenance() -> dict[str, Any]:
+    """Resolve the installed Fugue code and bundled assets without using cwd."""
+
+    digest = hashlib.sha256()
+    count = 0
+    for package in ("fugue",):
+        root = files(package)
+        for relative, item in _distribution_files(root):
+            digest.update(package.encode())
+            digest.update(b"\0")
+            digest.update(relative.encode())
+            digest.update(b"\0")
+            digest.update(item.read_bytes())
+            digest.update(b"\0")
+            count += 1
+    try:
+        installed_version = version("fugue")
+    except PackageNotFoundError:
+        installed_version = "0+uninstalled"
+    build = _embedded_build_provenance()
+    return {
+        "schema_version": DISTRIBUTION_PROVENANCE_SCHEMA_VERSION,
+        "kind": "installed_distribution",
+        "name": "fugue",
+        "version": installed_version,
+        "source_commit": build.get("source_commit"),
+        "digest": digest.hexdigest(),
+        "files": count,
+    }
+
+
+def _embedded_build_provenance() -> dict[str, Any]:
+    item = files("fugue").joinpath("resources", "build-provenance.json")
+    if not item.is_file():
+        return {}
+    try:
+        value = json.loads(item.read_text(encoding="utf-8"))
+    except (OSError, UnicodeDecodeError, json.JSONDecodeError):
+        return {}
+    return value if isinstance(value, dict) else {}
+
+
+def _distribution_files(
+    root: Traversable,
+    prefix: str = "",
+) -> list[tuple[str, Traversable]]:
+    selected: list[tuple[str, Traversable]] = []
+    for item in sorted(root.iterdir(), key=lambda candidate: candidate.name):
+        if item.name == "__pycache__" or item.name.endswith((".pyc", ".pyo")):
+            continue
+        relative = f"{prefix}/{item.name}" if prefix else item.name
+        if item.is_dir():
+            selected.extend(_distribution_files(item, relative))
+        elif item.is_file():
+            selected.append((relative, item))
+    return selected
 
 
 def _dirty_tree_digest(root: Path, status: bytes) -> str:
