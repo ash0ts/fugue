@@ -1,0 +1,29 @@
+{
+  "admissions": [
+    {
+      "admission_digest": "82701986da247401fb13d485ec71c183f7c4ae91e14a0b8b6ad6de85eac2a9ff",
+      "aligned_analysis_digest": "a61d5efe90fee6e9f3379ea00b7e7f8644aef4b63c2c40a2e55504cc608edf10",
+      "comparison_id": "mcp-main-vs-0-4-tool-surface-confirmation-v10",
+      "evidence_topology_digest": "df025901c1bd7e503d588324e72ccef1b9d2ae5291d1a886089035c8858f4867",
+      "preview_digest": "26e97037dd3b146d610cc5a95fc487df0cb407aeb04f3c1cd01e074b14d5d803",
+      "qualification_digest": "e062f5b392a36d9ebd97adc3ab58b6e253cdd9dd943381342d51d76303bbcf38",
+      "result_digest": "e062f5b392a36d9ebd97adc3ab58b6e253cdd9dd943381342d51d76303bbcf38",
+      "result_file_sha256": "1a414f3dfbd5e92d7beaecbc0b175dbfded4986b757adf4306b27f1e522d98e3",
+      "result_project": "wandb/fugue-mcp-release-qualification-v1",
+      "result_source": "20260731T063856-2fe747cab6",
+      "reviewed_provenance": {
+        "digest": "ca7674943384ec41ef8c4690479cb9e5c9fd33bf9c1e56a191b932b76991f646",
+        "kind": "comparison-repeated-failure-lock",
+        "preview_artifact_sha256": "9a0ea5ca72fbdde09dceebce9cad1a9f6ec591e560e09c5ec9da6b6a1f0fe0ac",
+        "review_status": "reviewed",
+        "spec_digest": "01505584f3af5146c165be47c9635bc5a992cbd029f8fcaa38991a030d340f61"
+      },
+      "schema_version": 1,
+      "source_lock_digest": "c335b3a35d6a5a8231f1135a33e86ff9adafe7f7988625e21297544cca530f1e",
+      "source_project": "wandb/fugue-mcp-release-source-v2"
+    }
+  ],
+  "kind": "legacy-hosted-v3-admission-registry",
+  "registry_digest": "b4b37d6ddaeb504556db8e29c0561fa64c0604b91a952e01f5bf7e7b4ba4925e",
+  "schema_version": 1
+}

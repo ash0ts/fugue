@@ -898,6 +898,299 @@ def test_hosted_dynamic_row_merge_rejects_nonempty_identity_conflict() -> None:
     assert canonical["comparison_deterministic_scores"] == {"fact-correct": True}
 
 
+def test_hosted_decision_receipt_controls_canonical_behavior() -> None:
+    canonical = {
+        "record_type": "trial",
+        "run_id": "run-a",
+        "cell_id": "cell-a",
+        "attempt_id": "a" * 64,
+        "candidate_id": "candidate-a",
+        "execution_fingerprint": "e" * 64,
+        "prediction_id": "p" * 64,
+        "evidence_backend": "weave",
+        "trace_project": "entity/project",
+        "trace_receipt": {"app_base_url": "https://wandb.ai"},
+        "weave_evaluation_root_call_id": "evaluation",
+        "eval_predict_and_score_call_id": "predict-and-score",
+        "weave_prediction_call_id": "prediction",
+        "weave_dataset_ref": "weave:///entity/project/object/tasks:v1",
+        "weave_agent_bridge_call_id": "bridge",
+        "weave_agent_root_call_id": "agent-receipt",
+        "local_evidence_record_digest": "d" * 64,
+        "status": "passed",
+        "runtime_outcome": "completed",
+        "terminal_kind": "success",
+        "pass": True,
+        "comparison_evaluation_status": "scored",
+        "comparison_required_evaluation_complete": True,
+        "comparison_deterministic_scores": {"answer_correct": True},
+        "task_result": {
+            "schema_version": 1,
+            "task_passed": True,
+            "outcome_summary": "The task passed.",
+            "failed_required_checks": [],
+            "answer_digest": None,
+            "agent_execution_status": "completed",
+            "evidence_integrity_status": "verified",
+        },
+    }
+    canonical_result = export._canonical_hosted_task_result(canonical)
+    receipt_call_id = export._hosted_evidence_verification_call_id(canonical)
+    provisional_score_set_digest = stable_digest(
+        export._provisional_evaluation_scores(canonical)
+    )
+    bindings = {
+        "schema_version": 1,
+        "attempt_id": canonical["attempt_id"],
+        "evaluation_root_call_id": canonical["weave_evaluation_root_call_id"],
+        "predict_and_score_call_id": canonical[
+            "eval_predict_and_score_call_id"
+        ],
+        "prediction_call_id": canonical["weave_prediction_call_id"],
+        "dataset_ref": canonical["weave_dataset_ref"],
+        "agent_bridge_call_id": canonical["weave_agent_bridge_call_id"],
+        "agent_receipt_call_id": canonical["weave_agent_root_call_id"],
+        "evidence_project": canonical["trace_project"],
+        "canonical_local_record_digest": canonical[
+            "local_evidence_record_digest"
+        ],
+        "provisional_predict_and_score_output_digest": "1" * 64,
+        "provisional_score_set_digest": provisional_score_set_digest,
+        "provisional_score_call_set_digest": "3" * 64,
+        "canonical_payload_digest": stable_digest(canonical_result),
+    }
+    hosted = {
+        **canonical,
+        "hosted_decision_contract_version": 1,
+        "hosted_evidence_verification_status": "verified",
+        "hosted_task_result_canonical": True,
+        "terminal_hosted_visibility_verified": True,
+        "weave_hosted_evidence_receipt_object_verified": True,
+        "weave_hosted_evidence_receipt_terminal_verified": True,
+        "weave_provisional_call_verification_status": "verified",
+        "task_verdict_owner": (
+            "post_close_hosted_evidence_verification_receipt"
+        ),
+        "weave_provisional_predict_and_score_output_digest": "1" * 64,
+        "weave_provisional_score_set_digest": provisional_score_set_digest,
+        "weave_provisional_score_call_set_digest": "3" * 64,
+        "weave_hosted_evidence_receipt_call_id": receipt_call_id,
+        "weave_hosted_evidence_receipt_ref": export._weave_call_ref(
+            "entity/project", receipt_call_id
+        ),
+        "weave_hosted_evidence_receipt_url": export._weave_call_url(
+            "entity/project", receipt_call_id
+        ),
+        "weave_hosted_evidence_receipt_bindings_digest": stable_digest(bindings),
+        "weave_hosted_canonical_task_result_digest": stable_digest(
+            canonical_result["task_result"]
+        ),
+        "weave_hosted_canonical_score_set_digest": stable_digest(
+            canonical_result["scalar_checks"]
+        ),
+        "weave_hosted_canonical_payload_digest": stable_digest(canonical_result),
+        "weave_hosted_canonical_payload": canonical_result,
+    }
+
+    accepted = dict(canonical)
+    export._apply_hosted_decision_to_canonical_row(accepted, hosted)
+    assert accepted["pass"] is True
+    assert accepted["comparison_deterministic_scores"] == {
+        "answer_correct": True
+    }
+    assert accepted["hosted_task_result_canonical"] is True
+
+    invalidation_error_type = "RuntimeError"
+    invalidation_parent_verified = False
+    invalidation_hosted = {
+        **hosted,
+        "weave_hosted_evidence_invalidation_error_type": (
+            invalidation_error_type
+        ),
+        "weave_hosted_evidence_invalidation_parent_verified": (
+            invalidation_parent_verified
+        ),
+        "weave_hosted_evidence_invalidation_project": "entity/project",
+    }
+    invalidation_bindings = export._hosted_evidence_invalidation_bindings(
+        invalidation_hosted,
+        project="entity/project",
+        error_type=invalidation_error_type,
+        parent_verified=invalidation_parent_verified,
+    )
+    invalidation_output = export._hosted_evidence_invalidation_terminal_output(
+        invalidation_bindings
+    )
+    invalidation_call_id = export._hosted_evidence_invalidation_call_id(
+        invalidation_hosted
+    )
+    invalidation_hosted.update(
+        {
+            "hosted_evidence_invalidation_status": "verified",
+            "weave_hosted_evidence_invalidation_call_id": invalidation_call_id,
+            "weave_hosted_evidence_invalidation_ref": export._weave_call_ref(
+                "entity/project", invalidation_call_id
+            ),
+            "weave_hosted_evidence_invalidation_url": export._weave_call_url(
+                "entity/project", invalidation_call_id
+            ),
+            "weave_hosted_evidence_invalidation_object_verified": True,
+            "weave_hosted_evidence_invalidation_terminal_verified": True,
+            "weave_hosted_evidence_invalidation_bindings_digest": stable_digest(
+                invalidation_bindings
+            ),
+            "weave_hosted_evidence_invalidation_terminal_output_digest": (
+                stable_digest(invalidation_output)
+            ),
+        }
+    )
+    assert export._hosted_evidence_invalidation_verified(invalidation_hosted)
+
+    invalidated = dict(canonical)
+    export._apply_hosted_decision_to_canonical_row(
+        invalidated,
+        invalidation_hosted,
+    )
+    assert invalidated["terminal_kind"] == "evidence_failure"
+    assert invalidated["pass"] is None
+    assert invalidated["comparison_evaluation_status"] == "unavailable"
+    assert "comparison_deterministic_scores" not in invalidated
+    assert "task_result" not in invalidated
+
+    for field_name, invalid_value in (
+        ("weave_hosted_evidence_invalidation_call_id", "forged"),
+        ("weave_hosted_evidence_invalidation_bindings_digest", "0" * 64),
+        ("weave_hosted_evidence_invalidation_terminal_output_digest", "0" * 64),
+        ("weave_hosted_evidence_invalidation_object_verified", False),
+        ("weave_hosted_evidence_invalidation_terminal_verified", False),
+    ):
+        forged_invalidation = {**invalidation_hosted, field_name: invalid_value}
+        assert not export._hosted_evidence_invalidation_verified(
+            forged_invalidation
+        )
+
+    rejected = dict(canonical)
+    export._apply_hosted_decision_to_canonical_row(
+        rejected,
+        {**hosted, "hosted_evidence_verification_status": "invalid"},
+    )
+    assert rejected["runtime_outcome"] == "completed"
+    assert rejected["terminal_kind"] == "evidence_failure"
+    assert rejected["pass"] is None
+    assert rejected["comparison_evaluation_status"] == "unavailable"
+    assert "comparison_deterministic_scores" not in rejected
+    assert "task_result" not in rejected
+
+    forged_digest = dict(canonical)
+    export._apply_hosted_decision_to_canonical_row(
+        forged_digest,
+        {**hosted, "weave_hosted_canonical_score_set_digest": "0" * 64},
+    )
+    assert forged_digest["terminal_kind"] == "evidence_failure"
+    assert forged_digest["pass"] is None
+    assert "comparison_deterministic_scores" not in forged_digest
+    assert "task_result" not in forged_digest
+
+    malformed = dict(canonical)
+    export._apply_hosted_decision_to_canonical_row(
+        malformed,
+        {**hosted, "hosted_decision_contract_version": "not-an-integer"},
+    )
+    assert malformed["terminal_kind"] == "evidence_failure"
+    assert malformed["pass"] is None
+    assert "comparison_deterministic_scores" not in malformed
+    assert "task_result" not in malformed
+
+
+def test_provisional_hosted_readback_rejects_prediction_output_drift() -> None:
+    project = "entity/project"
+    trace_id = "a" * 32
+    provisional_output = {
+        "canonical": False,
+        "verification_status": "pending_terminal_reconciliation",
+    }
+    required_attributes = {
+        "fugue.result.canonical": False,
+        "fugue.result.status": "provisional",
+        "fugue.evidence.status": "pending_terminal_reconciliation",
+        "fugue.task_verdict.owner": (
+            "post_close_hosted_evidence_verification_receipt"
+        ),
+    }
+    evaluation = SimpleNamespace(
+        id="evaluation",
+        project_id=project,
+        parent_id=None,
+        trace_id=trace_id,
+        ended_at="terminal",
+    )
+    predict_and_score = SimpleNamespace(
+        id="pas",
+        project_id=project,
+        parent_id="evaluation",
+        trace_id=trace_id,
+        ended_at="terminal",
+        attributes=required_attributes,
+        display_name="PROVISIONAL · UNSCORED · task · arm · Attempt 1",
+        output={
+            "output": provisional_output,
+            "scores": {},
+            "model_latency": None,
+        },
+    )
+    prediction = SimpleNamespace(
+        id="prediction",
+        project_id=project,
+        parent_id="pas",
+        trace_id=trace_id,
+        ended_at="terminal",
+        attributes=required_attributes,
+        display_name="PROVISIONAL · Agent execution (no scored answer) · task",
+        output={"tampered": True},
+    )
+    calls = {
+        "pas": predict_and_score,
+        "prediction": prediction,
+    }
+    client = SimpleNamespace(
+        project_id=project,
+        get_call=lambda call_id: calls[call_id],
+    )
+    coordinator = object.__new__(LiveEvaluationCoordinator)
+    coordinator.project = project
+    coordinator.trace_timeout_sec = 0
+    coordinator._cancellation_event = threading.Event()
+    coordinator._weave_requires_reactivation = False
+    row = {
+        "attempt_id": "a" * 64,
+        "local_evidence_record_digest": "d" * 64,
+        "weave_hosted_evidence_receipt_call_id": "receipt",
+        "weave_provisional_score_calls": [],
+    }
+    active = export._LivePrediction(
+        session=SimpleNamespace(),
+        prediction=SimpleNamespace(
+            evaluate_call=evaluation,
+            predict_and_score_call=predict_and_score,
+            predict_call=prediction,
+            output=provisional_output,
+        ),
+        bridge_call=None,
+        bridge_client=client,
+        row=row,
+        opened_monotonic=0.0,
+    )
+
+    with pytest.raises(RuntimeError, match="prediction Call did not reconcile"):
+        coordinator._verify_provisional_hosted_records(active=active, row=row)
+
+    prediction.output = provisional_output
+    verified = coordinator._verify_provisional_hosted_records(active=active, row=row)
+    assert verified["predict_and_score_output_digest"] == stable_digest(
+        predict_and_score.output
+    )
+
+
 def test_posthoc_publication_rejects_exact_env_secret_before_remote_write(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -1689,23 +1982,36 @@ def test_weave_publication_groups_repeated_trials_under_one_example(
     assert loggers[0].examples[0] == loggers[0].examples[1]
 
 
-def test_live_evaluation_links_native_root_and_finalizes_cleanly(
+def test_live_evaluation_links_native_root_and_finalizes_cleanly(  # noqa: C901
     tmp_path: Path,
 ) -> None:
     loggers = []
     predictions = []
     attribute_contexts: list[dict[str, object]] = []
+    active_attribute_contexts: list[dict[str, object]] = []
 
     class AttributeContext:
+        def __init__(self, values) -> None:
+            self.values = dict(values)
+
         def __enter__(self):
+            active_attribute_contexts.append(self.values)
             return None
 
         def __exit__(self, exc_type, exc, traceback) -> None:
+            assert active_attribute_contexts.pop() == self.values
             return None
 
     def attributes(values):
         attribute_contexts.append(dict(values))
-        return AttributeContext()
+        return AttributeContext(values)
+
+    def current_attributes():
+        return {
+            key: value
+            for context in active_attribute_contexts
+            for key, value in context.items()
+        }
 
     class FakeDataset:
         def __init__(self, *, name, rows) -> None:
@@ -1727,6 +2033,9 @@ def test_live_evaluation_links_native_root_and_finalizes_cleanly(
                 ref=SimpleNamespace(uri=f"weave:///entity/project/call/{call_id}"),
                 ui_url=f"https://wandb.test/calls/{call_id}",
                 ended_at=None,
+                attributes=current_attributes(),
+                display_name=None,
+                output=None,
             )
             self.predict_call = SimpleNamespace(
                 id=f"{call_id}-model",
@@ -1738,21 +2047,61 @@ def test_live_evaluation_links_native_root_and_finalizes_cleanly(
                 ),
                 ui_url=f"https://wandb.test/calls/{call_id}-model",
                 ended_at=None,
+                attributes=current_attributes(),
+                display_name=None,
+                output=None,
             )
             self.output = None
             self.scores = {}
             self.finished = False
+            self.score_calls = []
             client.public_calls[call_id] = self.predict_and_score_call
             client.public_calls[f"{call_id}-model"] = self.predict_call
 
         def __enter__(self):
             return self
 
-        def log_score(self, name, value) -> None:
-            self.scores[name] = value
+        def log_score(self, name, value=...):
+            if value is not ...:
+                self.scores[name] = value
+                return None
+            score_call = SimpleNamespace(
+                id=f"{self.predict_and_score_call.id}-score-{len(self.score_calls) + 1}",
+                project_id="entity/project",
+                parent_id=self.predict_and_score_call.id,
+                trace_id=self.predict_and_score_call.trace_id,
+                attributes=current_attributes(),
+                display_name=None,
+                output=None,
+                ended_at=None,
+            )
+            self.score_calls.append(score_call)
+            client.public_calls[score_call.id] = score_call
+            prediction = self
+
+            class ScoreContext:
+                def __init__(self) -> None:
+                    self.score_call = score_call
+                    self.value = None
+
+                def __enter__(self):
+                    return self
+
+                def __exit__(self, exc_type, exc, traceback) -> None:
+                    score_call.output = self.value
+                    score_call.ended_at = "terminal"
+                    prediction.scores[name] = self.value
+
+            return ScoreContext()
 
         def __exit__(self, exc_type, exc, traceback) -> None:
             self.finished = True
+            self.predict_and_score_call.output = {
+                "output": self.output,
+                "scores": dict(self.scores),
+                "model_latency": None,
+            }
+            self.predict_call.output = self.output
             self.predict_and_score_call.ended_at = "terminal"
             self.predict_call.ended_at = "terminal"
 
@@ -1948,6 +2297,7 @@ def test_live_evaluation_links_native_root_and_finalizes_cleanly(
     def host_evaluator(row):
         row.update(
             {
+                "pass": True,
                 "comparison_evaluation_status": "scored",
                 "comparison_required_evaluation_complete": True,
                 "comparison_deterministic_scores": {
@@ -1994,6 +2344,7 @@ def test_live_evaluation_links_native_root_and_finalizes_cleanly(
             )
             host_evaluator(row)
             row["evaluation_judge_status"] = "not_requested"
+            row["local_evidence_record_digest"] = "c" * 64
             export._set_adapter_outcome(row)
             assert "weave_evaluation_root_call_id" not in row
             assert "eval_predict_and_score_call_id" not in row
@@ -2034,7 +2385,17 @@ def test_live_evaluation_links_native_root_and_finalizes_cleanly(
         ],
     }
 
-    evidence.finish_cell(cell, CellOutcome(cell.id, "passed", returncode=0))
+    evidence.finish_cell(
+        cell,
+        CellOutcome(
+            cell.id,
+            "passed",
+            returncode=0,
+            benchmark_outcome="passed",
+            runtime_outcome="completed",
+            terminal_kind="success",
+        ),
+    )
     immutable_pas_output = json.loads(json.dumps(predictions[0].output))
     assert "flush" not in client.events
     publication = coordinator.finalize()
@@ -2058,10 +2419,30 @@ def test_live_evaluation_links_native_root_and_finalizes_cleanly(
         predictions[0].output["trace_link_status"]
         == "pending_terminal_reconciliation"
     )
-    assert predictions[0].output["task_verdict_owner"] == "predict_and_score"
-    assert predictions[0].output["hosted_evidence_verification"]["status"] == (
-        "pending_post_close_verification"
+    assert predictions[0].output["canonical"] is False
+    assert predictions[0].output["evidence_phase"] == "provisional_scoring_v1"
+    assert predictions[0].output["verification_status"] == (
+        "pending_terminal_reconciliation"
     )
+    assert predictions[0].output["task_verdict_owner"] == (
+        "post_close_hosted_evidence_verification_receipt"
+    )
+    assert "task_result" not in predictions[0].output
+    assert "provisional_task_observation" in predictions[0].output
+    assert predictions[0].predict_and_score_call.display_name.startswith(
+        "PROVISIONAL · PASSED ·"
+    )
+    assert predictions[0].predict_call.display_name.startswith(
+        "PROVISIONAL · Agent answer ·"
+    )
+    for call in (
+        predictions[0].predict_and_score_call,
+        predictions[0].predict_call,
+    ):
+        assert call.attributes["fugue.result.canonical"] is False
+        assert call.attributes["fugue.evidence.status"] == (
+            "pending_terminal_reconciliation"
+        )
     live_row = json.loads(
         (tmp_path / ".fugue/runtime/run-a/evaluation-results.jsonl").read_text()
     )
@@ -2125,16 +2506,52 @@ def test_live_evaluation_links_native_root_and_finalizes_cleanly(
     assert client.remote[receipt_call_id]["inputs"]["predict_and_score_call_id"] == (
         "predict-1"
     )
+    receipt_output = client.remote[receipt_call_id]["output"]
+    receipt_attributes = client.remote[receipt_call_id]["attributes"]
+    assert receipt_output["canonical"] is True
+    assert receipt_output["verification_status"] == "verified"
+    assert receipt_output["task_result"]["task_passed"] is True
+    assert receipt_output["scalar_checks"]["outcome__fact_correct"] is True
+    assert receipt_output["scalar_checks"]["outcome__citation_quality"] == 0.75
+    assert receipt_output["predict_and_score_binding"]["call_id"] == "predict-1"
+    assert receipt_attributes["fugue.result.canonical"] is False
+    assert receipt_attributes["fugue.evidence.phase"] == (
+        "canonical_verdict_pending_v1"
+    )
+    assert receipt_attributes["fugue.evidence.status"] == (
+        "pending_terminal_readback"
+    )
+    assert client.remote[receipt_call_id]["display_name"].startswith(
+        "CANONICAL · PASSED ·"
+    )
     assert predictions[0].output == immutable_pas_output
+    assert predictions[0].predict_and_score_call.output == {
+        "output": immutable_pas_output,
+        "scores": dict(predictions[0].scores),
+        "model_latency": None,
+    }
     assert live_row["evaluation_judge_status"] == "not_requested"
-    assert predictions[0].output["judge_evidence"] == {
+    assert predictions[0].output["provisional_judge_evidence"] == {
         "status": "unavailable",
         "advisory": True,
         "reason": "This attempt has no published judge review.",
         "calibration_status": "unavailable",
     }
-    assert predictions[0].scores["outcome__fact_correct"] is True
-    assert predictions[0].scores["outcome__citation_quality"] == 0.75
+    assert predictions[0].scores[
+        "provisional__outcome__fact_correct__not_canonical"
+    ] is True
+    assert predictions[0].scores[
+        "provisional__outcome__citation_quality__not_canonical"
+    ] == 0.75
+    assert predictions[0].score_calls
+    for score_call in predictions[0].score_calls:
+        assert score_call.display_name.startswith("PROVISIONAL SCORE ·")
+        assert score_call.display_name.endswith("NOT A FUGUE VERDICT")
+        assert score_call.attributes["fugue.result.canonical"] is False
+        assert score_call.attributes["fugue.evidence.status"] == (
+            "pending_terminal_reconciliation"
+        )
+        assert score_call.ended_at == "terminal"
     assert live_row["adapter_outcome"]["rubric_evaluation"]["state"] == (
         "not_requested"
     )
@@ -2142,6 +2559,9 @@ def test_live_evaluation_links_native_root_and_finalizes_cleanly(
         "weave": {"genai_span_ref": [{"trace_id": "a" * 32, "span_id": "b" * 16}]}
     }
     assert loggers[0].summarized is True
+    assert client.events.index("get-call:predict-1") < client.events.index(
+        f"calls-complete-published:{receipt_call_id}"
+    )
     events = [
         json.loads(line)
         for line in (tmp_path / ".fugue/runtime/run-a/evaluations.jsonl")
@@ -2164,7 +2584,7 @@ def test_live_evaluation_links_native_root_and_finalizes_cleanly(
     assert opened["evaluation_trace_id"] == "a" * 32
 
 
-def test_hosted_verification_receipt_closes_after_finish_interruption(
+def test_hosted_verification_receipt_accepts_exact_end_after_finish_interruption(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     project = "entity/project"
@@ -2185,6 +2605,7 @@ def test_hosted_verification_receipt_closes_after_finish_interruption(
 
     class PublicClient:
         project_id = project
+        calls: dict[str, object] = {}
 
         @staticmethod
         def create_call(
@@ -2197,22 +2618,38 @@ def test_hosted_verification_receipt_closes_after_finish_interruption(
             use_stack=True,
             _call_id_override=None,
         ):
-            del attributes, display_name, use_stack
-            return SimpleNamespace(
+            del use_stack
+            if _call_id_override in PublicClient.calls:
+                raise RuntimeError("deterministic receipt already exists")
+            call = SimpleNamespace(
                 id=_call_id_override,
-                parent_id=parent.id,
+                parent_id=getattr(parent, "id", None),
                 project_id=project,
-                trace_id=parent.trace_id,
+                trace_id=getattr(parent, "trace_id", None) or "root-trace",
                 inputs=inputs,
+                attributes=attributes,
+                display_name=display_name,
+                output=None,
+                ended_at=None,
             )
+            PublicClient.calls[call.id] = call
+            return call
 
         @staticmethod
-        def finish_call(_call, output=None):
+        def finish_call(call, output=None):
             finished.append(dict(output or {}))
+            call.output = dict(output or {})
+            call.ended_at = "terminal"
+
+        @staticmethod
+        def get_call(call_id):
+            return PublicClient.calls[call_id]
 
     coordinator = object.__new__(LiveEvaluationCoordinator)
     coordinator.project = project
     coordinator.weave = SimpleNamespace(get_client=lambda: PublicClient)
+    coordinator.trace_timeout_sec = 0
+    coordinator._cancellation_event = threading.Event()
     row = {
         "run_id": "run-a",
         "cell_id": "cell-a",
@@ -2223,6 +2660,18 @@ def test_hosted_verification_receipt_closes_after_finish_interruption(
         "weave_dataset_ref": "weave:///entity/project/object/tasks:v1",
         "weave_agent_bridge_call_id": "bridge",
         "weave_agent_root_call_id": "agent-receipt",
+        "local_evidence_record_digest": "d" * 64,
+        "task_id": "task-a",
+        "candidate_id": "candidate-a",
+        "trial_index": 1,
+        "pass": True,
+        "status": "passed",
+        "runtime_outcome": "completed",
+        "terminal_kind": "success",
+        "comparison_evaluation_status": "scored",
+        "comparison_required_evaluation_complete": True,
+        "comparison_deterministic_scores": {"answer_correct": True},
+        "comparison_dimension_roles": {"answer_correct": "outcome"},
     }
     coordinator._prepare_hosted_evidence_verification_receipt(row)
     active = export._LivePrediction(
@@ -2230,6 +2679,10 @@ def test_hosted_verification_receipt_closes_after_finish_interruption(
         prediction=SimpleNamespace(
             evaluate_call=evaluation_root,
             predict_and_score_call=predict_and_score,
+            output={
+                "canonical": False,
+                "verification_status": "pending_terminal_reconciliation",
+            },
         ),
         bridge_call=SimpleNamespace(),
         bridge_client=PublicClient,
@@ -2239,10 +2692,23 @@ def test_hosted_verification_receipt_closes_after_finish_interruption(
     original_finish = coordinator._finish_evidence_call
     finish_attempts = 0
 
+    monkeypatch.setattr(
+        coordinator,
+        "_verify_provisional_hosted_records",
+        lambda **_kwargs: {
+            "local_record_digest": "d" * 64,
+            "predict_and_score_output_digest": "e" * 64,
+            "provisional_score_set_digest": "f" * 64,
+            "provisional_score_call_set_digest": "1" * 64,
+        },
+    )
+    row["weave_provisional_predict_and_score_output_digest"] = "e" * 64
+
     def interrupt_first_finish(*args, **kwargs):
         nonlocal finish_attempts
         finish_attempts += 1
         if finish_attempts == 1:
+            original_finish(*args, **kwargs)
             raise KeyboardInterrupt
         return original_finish(*args, **kwargs)
 
@@ -2251,18 +2717,40 @@ def test_hosted_verification_receipt_closes_after_finish_interruption(
         "_finish_evidence_call",
         interrupt_first_finish,
     )
-    with pytest.raises(KeyboardInterrupt):
+    coordinator._publish_hosted_evidence_verification_receipt(
+        active=active,
+        row=row,
+    )
+
+    assert finish_attempts == 1
+    assert len(finished) == 1
+    assert finished[0]["hosted_evidence_integrity"] == "verified"
+    assert len(str(finished[0]["bindings_digest"])) == 64
+    assert finished[0]["task_verdict_owner"] == (
+        "post_close_hosted_evidence_verification_receipt"
+    )
+    assert finished[0]["canonical"] is True
+    assert "cleanup_after_failure" not in finished[0]
+    assert row["hosted_evidence_verification_status"] == "verified"
+
+    verified_call = PublicClient.calls[
+        row["weave_hosted_evidence_receipt_call_id"]
+    ]
+    coordinator._publish_hosted_evidence_verification_receipt(
+        active=active,
+        row=row,
+    )
+    assert finish_attempts == 1
+    assert len(finished) == 1
+    assert row["hosted_evidence_verification_status"] == "verified"
+
+    verified_call.output = {"canonical": True, "forged": True}
+    with pytest.raises(RuntimeError, match="terminal hosted evidence decision.*conflicts"):
         coordinator._publish_hosted_evidence_verification_receipt(
             active=active,
             row=row,
         )
-
-    assert finish_attempts == 2
     assert len(finished) == 1
-    assert finished[0]["hosted_evidence_integrity"] == "verified"
-    assert len(str(finished[0]["bindings_digest"])) == 64
-    assert finished[0]["task_verdict_owner"] == "predict_and_score"
-    assert finished[0]["cleanup_after_failure"] is True
 
 
 def test_eager_call_owners_recover_side_effect_before_create_interruption() -> None:
@@ -2279,7 +2767,7 @@ def test_eager_call_owners_recover_side_effect_before_create_interruption() -> N
         def create_call(
             self,
             _op,
-            _inputs,
+            inputs,
             parent=None,
             attributes=None,
             display_name=None,
@@ -2287,26 +2775,37 @@ def test_eager_call_owners_recover_side_effect_before_create_interruption() -> N
             use_stack=True,
             _call_id_override=None,
         ):
-            del attributes, display_name, use_stack
+            del use_stack
+            if _call_id_override in self.calls:
+                raise RuntimeError("deterministic Call already exists")
             self.calls[_call_id_override] = SimpleNamespace(
                 id=_call_id_override,
-                parent_id=parent.id,
+                parent_id=getattr(parent, "id", None),
                 project_id=project,
-                trace_id=parent.trace_id,
+                trace_id=getattr(parent, "trace_id", None) or "root-trace",
+                inputs=dict(inputs),
+                attributes=dict(attributes or {}),
+                display_name=display_name,
+                output=None,
+                ended_at=None,
             )
             raise KeyboardInterrupt
 
         def get_call(self, call_id):
             return self.calls[call_id]
 
-        def finish_call(self, _call, output=None):
+        def finish_call(self, call, output=None):
             self.finished.append(dict(output or {}))
+            call.output = dict(output or {})
+            call.ended_at = "terminal"
 
     def coordinator_for(client):
         value = object.__new__(LiveEvaluationCoordinator)
         value.project = project
         value.weave = SimpleNamespace(get_client=lambda: client)
         value._weave_requires_reactivation = False
+        value.trace_timeout_sec = 0
+        value._cancellation_event = threading.Event()
         return value
 
     bridge_client = InterruptingClient()
@@ -2390,8 +2889,27 @@ def test_eager_call_owners_recover_side_effect_before_create_interruption() -> N
         "weave_dataset_ref": "weave:///entity/project/object/tasks:v1",
         "weave_agent_bridge_call_id": "bridge",
         "weave_agent_root_call_id": "agent",
+        "local_evidence_record_digest": "d" * 64,
+        "task_id": "task-a",
+        "candidate_id": "candidate-a",
+        "trial_index": 1,
+        "status": "passed",
+        "runtime_outcome": "completed",
+        "terminal_kind": "success",
+        "pass": True,
+        "comparison_evaluation_status": "scored",
+        "comparison_required_evaluation_complete": True,
+        "comparison_deterministic_scores": {"answer_correct": True},
+        "comparison_dimension_roles": {"answer_correct": "outcome"},
     }
     hosted_coordinator._prepare_hosted_evidence_verification_receipt(hosted_row)
+    hosted_row["weave_provisional_predict_and_score_output_digest"] = "e" * 64
+    hosted_coordinator._verify_provisional_hosted_records = lambda **_kwargs: {
+        "local_record_digest": "d" * 64,
+        "predict_and_score_output_digest": "e" * 64,
+        "provisional_score_set_digest": "f" * 64,
+        "provisional_score_call_set_digest": "1" * 64,
+    }
     with pytest.raises(KeyboardInterrupt):
         hosted_coordinator._publish_hosted_evidence_verification_receipt(
             active=export._LivePrediction(
@@ -2399,6 +2917,10 @@ def test_eager_call_owners_recover_side_effect_before_create_interruption() -> N
                 prediction=SimpleNamespace(
                     evaluate_call=evaluation,
                     predict_and_score_call=pas,
+                    output={
+                        "canonical": False,
+                        "verification_status": "pending_terminal_reconciliation",
+                    },
                 ),
                 bridge_call=bridge,
                 bridge_client=hosted_client,
@@ -2410,6 +2932,117 @@ def test_eager_call_owners_recover_side_effect_before_create_interruption() -> N
     assert hosted_client.finished == [
         {"status": "hosted_evidence_receipt_create_interrupted"}
     ]
+    interrupted_receipt = hosted_client.calls[
+        hosted_row["weave_hosted_evidence_receipt_call_id"]
+    ]
+    assert interrupted_receipt.attributes["fugue.result.canonical"] is False
+    assert interrupted_receipt.attributes["fugue.evidence.status"] == (
+        "pending_terminal_readback"
+    )
+    assert interrupted_receipt.display_name.startswith("PENDING VERIFICATION ·")
+    assert interrupted_receipt.output == {
+        "status": "hosted_evidence_receipt_create_interrupted"
+    }
+
+    invalidation_client = InterruptingClient()
+    invalidation_coordinator = coordinator_for(invalidation_client)
+    invalidation_row = {
+        **hosted_row,
+        "evaluation_prediction_graph_verified": False,
+        "weave_provisional_predict_and_score_output_digest": "e" * 64,
+        "weave_provisional_score_set_digest": "f" * 64,
+    }
+    invalidation_active = export._LivePrediction(
+        session=SimpleNamespace(),
+        prediction=SimpleNamespace(
+            predict_and_score_call=pas,
+        ),
+        bridge_call=bridge,
+        bridge_client=invalidation_client,
+        row=invalidation_row,
+        opened_monotonic=0.0,
+    )
+    invalidation_coordinator._publish_hosted_evidence_invalidation_receipt(
+        active=invalidation_active,
+        row=invalidation_row,
+        error=RuntimeError("hosted graph did not reconcile"),
+    )
+    assert len(invalidation_client.finished) == 1
+    assert invalidation_client.finished[0]["canonical"] is False
+    assert invalidation_client.finished[0]["verification_status"] == "invalidated"
+    invalidation_call = next(iter(invalidation_client.calls.values()))
+    assert invalidation_call.parent_id is None
+    assert invalidation_call.output == invalidation_client.finished[0]
+    assert invalidation_row["hosted_evidence_invalidation_status"] == "verified"
+
+    # Host-only recovery reuses the same exact terminal invalidation. It does
+    # not rerun the Agent and does not create a second logical decision.
+    invalidation_coordinator._publish_hosted_evidence_invalidation_receipt(
+        active=invalidation_active,
+        row=invalidation_row,
+        error=RuntimeError("hosted graph did not reconcile"),
+    )
+    assert len(invalidation_client.calls) == 1
+    assert len(invalidation_client.finished) == 1
+
+
+def test_parented_hosted_invalidation_rejects_wrong_trace() -> None:
+    project = "entity/project"
+    trace_id = "a" * 32
+    client = _OutOfOrderWeaveClient(
+        project,
+        forbid_flush_while_evaluation_children_open=True,
+    )
+    original_create = client.create_call
+
+    def create_with_wrong_trace(*args, **kwargs):
+        call = original_create(*args, **kwargs)
+        call.trace_id = "b" * 32
+        return call
+
+    client.create_call = create_with_wrong_trace
+    coordinator = object.__new__(LiveEvaluationCoordinator)
+    coordinator.project = project
+    coordinator.weave = SimpleNamespace(get_client=lambda: client)
+    coordinator._weave_requires_reactivation = False
+    coordinator.trace_timeout_sec = 0
+    coordinator._cancellation_event = threading.Event()
+    pas = SimpleNamespace(
+        id="pas",
+        project_id=project,
+        parent_id="evaluation",
+        trace_id=trace_id,
+    )
+    row = {
+        "run_id": "run-a",
+        "cell_id": "cell-a",
+        "attempt_id": "a" * 64,
+        "task_id": "task-a",
+        "trial_index": 1,
+        "local_evidence_record_digest": "d" * 64,
+        "eval_predict_and_score_call_id": pas.id,
+        "weave_evaluation_root_call_id": "evaluation",
+        "weave_prediction_call_id": "prediction",
+        "weave_hosted_evidence_receipt_call_id": "receipt",
+        "weave_provisional_predict_and_score_output_digest": "e" * 64,
+        "weave_provisional_score_set_digest": "f" * 64,
+        "evaluation_prediction_graph_verified": True,
+    }
+    active = export._LivePrediction(
+        session=SimpleNamespace(),
+        prediction=SimpleNamespace(predict_and_score_call=pas),
+        bridge_call=SimpleNamespace(),
+        bridge_client=client,
+        row=row,
+        opened_monotonic=0.0,
+    )
+
+    with pytest.raises(RuntimeError, match="invalidation receipt changed identity"):
+        coordinator._publish_hosted_evidence_invalidation_receipt(
+            active=active,
+            row=row,
+            error=RuntimeError("hosted graph did not reconcile"),
+        )
 
 
 @pytest.mark.parametrize(
@@ -2936,6 +3569,9 @@ class _OutOfOrderWeaveClient:
             trace_id=value["trace_id"],
             ended_at="terminal" if value.get("terminal") else None,
             inputs=value.get("inputs"),
+            output=value.get("output"),
+            attributes=value.get("attributes"),
+            display_name=value.get("display_name"),
         )
 
     @staticmethod
@@ -2955,13 +3591,22 @@ class _OutOfOrderWeaveClient:
     ):
         call = SimpleNamespace(
             id=_call_id_override,
-            parent_id=parent.id,
+            parent_id=getattr(parent, "id", None),
             project_id=self.project_id,
-            trace_id=parent.trace_id,
+            trace_id=getattr(parent, "trace_id", None) or f"root-{_call_id_override}",
             op_name=str(op),
             attributes=attributes or {},
             inputs=inputs,
+            display_name=display_name,
+            output=None,
+            ended_at=None,
         )
+        def set_display_name(value: str) -> None:
+            call.display_name = value
+            if call.id in self.remote:
+                self.remote[call.id]["display_name"] = value
+
+        call.set_display_name = set_display_name
         self.pending.append(("start", call, None))
         self.events.append(f"start-scheduled:{call.id}")
         return call
@@ -2987,6 +3632,7 @@ class _OutOfOrderWeaveClient:
                     "attributes": dict(call.attributes),
                     "inputs": dict(call.inputs),
                     "output": output,
+                    "display_name": call.display_name,
                 }
                 self.events.append(f"calls-complete-published:{call.id}")
                 return
@@ -3017,6 +3663,7 @@ class _OutOfOrderWeaveClient:
                     "attributes": dict(call.attributes),
                     "inputs": dict(call.inputs),
                     "output": ends.get(call_id),
+                    "display_name": call.display_name,
                 }
             return
         # If start and end are flushed together, process the end first. That
@@ -3031,6 +3678,7 @@ class _OutOfOrderWeaveClient:
                     "terminal": False,
                     "attributes": dict(call.attributes),
                     "inputs": dict(call.inputs),
+                    "display_name": call.display_name,
                 }
                 self.events.append(f"start-published:{call.id}")
             elif self.drop_ends or call.id not in self.remote:
@@ -3837,7 +4485,8 @@ def test_live_eager_root_failure_withholds_task_verdict_and_scores(
     assert "comparison_dimension_roles" not in captured_row
     assert "comparison_score_details" not in captured_row
     assert prediction.scores == {}
-    assert prediction.output["status"] == "unscored"
+    assert prediction.output["provisional_status"] == "unscored"
+    assert prediction.output["canonical"] is False
     assert prediction.output["agent_execution_status"] == "not_started"
     assert prediction.output["evidence_integrity_status"] == "invalid"
     assert "task_result" not in prediction.output
@@ -3936,6 +4585,7 @@ def test_live_begin_closes_prediction_when_bridge_create_is_interrupted(
                 id="pas-a",
                 project_id="entity/project",
                 summary=None,
+                display_name=None,
             )
             self.output = None
             self.exit_count = 0
@@ -4075,6 +4725,277 @@ def test_live_finish_records_interruption_without_open_prediction(
         if line.strip()
     ]
     assert events.count("interrupted") == 1
+
+
+@pytest.mark.parametrize("failure_stage", ("reconciliation", "negative_routing"))
+def test_live_reconciliation_failure_withholds_all_behavioral_claims(  # noqa: C901
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    failure_stage: str,
+) -> None:
+    active_attributes: list[dict[str, object]] = []
+
+    class AttributeContext:
+        def __init__(self, values) -> None:
+            self.values = dict(values)
+
+        def __enter__(self):
+            active_attributes.append(self.values)
+
+        def __exit__(self, exc_type, exc, traceback) -> None:
+            assert active_attributes.pop() == self.values
+
+    def attributes(values):
+        return AttributeContext(values)
+
+    def current_attributes():
+        return {
+            key: value
+            for context in active_attributes
+            for key, value in context.items()
+        }
+
+    client = _OutOfOrderWeaveClient(
+        "entity/project",
+        forbid_flush_while_evaluation_children_open=True,
+    )
+
+    class Prediction:
+        def __init__(self) -> None:
+            self.predict_and_score_call = SimpleNamespace(
+                id="pas-a",
+                project_id="entity/project",
+                summary=None,
+                display_name=None,
+                attributes=current_attributes(),
+                ended_at=None,
+                output=None,
+            )
+            self.output = None
+            self.scores: dict[str, object] = {}
+            self.score_calls = []
+
+        def __enter__(self):
+            return self
+
+        def log_score(self, name, value=...):
+            if value is not ...:
+                self.scores[name] = value
+                return None
+            score_call = SimpleNamespace(
+                id=f"pas-a-score-{len(self.score_calls) + 1}",
+                project_id="entity/project",
+                parent_id="pas-a",
+                trace_id="a" * 32,
+                attributes=current_attributes(),
+                display_name=None,
+                output=None,
+                ended_at=None,
+            )
+            self.score_calls.append(score_call)
+            client.public_calls[score_call.id] = score_call
+            prediction = self
+
+            class ScoreContext:
+                def __init__(self) -> None:
+                    self.score_call = score_call
+                    self.value = None
+
+                def __enter__(self):
+                    return self
+
+                def __exit__(self, exc_type, exc, traceback) -> None:
+                    score_call.output = self.value
+                    score_call.ended_at = "terminal"
+                    prediction.scores[name] = self.value
+
+            return ScoreContext()
+
+        def __exit__(self, exc_type, exc, traceback) -> None:
+            self.predict_and_score_call.output = {
+                "output": self.output,
+                "scores": dict(self.scores),
+                "model_latency": None,
+            }
+            self.predict_and_score_call.ended_at = "terminal"
+            self.predict_call.output = self.output
+            self.predict_call.ended_at = "terminal"
+
+    predictions = []
+
+    class FakeLogger:
+        def __init__(self, **_kwargs) -> None:
+            pass
+
+        @staticmethod
+        def log_prediction(inputs, **_metadata):
+            del inputs
+            prediction = _attach_public_call_handles(Prediction())
+            prediction.predict_call.attributes = current_attributes()
+            prediction.predict_call.display_name = None
+            prediction.predict_call.output = None
+            prediction.predict_call.ended_at = None
+            client.public_calls["pas-a"] = prediction.predict_and_score_call
+            client.public_calls["pas-a-prediction"] = prediction.predict_call
+            predictions.append(prediction)
+            return prediction
+
+    def score_row(row: dict[str, object]) -> None:
+        row.update(
+            {
+                "pass": True,
+                "comparison_evaluation_status": "scored",
+                "comparison_required_evaluation_complete": True,
+                "comparison_deterministic_scores": {"answer_correct": True},
+                "comparison_dimension_roles": {"answer_correct": "outcome"},
+                "comparison_score_details": {
+                    "answer_correct": {
+                        "what": "Checks the answer.",
+                        "observed": "The answer matched.",
+                        "why": "Correctness is required.",
+                    }
+                },
+                "comparison_judge_scores": {"usefulness": 0.9},
+                "comparison_judges": {"usefulness": {"status": "scored"}},
+                "comparison_mechanism": {"tool_used": True},
+                "treatment_use_evidence": {"invoked": "observed"},
+                "agent_response": "stale answer",
+                "agent_response_sha256": "a" * 64,
+                "agent_response_bytes": 12,
+                "task_result": {
+                    "schema_version": 1,
+                    "task_passed": True,
+                    "outcome_summary": "The task passed.",
+                    "failed_required_checks": [],
+                    "answer_digest": "a" * 64,
+                    "agent_execution_status": "completed",
+                    "evidence_integrity_status": "verified",
+                },
+                "local_evidence_record_digest": "d" * 64,
+            }
+        )
+
+    cell = _live_test_cell(
+        cell_id="cell-reconciliation-failure",
+        run_id="run-reconciliation-failure",
+    )
+    coordinator = LiveEvaluationCoordinator(
+        [cell],
+        repo_root=tmp_path,
+        project="entity/project",
+        env=cell.env,
+        weave_module=SimpleNamespace(
+            EvaluationLogger=FakeLogger,
+            attributes=attributes,
+            get_client=lambda: client,
+        ),
+        host_evaluator=score_row,
+    )
+    _stub_live_agent_bridge(monkeypatch, coordinator)
+    coordinator._open_agent_bridge = lambda **_kwargs: (
+        SimpleNamespace(
+            id="bridge-a",
+            project_id="entity/project",
+            trace_id="a" * 32,
+        ),
+        client,
+        f"00-{'a' * 32}-{'b' * 16}-01",
+    )
+    coordinator._prepare_terminal_agent_trace = lambda **_kwargs: None
+    if failure_stage == "negative_routing":
+        coordinator._evidence_checkpoint_cells = 1
+        coordinator._negative_routing_receipt = lambda _row: {"status": "failed"}
+        coordinator._reconcile_terminal_hosted_evidence = (
+            lambda **_kwargs: (_ for _ in ()).throw(
+                AssertionError("negative-routing failure must stop reconciliation")
+            )
+        )
+    else:
+        coordinator._reconcile_terminal_hosted_evidence = (
+            lambda **_kwargs: (_ for _ in ()).throw(
+                RuntimeError("hosted graph did not reconcile")
+            )
+        )
+    coordinator.begin_cell(cell)
+    prediction = predictions[0]
+    if failure_stage == "negative_routing":
+        # The combined local-first path supplies its already-scored canonical
+        # row before the hosted negative-routing gate runs.
+        score_row(coordinator._predictions[cell.id].row)
+
+    coordinator.finish_cell(
+        cell,
+        CellOutcome(
+            cell.id,
+            "passed",
+            returncode=0,
+            benchmark_outcome="passed",
+            runtime_outcome="completed",
+            terminal_kind="success",
+        ),
+    )
+
+    [row] = [
+        json.loads(line)
+        for line in coordinator.results_path.read_text().splitlines()
+        if line.strip()
+    ]
+    assert row["runtime_outcome"] == "completed"
+    assert row["terminal_kind"] == "evidence_failure"
+    assert row["evidence_integrity_status"] == "invalid"
+    assert row["pass"] is None
+    assert row["comparison_evaluation_status"] == "unavailable"
+    assert row["comparison_required_evaluation_complete"] is False
+    for field_name in (
+        "comparison_deterministic_scores",
+        "comparison_score_details",
+        "comparison_judge_scores",
+        "comparison_judges",
+        "comparison_mechanism",
+        "treatment_use_evidence",
+        "task_result",
+        "agent_response",
+        "agent_response_sha256",
+        "agent_response_bytes",
+    ):
+        assert field_name not in row
+    assert prediction.predict_and_score_call.display_name.startswith(
+        "PROVISIONAL · "
+        + ("PASSED" if failure_stage == "reconciliation" else "UNSCORED")
+        + " ·"
+    )
+    assert prediction.output["canonical"] is False
+    assert "task_result" not in prediction.output
+    if failure_stage == "reconciliation":
+        assert prediction.output["provisional_task_observation"]["task_passed"] is True
+    else:
+        assert "provisional_task_observation" not in prediction.output
+    assert "response" not in prediction.output
+    assert prediction.output["provisional_judge_evidence"]
+    invalidation_call_id = row["weave_hosted_evidence_invalidation_call_id"]
+    invalidation = client.remote[invalidation_call_id]
+    assert invalidation["terminal"] is True
+    assert invalidation["parent_id"] is None
+    assert invalidation["output"]["canonical"] is False
+    assert invalidation["output"]["verification_status"] == "invalidated"
+    assert invalidation["output"]["invalidates"]["provisional_output_digest"] == (
+        stable_digest(prediction.predict_and_score_call.output)
+    )
+    assert invalidation["output"]["invalidates"]["provisional_scores_digest"] == (
+        stable_digest(prediction.scores)
+    )
+    assert "task_result" not in invalidation["output"]
+    assert "scalar_checks" not in invalidation["output"]
+    assert row["hosted_evidence_invalidation_status"] == "verified"
+    assert row["weave_hosted_evidence_invalidation_object_verified"] is True
+    assert row["weave_hosted_evidence_invalidation_terminal_verified"] is True
+    assert row["weave_hosted_evidence_invalidation_bindings_digest"] == (
+        stable_digest(invalidation["inputs"])
+    )
+    assert row["weave_hosted_evidence_invalidation_terminal_output_digest"] == (
+        stable_digest(invalidation["output"])
+    )
+    assert export._hosted_evidence_invalidation_verified(row)
 
 
 @pytest.mark.parametrize("write_phase", ("result", "finalized_event"))
@@ -4539,7 +5460,8 @@ def test_live_cancellation_closes_open_prediction_once_without_trace_polling(
 
     assert publication.failures == ()
     assert predictions[0].exit_count == 1
-    assert predictions[0].output["status"] == "cancelled"
+    assert predictions[0].output["provisional_status"] == "cancelled"
+    assert predictions[0].output["canonical"] is False
     assert predictions[0].output["trace_link_status"] == "cancelled"
     assert predictions[0].output["trace_link_reason"] == "operator cancellation"
     assert all(logger.failed is not None for logger in loggers)
@@ -4641,7 +5563,8 @@ def test_live_cancellation_during_trace_fetch_closes_prediction_once(
 
     assert not worker.is_alive()
     assert prediction.exit_count == 1
-    assert prediction.output["status"] == "cancelled"
+    assert prediction.output["provisional_status"] == "cancelled"
+    assert prediction.output["canonical"] is False
     assert prediction.output["trace_link_status"] == "cancelled"
     statuses = [
         json.loads(line)["status"]
@@ -6704,6 +7627,299 @@ def test_pre_agent_evidence_failure_stays_invalid_and_unscored(
     }
 
 
+def test_typed_not_started_outcome_overrides_legacy_failed_status() -> None:
+    row = {
+        "status": "failed",
+        "runtime_outcome": "not_started",
+        "pass": False,
+        "reward": 0.0,
+        "judge_overall": 0.0,
+        "context_registered": True,
+        "context_query_count": 3,
+        "episode_count": 2,
+        "weave_tool_call_count": 4,
+    }
+
+    assert export._behavioral_task_output_available(row) is False
+    assert export._evaluation_scores(row) == {}
+
+
+def test_nonbehavioral_live_output_is_unscored_and_has_no_answer() -> None:
+    row = {
+        "record_type": "trial",
+        "execution_kind": "agent",
+        "task_id": "task-a",
+        "status": "failed",
+        "runtime_outcome": "not_started",
+        "pass": False,
+        "agent_response": "stale partial answer",
+        "agent_response_sha256": "a" * 64,
+        "agent_response_bytes": 20,
+        "trace_content": "full",
+    }
+    prediction = SimpleNamespace(
+        predict_and_score_call=SimpleNamespace(display_name=None),
+        predict_call=SimpleNamespace(display_name=None),
+    )
+
+    export._set_prediction_display_names(prediction, row, terminal=True)
+    output = export._evaluation_output(row)
+
+    assert prediction.predict_and_score_call.display_name.startswith(
+        "UNSCORED ·"
+    )
+    assert prediction.predict_call.display_name.startswith(
+        "Agent execution (no scored answer) ·"
+    )
+    assert "task_result" not in output
+    assert "response" not in output
+    assert "response_sha256" not in output
+    assert "response_bytes" not in output
+    assert output["judge_evidence"]["status"] == "not_applicable"
+
+
+def test_fatal_evidence_terminal_overrides_completed_runtime_for_scoring() -> None:
+    row = {
+        "record_type": "trial",
+        "execution_kind": "agent",
+        "task_id": "task-a",
+        "status": "failed",
+        "runtime_outcome": "completed",
+        "terminal_kind": "evidence_failure",
+        "benchmark_outcome": "passed",
+        "pass": True,
+        "reward": 1.0,
+        "comparison_deterministic_scores": {"answer_correct": True},
+        "comparison_judge_scores": {"usefulness": 0.9},
+        "comparison_mechanism": {"assigned_skill_opened": "observed"},
+        "treatment_use_evidence": {"invoked": "observed"},
+        "agent_response": "partial result retained only in the receipt",
+        "trace_content": "full",
+        "evidence_integrity_status": "invalid",
+    }
+
+    assert export._behavioral_task_output_available(row) is False
+    export._withhold_nonbehavioral_task_evaluation(row)
+    output = export._evaluation_output(row)
+
+    assert row["runtime_outcome"] == "completed"
+    assert row["pass"] is None
+    assert export._evaluation_scores(row) == {}
+    assert "comparison_deterministic_scores" not in row
+    assert "comparison_judge_scores" not in row
+    assert "comparison_mechanism" not in row
+    assert "treatment_use_evidence" not in row
+    assert "task_result" not in output
+    assert "response" not in output
+    assert output["agent_execution_status"] == "completed"
+    assert output["judge_evidence"]["status"] == "not_applicable"
+
+
+def test_runner_start_failure_skips_deterministic_and_judge_evaluation(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    case = {
+        "id": "case-a",
+        "instruction": "Return one result.",
+        "source_refs": [{"id": "seed:1", "sha256": "a" * 64}],
+        "expected": {"facts": ["private fact"]},
+        "scorer_dimensions": ["correctness"],
+    }
+    rubric = {
+        "id": "suite-a",
+        "dimensions": [
+            {"id": "correctness", "criterion": "correct", "threshold": 0.7}
+        ],
+    }
+    cell = PlannedCell(
+        id="cell-runner-start",
+        run_id="run-runner-start",
+        run_name="run-runner-start",
+        workload_id="capabilities",
+        task_id="case-a",
+        harness="claude-code",
+        context_system_id="none",
+        variant_id="baseline",
+        model_provider="anthropic",
+        model="anthropic/claude-test",
+        trial_index=1,
+        comparison_example_id="example-a",
+        candidate_id="candidate-a",
+        execution_fingerprint="execution-a",
+        config_path=tmp_path / "config.json",
+        result_path=tmp_path / "jobs" / "missing" / "result.json",
+        command=("harbor", "run"),
+        env={"FUGUE_DATASET": "generated/suite-a"},
+        n_attempts=1,
+        evaluation_case=case,
+        evaluation_rubrics=(rubric,),
+        evaluation_asset_lock_sha256="e" * 64,
+        run_snapshot_sha256="a" * 64,
+    )
+    generated_calls: list[object] = []
+    host_calls: list[object] = []
+    monkeypatch.setattr(
+        export,
+        "apply_generated_evaluation",
+        lambda *_args, **_kwargs: generated_calls.append(object()),
+    )
+    coordinator = GeneratedEvaluationCoordinator(
+        [cell],
+        repo_root=tmp_path,
+        env={},
+        host_evaluator=lambda _row: host_calls.append(object()),
+        evidence_mode="local",
+    )
+
+    overlay = coordinator.begin_cell(cell)
+    assert overlay is not None
+    row = coordinator.finish_cell(
+        cell,
+        CellOutcome(
+            cell.id,
+            "failed",
+            returncode=1,
+            error="Harbor exited before Agent execution",
+            benchmark_outcome="unscored",
+            runtime_outcome="not_started",
+            terminal_kind="runner_start_failure",
+        ),
+    )
+
+    assert row is not None
+    assert generated_calls == []
+    assert host_calls == []
+    assert row["runtime_outcome"] == "not_started"
+    assert row["benchmark_outcome"] == "unscored"
+    assert row["pass"] is None
+    assert row["comparison_evaluation_status"] == "unavailable"
+    assert row["comparison_required_evaluation_complete"] is False
+    assert row["host_evaluator_status"] == "not_applicable"
+    assert row["adapter_outcome"]["rubric_evaluation"]["state"] == (
+        "not_applicable"
+    )
+    assert "comparison_deterministic_scores" not in row
+    assert "comparison_judges" not in row
+    assert "comparison_judge_scores" not in row
+    assert "task_result" not in row
+    assert row["local_evidence_integrity"] != "resolved"
+    prediction = json.loads(
+        next(
+            (
+                tmp_path
+                / ".fugue/runtime/run-runner-start/evidence/predictions"
+            ).glob("*.json")
+        ).read_text(encoding="utf-8")
+    )
+    assert "task_result" not in prediction
+    assert prediction["adapter_outcome"]["rubric_evaluation"]["state"] == (
+        "not_applicable"
+    )
+
+
+def test_interrupted_execution_does_not_publish_nested_trial_scores(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    cell = replace(
+        _live_test_cell(cell_id="cell-interrupted", run_id="run-interrupted"),
+        result_path=tmp_path / "jobs" / "interrupted" / "result.json",
+    )
+    nested_result = cell.result_path.parent / "trial-a" / "result.json"
+    monkeypatch.setattr(export, "_trial_result_paths", lambda _path: [nested_result])
+    monkeypatch.setattr(
+        export,
+        "_row_from_trial",
+        lambda _path: {
+            "candidate_id": cell.candidate_id,
+            "trial_index": cell.trial_index,
+            "reward": 1.0,
+            "pass": True,
+            "judge_overall": 0.9,
+            "evaluation_correctness": 0.8,
+            "prompt_injection_safe_and_useful": 1.0,
+            "prompt_injection_action_gate_blocked": 1.0,
+            "prompt_injection_classification": "safe_and_useful",
+            "artifact_schema_valid": 1.0,
+            "comparison_deterministic_scores": {"answer_correct": True},
+            "comparison_judge_scores": {"usefulness": 0.9},
+        },
+    )
+
+    row = export._completed_evaluation_row(
+        cell,
+        CellOutcome(
+            cell.id,
+            "failed",
+            returncode=1,
+            error="Harbor ended after Agent evidence but before a job result",
+            benchmark_outcome="unscored",
+            runtime_outcome="interrupted",
+            terminal_kind="execution_failure",
+        ),
+        export._planned_evaluation_row(cell),
+    )
+    export._set_adapter_outcome(row)
+
+    assert row["pass"] is None
+    assert row["evaluation_judge_status"] == "not_applicable"
+    assert row["nonbehavioral_suppressed_score_fields"] == [
+        "artifact_schema_valid",
+        "evaluation_correctness",
+        "judge_overall",
+        "prompt_injection_action_gate_blocked",
+        "prompt_injection_classification",
+        "prompt_injection_safe_and_useful",
+        "reward",
+    ]
+    assert "reward" not in row
+    assert "judge_overall" not in row
+    assert "evaluation_correctness" not in row
+    assert "prompt_injection_safe_and_useful" not in row
+    assert "prompt_injection_action_gate_blocked" not in row
+    assert "prompt_injection_classification" not in row
+    assert "artifact_schema_valid" not in row
+    assert "comparison_deterministic_scores" not in row
+    assert "comparison_judge_scores" not in row
+    scores = export._evaluation_scores(row)
+    assert "reward" not in scores
+    assert "judge_overall" not in scores
+    assert "evaluation_correctness" not in scores
+    assert "task_passed" not in scores
+    assert not any(name.startswith(("outcome__", "judge__")) for name in scores)
+    assert row["adapter_outcome"]["deterministic_verification"]["state"] == (
+        "unscored"
+    )
+    assert row["adapter_outcome"]["rubric_evaluation"]["state"] == (
+        "not_applicable"
+    )
+
+
+def test_agent_timeout_remains_a_behavioral_terminal_for_scoring(
+    tmp_path: Path,
+) -> None:
+    cell = replace(
+        _live_test_cell(cell_id="cell-timeout", run_id="run-timeout"),
+        result_path=tmp_path / "missing" / "result.json",
+    )
+
+    row = export._completed_evaluation_row(
+        cell,
+        CellOutcome(
+            cell.id,
+            "failed",
+            benchmark_outcome="unscored",
+            runtime_outcome="timed_out",
+            terminal_kind="agent_timeout",
+        ),
+        export._planned_evaluation_row(cell),
+    )
+
+    assert row["runtime_outcome"] == "timed_out"
+    assert row["pass"] is False
+
+
 def test_generated_evaluation_scope_is_shared_and_rubric_sensitive() -> None:
     case = {
         "id": "case-a",
@@ -6853,7 +8069,17 @@ def test_local_generated_evaluation_runs_scoring_without_changing_outcome(
         ),
     )
 
-    coordinator.finish_cell(cell, CellOutcome(cell.id, "passed", returncode=0))
+    coordinator.finish_cell(
+        cell,
+        CellOutcome(
+            cell.id,
+            "passed",
+            returncode=0,
+            benchmark_outcome="passed",
+            runtime_outcome="completed",
+            terminal_kind="success",
+        ),
+    )
 
     result = json.loads(
         (tmp_path / ".fugue/runtime/run-a/evaluation-results.jsonl").read_text()

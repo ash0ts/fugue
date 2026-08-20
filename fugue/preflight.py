@@ -10,7 +10,10 @@ from pathlib import Path
 
 import httpx
 
-from fugue.bench.executables import resolve_console_script
+from fugue.bench.executables import (
+    resolve_console_script,
+    resolve_console_script_python,
+)
 from fugue.bridge import bridge_status
 from fugue.model_plane import (
     ModelRoute,
@@ -228,11 +231,14 @@ def harbor_version_check() -> PreflightCheck:
         return PreflightCheck(
             "harbor version", False, f"harbor=={HARBOR_VERSION} is required"
         )
-    harbor_py = Path(harbor).resolve().parent / "python"
-    if not harbor_py.exists():
-        return PreflightCheck("harbor version", False, f"{harbor_py} not found")
+    harbor_py = resolve_console_script_python(harbor)
+    if not harbor_py:
+        return PreflightCheck(
+            "harbor version", False, f"Harbor Python not found for {harbor}"
+        )
     command = [
-        harbor_py.as_posix(),
+        harbor_py,
+        "-I",
         "-c",
         "from importlib.metadata import version; print(version('harbor'))",
     ]
@@ -255,11 +261,12 @@ def validate_harbor_job_configs(paths: list[Path]) -> None:
     harbor = _harbor_executable()
     if not harbor:
         raise RuntimeError(f"harbor=={HARBOR_VERSION} CLI is required")
-    harbor_py = Path(harbor).resolve().parent / "python"
-    if not harbor_py.exists():
-        raise RuntimeError(f"Harbor Python not found: {harbor_py}")
+    harbor_py = resolve_console_script_python(harbor)
+    if not harbor_py:
+        raise RuntimeError(f"Harbor Python not found for {harbor}")
     command = [
-        harbor_py.as_posix(),
+        harbor_py,
+        "-I",
         "-c",
         _HARBOR_CONFIG_VALIDATOR,
         HARBOR_VERSION,
@@ -324,11 +331,18 @@ def harbor_import_check(repo_root: Path | str) -> PreflightCheck:
     harbor = _harbor_executable()
     if not harbor:
         return PreflightCheck("adapters", False, "harbor CLI not found")
-    harbor_py = Path(harbor).resolve().parent / "python"
-    if not harbor_py.exists():
-        return PreflightCheck("adapters", False, f"{harbor_py} not found")
+    harbor_py = resolve_console_script_python(harbor)
+    if not harbor_py:
+        return PreflightCheck(
+            "adapters", False, f"Harbor Python not found for {harbor}"
+        )
     result = subprocess.run(
-        [harbor_py.as_posix(), "-c", "import fugue.agents"],
+        [
+            harbor_py,
+            "-I",
+            "-c",
+            "import fugue.agents; import fugue.bench.harbor_terminal",
+        ],
         cwd=repo_root,
         capture_output=True,
         text=True,
@@ -336,7 +350,7 @@ def harbor_import_check(repo_root: Path | str) -> PreflightCheck:
     return PreflightCheck(
         "adapters",
         result.returncode == 0,
-        "fugue.agents importable under harbor python"
+        "Fugue agents and Harbor terminal plugin importable under Harbor Python"
         if result.returncode == 0
         else (result.stderr.strip() or result.stdout.strip()),
     )

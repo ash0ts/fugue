@@ -574,7 +574,7 @@ def _validate_human_readable_canary_binding(
 
     expected_study_id = (
         "mcp-main-vs-0-4-"
-        f"{source_lock.source_commit[:7]}-human-readable-evidence-canary-v1"
+        f"{source_lock.source_commit[:7]}-human-readable-evidence-canary-v2"
     )
     if (
         spec.id != expected_study_id
@@ -893,7 +893,7 @@ def _is_exact_human_readable_canary(
 
     expected_id = (
         "mcp-main-vs-0-4-"
-        f"{source_lock.source_commit[:7]}-human-readable-evidence-canary-v1"
+        f"{source_lock.source_commit[:7]}-human-readable-evidence-canary-v2"
     )
     if (
         spec.id != expected_id

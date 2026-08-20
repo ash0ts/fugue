@@ -1,5 +1,5 @@
 schema_version: 3
-id: mcp-main-vs-0-4-{{CANDIDATE_SHORT}}-human-readable-evidence-canary-v1
+id: mcp-main-vs-0-4-{{CANDIDATE_SHORT}}-human-readable-evidence-canary-v2
 question: Does the exact W&B MCP staging/0.4.0 commit improve or preserve factual, bounded maintainer work on the two tasks selected for human-readable evidence review?
 taskset:
   tasks: human-readable-evidence-tasks.jsonl

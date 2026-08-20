@@ -229,21 +229,21 @@
         "evidence_links": [
           {
             "kind": "evaluation_root",
-            "ref": "baseline-evaluation_root",
+            "ref": "weave:///wandb/fugue-mcp-release-qualification-v1/call/baseline-evaluation_root",
             "status": "resolved",
             "system": "weave",
             "url": "https://wandb.ai/wandb/fugue-mcp-release-qualification-v1/weave/calls/baseline-evaluation_root"
           },
           {
             "kind": "prediction_and_score",
-            "ref": "baseline-prediction_and_score",
+            "ref": "weave:///wandb/fugue-mcp-release-qualification-v1/call/baseline-prediction_and_score",
             "status": "resolved",
             "system": "weave",
             "url": "https://wandb.ai/wandb/fugue-mcp-release-qualification-v1/weave/calls/baseline-prediction_and_score"
           },
           {
             "kind": "prediction",
-            "ref": "baseline-prediction",
+            "ref": "weave:///wandb/fugue-mcp-release-qualification-v1/call/baseline-prediction",
             "status": "resolved",
             "system": "weave",
             "url": "https://wandb.ai/wandb/fugue-mcp-release-qualification-v1/weave/calls/baseline-prediction"
@@ -253,14 +253,14 @@
           "evidence_kind": "native_weave_call_v1",
           "kind": "agent_root",
           "native_trajectory_status": "native_weave_call",
-          "ref": "baseline-agent_root",
+          "ref": "weave:///wandb/fugue-mcp-release-qualification-v1/call/baseline-agent_root",
             "status": "resolved",
             "system": "weave",
             "url": "https://wandb.ai/wandb/fugue-mcp-release-qualification-v1/weave/calls/baseline-agent_root"
           },
           {
             "kind": "dataset",
-            "ref": "release-dataset:v1",
+            "ref": "weave:///wandb/fugue-mcp-release-qualification-v1/object/release-dataset:v1",
             "status": "resolved",
             "system": "weave",
             "url": "https://wandb.ai/wandb/fugue-mcp-release-qualification-v1/weave/objects/release-dataset/versions/v1"
@@ -327,21 +327,21 @@
         "evidence_links": [
           {
             "kind": "evaluation_root",
-            "ref": "candidate-evaluation_root",
+            "ref": "weave:///wandb/fugue-mcp-release-qualification-v1/call/candidate-evaluation_root",
             "status": "resolved",
             "system": "weave",
             "url": "https://wandb.ai/wandb/fugue-mcp-release-qualification-v1/weave/calls/candidate-evaluation_root"
           },
           {
             "kind": "prediction_and_score",
-            "ref": "candidate-prediction_and_score",
+            "ref": "weave:///wandb/fugue-mcp-release-qualification-v1/call/candidate-prediction_and_score",
             "status": "resolved",
             "system": "weave",
             "url": "https://wandb.ai/wandb/fugue-mcp-release-qualification-v1/weave/calls/candidate-prediction_and_score"
           },
           {
             "kind": "prediction",
-            "ref": "candidate-prediction",
+            "ref": "weave:///wandb/fugue-mcp-release-qualification-v1/call/candidate-prediction",
             "status": "resolved",
             "system": "weave",
             "url": "https://wandb.ai/wandb/fugue-mcp-release-qualification-v1/weave/calls/candidate-prediction"
@@ -351,14 +351,14 @@
           "evidence_kind": "native_weave_call_v1",
           "kind": "agent_root",
           "native_trajectory_status": "native_weave_call",
-          "ref": "candidate-agent_root",
+          "ref": "weave:///wandb/fugue-mcp-release-qualification-v1/call/candidate-agent_root",
             "status": "resolved",
             "system": "weave",
             "url": "https://wandb.ai/wandb/fugue-mcp-release-qualification-v1/weave/calls/candidate-agent_root"
           },
           {
             "kind": "dataset",
-            "ref": "release-dataset:v1",
+            "ref": "weave:///wandb/fugue-mcp-release-qualification-v1/object/release-dataset:v1",
             "status": "resolved",
             "system": "weave",
             "url": "https://wandb.ai/wandb/fugue-mcp-release-qualification-v1/weave/objects/release-dataset/versions/v1"

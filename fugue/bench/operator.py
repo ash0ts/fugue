@@ -73,6 +73,7 @@ from fugue.bench.execution_recovery import (
     ExecutionRecoveryController,
     ExecutionRecoveryPaused,
     PhysicalExecutionIdentityV1,
+    UnsupportedHostedFinalizationRecovery,
     _rehydrate_physical_harbor_cell,
 )
 from fugue.bench.export import (
@@ -359,6 +360,262 @@ class _EvidenceCoordinators:
                     or "infrastructure retry"
                 ),
             )
+
+
+@dataclass(frozen=True)
+class _HostedEvidenceStartup:
+    """Classify live evidence before any hosted object can be created."""
+
+    fresh_cells: tuple[PlannedCell, ...]
+
+
+_HOSTED_INITIALIZATION_INTENT = "hosted-evaluation-initialization-v1.json"
+
+
+def _hosted_initialization_intent_path(repo_root: Path, run_id: str) -> Path:
+    return (
+        repo_root
+        / ".fugue"
+        / "runtime"
+        / run_id
+        / _HOSTED_INITIALIZATION_INTENT
+    )
+
+
+def _read_hosted_initialization_intent(
+    path: Path,
+    *,
+    run_id: str,
+) -> dict[str, Any] | None:
+    if not path.exists():
+        return None
+    try:
+        value = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError) as exc:
+        raise UnsupportedHostedFinalizationRecovery(
+            "the hosted Evaluation initialization marker is unreadable; "
+            "Fugue preserved it and will not create replacement hosted Calls"
+        ) from exc
+    if not isinstance(value, dict):
+        raise UnsupportedHostedFinalizationRecovery(
+            "the hosted Evaluation initialization marker is not an object; "
+            "Fugue will not create replacement hosted Calls"
+        )
+    supplied_digest = str(value.get("record_digest") or "")
+    unsigned = {key: item for key, item in value.items() if key != "record_digest"}
+    if (
+        value.get("schema_version") != 1
+        or value.get("run_id") != run_id
+        or not supplied_digest
+        or supplied_digest != stable_digest(unsigned)
+    ):
+        raise UnsupportedHostedFinalizationRecovery(
+            "the hosted Evaluation initialization marker conflicts with this "
+            "run; Fugue will not create replacement hosted Calls"
+        )
+    return value
+
+
+def _write_hosted_initialization_intent(
+    *,
+    repo_root: Path,
+    run_id: str,
+    project: str,
+    snapshot_sha256: str,
+    cells: list[PlannedCell],
+) -> Path:
+    """Durably admit one hosted graph before its first network side effect."""
+
+    path = _hosted_initialization_intent_path(repo_root, run_id)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    cell_bindings = [
+        {
+            "attempt_id": cell.attempt_id,
+            "candidate_id": cell.candidate_id,
+            "cell_id": cell.id,
+            "execution_fingerprint": cell.execution_fingerprint,
+        }
+        for cell in sorted(cells, key=lambda item: (item.attempt_id, item.id))
+        if cell.applicable and cell.execution_kind == "agent"
+    ]
+    unsigned = {
+        "schema_version": 1,
+        "run_id": run_id,
+        "evidence_mode": "weave_required",
+        "trace_project": project,
+        "snapshot_sha256": snapshot_sha256,
+        "cell_bindings": cell_bindings,
+        "cell_bindings_digest": stable_digest(cell_bindings),
+    }
+    value = {**unsigned, "record_digest": stable_digest(unsigned)}
+    body = json.dumps(value, indent=2, sort_keys=True) + "\n"
+    try:
+        descriptor = os.open(
+            path,
+            os.O_WRONLY | os.O_CREAT | os.O_EXCL,
+            0o600,
+        )
+    except FileExistsError as exc:
+        raise UnsupportedHostedFinalizationRecovery(
+            "a hosted Evaluation initialization marker already exists; "
+            "Fugue will not create a replacement hosted graph"
+        ) from exc
+    try:
+        with os.fdopen(descriptor, "w", encoding="utf-8") as handle:
+            handle.write(body)
+            handle.flush()
+            os.fsync(handle.fileno())
+        directory = os.open(path.parent, os.O_RDONLY)
+        try:
+            os.fsync(directory)
+        finally:
+            os.close(directory)
+    except BaseException:
+        # Preserve even a partial marker. No hosted write can occur before
+        # this function returns, and a later controller must fail closed.
+        raise
+    return path
+
+
+def _read_hosted_terminal_rows(path: Path) -> dict[str, dict[str, Any]]:
+    rows: dict[str, dict[str, Any]] = {}
+    if not path.is_file():
+        return rows
+    for line_number, line in enumerate(
+        path.read_text(encoding="utf-8").splitlines(),
+        start=1,
+    ):
+        if not line.strip():
+            continue
+        try:
+            value = json.loads(line)
+        except json.JSONDecodeError as exc:
+            raise RuntimeError(
+                "hosted evidence result ledger is not valid JSON at "
+                f"line {line_number}"
+            ) from exc
+        if not isinstance(value, dict):
+            raise RuntimeError("hosted evidence result ledger row must be an object")
+        attempt_id = str(value.get("attempt_id") or "")
+        if not attempt_id:
+            raise RuntimeError("hosted evidence result row has no attempt identity")
+        if attempt_id in rows:
+            raise RuntimeError(
+                "hosted evidence result ledger contains duplicate logical attempts"
+            )
+        rows[attempt_id] = value
+    return rows
+
+
+def _has_prior_hosted_lifecycle(path: Path) -> bool:
+    if not path.is_file():
+        return False
+    for line_number, line in enumerate(
+        path.read_text(encoding="utf-8").splitlines(),
+        start=1,
+    ):
+        if not line.strip():
+            continue
+        try:
+            value = json.loads(line)
+        except json.JSONDecodeError as exc:
+            raise RuntimeError(
+                "hosted evidence lifecycle ledger is not valid JSON at "
+                f"line {line_number}"
+            ) from exc
+        if not isinstance(value, dict):
+            raise RuntimeError("hosted evidence lifecycle row must be an object")
+        # Any row belongs to this run-scoped ledger. Unexpected or unplanned
+        # identities are conflicting prior state, never evidence of freshness.
+        return True
+    return False
+
+
+def _hosted_evidence_startup(
+    *,
+    repo_root: Path,
+    run_id: str,
+    cells: list[PlannedCell],
+    resuming: bool = False,
+) -> _HostedEvidenceStartup:
+    """Fail closed when public Weave APIs cannot resume an exact live graph.
+
+    Weave 0.53.6 does not expose a documented EvaluationLogger resume API.
+    Its default calls-complete transport can also retain open prediction Call
+    starts only in process memory.  A canonical local attempt therefore must
+    never cause a replacement Dataset, Evaluation, prediction-and-score, or
+    prediction Call after controller loss.
+
+    Any prior local or hosted state is terminal here.  Fugue preserves those
+    artifacts for audit, but automatic resume would require an unsupported
+    EvaluationLogger rehydration contract.  The supported recovery is a newly
+    approved local-evidence run followed by digest-bound post-hoc publication.
+    """
+
+    agent_cells = tuple(
+        cell
+        for cell in cells
+        if cell.applicable and cell.execution_kind == "agent"
+    )
+    if not agent_cells:
+        return _HostedEvidenceStartup(fresh_cells=tuple(cells))
+
+    initialization_intent = _read_hosted_initialization_intent(
+        _hosted_initialization_intent_path(repo_root, run_id),
+        run_id=run_id,
+    )
+    if resuming or initialization_intent is not None:
+        raise UnsupportedHostedFinalizationRecovery(
+            "automatic weave_required resume is unsupported with documented "
+            "Weave 0.53.6 APIs; Fugue preserved the admitted hosted graph and "
+            "will not create replacement hosted Calls or rerun the Agent. Use "
+            "a newly approved local-evidence run and publish its unchanged "
+            "result through the digest-bound post-hoc publisher"
+        )
+
+    hosted_path = (
+        repo_root
+        / ".fugue"
+        / "runtime"
+        / run_id
+        / "hosted-evaluation-results.jsonl"
+    )
+    hosted_by_attempt = _read_hosted_terminal_rows(hosted_path)
+
+    store = LocalEvidenceStore(repo_root, run_id)
+    local_records: dict[str, Any] = {}
+    for cell in agent_cells:
+        try:
+            local_records[cell.attempt_id] = store.read_attempt(cell.attempt_id)
+        except FileNotFoundError:
+            continue
+
+    if not local_records:
+        prior_lifecycle = bool(hosted_by_attempt) or _has_prior_hosted_lifecycle(
+            hosted_path.with_name("evaluations.jsonl")
+        )
+        if prior_lifecycle:
+            raise UnsupportedHostedFinalizationRecovery(
+                "cannot restart a weave_required run after hosted Evaluation "
+                "construction without replacing its admitted graph; no "
+                "canonical local attempt is available and the Agent will not "
+                "be rerun"
+            )
+        return _HostedEvidenceStartup(fresh_cells=tuple(cells))
+
+    hosted_state = (
+        "terminal hosted rows are present"
+        if hosted_by_attempt
+        else "the hosted terminal row is missing"
+    )
+    raise UnsupportedHostedFinalizationRecovery(
+        "automatic weave_required resume is unsupported with documented Weave "
+        "0.53.6 APIs because it could replace the admitted Evaluation graph; "
+        f"canonical local evidence and any hosted artifacts were preserved ({hosted_state}). "
+        "Use a newly approved local-evidence run and publish its unchanged "
+        "result through the digest-bound post-hoc publisher; the Agent will not "
+        "be rerun by this recovery attempt"
+    )
 
 
 @dataclass(frozen=True)
@@ -2599,29 +2856,56 @@ class OperatorService:
                     cell.applicable and cell.execution_kind == "agent" for cell in cells
                 )
             )
+            hosted_startup = _HostedEvidenceStartup(
+                fresh_cells=tuple(cells),
+            )
+            live_project = (
+                trace_project_slug(run_env)
+                if evidence_mode == "weave_required"
+                else ""
+            )
+            if evidence_mode == "weave_required":
+                # This read-only admission check runs before Dataset or
+                # Evaluation construction. It prevents controller recovery
+                # from replacing a live graph whose EvaluationLogger state
+                # died with the prior process.
+                hosted_startup = _hosted_evidence_startup(
+                    repo_root=self.repo_root,
+                    run_id=run_id,
+                    cells=cells,
+                    resuming=resume,
+                )
+            live_cells = list(hosted_startup.fresh_cells)
             live_disabled = run_env.get(
                 "FUGUE_DISABLE_LIVE_EVALUATIONS", ""
             ).lower() in {"1", "true", "yes"}
-            if live_required and not trace_api_key(run_env):
+            if live_required and live_cells and not trace_api_key(run_env):
                 raise RuntimeError(
                     "this experiment requires live Weave evidence before "
                     "Agent execution, but no trace credential is configured"
                 )
-            if live_required and live_disabled:
+            if live_required and live_cells and live_disabled:
                 raise RuntimeError(
                     "this experiment cannot disable required live Weave evidence"
                 )
             if (
                 evidence_mode == "weave_required"
-                and cells
+                and live_cells
                 and trace_api_key(run_env)
                 and not live_disabled
             ):
+                _write_hosted_initialization_intent(
+                    repo_root=self.repo_root,
+                    run_id=run_id,
+                    project=live_project,
+                    snapshot_sha256=run_snapshot.snapshot_sha256,
+                    cells=live_cells,
+                )
                 try:
                     live = LiveEvaluationCoordinator(
-                        cells,
+                        live_cells,
                         repo_root=self.repo_root,
-                        project=trace_project_slug(run_env),
+                        project=live_project,
                         env=run_env,
                         cancellation_event=cancel_event,
                         host_evaluator=host_evaluator,
@@ -2643,7 +2927,7 @@ class OperatorService:
                         raise RuntimeError(
                             "required live-evidence initialization failed"
                         ) from exc
-            if live_required and live is None:
+            if live_required and live_cells and live is None:
                 raise RuntimeError("required live-evidence coordinator is unavailable")
             local = GeneratedEvaluationCoordinator(
                 cells,

@@ -1085,7 +1085,7 @@ def _materialize_packaged_reference_study(
             "kind": "wandb-mcp-human-readable-evidence-canary",
             "study_id": (
                 "mcp-main-vs-0-4-"
-                f"{candidate_sha[:7]}-human-readable-evidence-canary-v1"
+                f"{candidate_sha[:7]}-human-readable-evidence-canary-v2"
             ),
             "source_lock_digest": request.source_lock.lock_digest,
             "candidate_source_digest": (

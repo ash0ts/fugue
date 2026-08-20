@@ -27,8 +27,28 @@ from filelock import FileLock
 
 from fugue.agent_tracing import agent_conversation_id, stable_agent_name
 from fugue.bench.candidates import CANDIDATE_IDENTITY_SCHEMA_VERSION, stable_digest
+from fugue.bench.evaluation_semantics import (
+    DIRECT_SCORE_FIELDS as _DIRECT_SCORE_FIELDS,
+)
+from fugue.bench.evaluation_semantics import (
+    EVIDENCE_USE_REWARDS as _EVIDENCE_USE_REWARDS,
+)
+from fugue.bench.evaluation_semantics import (
+    GENERATED_EVALUATION_SCORE_DIMENSIONS as _GENERATED_EVALUATION_SCORE_DIMENSIONS,
+)
+from fugue.bench.evaluation_semantics import (
+    PROMPT_INJECTION_OPTIONAL_REWARDS as _PROMPT_INJECTION_OPTIONAL_REWARDS,
+)
+from fugue.bench.evaluation_semantics import (
+    PROMPT_INJECTION_REWARDS as _PROMPT_INJECTION_REWARDS,
+)
+from fugue.bench.evaluation_semantics import (
+    behavioral_task_output_available,
+    nonbehavioral_score_field_names,
+)
 from fugue.bench.evaluations import apply_generated_evaluation, public_evaluation_case
 from fugue.bench.execution import CellOutcome, PlannedCell
+from fugue.bench.execution_recovery import ExecutionFinalizationPending
 from fugue.bench.files import atomic_write_json
 from fugue.bench.local_evidence import (
     AgentEvidenceReceiptV1,
@@ -73,30 +93,6 @@ from fugue.weave_support import (
 
 PREDICTION_SCHEMA_VERSION = 1
 PUBLICATION_SCHEMA_VERSION = 1
-_PROMPT_INJECTION_REWARDS = (
-    "safe_and_useful",
-    "safe_but_failed_or_refused",
-    "compromised",
-    "incorrect",
-    "task_complete",
-    "false_positive_refusal",
-    "evidence_preserved",
-)
-_PROMPT_INJECTION_OPTIONAL_REWARDS = (
-    "attack_encountered",
-    "sensitive_action_attempted",
-    "action_gate_blocked",
-    "action_gate_allowed",
-)
-_EVIDENCE_USE_REWARDS = (
-    "artifact_schema_valid",
-    "answer_facts_correct",
-    "current_document_cited",
-    "current_document_used",
-    "unsupported_claims_absent",
-)
-
-
 @dataclass(frozen=True)
 class PredictionRowV1:
     prediction_id: str
@@ -178,6 +174,8 @@ class _LivePrediction:
     row: dict[str, Any]
     opened_monotonic: float
     bridge_finished: bool = False
+    prediction_closed: bool = False
+    provisional_scores_logged: bool = False
 
 
 class _TracePollingCancelled(Exception):
@@ -188,6 +186,12 @@ _WEAVE_CALL_SOURCE = "weave_calls"
 _WEAVE_AGENT_SPAN_SOURCE = "weave_agents"
 _TERMINAL_EVENT_STATUSES = frozenset(
     {"cancelled", "failed", "finalized", "interrupted"}
+)
+_HOSTED_DECISION_CONTRACT_VERSION = 1
+_PROVISIONAL_TASK_NOTICE = (
+    "This pre-reconciliation record is not a Fugue task verdict. The exact "
+    "post-close hosted-evidence receipt must verify before Fugue uses the "
+    "task result."
 )
 
 # Only these live-hosted fields may cross into a canonical local row. Task,
@@ -240,10 +244,35 @@ _HOSTED_DYNAMIC_ROW_FIELDS = (
     "weave_hosted_evidence_receipt_call_id",
     "weave_hosted_evidence_receipt_ref",
     "weave_hosted_evidence_receipt_url",
+    "weave_hosted_evidence_receipt_object_verified",
+    "weave_hosted_evidence_receipt_terminal_verified",
     "hosted_evidence_verification_status",
     "hosted_evidence_verification_owner",
     "terminal_hosted_visibility_verified",
     "task_verdict_owner",
+    "hosted_decision_contract_version",
+    "hosted_task_result_canonical",
+    "weave_provisional_predict_and_score_output_digest",
+    "weave_provisional_score_set_digest",
+    "weave_provisional_score_calls",
+    "weave_provisional_call_verification_status",
+    "weave_provisional_score_call_set_digest",
+    "weave_hosted_evidence_receipt_bindings_digest",
+    "weave_hosted_canonical_task_result_digest",
+    "weave_hosted_canonical_score_set_digest",
+    "weave_hosted_canonical_payload_digest",
+    "weave_hosted_canonical_payload",
+    "weave_hosted_evidence_invalidation_call_id",
+    "weave_hosted_evidence_invalidation_ref",
+    "weave_hosted_evidence_invalidation_url",
+    "weave_hosted_evidence_invalidation_object_verified",
+    "weave_hosted_evidence_invalidation_terminal_verified",
+    "weave_hosted_evidence_invalidation_bindings_digest",
+    "weave_hosted_evidence_invalidation_terminal_output_digest",
+    "weave_hosted_evidence_invalidation_error_type",
+    "weave_hosted_evidence_invalidation_parent_verified",
+    "weave_hosted_evidence_invalidation_project",
+    "hosted_evidence_invalidation_status",
 )
 
 
@@ -377,6 +406,10 @@ class LiveEvaluationCoordinator:
         self._hosted_evidence_receipt_op = _eager_call_op(
             self.weave,
             "fugue.hosted_evidence_verification_receipt",
+        )
+        self._hosted_evidence_invalidation_op = _eager_call_op(
+            self.weave,
+            "fugue.hosted_evidence_invalidation_receipt",
         )
         logger_cls = getattr(self.weave, "EvaluationLogger", None)
         if logger_cls is None:
@@ -521,6 +554,13 @@ class LiveEvaluationCoordinator:
                     "fugue.study_console_backlink": cell.env.get(
                         "FUGUE_STUDY_CONSOLE_BACKLINK", ""
                     ),
+                    "fugue.result.canonical": False,
+                    "fugue.result.status": "provisional",
+                    "fugue.evidence.status": "pending_terminal_reconciliation",
+                    "fugue.task_verdict.owner": (
+                        "post_close_hosted_evidence_verification_receipt"
+                    ),
+                    "fugue.provisional_notice": _PROVISIONAL_TASK_NOTICE,
                 }
             )
             if attributes is not None
@@ -568,6 +608,7 @@ class LiveEvaluationCoordinator:
                 prediction,
                 row,
                 terminal=False,
+                provisional=True,
             )
             if row.get("evaluation_root_dataset_relationship_verified") is not True:
                 raise RuntimeError(
@@ -630,7 +671,7 @@ class LiveEvaluationCoordinator:
                     }
                 )
                 try:
-                    prediction.output = _evaluation_output(row)
+                    prediction.output = _evaluation_output(row, provisional=True)
                 except Exception:
                     pass
                 try:
@@ -958,7 +999,8 @@ class LiveEvaluationCoordinator:
             if (
                 _live_call_value(call, "id") != call_id
                 or _live_call_value(call, "project_id") != self.project
-                or _live_call_value(call, "parent_id") != expected_parent_id
+                or str(_live_call_value(call, "parent_id") or "")
+                != expected_parent_id
             ):
                 return
             self._best_effort_finish_evidence_call(
@@ -968,6 +1010,80 @@ class LiveEvaluationCoordinator:
             )
         except BaseException:
             pass
+
+    def _reuse_exact_terminal_hosted_decision(
+        self,
+        *,
+        client: Any | None,
+        call_id: str,
+        expected_parent_id: str,
+        expected_trace_id: str,
+        bindings_digest: str,
+        terminal_output: Mapping[str, Any],
+        required_attributes: Mapping[str, Any],
+        pending_display_name: str,
+        canonical_display_name: str,
+    ) -> bool:
+        """Reuse only an exact terminal decision after an interrupted create.
+
+        A deterministic Call ID lets controller recovery discover a Call whose
+        create request reached Weave before the client raised.  Fugue may reuse
+        that Call only when its full, public, terminal representation matches
+        the decision that this attempt independently recomputed.  A still-open
+        Call is closed as noncanonical; a conflicting terminal Call is never
+        overwritten.
+        """
+
+        try:
+            with EVIDENCE_ROUTING_LOCK:
+                active_client = self._activate_evidence_client(client)
+                get_call = getattr(active_client, "get_call", None)
+                if active_client is None or not callable(get_call):
+                    return False
+                call = get_call(call_id)
+        except Exception:
+            return False
+        identity_matches = bool(
+            _live_call_value(call, "id") == call_id
+            and _live_call_value(call, "project_id") == self.project
+            and _live_call_value(call, "parent_id") == expected_parent_id
+            and _same_nonempty_trace(
+                _live_call_value(call, "trace_id"), expected_trace_id
+            )
+        )
+        inputs = getattr(call, "inputs", None)
+        attributes = getattr(call, "attributes", None)
+        binding_matches = bool(
+            isinstance(inputs, Mapping)
+            and stable_digest(dict(inputs)) == bindings_digest
+            and _mapping_contains(attributes, required_attributes)
+        )
+        if not identity_matches or not binding_matches:
+            raise RuntimeError(
+                "existing hosted evidence decision receipt conflicts with "
+                "the canonical attempt"
+            )
+        if getattr(call, "ended_at", None) is None:
+            if _live_call_value(call, "display_name") != pending_display_name:
+                raise RuntimeError(
+                    "existing open hosted evidence decision receipt changed display"
+                )
+            self._best_effort_finish_evidence_call(
+                active_client,
+                call,
+                output={"status": "hosted_evidence_receipt_create_interrupted"},
+            )
+            return False
+        if (
+            stable_digest(getattr(call, "output", None))
+            == stable_digest(terminal_output)
+            and _live_call_value(call, "display_name") == canonical_display_name
+        ):
+            return True
+        raise RuntimeError(
+            "existing terminal hosted evidence decision receipt conflicts with "
+            "the canonical attempt"
+        )
 
     def _finish_evidence_call(
         self,
@@ -1031,7 +1147,13 @@ class LiveEvaluationCoordinator:
                 "hosted_evidence_verification_owner": (
                     "post_close_verification_receipt"
                 ),
-                "task_verdict_owner": "predict_and_score",
+                "task_verdict_owner": (
+                    "post_close_hosted_evidence_verification_receipt"
+                ),
+                "hosted_decision_contract_version": (
+                    _HOSTED_DECISION_CONTRACT_VERSION
+                ),
+                "hosted_task_result_canonical": False,
                 "terminal_hosted_visibility_verified": False,
             }
         )
@@ -1070,6 +1192,172 @@ class LiveEvaluationCoordinator:
             if self._cancellation_event.wait(wait_sec):
                 raise _TracePollingCancelled
 
+    def _verify_provisional_hosted_records(
+        self,
+        *,
+        active: _LivePrediction,
+        row: dict[str, Any],
+    ) -> dict[str, Any]:
+        """Verify every closed provisional Call through Weave's public API."""
+
+        local_record_digest = str(row.get("local_evidence_record_digest") or "")
+        if re.fullmatch(r"[0-9a-f]{64}", local_record_digest) is None:
+            raise RuntimeError(
+                "hosted decision requires the canonical local evidence record digest"
+            )
+        client = self._activate_evidence_client(active.bridge_client)
+        if client is None:
+            raise RuntimeError("hosted evidence has no public Weave client")
+        evaluation_root = getattr(active.prediction, "evaluate_call", None)
+        predict_and_score = getattr(
+            active.prediction, "predict_and_score_call", None
+        )
+        prediction_call = getattr(active.prediction, "predict_call", None)
+        evaluation_id = _live_call_value(evaluation_root, "id")
+        pas_id = _live_call_value(predict_and_score, "id")
+        prediction_id = _live_call_value(prediction_call, "id")
+        expected_trace = _live_call_value(evaluation_root, "trace_id")
+        if not all((evaluation_id, pas_id, prediction_id, expected_trace)):
+            raise RuntimeError("provisional hosted Call identity is incomplete")
+        required_attributes = {
+            "fugue.result.canonical": False,
+            "fugue.result.status": "provisional",
+            "fugue.evidence.status": "pending_terminal_reconciliation",
+            "fugue.task_verdict.owner": (
+                "post_close_hosted_evidence_verification_receipt"
+            ),
+        }
+        provisional_output = active.prediction.output
+        expected_scores = _provisional_evaluation_scores(row)
+        expected_predict_and_score_output = _provisional_predict_and_score_output(
+            output=provisional_output,
+            scores=expected_scores,
+        )
+        provisional_output_digest = stable_digest(
+            expected_predict_and_score_output
+        )
+        pas_remote = self._wait_for_public_terminal_call(
+            client=client,
+            call_id=pas_id,
+            phase="provisional prediction-and-score Call",
+        )
+        if (
+            _live_call_value(pas_remote, "project_id") != self.project
+            or _live_call_value(pas_remote, "parent_id") != evaluation_id
+            or not _same_nonempty_trace(
+                _live_call_value(pas_remote, "trace_id"), expected_trace
+            )
+            or not _mapping_contains(
+                getattr(pas_remote, "attributes", None), required_attributes
+            )
+            or not _live_call_value(pas_remote, "display_name").startswith(
+                "PROVISIONAL · "
+            )
+            or stable_digest(getattr(pas_remote, "output", None))
+            != provisional_output_digest
+        ):
+            raise RuntimeError(
+                "provisional prediction-and-score Call did not reconcile exactly"
+            )
+        prediction_remote = self._wait_for_public_terminal_call(
+            client=client,
+            call_id=prediction_id,
+            phase="provisional prediction Call",
+        )
+        if (
+            _live_call_value(prediction_remote, "project_id") != self.project
+            or _live_call_value(prediction_remote, "parent_id") != pas_id
+            or not _same_nonempty_trace(
+                _live_call_value(prediction_remote, "trace_id"), expected_trace
+            )
+            or not _mapping_contains(
+                getattr(prediction_remote, "attributes", None),
+                required_attributes,
+            )
+            or not _live_call_value(prediction_remote, "display_name").startswith(
+                "PROVISIONAL · "
+            )
+            or stable_digest(getattr(prediction_remote, "output", None))
+            != stable_digest(provisional_output)
+        ):
+            raise RuntimeError("provisional prediction Call did not reconcile exactly")
+        score_records = row.get("weave_provisional_score_calls")
+        if not isinstance(score_records, list) or len(score_records) != len(
+            expected_scores
+        ):
+            raise RuntimeError(
+                "provisional scorer Calls are unavailable for exact readback"
+            )
+        verified_scores: list[dict[str, Any]] = []
+        seen_names: set[str] = set()
+        seen_ids: set[str] = set()
+        for record in score_records:
+            if not isinstance(record, Mapping):
+                raise RuntimeError("provisional scorer Call record is invalid")
+            name = str(record.get("name") or "")
+            call_id = str(record.get("call_id") or "")
+            display_name = str(record.get("display_name") or "")
+            if (
+                name not in expected_scores
+                or name in seen_names
+                or not call_id
+                or call_id in seen_ids
+            ):
+                raise RuntimeError("provisional scorer Call identity is invalid")
+            remote = self._wait_for_public_terminal_call(
+                client=client,
+                call_id=call_id,
+                phase=f"provisional scorer Call {name}",
+            )
+            score_attributes = {
+                **required_attributes,
+                "fugue.attempt_id": str(row.get("attempt_id") or ""),
+                "fugue.local_record_digest": local_record_digest,
+                "weave.eval.predict_and_score_call_id": pas_id,
+                "fugue.canonical_receipt_call_id": str(
+                    row.get("weave_hosted_evidence_receipt_call_id") or ""
+                ),
+            }
+            if (
+                _live_call_value(remote, "project_id") != self.project
+                or _live_call_value(remote, "parent_id") != pas_id
+                or not _same_nonempty_trace(
+                    _live_call_value(remote, "trace_id"), expected_trace
+                )
+                or not _mapping_contains(
+                    getattr(remote, "attributes", None), score_attributes
+                )
+                or _live_call_value(remote, "display_name") != display_name
+                or stable_digest(getattr(remote, "output", None))
+                != stable_digest(expected_scores[name])
+            ):
+                raise RuntimeError(
+                    f"provisional scorer Call {name} did not reconcile exactly"
+                )
+            seen_names.add(name)
+            seen_ids.add(call_id)
+            verified_scores.append(
+                {
+                    "name": name,
+                    "call_id": call_id,
+                    "output_digest": stable_digest(expected_scores[name]),
+                }
+            )
+        verified_scores.sort(key=lambda item: item["name"])
+        score_call_set_digest = stable_digest(verified_scores)
+        row.update(
+            {
+                "weave_provisional_call_verification_status": "verified",
+                "weave_provisional_score_call_set_digest": score_call_set_digest,
+            }
+        )
+        return {
+            "local_record_digest": local_record_digest,
+            "predict_and_score_output_digest": provisional_output_digest,
+            "provisional_score_set_digest": stable_digest(expected_scores),
+            "provisional_score_call_set_digest": score_call_set_digest,
+        }
+
     def _publish_hosted_evidence_verification_receipt(
         self,
         *,
@@ -1082,8 +1370,24 @@ class LiveEvaluationCoordinator:
         evaluation_root = getattr(active.prediction, "evaluate_call", None)
         if not call_id or evaluation_root is None:
             raise RuntimeError("hosted evidence verification receipt was not prepared")
+        provisional = self._verify_provisional_hosted_records(
+            active=active,
+            row=row,
+        )
+        provisional_output_digest = provisional[
+            "predict_and_score_output_digest"
+        ]
+        recorded_output_digest = str(
+            row.get("weave_provisional_predict_and_score_output_digest") or ""
+        )
+        if recorded_output_digest != provisional_output_digest:
+            raise RuntimeError(
+                "provisional predict-and-score output changed before verification"
+            )
+        canonical_result = _canonical_hosted_task_result(row)
+        canonical_payload_digest = stable_digest(canonical_result)
         bindings = {
-            "schema_version": 1,
+            "schema_version": _HOSTED_DECISION_CONTRACT_VERSION,
             "attempt_id": str(row.get("attempt_id") or ""),
             "evaluation_root_call_id": str(
                 row.get("weave_evaluation_root_call_id") or ""
@@ -1098,41 +1402,118 @@ class LiveEvaluationCoordinator:
             ),
             "agent_receipt_call_id": str(row.get("weave_agent_root_call_id") or ""),
             "evidence_project": self.project,
+            "canonical_local_record_digest": provisional[
+                "local_record_digest"
+            ],
+            "provisional_predict_and_score_output_digest": (
+                provisional_output_digest
+            ),
+            "provisional_score_set_digest": provisional[
+                "provisional_score_set_digest"
+            ],
+            "provisional_score_call_set_digest": provisional[
+                "provisional_score_call_set_digest"
+            ],
+            "canonical_payload_digest": canonical_payload_digest,
         }
         if any(not value for key, value in bindings.items() if key != "schema_version"):
             raise RuntimeError("hosted evidence verification bindings are incomplete")
         bindings_digest = stable_digest(bindings)
-        receipt_call, client = self._create_owned_eager_call(
-            active.bridge_client,
-            getattr(
-                self,
-                "_hosted_evidence_receipt_op",
-                "fugue.hosted_evidence_verification_receipt",
-            ),
-            bindings,
-            call_id=call_id,
-            expected_parent_id=bindings["predict_and_score_call_id"],
-            failure_status="hosted_evidence_receipt_create_interrupted",
-            parent=active.prediction.predict_and_score_call,
-            attributes={
-                "fugue.evidence.kind": "post_close_hosted_evidence_verification",
-                "fugue.evidence.schema_version": 1,
-                "fugue.evidence.status": "verified",
-                "fugue.evidence.bindings_digest": bindings_digest,
-                "fugue.run_id": str(row.get("run_id") or ""),
-                "fugue.cell_id": str(row.get("cell_id") or ""),
-                "fugue.attempt_id": bindings["attempt_id"],
-                "weave.eval.run_id": bindings["evaluation_root_call_id"],
-                "weave.eval.predict_and_score_call_id": bindings[
-                    "predict_and_score_call_id"
-                ],
-            },
-            display_name=(
-                f"Evidence verified · {_task_title(row)} · {_arm_label(row)} · "
-                f"Attempt {_positive_int(row.get('trial_index')) or 1}"
-            ),
-            use_stack=False,
+        canonical_display_name = (
+            f"CANONICAL · {_task_verdict_label(row)} · {_task_title(row)} · "
+            f"{_arm_label(row)} · "
+            f"Attempt {_positive_int(row.get('trial_index')) or 1}"
         )
+        pending_display_name = (
+            f"PENDING VERIFICATION · {_task_title(row)} · {_arm_label(row)} · "
+            f"Attempt {_positive_int(row.get('trial_index')) or 1}"
+        )
+        required_attributes = {
+            "fugue.evidence.kind": "post_close_hosted_evidence_verification",
+            "fugue.evidence.phase": "canonical_verdict_pending_v1",
+            "fugue.evidence.schema_version": _HOSTED_DECISION_CONTRACT_VERSION,
+            "fugue.evidence.status": "pending_terminal_readback",
+            "fugue.evidence.verification_status": "pending_terminal_readback",
+            "fugue.evidence.bindings_digest": bindings_digest,
+            "fugue.evidence.canonical_payload_digest": canonical_payload_digest,
+            "fugue.result.canonical": False,
+            "fugue.task_verdict.owner": (
+                "post_close_hosted_evidence_verification_receipt"
+            ),
+            "fugue.run_id": str(row.get("run_id") or ""),
+            "fugue.cell_id": str(row.get("cell_id") or ""),
+            "fugue.attempt_id": bindings["attempt_id"],
+            "fugue.local_record_digest": bindings[
+                "canonical_local_record_digest"
+            ],
+            "weave.eval.run_id": bindings["evaluation_root_call_id"],
+            "weave.eval.predict_and_score_call_id": bindings[
+                "predict_and_score_call_id"
+            ],
+        }
+        terminal_output = {
+            "schema_version": _HOSTED_DECISION_CONTRACT_VERSION,
+            "canonical": True,
+            "hosted_evidence_integrity": "verified",
+            "verification_status": "verified",
+            "bindings_digest": bindings_digest,
+            "canonical_payload_digest": canonical_payload_digest,
+            "task_verdict_owner": (
+                "post_close_hosted_evidence_verification_receipt"
+            ),
+            "task_result": canonical_result["task_result"],
+            "scalar_checks": canonical_result["scalar_checks"],
+            "score_descriptors": canonical_result["score_descriptors"],
+            "judge_evidence": canonical_result["judge_evidence"],
+            "mechanism_evidence": canonical_result["mechanism_evidence"],
+            "predict_and_score_binding": {
+                "call_id": bindings["predict_and_score_call_id"],
+                "output_digest": provisional_output_digest,
+                "scores_digest": provisional["provisional_score_set_digest"],
+            },
+        }
+        canonical_result_digest = stable_digest(terminal_output["task_result"])
+        canonical_score_set_digest = stable_digest(terminal_output["scalar_checks"])
+        terminal_output["task_result_digest"] = canonical_result_digest
+        terminal_output["score_set_digest"] = canonical_score_set_digest
+        try:
+            receipt_call, client = self._create_evidence_call(
+                active.bridge_client,
+                getattr(
+                    self,
+                    "_hosted_evidence_receipt_op",
+                    "fugue.hosted_evidence_verification_receipt",
+                ),
+                bindings,
+                _call_id_override=call_id,
+                parent=active.prediction.predict_and_score_call,
+                attributes=required_attributes,
+                display_name=pending_display_name,
+                use_stack=False,
+            )
+        except BaseException as create_error:
+            if self._reuse_exact_terminal_hosted_decision(
+                client=active.bridge_client,
+                call_id=call_id,
+                expected_parent_id=bindings["predict_and_score_call_id"],
+                expected_trace_id=_live_call_value(evaluation_root, "trace_id"),
+                bindings_digest=bindings_digest,
+                terminal_output=terminal_output,
+                required_attributes=required_attributes,
+                pending_display_name=pending_display_name,
+                canonical_display_name=canonical_display_name,
+            ):
+                row.update(
+                    _verified_hosted_decision_fields(
+                        bindings_digest=bindings_digest,
+                        canonical_result_digest=canonical_result_digest,
+                        canonical_score_set_digest=canonical_score_set_digest,
+                        canonical_payload_digest=canonical_payload_digest,
+                        canonical_payload=canonical_result,
+                    )
+                )
+                return
+            raise create_error
         try:
             identity_valid = bool(
                 _live_call_value(receipt_call, "id") == call_id
@@ -1155,30 +1536,30 @@ class LiveEvaluationCoordinator:
                 output={"status": "invalid_hosted_evidence_receipt"},
             )
             raise
-        terminal_output = {
-            "hosted_evidence_integrity": "verified",
-            "bindings_digest": bindings_digest,
-            "task_verdict_owner": "predict_and_score",
-        }
+        finish_error: BaseException | None = None
         try:
             self._finish_evidence_call(
                 client,
                 receipt_call,
                 output=terminal_output,
             )
-        except BaseException:
-            self._best_effort_finish_evidence_call(
-                client,
-                receipt_call,
-                output={**terminal_output, "cleanup_after_failure": True},
+        except BaseException as exc:
+            # A transport may raise after the server accepted the exact end.
+            # Read the deterministic Call before deciding whether it is safe.
+            finish_error = exc
+        try:
+            remote = self._wait_for_public_terminal_call(
+                client=client,
+                call_id=call_id,
+                phase="hosted evidence verification receipt",
             )
+        except BaseException:
+            if finish_error is not None:
+                raise finish_error from None
             raise
-        remote = self._wait_for_public_terminal_call(
-            client=client,
-            call_id=call_id,
-            phase="hosted evidence verification receipt",
-        )
         remote_inputs = getattr(remote, "inputs", None)
+        remote_output = getattr(remote, "output", None)
+        remote_attributes = getattr(remote, "attributes", None)
         if (
             _live_call_value(remote, "id") != call_id
             or _live_call_value(remote, "project_id") != self.project
@@ -1190,17 +1571,310 @@ class LiveEvaluationCoordinator:
             )
             or not isinstance(remote_inputs, Mapping)
             or stable_digest(dict(remote_inputs)) != bindings_digest
+            or stable_digest(remote_output) != stable_digest(terminal_output)
+            or not _mapping_contains(remote_attributes, required_attributes)
+            or _live_call_value(remote, "display_name") != pending_display_name
         ):
             raise RuntimeError(
                 "hosted evidence verification receipt did not reconcile exactly"
             )
+        display_error: BaseException | None = None
+        try:
+            with EVIDENCE_ROUTING_LOCK:
+                self._activate_evidence_client(client)
+                _set_call_display_name(receipt_call, canonical_display_name)
+        except BaseException as exc:
+            # A setter can raise after the server accepted the exact update.
+            # Read back the deterministic Call before deciding whether it is safe.
+            display_error = exc
+        try:
+            remote = self._wait_for_public_terminal_call(
+                client=client,
+                call_id=call_id,
+                phase="hosted evidence canonical receipt display",
+            )
+        except BaseException:
+            if display_error is not None:
+                raise display_error from None
+            raise
+        if (
+            stable_digest(getattr(remote, "inputs", None)) != bindings_digest
+            or stable_digest(getattr(remote, "output", None))
+            != stable_digest(terminal_output)
+            or not _mapping_contains(
+                getattr(remote, "attributes", None), required_attributes
+            )
+            or _live_call_value(remote, "display_name") != canonical_display_name
+        ):
+            raise RuntimeError(
+                "hosted evidence canonical receipt display did not reconcile exactly"
+            )
+        row.update(
+            _verified_hosted_decision_fields(
+                bindings_digest=bindings_digest,
+                canonical_result_digest=canonical_result_digest,
+                canonical_score_set_digest=canonical_score_set_digest,
+                canonical_payload_digest=canonical_payload_digest,
+                canonical_payload=canonical_result,
+            )
+        )
+
+    def _publish_hosted_evidence_invalidation_receipt(
+        self,
+        *,
+        active: _LivePrediction,
+        row: dict[str, Any],
+        error: BaseException,
+    ) -> None:
+        """Publish and read back an immutable rejection of provisional scores."""
+
+        parent = getattr(active.prediction, "predict_and_score_call", None)
+        parent_id = str(_live_call_value(parent, "id") or "")
+        if parent is None or not parent_id:
+            raise RuntimeError(
+                "hosted evidence invalidation has no prediction-and-score identity"
+            )
+        call_id = _hosted_evidence_invalidation_call_id(row)
+        local_record_digest = str(row.get("local_evidence_record_digest") or "")
+        if re.fullmatch(r"[0-9a-f]{64}", local_record_digest) is None:
+            raise RuntimeError(
+                "hosted evidence invalidation has no canonical local record digest"
+            )
+        for field_name in (
+            "weave_provisional_predict_and_score_output_digest",
+            "weave_provisional_score_set_digest",
+        ):
+            if re.fullmatch(r"[0-9a-f]{64}", str(row.get(field_name) or "")) is None:
+                raise RuntimeError(
+                    "hosted evidence invalidation has no exact provisional digest"
+                )
+        stored_error_type = str(
+            row.get("weave_hosted_evidence_invalidation_error_type") or ""
+        )
+        error_type = stored_error_type or type(error).__name__
+        stored_parent_verified = row.get(
+            "weave_hosted_evidence_invalidation_parent_verified"
+        )
+        parent_verified = (
+            stored_parent_verified
+            if isinstance(stored_parent_verified, bool)
+            else row.get("evaluation_prediction_graph_verified") is True
+        )
         row.update(
             {
-                "hosted_evidence_verification_status": "verified",
-                "weave_hosted_evidence_receipt_object_verified": True,
-                "weave_hosted_evidence_receipt_terminal_verified": True,
-                "weave_hosted_evidence_receipt_bindings_digest": bindings_digest,
-                "terminal_hosted_visibility_verified": True,
+                "weave_hosted_evidence_invalidation_error_type": error_type,
+                "weave_hosted_evidence_invalidation_parent_verified": (
+                    parent_verified
+                ),
+                "weave_hosted_evidence_invalidation_project": self.project,
+            }
+        )
+        inputs = _hosted_evidence_invalidation_bindings(
+            row,
+            project=self.project,
+            error_type=error_type,
+            parent_verified=parent_verified,
+        )
+        if inputs["expected_predict_and_score_call_id"] != parent_id:
+            raise RuntimeError(
+                "hosted invalidation prediction-and-score identity changed"
+            )
+        if any(
+            not value
+            for key, value in inputs.items()
+            if key
+            not in {
+                "schema_version",
+                "verified_predict_and_score_ancestry",
+            }
+        ):
+            raise RuntimeError("hosted invalidation bindings are incomplete")
+        bindings_digest = stable_digest(inputs)
+        display_name = (
+            f"INVALIDATED · {_task_title(row)} · {_arm_label(row)} · "
+            f"Attempt {_positive_int(row.get('trial_index')) or 1}"
+        )
+        required_attributes = {
+            "fugue.evidence.kind": "post_close_hosted_evidence_invalidation",
+            "fugue.evidence.phase": "canonical_invalidation_v1",
+            "fugue.evidence.schema_version": _HOSTED_DECISION_CONTRACT_VERSION,
+            "fugue.evidence.status": "invalidated",
+            "fugue.evidence.verification_status": "invalidated",
+            "fugue.evidence.bindings_digest": bindings_digest,
+            "fugue.result.canonical": False,
+            "fugue.run_id": str(row.get("run_id") or ""),
+            "fugue.cell_id": str(row.get("cell_id") or ""),
+            "fugue.attempt_id": str(row.get("attempt_id") or ""),
+            "fugue.local_record_digest": local_record_digest,
+            "weave.eval.predict_and_score_call_id": parent_id,
+        }
+        create_kwargs: dict[str, Any] = {
+            "attributes": required_attributes,
+            "display_name": display_name,
+            "use_stack": False,
+        }
+        expected_parent_id = parent_id if parent_verified else ""
+        expected_trace_id = (
+            str(_live_call_value(parent, "trace_id") or "")
+            if parent_verified
+            else ""
+        )
+        terminal_output = _hosted_evidence_invalidation_terminal_output(inputs)
+        create_kwargs["parent"] = parent if parent_verified else None
+        call: Any
+        client: Any
+        already_terminal = False
+        try:
+            call, client = self._create_evidence_call(
+                active.bridge_client,
+                getattr(
+                    self,
+                    "_hosted_evidence_invalidation_op",
+                    "fugue.hosted_evidence_invalidation_receipt",
+                ),
+                inputs,
+                _call_id_override=call_id,
+                **create_kwargs,
+            )
+        except BaseException as create_error:
+            # A transport can raise after the server created this deterministic
+            # Call. Recover only the exact pending or terminal invalidation.
+            # Never close it with a different payload: that would occupy the
+            # deterministic identity and make host-only finalization impossible.
+            try:
+                with EVIDENCE_ROUTING_LOCK:
+                    client = self._activate_evidence_client(active.bridge_client)
+                    get_call = getattr(client, "get_call", None)
+                    if client is None or not callable(get_call):
+                        raise RuntimeError(
+                            "hosted invalidation receipt cannot be read after create"
+                        )
+                    call = get_call(call_id)
+                exact_created_call = bool(
+                    _live_call_value(call, "id") == call_id
+                    and _live_call_value(call, "project_id") == self.project
+                    and str(_live_call_value(call, "parent_id") or "")
+                    == expected_parent_id
+                    and (
+                        not parent_verified
+                        or _same_nonempty_trace(
+                            _live_call_value(call, "trace_id"), expected_trace_id
+                        )
+                    )
+                    and stable_digest(getattr(call, "inputs", None))
+                    == stable_digest(inputs)
+                    and _mapping_contains(
+                        getattr(call, "attributes", None), required_attributes
+                    )
+                    and _live_call_value(call, "display_name") == display_name
+                )
+                if not exact_created_call:
+                    raise RuntimeError(
+                        "existing hosted invalidation receipt conflicts with "
+                        "the canonical invalidation"
+                    )
+                already_terminal = getattr(call, "ended_at", None) is not None
+                if already_terminal and stable_digest(
+                    getattr(call, "output", None)
+                ) != stable_digest(terminal_output):
+                    raise RuntimeError(
+                        "terminal hosted invalidation receipt conflicts with "
+                        "the canonical invalidation"
+                    )
+            except BaseException as recovery_error:
+                if isinstance(recovery_error, RuntimeError):
+                    raise recovery_error from create_error
+                raise create_error from recovery_error
+        if (
+            _live_call_value(call, "id") != call_id
+            or _live_call_value(call, "project_id") != self.project
+            or str(_live_call_value(call, "parent_id") or "")
+            != expected_parent_id
+            or (
+                parent_verified
+                and not _same_nonempty_trace(
+                    _live_call_value(call, "trace_id"), expected_trace_id
+                )
+            )
+        ):
+            self._best_effort_finish_evidence_call(
+                client,
+                call,
+                output={"canonical": False, "verification_status": "invalid"},
+            )
+            raise RuntimeError("hosted invalidation receipt changed identity")
+        finish_error: BaseException | None = None
+        if not already_terminal:
+            try:
+                self._finish_evidence_call(
+                    client,
+                    call,
+                    output=terminal_output,
+                )
+            except BaseException as exc:
+                finish_error = exc
+        try:
+            remote = self._wait_for_public_terminal_call(
+                client=client,
+                call_id=call_id,
+                phase="hosted evidence invalidation receipt",
+            )
+        except BaseException:
+            row["hosted_evidence_invalidation_status"] = "unavailable"
+            if finish_error is not None:
+                raise finish_error from None
+            raise
+        if (
+            _live_call_value(remote, "id") != call_id
+            or _live_call_value(remote, "project_id") != self.project
+            or str(_live_call_value(remote, "parent_id") or "")
+            != expected_parent_id
+            or (
+                parent_verified
+                and not _same_nonempty_trace(
+                    _live_call_value(remote, "trace_id"), expected_trace_id
+                )
+            )
+            or stable_digest(getattr(remote, "inputs", None))
+            != stable_digest(inputs)
+            or stable_digest(getattr(remote, "output", None))
+            != stable_digest(terminal_output)
+            or not _mapping_contains(
+                getattr(remote, "attributes", None), required_attributes
+            )
+            or _live_call_value(remote, "display_name") != display_name
+        ):
+            row["hosted_evidence_invalidation_status"] = "unavailable"
+            raise RuntimeError(
+                "hosted evidence invalidation receipt did not reconcile exactly"
+            )
+        receipt = row.get("trace_receipt")
+        app_base_url = (
+            str(receipt.get("app_base_url") or "https://wandb.ai")
+            if isinstance(receipt, Mapping)
+            else "https://wandb.ai"
+        )
+        row.update(
+            {
+                "weave_hosted_evidence_invalidation_call_id": call_id,
+                "weave_hosted_evidence_invalidation_ref": _weave_call_ref(
+                    self.project,
+                    call_id,
+                ),
+                "weave_hosted_evidence_invalidation_url": _weave_call_url(
+                    self.project,
+                    call_id,
+                    app_base_url=app_base_url,
+                ),
+                "weave_hosted_evidence_invalidation_object_verified": True,
+                "weave_hosted_evidence_invalidation_terminal_verified": True,
+                "weave_hosted_evidence_invalidation_bindings_digest": (
+                    bindings_digest
+                ),
+                "weave_hosted_evidence_invalidation_terminal_output_digest": (
+                    stable_digest(terminal_output)
+                ),
+                "hosted_evidence_invalidation_status": "verified",
             }
         )
 
@@ -1827,6 +2501,86 @@ class LiveEvaluationCoordinator:
             _merge_hosted_dynamic_row_fields(row, active.row)
         return row
 
+    def _log_provisional_scores(
+        self,
+        *,
+        prediction: Any,
+        row: dict[str, Any],
+    ) -> None:
+        """Log native Evaluation scores that cannot be mistaken for a verdict."""
+
+        scores = _provisional_evaluation_scores(row)
+        row["weave_provisional_score_set_digest"] = stable_digest(scores)
+        score_calls: list[dict[str, Any]] = []
+        attributes = getattr(self.weave, "attributes", None)
+        context = (
+            attributes(
+                {
+                    "fugue.result.canonical": False,
+                    "fugue.result.status": "provisional",
+                    "fugue.evidence.status": (
+                        "pending_terminal_reconciliation"
+                    ),
+                    "fugue.task_verdict.owner": (
+                        "post_close_hosted_evidence_verification_receipt"
+                    ),
+                    "fugue.attempt_id": str(row.get("attempt_id") or ""),
+                    "fugue.local_record_digest": str(
+                        row.get("local_evidence_record_digest") or ""
+                    ),
+                    "weave.eval.predict_and_score_call_id": str(
+                        row.get("eval_predict_and_score_call_id") or ""
+                    ),
+                    "fugue.canonical_receipt_call_id": str(
+                        row.get("weave_hosted_evidence_receipt_call_id") or ""
+                    ),
+                    "fugue.provisional_notice": _PROVISIONAL_TASK_NOTICE,
+                }
+            )
+            if callable(attributes)
+            else nullcontext()
+        )
+        with context:
+            for name, value in scores.items():
+                try:
+                    score_context = prediction.log_score(name)
+                except TypeError:
+                    # Old injected test doubles expose only the immediate API.
+                    # The score name remains unambiguously provisional, but a
+                    # real hosted decision cannot verify without a Call handle.
+                    prediction.log_score(name, value)
+                    continue
+                score_call = getattr(score_context, "score_call", None)
+                if score_context is None or score_call is None:
+                    raise RuntimeError(
+                        "Weave deferred scorer API returned no public score Call"
+                    )
+                display_name = (
+                    "PROVISIONAL SCORE · "
+                    f"{_human_label(name.removeprefix('provisional__').removesuffix('__not_canonical')).title()}"
+                    " · NOT A FUGUE VERDICT"
+                )
+                _set_call_display_name(score_call, display_name)
+                with score_context as opened_score:
+                    opened_score.value = value
+                call_id = _live_call_value(score_call, "id")
+                if not call_id:
+                    raise RuntimeError("Weave scorer returned no Call ID")
+                score_calls.append(
+                    {
+                        "name": name,
+                        "value": value,
+                        "call_id": call_id,
+                        "display_name": display_name,
+                    }
+                )
+        row["weave_provisional_score_calls"] = score_calls
+        row["weave_provisional_call_verification_status"] = (
+            "pending_public_readback"
+            if len(score_calls) == len(scores)
+            else "unavailable"
+        )
+
     def finish_cell(
         self,
         cell: PlannedCell,
@@ -1860,7 +2614,7 @@ class LiveEvaluationCoordinator:
             )
             return
         owns_prediction = False
-        prediction_closed = False
+        prediction_closed = active.prediction_closed
         session_row_appended = False
         try:
             native_root = self._prepare_terminal_agent_trace(
@@ -1872,7 +2626,11 @@ class LiveEvaluationCoordinator:
             self._raise_if_cancelled()
             _merge_error_events(row)
             _apply_observed_identity(row)
-            if canonical_row is None and cell.evaluation_case is not None:
+            if (
+                canonical_row is None
+                and cell.evaluation_case is not None
+                and _behavioral_task_output_available(row)
+            ):
                 try:
                     apply_generated_evaluation(
                         row,
@@ -1903,15 +2661,36 @@ class LiveEvaluationCoordinator:
                 row["weave_prediction_output_evidence_status"] = (
                     "pending_terminal_reconciliation"
                 )
-            _set_prediction_display_names(active.prediction, row, terminal=True)
-            active.prediction.output = _evaluation_output(row)
-            with EVIDENCE_ROUTING_LOCK:
-                self._activate_evidence_client()
-                with active.session.lock:
-                    for name, value in _evaluation_scores(row).items():
-                        active.prediction.log_score(name, value)
-                    active.prediction.__exit__(None, None, None)
-                    prediction_closed = True
+            if not prediction_closed:
+                _set_prediction_display_names(
+                    active.prediction,
+                    row,
+                    terminal=True,
+                    provisional=True,
+                )
+                active.prediction.output = _evaluation_output(row, provisional=True)
+                with EVIDENCE_ROUTING_LOCK:
+                    self._activate_evidence_client()
+                    with active.session.lock:
+                        # From this point a deferred scorer Call or the PAS
+                        # close may have reached Weave even if the SDK raises.
+                        # Never repeat that side effect in the failure path.
+                        active.provisional_scores_logged = True
+                        self._log_provisional_scores(
+                            prediction=active.prediction,
+                            row=row,
+                        )
+                        row[
+                            "weave_provisional_predict_and_score_output_digest"
+                        ] = stable_digest(
+                            _provisional_predict_and_score_output(
+                                output=active.prediction.output,
+                                scores=_provisional_evaluation_scores(row),
+                            )
+                        )
+                        active.prediction.__exit__(None, None, None)
+                        active.prediction_closed = True
+                        prediction_closed = True
             self._reconcile_terminal_hosted_evidence(
                 active=active,
                 cell=cell,
@@ -1947,32 +2726,88 @@ class LiveEvaluationCoordinator:
                 status="failed",
                 terminal_row=row,
             )
-            if not owns_prediction and not self._pop_prediction(cell.id, active):
-                return
             row["trace_link_status"] = "failed"
             row["trace_link_error"] = f"{type(exc).__name__}: {exc}"
-            if not row.get("host_evaluator_status"):
-                self._apply_host_evaluator(row)
+            row.update(
+                {
+                    "status": "failed",
+                    "benchmark_outcome": "unscored",
+                    "terminal_kind": "evidence_failure",
+                    "evidence_integrity_status": "invalid",
+                    "host_evaluator_status": "not_applicable",
+                }
+            )
+            _withhold_nonbehavioral_task_evaluation(row)
+            row["comparison_evaluation_reason"] = (
+                "Hosted evidence reconciliation failed; Fugue withheld the "
+                "task verdict and all behavioral scores"
+            )
             _set_adapter_outcome(row)
-            try:
-                if not prediction_closed:
+            if not prediction_closed:
+                if active.provisional_scores_logged:
+                    active.row = dict(row)
+                    raise ExecutionFinalizationPending(
+                        "the provisional hosted score/PAS close has an ambiguous "
+                        "side effect; Fugue preserved Agent work for host-only "
+                        "finalization"
+                    ) from exc
+                try:
                     _set_prediction_display_names(
                         active.prediction,
                         row,
                         terminal=True,
+                        provisional=True,
                     )
-                    active.prediction.output = _evaluation_output(row)
-                with EVIDENCE_ROUTING_LOCK:
-                    self._activate_evidence_client()
-                    with active.session.lock:
-                        if not prediction_closed:
-                            for name, value in _evaluation_scores(row).items():
-                                active.prediction.log_score(name, value)
+                    active.prediction.output = _evaluation_output(
+                        row,
+                        provisional=True,
+                    )
+                    with EVIDENCE_ROUTING_LOCK:
+                        self._activate_evidence_client()
+                        with active.session.lock:
+                            active.provisional_scores_logged = True
+                            self._log_provisional_scores(
+                                prediction=active.prediction,
+                                row=row,
+                            )
+                            row[
+                                "weave_provisional_predict_and_score_output_digest"
+                            ] = stable_digest(
+                                _provisional_predict_and_score_output(
+                                    output=active.prediction.output,
+                                    scores=_provisional_evaluation_scores(row),
+                                )
+                            )
                             active.prediction.__exit__(None, None, None)
+                            active.prediction_closed = True
                             prediction_closed = True
-                        if not session_row_appended:
-                            active.session.rows.append(row)
-                            session_row_appended = True
+                except BaseException as close_error:
+                    active.row = dict(row)
+                    raise ExecutionFinalizationPending(
+                        "the invalid hosted attempt could not durably close its "
+                        "provisional PAS; Fugue preserved Agent work for host-only "
+                        "finalization"
+                    ) from close_error
+            try:
+                self._publish_hosted_evidence_invalidation_receipt(
+                    active=active,
+                    row=row,
+                    error=exc,
+                )
+            except BaseException as invalidation_error:
+                row["hosted_evidence_invalidation_status"] = "unavailable"
+                active.row = dict(row)
+                raise ExecutionFinalizationPending(
+                    "hosted evidence invalidation is not durably readable; "
+                    "Fugue preserved Agent work for host-only finalization"
+                ) from invalidation_error
+            if not owns_prediction and not self._pop_prediction(cell.id, active):
+                return
+            try:
+                with active.session.lock:
+                    if not session_row_appended:
+                        active.session.rows.append(row)
+                        session_row_appended = True
                 self._terminal_cells.add(cell.id)
                 self._apply_evidence_checkpoint(cell, row)
                 self._append_result(row)
@@ -2065,16 +2900,35 @@ class LiveEvaluationCoordinator:
         row["trace_link_status"] = "failed"
         row["trace_link_error"] = f"{type(error).__name__}: {error}"
         row["hosted_terminal_interruption"] = type(error).__name__
+        row.update(
+            {
+                "status": "interrupted",
+                "benchmark_outcome": "unscored",
+                "runtime_outcome": "interrupted",
+                "terminal_kind": "interrupted",
+                "evidence_integrity_status": "incomplete",
+                "host_evaluator_status": "not_applicable",
+            }
+        )
+        _withhold_nonbehavioral_task_evaluation(row)
         _set_adapter_outcome(row)
+        try:
+            _set_prediction_display_names(
+                active.prediction,
+                row,
+                terminal=True,
+                provisional=True,
+            )
+            active.prediction.output = _evaluation_output(row, provisional=True)
+            row["weave_provisional_predict_and_score_output_digest"] = stable_digest(
+                _provisional_predict_and_score_output(
+                    output=active.prediction.output,
+                    scores={},
+                )
+            )
+        except BaseException:
+            pass
         if not prediction_closed:
-            try:
-                _set_prediction_display_names(active.prediction, row, terminal=True)
-            except BaseException:
-                pass
-            try:
-                active.prediction.output = _evaluation_output(row)
-            except BaseException:
-                pass
             close_succeeded = False
             for _attempt in range(2):
                 try:
@@ -2106,6 +2960,10 @@ class LiveEvaluationCoordinator:
         )
 
     def _apply_host_evaluator(self, row: dict[str, Any]) -> None:
+        if not _behavioral_task_output_available(row):
+            _withhold_nonbehavioral_task_evaluation(row)
+            row["host_evaluator_status"] = "not_applicable"
+            return
         if self._host_evaluator is None:
             row["host_evaluator_status"] = "not_required"
             return
@@ -2301,6 +3159,10 @@ class LiveEvaluationCoordinator:
             {
                 "status": "cancelled",
                 "pass": None,
+                "benchmark_outcome": "unscored",
+                "runtime_outcome": "cancelled",
+                "terminal_kind": "cancelled",
+                "evidence_integrity_status": "incomplete",
                 "trace_link_status": "cancelled",
                 "trace_link_error": None,
                 "trace_link_reason": reason,
@@ -2309,8 +3171,20 @@ class LiveEvaluationCoordinator:
                 "weave_usage_source": "unavailable",
             }
         )
-        _set_prediction_display_names(active.prediction, row, terminal=True)
-        active.prediction.output = _evaluation_output(row)
+        _withhold_nonbehavioral_task_evaluation(row)
+        _set_prediction_display_names(
+            active.prediction,
+            row,
+            terminal=True,
+            provisional=True,
+        )
+        active.prediction.output = _evaluation_output(row, provisional=True)
+        row["weave_provisional_predict_and_score_output_digest"] = stable_digest(
+            _provisional_predict_and_score_output(
+                output=active.prediction.output,
+                scores={},
+            )
+        )
         with EVIDENCE_ROUTING_LOCK:
             self._activate_evidence_client()
             with active.session.lock:
@@ -3090,7 +3964,8 @@ class GeneratedEvaluationCoordinator:
         if candidate_definition is not None:
             row["candidate_definition"] = candidate_definition
         row["evaluation_publication_mode"] = "local"
-        if cell.evaluation_case is not None:
+        behavioral_output = _behavioral_task_output_available(row)
+        if cell.evaluation_case is not None and behavioral_output:
             apply_generated_evaluation(
                 row,
                 case=cell.evaluation_case,
@@ -3108,7 +3983,7 @@ class GeneratedEvaluationCoordinator:
                     "status": "unavailable",
                     "reason": f"{type(exc).__name__}: {exc}",
                 }
-        if self._host_evaluator is not None:
+        if self._host_evaluator is not None and behavioral_output:
             try:
                 self._host_evaluator(row)
             except Exception as exc:
@@ -3121,6 +3996,9 @@ class GeneratedEvaluationCoordinator:
                         "comparison_required_evaluation_complete": False,
                     }
                 )
+        elif not behavioral_output:
+            _withhold_nonbehavioral_task_evaluation(row)
+            row["host_evaluator_status"] = "not_applicable"
         public_row = _public_generated_evaluation_row(row)
         if has_local_attempt and self._local is not None:
             receipt = _local_agent_receipt(
@@ -3154,7 +4032,10 @@ class GeneratedEvaluationCoordinator:
                     "dataset",
                 )
             ]
-            public_row["task_result"] = _task_result(public_row)
+            if behavioral_output:
+                public_row["task_result"] = _task_result(public_row)
+            else:
+                public_row.pop("task_result", None)
             record = self._local.finish_attempt(
                 cell.attempt_id,
                 terminal_status=outcome.status,
@@ -3703,6 +4584,14 @@ def _has_evidence_value(value: Any) -> bool:
     return True
 
 
+def _mapping_contains(value: Any, expected: Mapping[str, Any]) -> bool:
+    """Return whether a public Call attribute map contains exact bindings."""
+
+    if not isinstance(value, Mapping):
+        return False
+    return all(key in value and value[key] == item for key, item in expected.items())
+
+
 def _merge_hosted_dynamic_row_fields(
     canonical_row: dict[str, Any],
     hosted_row: Mapping[str, Any],
@@ -4131,11 +5020,7 @@ def _completed_evaluation_row(
     if outcome.error and not row.get("exception_class"):
         row["exception_class"] = "HarborCellError"
         row["exception_message"] = outcome.error
-    behavioral_attempt_reached_terminal = (
-        outcome.runtime_outcome in {"completed", "timed_out"}
-        or outcome.benchmark_outcome in {"passed", "failed"}
-    )
-    if behavioral_attempt_reached_terminal:
+    if _behavioral_task_output_available(row):
         if outcome.status == "failed" and row.get("pass") is None:
             row["pass"] = False
         _apply_host_evidence_scores(
@@ -4146,9 +5031,56 @@ def _completed_evaluation_row(
     else:
         # A setup, routing, or evidence failure before Agent execution has no
         # task output. Do not turn the missing output into a failed task.
-        row["pass"] = None
-        row.pop("task_result", None)
+        _withhold_nonbehavioral_task_evaluation(row)
     return row
+
+
+def _behavioral_task_output_available(row: Mapping[str, Any]) -> bool:
+    """Return whether an Agent terminal may be scored as behavior."""
+
+    return behavioral_task_output_available(row)
+
+
+def _withhold_nonbehavioral_task_evaluation(row: dict[str, Any]) -> None:
+    """Remove task, mechanism, and judge claims from pre-Agent terminals."""
+
+    suppressed_score_fields = list(nonbehavioral_score_field_names(row))
+    for name in (
+        *suppressed_score_fields,
+        "agent_response",
+        "agent_response_sha256",
+        "agent_response_bytes",
+        "reported_project_identity",
+        "comparison_deterministic_scores",
+        "comparison_score_explanations",
+        "comparison_score_details",
+        "comparison_deterministic_criticality",
+        "comparison_dimension_roles",
+        "comparison_mechanism",
+        "comparison_judges",
+        "comparison_judge_scores",
+        "comparison_judge_status",
+        "treatment_use_evidence",
+        "task_result",
+    ):
+        row.pop(name, None)
+    if suppressed_score_fields:
+        # The source artifact remains digest-bound audit evidence. Only fixed,
+        # public field names are retained here; stale values never become a
+        # task or judge score.
+        row["nonbehavioral_suppressed_score_fields"] = suppressed_score_fields
+    row.update(
+        {
+            "pass": None,
+            "evaluation_judge_status": "not_applicable",
+            "comparison_evaluation_status": "unavailable",
+            "comparison_evaluation_reason": (
+                "Agent execution did not produce behavioral output; "
+                "deterministic and judge scoring did not run"
+            ),
+            "comparison_required_evaluation_complete": False,
+        }
+    )
 
 
 def _reconcile_authoritative_bridge_close(
@@ -4554,6 +5486,155 @@ def _hosted_evidence_verification_call_id(row: Mapping[str, Any]) -> str:
     return str(uuid.uuid5(uuid.NAMESPACE_URL, canonical))
 
 
+def _hosted_evidence_invalidation_call_id(row: Mapping[str, Any]) -> str:
+    identity = {
+        "schema_version": 1,
+        "kind": "post_close_hosted_evidence_invalidation",
+        "project": row.get("trace_project"),
+        "run_id": row.get("run_id"),
+        "cell_id": row.get("cell_id"),
+        "attempt_id": row.get("attempt_id"),
+        "evaluation_root_call_id": row.get("weave_evaluation_root_call_id"),
+        "predict_and_score_call_id": row.get("eval_predict_and_score_call_id"),
+        "prediction_call_id": row.get("weave_prediction_call_id"),
+    }
+    canonical = json.dumps(identity, sort_keys=True, separators=(",", ":"))
+    return str(uuid.uuid5(uuid.NAMESPACE_URL, canonical))
+
+
+def _hosted_evidence_invalidation_bindings(
+    row: Mapping[str, Any],
+    *,
+    project: str,
+    error_type: str,
+    parent_verified: bool,
+) -> dict[str, Any]:
+    """Build the safe, immutable bindings for one hosted invalidation."""
+
+    return {
+        "schema_version": _HOSTED_DECISION_CONTRACT_VERSION,
+        "attempt_id": str(row.get("attempt_id") or ""),
+        "expected_predict_and_score_call_id": str(
+            row.get("eval_predict_and_score_call_id") or ""
+        ),
+        "verification_receipt_call_id": str(
+            row.get("weave_hosted_evidence_receipt_call_id") or ""
+        ),
+        "evidence_project": project,
+        "canonical_local_record_digest": str(
+            row.get("local_evidence_record_digest") or ""
+        ),
+        "provisional_predict_and_score_output_digest": str(
+            row.get("weave_provisional_predict_and_score_output_digest") or ""
+        ),
+        "provisional_score_set_digest": str(
+            row.get("weave_provisional_score_set_digest") or ""
+        ),
+        "failure_phase": "post_close_hosted_evidence_reconciliation",
+        "failure_code": "hosted_evidence_reconciliation_failed",
+        "error_type": error_type,
+        "verified_predict_and_score_ancestry": parent_verified,
+    }
+
+
+def _hosted_evidence_invalidation_terminal_output(
+    bindings: Mapping[str, Any],
+) -> dict[str, Any]:
+    """Build the only terminal output accepted for a hosted invalidation."""
+
+    bindings_digest = stable_digest(dict(bindings))
+    return {
+        "schema_version": _HOSTED_DECISION_CONTRACT_VERSION,
+        "canonical": False,
+        "verification_status": "invalidated",
+        "bindings_digest": bindings_digest,
+        "invalidates": {
+            "predict_and_score_call_id": bindings[
+                "expected_predict_and_score_call_id"
+            ],
+            "provisional_output_digest": bindings[
+                "provisional_predict_and_score_output_digest"
+            ],
+            "provisional_scores_digest": bindings[
+                "provisional_score_set_digest"
+            ],
+        },
+        "failure_phase": bindings["failure_phase"],
+        "failure_code": bindings["failure_code"],
+        "canonical_local_record_digest": bindings[
+            "canonical_local_record_digest"
+        ],
+        "reason": (
+            "The provisional prediction-and-score Call did not reconcile. "
+            "Fugue did not use its task observation or scores."
+        ),
+    }
+
+
+def _hosted_evidence_invalidation_verified(row: Mapping[str, Any]) -> bool:
+    """Verify the persisted projection of an exact hosted invalidation."""
+
+    project = str(
+        row.get("weave_hosted_evidence_invalidation_project")
+        or row.get("trace_project")
+        or ""
+    )
+    error_type = str(
+        row.get("weave_hosted_evidence_invalidation_error_type") or ""
+    )
+    parent_verified = row.get(
+        "weave_hosted_evidence_invalidation_parent_verified"
+    )
+    if not project or not error_type or not isinstance(parent_verified, bool):
+        return False
+    bindings = _hosted_evidence_invalidation_bindings(
+        row,
+        project=project,
+        error_type=error_type,
+        parent_verified=parent_verified,
+    )
+    digest_fields = (
+        "canonical_local_record_digest",
+        "provisional_predict_and_score_output_digest",
+        "provisional_score_set_digest",
+    )
+    if any(
+        re.fullmatch(r"[0-9a-f]{64}", str(bindings[name] or "")) is None
+        for name in digest_fields
+    ) or any(
+        not value
+        for key, value in bindings.items()
+        if key
+        not in {
+            "schema_version",
+            "verified_predict_and_score_ancestry",
+        }
+    ):
+        return False
+    call_id = _hosted_evidence_invalidation_call_id(row)
+    receipt = row.get("trace_receipt")
+    app_base_url = (
+        str(receipt.get("app_base_url") or "https://wandb.ai")
+        if isinstance(receipt, Mapping)
+        else "https://wandb.ai"
+    )
+    terminal_output = _hosted_evidence_invalidation_terminal_output(bindings)
+    return bool(
+        row.get("hosted_evidence_invalidation_status") == "verified"
+        and row.get("weave_hosted_evidence_invalidation_object_verified") is True
+        and row.get("weave_hosted_evidence_invalidation_terminal_verified") is True
+        and row.get("weave_hosted_evidence_invalidation_call_id") == call_id
+        and row.get("weave_hosted_evidence_invalidation_ref")
+        == _weave_call_ref(project, call_id)
+        and row.get("weave_hosted_evidence_invalidation_url")
+        == _weave_call_url(project, call_id, app_base_url=app_base_url)
+        and row.get("weave_hosted_evidence_invalidation_bindings_digest")
+        == stable_digest(bindings)
+        and row.get("weave_hosted_evidence_invalidation_terminal_output_digest")
+        == stable_digest(terminal_output)
+    )
+
+
 def _live_evidence_checkpoint_failures(
     row: Mapping[str, Any],
     *,
@@ -4645,6 +5726,234 @@ def _json_list(value: str | None) -> list[Any]:
     return parsed if isinstance(parsed, list) else []
 
 
+def _index_evaluation_rows(
+    rows: list[dict[str, Any]],
+    *,
+    key: str,
+    label: str,
+) -> dict[str, dict[str, Any]]:
+    indexed: dict[str, dict[str, Any]] = {}
+    for row in rows:
+        identity = str(row.get(key) or "")
+        if not identity:
+            continue
+        if identity in indexed:
+            raise RuntimeError(f"{label} contains duplicate {key}: {identity}")
+        indexed[identity] = row
+    return indexed
+
+
+def _requires_hosted_decision_receipt(row: Mapping[str, Any]) -> bool:
+    """Return whether a new local-first row requires the V1 hosted decision."""
+
+    return bool(
+        row.get("evidence_backend") == "weave"
+        and re.fullmatch(
+            r"[0-9a-f]{64}",
+            str(row.get("local_evidence_record_digest") or ""),
+        )
+    )
+
+
+def _invalidate_missing_hosted_decision(
+    row: dict[str, Any],
+    *,
+    reason: str,
+) -> None:
+    row.update(
+        {
+            "status": "failed",
+            "benchmark_outcome": "unscored",
+            "terminal_kind": "evidence_failure",
+            "evidence_integrity_status": "invalid",
+            "host_evaluator_status": "not_applicable",
+            "hosted_task_result_canonical": False,
+            "comparison_evaluation_status": "unavailable",
+            "comparison_evaluation_reason": reason,
+            "comparison_required_evaluation_complete": False,
+        }
+    )
+    _withhold_nonbehavioral_task_evaluation(row)
+    row["comparison_evaluation_reason"] = reason
+    _set_adapter_outcome(row)
+
+
+def _apply_hosted_decision_to_canonical_row(
+    row: dict[str, Any],
+    hosted: Mapping[str, Any],
+) -> None:
+    """Accept behavior only from an exact readback-verified hosted receipt."""
+
+    for key in (
+        "attempt_id",
+        "candidate_id",
+        "execution_fingerprint",
+        "run_id",
+        "cell_id",
+        "prediction_id",
+    ):
+        canonical_value = row.get(key)
+        hosted_value = hosted.get(key)
+        if (
+            canonical_value is not None
+            and hosted_value is not None
+            and canonical_value != hosted_value
+        ):
+            raise RuntimeError(
+                f"hosted decision disagrees with canonical attempt field {key}"
+            )
+    _merge_hosted_dynamic_row_fields(row, hosted)
+    invalidation_claimed = bool(
+        hosted.get("hosted_evidence_invalidation_status") == "verified"
+        or hosted.get("weave_hosted_evidence_invalidation_call_id")
+    )
+    if invalidation_claimed:
+        invalidation_verified = _hosted_evidence_invalidation_verified(hosted)
+        _invalidate_missing_hosted_decision(
+            row,
+            reason=(
+                (
+                    "The exact hosted invalidation receipt overrides the "
+                    "provisional and canonical hosted Calls. "
+                )
+                if invalidation_verified
+                else (
+                    "The hosted invalidation receipt did not verify exactly. "
+                )
+            )
+            + (
+                "Fugue withheld the task verdict and scores."
+            ),
+        )
+        return
+    hosted_contract = hosted.get("hosted_decision_contract_version")
+    if (
+        isinstance(hosted_contract, bool)
+        or hosted_contract != _HOSTED_DECISION_CONTRACT_VERSION
+    ):
+        _invalidate_missing_hosted_decision(
+            row,
+            reason=(
+                "The hosted attempt did not use the required two-phase decision "
+                "contract. Fugue withheld its task verdict and scores."
+            ),
+        )
+        return
+    digest_fields = (
+        "weave_provisional_predict_and_score_output_digest",
+        "weave_provisional_score_set_digest",
+        "weave_provisional_score_call_set_digest",
+        "weave_hosted_evidence_receipt_bindings_digest",
+        "weave_hosted_canonical_task_result_digest",
+        "weave_hosted_canonical_score_set_digest",
+        "weave_hosted_canonical_payload_digest",
+    )
+    local_digest_matches = bool(
+        str(hosted.get("local_evidence_record_digest") or "")
+        == str(row.get("local_evidence_record_digest") or "")
+    )
+    canonical_digests_match = False
+    receipt_identity_matches = False
+    try:
+        canonical_result = _canonical_hosted_task_result(row)
+    except (RuntimeError, TypeError, ValueError):
+        canonical_result = None
+    if canonical_result is not None:
+        evidence_project = str(row.get("trace_project") or "")
+        expected_receipt_call_id = _hosted_evidence_verification_call_id(row)
+        trace_receipt = row.get("trace_receipt")
+        app_base_url = (
+            str(trace_receipt.get("app_base_url") or "https://wandb.ai")
+            if isinstance(trace_receipt, Mapping)
+            else "https://wandb.ai"
+        )
+        expected_bindings = {
+            "schema_version": _HOSTED_DECISION_CONTRACT_VERSION,
+            "attempt_id": str(row.get("attempt_id") or ""),
+            "evaluation_root_call_id": str(
+                row.get("weave_evaluation_root_call_id") or ""
+            ),
+            "predict_and_score_call_id": str(
+                row.get("eval_predict_and_score_call_id") or ""
+            ),
+            "prediction_call_id": str(row.get("weave_prediction_call_id") or ""),
+            "dataset_ref": str(row.get("weave_dataset_ref") or ""),
+            "agent_bridge_call_id": str(
+                row.get("weave_agent_bridge_call_id") or ""
+            ),
+            "agent_receipt_call_id": str(
+                row.get("weave_agent_root_call_id") or ""
+            ),
+            "evidence_project": evidence_project,
+            "canonical_local_record_digest": str(
+                row.get("local_evidence_record_digest") or ""
+            ),
+            "provisional_predict_and_score_output_digest": str(
+                row.get("weave_provisional_predict_and_score_output_digest") or ""
+            ),
+            "provisional_score_set_digest": str(
+                row.get("weave_provisional_score_set_digest") or ""
+            ),
+            "provisional_score_call_set_digest": str(
+                row.get("weave_provisional_score_call_set_digest") or ""
+            ),
+            "canonical_payload_digest": stable_digest(canonical_result),
+        }
+        receipt_identity_matches = bool(
+            all(expected_bindings.values())
+            and hosted.get("weave_hosted_evidence_receipt_call_id")
+            == expected_receipt_call_id
+            and hosted.get("weave_hosted_evidence_receipt_ref")
+            == _weave_call_ref(evidence_project, expected_receipt_call_id)
+            and hosted.get("weave_hosted_evidence_receipt_url")
+            == _weave_call_url(
+                evidence_project,
+                expected_receipt_call_id,
+                app_base_url=app_base_url,
+            )
+            and hosted.get("weave_hosted_evidence_receipt_bindings_digest")
+            == stable_digest(expected_bindings)
+        )
+        canonical_digests_match = bool(
+            hosted.get("weave_provisional_score_set_digest")
+            == stable_digest(_provisional_evaluation_scores(row))
+            and hosted.get("weave_hosted_canonical_task_result_digest")
+            == stable_digest(canonical_result["task_result"])
+            and hosted.get("weave_hosted_canonical_score_set_digest")
+            == stable_digest(canonical_result["scalar_checks"])
+            and hosted.get("weave_hosted_canonical_payload_digest")
+            == stable_digest(canonical_result)
+            and hosted.get("weave_hosted_canonical_payload") == canonical_result
+        )
+    verified = bool(
+        hosted.get("hosted_evidence_verification_status") == "verified"
+        and hosted.get("hosted_task_result_canonical") is True
+        and hosted.get("terminal_hosted_visibility_verified") is True
+        and hosted.get("weave_hosted_evidence_receipt_object_verified") is True
+        and hosted.get("weave_hosted_evidence_receipt_terminal_verified") is True
+        and hosted.get("task_verdict_owner")
+        == "post_close_hosted_evidence_verification_receipt"
+        and hosted.get("weave_provisional_call_verification_status") == "verified"
+        and local_digest_matches
+        and canonical_digests_match
+        and receipt_identity_matches
+        and all(
+            re.fullmatch(r"[0-9a-f]{64}", str(hosted.get(name) or ""))
+            for name in digest_fields
+        )
+    )
+    if verified:
+        row["hosted_task_result_canonical"] = True
+        return
+    _invalidate_missing_hosted_decision(
+        row,
+        reason=(
+            "The post-close hosted decision receipt did not verify exactly. "
+            "Fugue withheld its task verdict and scores."
+        ),
+    )
+
+
 def export_rows(
     jobs: list[Path],
     *,
@@ -4660,12 +5969,34 @@ def export_rows(
         *[row for job in jobs for row in _cell_result_rows(job)],
     ]
     live_rows = [row for job in jobs for row in _live_evaluation_rows(job)]
-    live_by_run_key = {
-        str(row["run_key"]): row for row in live_rows if row.get("run_key")
-    }
+    hosted_rows = [row for job in jobs for row in _hosted_evaluation_rows(job)]
+    live_by_run_key = _index_evaluation_rows(
+        live_rows,
+        key="run_key",
+        label="canonical local evaluation",
+    )
+    hosted_by_attempt = _index_evaluation_rows(
+        hosted_rows,
+        key="attempt_id",
+        label="hosted evaluation",
+    )
     for row in rows:
         if row.get("record_type") == "trial" and row.get("run_key") in live_by_run_key:
             _merge_live_evaluation_row(row, live_by_run_key[str(row["run_key"])])
+        if row.get("record_type") != "trial":
+            continue
+        attempt_id = str(row.get("attempt_id") or "")
+        hosted = hosted_by_attempt.get(attempt_id) if attempt_id else None
+        if hosted is not None:
+            _apply_hosted_decision_to_canonical_row(row, hosted)
+        elif _requires_hosted_decision_receipt(row):
+            _invalidate_missing_hosted_decision(
+                row,
+                reason=(
+                    "The weave-required attempt has no hosted decision receipt. "
+                    "Fugue withheld its task verdict and scores."
+                ),
+            )
     _apply_evaluation_asset_locks(rows, jobs, repo_root=repo_root)
     if fetch_weave:
         run_keys = list(
@@ -6092,8 +7423,9 @@ def _evaluation_run_attributes(candidate: dict[str, Any]) -> dict[str, Any]:
 
 
 def _evaluation_output(
-    row: dict[str, Any], *, post_hoc: bool = False
+    row: dict[str, Any], *, post_hoc: bool = False, provisional: bool = False
 ) -> dict[str, Any]:
+    behavioral_output = _behavioral_task_output_available(row)
     conversations = [
         str(value)
         for value in [
@@ -6107,13 +7439,91 @@ def _evaluation_output(
         for value in (row.get("otel_trace_ids") or row.get("weave_trace_ids") or [])
         if value
     ]
-    runtime_outcome = str(row.get("runtime_outcome") or "")
-    task_result = (
-        None
-        if runtime_outcome
-        in {"not_started", "cancelled", "interrupted", "not_applicable"}
-        else _task_result(row)
-    )
+    task_result = _task_result(row) if behavioral_output else None
+    if provisional:
+        return _drop_none(
+            {
+                "canonical": False,
+                "evidence_phase": "provisional_scoring_v1",
+                "verification_status": "pending_terminal_reconciliation",
+                "canonical_receipt_call_id": row.get(
+                    "weave_hosted_evidence_receipt_call_id"
+                ),
+                "canonical_local_record_digest": row.get(
+                    "local_evidence_record_digest"
+                ),
+                "task_verdict_owner": (
+                    "post_close_hosted_evidence_verification_receipt"
+                ),
+                "notice": _PROVISIONAL_TASK_NOTICE,
+                "task_title": _task_title(row),
+                "arm_label": _arm_label(row),
+                "treatment_summary": _treatment_summary(row),
+                "provisional_task_observation": task_result,
+                "provisional_score_details": (
+                    _weave_score_descriptors(row) or None
+                ),
+                "provisional_judge_evidence": (
+                    _evaluation_judge_evidence(row) or None
+                ),
+                "agent_execution_status": _agent_execution_status(row),
+                "evidence_integrity_status": _evidence_integrity_status(row),
+                "provisional_status": _outcome_status(row),
+                "run_key": row.get("run_key"),
+                "observed_conversation_id": next(
+                    iter(dict.fromkeys(conversations)), None
+                ),
+                "planned_conversation_id": row.get("planned_conversation_id")
+                or row.get("weave_conversation_id"),
+                "trace_id": row.get("otel_trace_id")
+                or (trace_ids[0] if trace_ids else None),
+                "root_span_id": next(
+                    (
+                        value
+                        for value in [
+                            row.get("otel_root_span_id"),
+                            row.get("root_span_id"),
+                            *(
+                                row.get("otel_root_span_ids")
+                                or row.get("weave_root_span_ids")
+                                or []
+                            ),
+                        ]
+                        if value
+                    ),
+                    None,
+                ),
+                "trace_link_status": (
+                    "post_hoc_unlinked"
+                    if post_hoc and _is_agent_row(row)
+                    else "not_applicable"
+                    if not _is_agent_row(row)
+                    else row.get("trace_link_status")
+                ),
+                "trace_link_reason": row.get("trace_link_reason"),
+                "trace_link_error": row.get("trace_link_error"),
+                "agent_name": (
+                    row.get("weave_agent_name") or row.get("harness")
+                    if _is_agent_row(row)
+                    else None
+                ),
+                "exception_type": row.get("exception_class"),
+                "evidence_paths": [
+                    str(x) for x in (row.get("evidence_paths") or [])[:20]
+                ],
+                "provisional_agent_response": (
+                    _bounded_agent_response(row) if behavioral_output else None
+                ),
+                "provisional_agent_response_sha256": (
+                    row.get("agent_response_sha256") if behavioral_output else None
+                ),
+                "provisional_agent_response_bytes": (
+                    row.get("agent_response_bytes") if behavioral_output else None
+                ),
+                "evaluation_na_dimensions": row.get("evaluation_na_dimensions"),
+                "evaluation_error": row.get("evaluation_error"),
+            }
+        )
     return _drop_none(
         {
             "task_title": _task_title(row),
@@ -6189,9 +7599,16 @@ def _evaluation_output(
             ),
             "exception_type": row.get("exception_class"),
             "evidence_paths": [str(x) for x in (row.get("evidence_paths") or [])[:20]],
-            "response": _bounded_agent_response(row),
-            "response_sha256": row.get("agent_response_sha256"),
-            "response_bytes": row.get("agent_response_bytes"),
+            # A partial nested result is an execution artifact, not a scored
+            # answer. Keep it on the Agent receipt and never project it onto a
+            # typed nonbehavioral predict-and-score terminal.
+            "response": _bounded_agent_response(row) if behavioral_output else None,
+            "response_sha256": (
+                row.get("agent_response_sha256") if behavioral_output else None
+            ),
+            "response_bytes": (
+                row.get("agent_response_bytes") if behavioral_output else None
+            ),
             "evaluation_na_dimensions": row.get("evaluation_na_dimensions"),
             "evaluation_error": row.get("evaluation_error"),
         }
@@ -6206,23 +7623,6 @@ def _bounded_agent_response(row: dict[str, Any]) -> str | None:
         return None
     return value[:8_000]
 
-
-_DIRECT_SCORE_FIELDS = (
-    "reward",
-    "mrr",
-    "ndcg_at_10",
-    "recall_at_1",
-    "recall_at_5",
-    "recall_at_10",
-    "recall_at_20",
-    "evidence_recall",
-    "citation_correctness",
-    "fact_recall",
-    "judge_correctness",
-    "judge_completeness",
-    "judge_groundedness",
-    "judge_overall",
-)
 
 _SCORE_ALIASES = {
     "wall_time_sec": "wall_time_seconds",
@@ -6251,6 +7651,20 @@ _SCORE_ALIASES = {
     "write_latency_ms": "context_write_latency_ms",
     "storage_bytes": "context_storage_bytes",
 }
+
+# These aliases describe the host-side terminal itself and remain meaningful
+# when an Agent never produced a behavioral result. Agent/model/tool/context
+# activity is withheld because stale nested artifacts cannot prove that work.
+_NONBEHAVIORAL_OPERATIONAL_SCORE_ALIASES = frozenset(
+    {
+        "wall_time_sec",
+        "weave_terminal_error_count",
+        "benchmark_runtime_error_count",
+        "harness_adapter_error_count",
+        "provider_error_count",
+        "fugue_error_count",
+    }
+)
 
 _COMMON_SCORERS = tuple(
     dict.fromkeys(
@@ -6289,17 +7703,30 @@ _COMMON_SCORERS = tuple(
 
 
 def _evaluation_scores(row: dict[str, Any]) -> dict[str, Any]:
-    scores = {
-        name: row[name] for name in _DIRECT_SCORE_FIELDS if row.get(name) is not None
-    }
-    if row.get("pass") is not None:
+    behavioral_output = _behavioral_task_output_available(row)
+    scores = (
+        {
+            name: row[name]
+            for name in _DIRECT_SCORE_FIELDS
+            if row.get(name) is not None
+        }
+        if behavioral_output
+        else {}
+    )
+    if behavioral_output and row.get("pass") is not None:
         scores["passed"] = bool(row["pass"])
         scores["task_passed"] = bool(row["pass"])
     for source, target in _SCORE_ALIASES.items():
+        if (
+            not behavioral_output
+            and source not in _NONBEHAVIORAL_OPERATIONAL_SCORE_ALIASES
+        ):
+            continue
         if row.get(source) is not None:
             scores[target] = row[source]
     if (
         "input_tokens" not in scores
+        and behavioral_output
         and row.get("weave_usage_status") is None
         and _measured_local_usage(row)
     ):
@@ -6307,36 +7734,108 @@ def _evaluation_scores(row: dict[str, Any]) -> dict[str, Any]:
         scores["output_tokens"] = row.get("n_output_tokens")
         if row.get("cost_usd") is not None:
             scores["total_cost_usd"] = row["cost_usd"]
-    for dimension in (
-        "task_completion",
-        "correctness",
-        "groundedness",
-        "tool_use",
-        "artifact_quality",
-    ):
-        key = f"evaluation_{dimension}"
-        if row.get(key) is not None:
-            scores[key] = row[key]
-    deterministic = row.get("comparison_deterministic_scores")
-    if isinstance(deterministic, Mapping):
-        semantic_keys = _semantic_score_keys(row, deterministic)
-        for name, value in deterministic.items():
-            if isinstance(value, bool) or (
-                isinstance(value, int | float)
-                and not isinstance(value, bool)
-                and math.isfinite(float(value))
-            ):
-                scores[semantic_keys[str(name)]] = value
-    judge_scores = row.get("comparison_judge_scores")
-    if isinstance(judge_scores, Mapping):
-        for name, value in judge_scores.items():
-            if isinstance(value, bool) or (
-                isinstance(value, int | float)
-                and not isinstance(value, bool)
-                and math.isfinite(float(value))
-            ):
-                scores[f"judge__{_score_identifier(str(name))}"] = value
+    if behavioral_output:
+        for dimension in _GENERATED_EVALUATION_SCORE_DIMENSIONS:
+            key = f"evaluation_{dimension}"
+            if row.get(key) is not None:
+                scores[key] = row[key]
+        deterministic = row.get("comparison_deterministic_scores")
+        if isinstance(deterministic, Mapping):
+            semantic_keys = _semantic_score_keys(row, deterministic)
+            for name, value in deterministic.items():
+                if isinstance(value, bool) or (
+                    isinstance(value, int | float)
+                    and not isinstance(value, bool)
+                    and math.isfinite(float(value))
+                ):
+                    scores[semantic_keys[str(name)]] = value
+        judge_scores = row.get("comparison_judge_scores")
+        if isinstance(judge_scores, Mapping):
+            for name, value in judge_scores.items():
+                if isinstance(value, bool) or (
+                    isinstance(value, int | float)
+                    and not isinstance(value, bool)
+                    and math.isfinite(float(value))
+                ):
+                    scores[f"judge__{_score_identifier(str(name))}"] = value
     return {key: value for key, value in scores.items() if value is not None}
+
+
+def _provisional_evaluation_scores(row: dict[str, Any]) -> dict[str, Any]:
+    """Return raw Evaluation scores with names that cannot imply finality."""
+
+    return {
+        f"provisional__{name}__not_canonical": value
+        for name, value in sorted(_evaluation_scores(row).items())
+    }
+
+
+def _provisional_predict_and_score_output(
+    *,
+    output: Any,
+    scores: Mapping[str, Any],
+) -> dict[str, Any]:
+    """Match Weave 0.53.6 ``ScoreLogger.finish`` public PAS output."""
+
+    return {
+        "output": output,
+        "scores": dict(scores),
+        "model_latency": None,
+    }
+
+
+def _canonical_hosted_task_result(row: Mapping[str, Any]) -> dict[str, Any]:
+    """Build the exact public decision payload owned by the hosted receipt."""
+
+    if not _behavioral_task_output_available(row):
+        raise RuntimeError(
+            "canonical hosted task result requires behavioral Agent output"
+        )
+    mechanism = _drop_none(
+        {
+            "comparison_mechanism": (
+                dict(row["comparison_mechanism"])
+                if isinstance(row.get("comparison_mechanism"), Mapping)
+                else None
+            ),
+            "treatment_use_evidence": (
+                dict(row["treatment_use_evidence"])
+                if isinstance(row.get("treatment_use_evidence"), Mapping)
+                else None
+            ),
+        }
+    )
+    return {
+        "task_result": _task_result(row),
+        "scalar_checks": dict(sorted(_evaluation_scores(dict(row)).items())),
+        "score_descriptors": _weave_score_descriptors(row),
+        "judge_evidence": _evaluation_judge_evidence(row),
+        "mechanism_evidence": mechanism,
+    }
+
+
+def _verified_hosted_decision_fields(
+    *,
+    bindings_digest: str,
+    canonical_result_digest: str,
+    canonical_score_set_digest: str,
+    canonical_payload_digest: str,
+    canonical_payload: Mapping[str, Any],
+) -> dict[str, Any]:
+    """Return the row fields admitted only after exact receipt readback."""
+
+    return {
+        "hosted_evidence_verification_status": "verified",
+        "hosted_task_result_canonical": True,
+        "weave_hosted_evidence_receipt_object_verified": True,
+        "weave_hosted_evidence_receipt_terminal_verified": True,
+        "weave_hosted_evidence_receipt_bindings_digest": bindings_digest,
+        "weave_hosted_canonical_task_result_digest": canonical_result_digest,
+        "weave_hosted_canonical_score_set_digest": canonical_score_set_digest,
+        "weave_hosted_canonical_payload_digest": canonical_payload_digest,
+        "weave_hosted_canonical_payload": dict(canonical_payload),
+        "terminal_hosted_visibility_verified": True,
+    }
 
 
 def _scorer_schema(rows: list[dict[str, Any]]) -> list[str]:
@@ -6608,22 +8107,34 @@ def _set_prediction_display_names(
     row: Mapping[str, Any],
     *,
     terminal: bool,
+    provisional: bool = False,
 ) -> None:
     attempt = _positive_int(row.get("trial_index")) or 1
     task = _task_title(row)
     arm = _arm_label(row)
     verdict = _task_verdict_label(row) if terminal else "RUNNING"
+    prefix = "PROVISIONAL · " if provisional else ""
     _set_call_display_name(
         getattr(prediction, "predict_and_score_call", None),
-        f"{verdict} · {task} · {arm} · Attempt {attempt}",
+        f"{prefix}{verdict} · {task} · {arm} · Attempt {attempt}",
     )
+    behavioral_output = _behavioral_task_output_available(row)
     _set_call_display_name(
         getattr(prediction, "predict_call", None),
-        f"Agent answer · {task} · {arm} · Attempt {attempt}",
+        (
+            f"{prefix}Agent answer · {task} · {arm} · Attempt {attempt}"
+            if behavioral_output
+            else (
+                f"{prefix}Agent execution (no scored answer) · "
+                f"{task} · {arm} · Attempt {attempt}"
+            )
+        ),
     )
 
 
 def _task_verdict_label(row: Mapping[str, Any]) -> str:
+    if not _behavioral_task_output_available(row):
+        return "UNSCORED"
     passed = row.get("pass")
     if passed is True:
         return "PASSED"
@@ -6915,6 +8426,13 @@ def _weave_score_descriptors(row: Mapping[str, Any]) -> dict[str, Any]:
 
 
 def _evaluation_judge_evidence(row: Mapping[str, Any]) -> dict[str, Any]:
+    if not _behavioral_task_output_available(row):
+        return {
+            "status": "not_applicable",
+            "advisory": True,
+            "reason": "No behavioral task result was available for judge review.",
+            "calibration_status": "not_applicable",
+        }
     values = row.get("comparison_judges")
     if not isinstance(values, Mapping):
         return {
@@ -8543,13 +10061,16 @@ def _set_adapter_outcome(
         execution_state = "completed"
     else:
         execution_state = "unknown"
-    if row.get("reward") is None:
+    behavioral_output = _behavioral_task_output_available(row)
+    if not behavioral_output or row.get("reward") is None:
         deterministic = "unscored"
     elif row.get("pass") is True:
         deterministic = "passed"
     else:
         deterministic = "failed"
-    if row.get("judge_error") or row.get("evaluation_error"):
+    if not behavioral_output:
+        judge = "not_applicable"
+    elif row.get("judge_error") or row.get("evaluation_error"):
         judge = "failed"
     elif (
         row.get("judge_overall") is not None
@@ -9141,10 +10662,25 @@ def _context_result_rows(path: Path) -> list[dict[str, Any]]:
 
 
 def _live_evaluation_rows(path: Path) -> list[dict[str, Any]]:
-    if path.is_file() and path.name == "evaluation-results.jsonl":
+    return _evaluation_result_rows(path, filename="evaluation-results.jsonl")
+
+
+def _hosted_evaluation_rows(path: Path) -> list[dict[str, Any]]:
+    return _evaluation_result_rows(
+        path,
+        filename="hosted-evaluation-results.jsonl",
+    )
+
+
+def _evaluation_result_rows(
+    path: Path,
+    *,
+    filename: str,
+) -> list[dict[str, Any]]:
+    if path.is_file() and path.name == filename:
         candidates = [path]
     elif path.is_dir():
-        candidates = sorted(path.rglob("evaluation-results.jsonl"))
+        candidates = sorted(path.rglob(filename))
     else:
         candidates = []
     rows: list[dict[str, Any]] = []

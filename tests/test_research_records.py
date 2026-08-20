@@ -124,6 +124,8 @@ def _preview(*, proposal_id: str = "proposal-1") -> ExperimentPreviewV1:
 
 
 def _large_terminal_v3_view(*, pair_count: int = 96) -> ExperimentViewV3:
+    result_project = "wandb/fugue-mcp-release-qualification-v1"
+    result_weave_url = f"https://wandb.ai/{result_project}/weave"
     fixture = (
         Path(__file__).parent
         / "fixtures"
@@ -164,18 +166,20 @@ def _large_terminal_v3_view(*, pair_count: int = 96) -> ExperimentViewV3:
             for link in attempt["evidence_links"]:
                 kind = link["kind"]
                 if kind == "dataset":
+                    link["ref"] = (
+                        f"weave:///{result_project}/object/release-dataset:v1"
+                    )
+                    link["url"] = (
+                        f"{result_weave_url}/objects/release-dataset/versions/v1"
+                    )
                     continue
-                ref = (
+                call_id = (
                     f"{arm}-agent-root-{index:03d}"
                     if kind == "agent_root"
                     else f"{arm}-{kind}-{index:03d}"
                 )
-                link["ref"] = ref
-                link["url"] = (
-                    "https://wandb.ai/wandb/"
-                    "fugue-mcp-release-qualification-v1/weave/calls/"
-                    + ref
-                )
+                link["ref"] = f"weave:///{result_project}/call/{call_id}"
+                link["url"] = f"{result_weave_url}/calls/{call_id}"
             attempt_ids[arm] = attempt_id
         pairs.append(pair)
         aligned_attempts.append(

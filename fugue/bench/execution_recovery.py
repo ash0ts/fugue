@@ -16,6 +16,7 @@ from filelock import FileLock
 
 from fugue.bench.candidates import stable_digest
 from fugue.bench.execution import (
+    HARBOR_PARENT_RUNNER_CLASSIFIER_DIGEST,
     CellOutcome,
     PlannedCell,
     execute_cells,
@@ -114,8 +115,11 @@ _EVENT_PAYLOAD_FIELDS: dict[str, set[str]] = {
 LOCAL_HARBOR_RECOVERY_ADAPTER_CONTRACT = stable_digest(
     {
         "contract": "fugue.execution-recovery-adapters",
-        "version": 3,
+        "version": 4,
         "harbor_terminal_classifier": HARBOR_TERMINAL_CLASSIFIER_DIGEST,
+        "parent_runner_terminal_classifier": (
+            HARBOR_PARENT_RUNNER_CLASSIFIER_DIGEST
+        ),
         "cost": "authoritative-receipt",
         "cleanup": "exact-scope-post-run-inventory",
         "interrupted": (
@@ -142,6 +146,16 @@ class ExecutionFinalizationPending(ExecutionRecoveryPaused):
     Finalizers must raise this type only when already-written Agent work is
     intact and the remaining operation is safe and idempotent. Integrity or
     identity disagreements must use another exception and remain fatal.
+    """
+
+
+class UnsupportedHostedFinalizationRecovery(ExecutionRecoveryError):
+    """A hosted Evaluation cannot resume without replacing its live graph.
+
+    This is a terminal integrity condition, not a retryable pause.  The
+    canonical local attempt remains authoritative, but the installed hosted
+    backend cannot safely continue the exact Evaluation lifecycle after the
+    owning process is lost.
     """
 
 

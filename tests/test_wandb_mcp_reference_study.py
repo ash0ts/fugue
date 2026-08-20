@@ -9,10 +9,13 @@ from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
+import yaml
 
 from fugue.bench.candidates import stable_digest
-from fugue.bench.comparison import load_comparison
+from fugue.bench.comparison import compile_comparison, load_comparison
 from fugue.bench.component_imports import MCPImportLockV1
+from fugue.bench.manifest import load_manifest
+from fugue.bench.task_authoring import AuthoredTaskMaterializer
 from fugue.reference_studies import (
     wandb_mcp_qualification,
     wandb_mcp_qualification_core,
@@ -54,6 +57,20 @@ TREE = "d" * 40
 BLOB = "e" * 40
 RELEASE_NOTES = b"# W&B MCP 0.4.0\n\nA frozen release note.\n"
 _BASELINE_FOR_TEST = "53b199a5f4af29aa82077e2c7f1e2c5e5e0c2ca0"
+_V11_AGENT_INSTRUCTION_SHA256 = {
+    "run-inventory-projection": (
+        "7a12301f01fe739936c941c106ae5f743efb5863cb35969b59151a85757b66a9"
+    ),
+    "evaluation-summary-accuracy": (
+        "268bd30d6f693e44bd3f5291f339c3dd588bf346266d86015caa3028ce1bc668"
+    ),
+    "exact-history-target": (
+        "53b3329b6d89fdc590b12b57a6daa3cd4e4c12fa34d2cd9c3096cf6595a3a4d2"
+    ),
+    "filtered-failure-triage": (
+        "4878ea685bf18220242eae60e012303bb174c78ee7ca3b438803ad7fcaff9287"
+    ),
+}
 
 
 class FakeGit:
@@ -254,7 +271,7 @@ def test_default_materializer_builds_a_complete_check_ready_bundle(
     comparison = (destination / "comparison.yaml").read_text(encoding="utf-8")
     assert "{{" not in comparison
     assert COMMIT in comparison
-    assert f"mcp-main-vs-0-4-{COMMIT[:7]}-harbor-canary-v11" in comparison
+    assert f"mcp-main-vs-0-4-{COMMIT[:7]}-harbor-canary-v12" in comparison
     assert f"wandb-mcp-main-{_BASELINE_FOR_TEST[:12]}" in comparison
     assert f"wandb-mcp-staging-{COMMIT[:12]}" in comparison
     assert "evidence_lock: source-evidence.lock.json" in comparison
@@ -267,7 +284,7 @@ def test_default_materializer_builds_a_complete_check_ready_bundle(
     assert "{{" not in human_comparison
     assert COMMIT in human_comparison
     assert (
-        f"mcp-main-vs-0-4-{COMMIT[:7]}-human-readable-evidence-canary-v1"
+        f"mcp-main-vs-0-4-{COMMIT[:7]}-human-readable-evidence-canary-v2"
         in human_comparison
     )
     assert "evidence_mode: weave_required" in human_comparison
@@ -334,6 +351,39 @@ def test_default_materializer_builds_a_complete_check_ready_bundle(
         repo_root=destination,
     )
     full_spec = load_comparison(destination / "comparison.yaml", repo_root=destination)
+    _, full_manifest, public_cases = compile_comparison(
+        full_spec,
+        repo_root=destination,
+    )
+    public_source = tmp_path / "v12-public-cases.jsonl"
+    public_source.write_text(
+        "\n".join(
+            json.dumps(item, sort_keys=True, separators=(",", ":"))
+            for item in public_cases
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+    rendered_tasks = tmp_path / "v12-agent-inputs"
+    AuthoredTaskMaterializer().materialize(
+        load_manifest(
+            tmp_path / "v12-manifest.yaml",
+            text=yaml.safe_dump(full_manifest, sort_keys=False),
+        ),
+        rendered_tasks,
+        public_source,
+        repo_root=destination,
+    )
+    assert {
+        task_id: hashlib.sha256(
+            (rendered_tasks / task_id / "instruction.md").read_bytes()
+        ).hexdigest()
+        for task_id in _V11_AGENT_INSTRUCTION_SHA256
+    } == _V11_AGENT_INSTRUCTION_SHA256
+    presented = {str(item["id"]): item for item in public_cases}
+    for task_id in ("run-inventory-projection", "evaluation-summary-accuracy"):
+        assert presented[task_id]["required_output"]
+        assert presented[task_id]["public_acceptance_criteria"]
     assert human_spec.id != full_spec.id
     assert human_spec.taskset.tasks == HUMAN_READABLE_TASKS_NAME
     assert human_spec.taskset.private_labels == HUMAN_READABLE_PRIVATE_LABELS_NAME
@@ -452,7 +502,7 @@ def test_default_materializer_builds_a_complete_check_ready_bundle(
     arbitrary_subset_path = destination / "arbitrary-local-subset.yaml"
     arbitrary_subset_path.write_text(
         comparison.replace(
-            f"id: mcp-main-vs-0-4-{COMMIT[:7]}-harbor-canary-v11",
+            f"id: mcp-main-vs-0-4-{COMMIT[:7]}-harbor-canary-v12",
             "id: arbitrary-local-subset",
         )
         .replace("tasks: tasks.jsonl", f"tasks: {HUMAN_READABLE_TASKS_NAME}")

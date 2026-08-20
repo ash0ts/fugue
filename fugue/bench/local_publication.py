@@ -6,7 +6,6 @@ import importlib
 import json
 import re
 import time
-import uuid
 from collections.abc import Callable, Mapping, Sequence
 from dataclasses import asdict, dataclass
 from datetime import UTC, datetime
@@ -17,11 +16,13 @@ from filelock import FileLock
 
 from fugue.bench.candidates import stable_digest
 from fugue.bench.comparison import ComparisonResultV3, read_comparison_result
+from fugue.bench.evaluation_semantics import behavioral_task_output_available
 from fugue.bench.files import atomic_write_json
 from fugue.bench.local_evidence import (
     LocalEvidenceManifestV1,
     LocalEvidenceStore,
     local_result_attempt_projection_v1,
+    local_result_projection_digest_candidates_v1,
 )
 from fugue.bench.task_presentation import (
     task_presentation_from_dict,
@@ -74,6 +75,8 @@ class MissingWeaveExtraError(LocalResultPublicationError):
 def _attempt_score_details(attempt: Any) -> dict[str, dict[str, str]]:
     """Serialize optional score detail contracts, including legacy test doubles."""
 
+    if _attempt_is_nonbehavioral(attempt):
+        return {}
     raw = getattr(attempt, "score_details", {})
     if not isinstance(raw, Mapping):
         raise LocalResultPublicationError("comparison score details must be an object")
@@ -94,6 +97,8 @@ def _attempt_score_details(attempt: Any) -> dict[str, dict[str, str]]:
 def _attempt_judge_reviews(attempt: Any) -> dict[str, dict[str, Any]]:
     """Serialize optional anchored reviews, including legacy test doubles."""
 
+    if _attempt_is_nonbehavioral(attempt):
+        return {}
     raw = getattr(attempt, "judge_reviews", {})
     if not isinstance(raw, Mapping):
         raise LocalResultPublicationError("comparison judge reviews must be an object")
@@ -141,7 +146,77 @@ def _attempt_task_presentation(
     return None
 
 
-def _attempt_task_result(attempt: Any) -> dict[str, Any]:
+def _attempt_agent_execution_status(attempt: Any) -> str:
+    execution_status = str(
+        getattr(attempt, "execution_status", "not_applicable") or "not_applicable"
+    ).lower()
+    return {
+        "passed": "completed",
+        "success": "completed",
+        "succeeded": "completed",
+        "completed": "completed",
+        "timeout": "timed_out",
+        "timed_out": "timed_out",
+        "error": "failed",
+        "failed": "failed",
+        "infrastructure_failed": "failed",
+        "unknown": "not_started",
+    }.get(execution_status, execution_status)
+
+
+def _attempt_is_nonbehavioral(attempt: Any) -> bool:
+    execution_status = _attempt_agent_execution_status(attempt)
+    infrastructure = getattr(attempt, "infrastructure", {})
+    terminal_kind = (
+        infrastructure.get("terminal_kind")
+        if isinstance(infrastructure, Mapping)
+        else None
+    )
+    if execution_status in {
+        "not_started",
+        "cancelled",
+        "interrupted",
+        "not_applicable",
+    }:
+        return True
+    if terminal_kind:
+        return not behavioral_task_output_available(
+            {
+                "runtime_outcome": (
+                    execution_status
+                    if execution_status in {"completed", "timed_out"}
+                    else None
+                ),
+                "terminal_kind": terminal_kind,
+            }
+        )
+    return False
+
+
+def _attempt_evidence_integrity_status(attempt: Any) -> str:
+    return (
+        "verified"
+        if str(getattr(attempt, "evidence_status", ""))
+        in {"resolved", "reconciled"}
+        else "incomplete"
+    )
+
+
+def _task_result_display_verdict(task_result: Mapping[str, Any] | None) -> str:
+    if task_result is None:
+        return "UNSCORED"
+    if task_result["task_passed"] is True:
+        return "PASSED"
+    if task_result["task_passed"] is False:
+        return "DID NOT PASS"
+    return "INVALID"
+
+
+def _attempt_task_result(attempt: Any) -> dict[str, Any] | None:
+    if _attempt_is_nonbehavioral(attempt):
+        # A nonbehavioral terminal deliberately has no task verdict. Ignore a
+        # stale or malformed legacy field at this defensive publication seam.
+        return None
     raw = getattr(attempt, "task_result", None)
     if raw is not None:
         value = raw.to_dict() if callable(getattr(raw, "to_dict", None)) else raw
@@ -165,21 +240,7 @@ def _attempt_task_result(attempt: Any) -> dict[str, Any]:
             }
         ]
     )
-    execution_status = str(
-        getattr(attempt, "execution_status", "not_applicable") or "not_applicable"
-    ).lower()
-    execution_status = {
-        "passed": "completed",
-        "success": "completed",
-        "succeeded": "completed",
-        "completed": "completed",
-        "timeout": "timed_out",
-        "timed_out": "timed_out",
-        "error": "failed",
-        "failed": "failed",
-        "infrastructure_failed": "failed",
-        "unknown": "not_started",
-    }.get(execution_status, execution_status)
+    execution_status = _attempt_agent_execution_status(attempt)
     return task_result_from_dict(
         {
             "schema_version": 1,
@@ -194,12 +255,7 @@ def _attempt_task_result(attempt: Any) -> dict[str, Any]:
             "failed_required_checks": failed,
             "answer_digest": None,
             "agent_execution_status": execution_status,
-            "evidence_integrity_status": (
-                "verified"
-                if str(getattr(attempt, "evidence_status", ""))
-                in {"resolved", "reconciled"}
-                else "incomplete"
-            ),
+            "evidence_integrity_status": _attempt_evidence_integrity_status(attempt),
         }
     ).to_dict()
 
@@ -226,6 +282,8 @@ def _published_scores(
     attempt: Any,
     dimension_roles: Mapping[str, str],
 ) -> dict[str, Any]:
+    if _attempt_is_nonbehavioral(attempt):
+        return {}
     result: dict[str, Any] = {
         "task_passed": getattr(attempt, "passed", None),
     }
@@ -251,6 +309,12 @@ def _weave_row_digest(row: Mapping[str, Any]) -> str:
 
 
 def _published_judge_evidence(attempt: Any) -> dict[str, Any]:
+    if _attempt_is_nonbehavioral(attempt):
+        return {
+            "status": "not_applicable",
+            "advisory": True,
+            "reason": "No behavioral task result was available for judge review.",
+        }
     reviews = _attempt_judge_reviews(attempt)
     if not reviews:
         return {
@@ -824,6 +888,7 @@ def _publish_with_active_weave_sdk(
         "finish_call",
         "flush",
         "get_call",
+        "get_calls",
         "get",
     )
     if client is None or any(
@@ -954,12 +1019,18 @@ def _publish_with_active_weave_sdk(
             "fugue.arm": arm,
             "fugue.arm_label": arm_label,
             "fugue.treatment_summary": treatment_summary,
-            "fugue.task_verdict": (
-                "passed"
-                if task_result["task_passed"] is True
-                else "did_not_pass"
-                if task_result["task_passed"] is False
-                else "invalid"
+            **(
+                {
+                    "fugue.task_verdict": (
+                        "passed"
+                        if task_result["task_passed"] is True
+                        else "did_not_pass"
+                        if task_result["task_passed"] is False
+                        else "invalid"
+                    )
+                }
+                if task_result is not None
+                else {}
             ),
             "fugue.harness": pair.harness,
             "fugue.trial_index": pair.attempt,
@@ -996,7 +1067,7 @@ def _publish_with_active_weave_sdk(
             "task_presentation": task_presentation,
         }
         predict_and_score_output = {
-            "task_result": task_result,
+            **({"task_result": task_result} if task_result is not None else {}),
             "scores": published_scores,
             "score_details": score_details,
             "judge_evidence": judge_evidence,
@@ -1009,12 +1080,18 @@ def _publish_with_active_weave_sdk(
             "treatment_summary": treatment_summary,
         }
         prediction_output = {
-            "task_result": task_result,
+            **({"task_result": task_result} if task_result is not None else {}),
             "scores": published_scores,
-            "score_explanations": dict(attempt.score_explanations),
+            "score_explanations": (
+                {} if _attempt_is_nonbehavioral(attempt) else dict(attempt.score_explanations)
+            ),
             "score_details": score_details,
             "judge_evidence": judge_evidence,
-            "sanitized_answer_excerpt": attempt.sanitized_answer_excerpt,
+            "sanitized_answer_excerpt": (
+                None
+                if _attempt_is_nonbehavioral(attempt)
+                else attempt.sanitized_answer_excerpt
+            ),
         }
         agent_inputs = {
             "attempt_id": attempt_id,
@@ -1022,8 +1099,16 @@ def _publish_with_active_weave_sdk(
             "local_manifest_digest": manifest.manifest_digest,
         }
         agent_output = {
-            "agent_execution_status": task_result["agent_execution_status"],
-            "evidence_integrity_status": task_result["evidence_integrity_status"],
+            "agent_execution_status": (
+                task_result["agent_execution_status"]
+                if task_result is not None
+                else _attempt_agent_execution_status(attempt)
+            ),
+            "evidence_integrity_status": (
+                task_result["evidence_integrity_status"]
+                if task_result is not None
+                else _attempt_evidence_integrity_status(attempt)
+            ),
             "native_agent_call": False,
         }
         root = _ensure_weave_call_started(
@@ -1050,7 +1135,7 @@ def _publish_with_active_weave_sdk(
             attributes=attributes,
             display_name=(
                 f"Published scored attempt: "
-                f"{'PASSED' if task_result['task_passed'] is True else 'DID NOT PASS' if task_result['task_passed'] is False else 'INVALID'}"
+                f"{_task_result_display_verdict(task_result)}"
                 f" · {task_title} · {arm_label} · Attempt {pair.attempt}"
             ),
             parent=root,
@@ -1065,8 +1150,13 @@ def _publish_with_active_weave_sdk(
             inputs=prediction_inputs,
             attributes=attributes,
             display_name=(
-                f"Published prediction record: Agent answer · {task_title} · "
-                f"{arm_label} · Attempt {pair.attempt}"
+                "Published prediction record: "
+                + (
+                    f"Agent execution (no scored answer) · {task_title} · "
+                    if _attempt_is_nonbehavioral(attempt)
+                    else f"Agent answer · {task_title} · "
+                )
+                + f"{arm_label} · Attempt {pair.attempt}"
             ),
             parent=predict_and_score,
         )
@@ -1149,9 +1239,15 @@ def _publish_with_active_weave_sdk(
                 require_finished=True,
             )
             readback[kind] = observed
-        root_id = str(getattr(readback["evaluation_root"], "id", "") or "")
+        root_trace_id = str(
+            getattr(readback["evaluation_root"], "trace_id", "") or ""
+        )
+        if not root_trace_id:
+            raise RuntimeError(
+                "authoritative Weave readback omitted the evidence trace identity"
+            )
         for observed in readback.values():
-            if str(getattr(observed, "trace_id", "") or "") != root_id:
+            if str(getattr(observed, "trace_id", "") or "") != root_trace_id:
                 raise RuntimeError(
                     "authoritative Weave readback lost the evidence trace identity"
                 )
@@ -1179,7 +1275,7 @@ def _publish_with_active_weave_sdk(
         target=target,
         objects=tuple(sorted(objects, key=_object_sort_key)),
         publisher_id="fugue-local-result-weave",
-        publisher_revision=f"v2-readback+weave-{version}",
+        publisher_revision=f"v3-public-query-readback+weave-{version}",
     )
 
 
@@ -1196,27 +1292,60 @@ def _ensure_weave_call_started(
     display_name: str,
     parent: Any | None = None,
 ) -> Any:
-    call_id = str(
-        uuid.uuid5(
-            uuid.NAMESPACE_URL,
-            f"fugue:{publication_id}:{attempt_id}:{kind}",
-        )
-    )
-    call = _get_weave_call_or_none(client, call_id)
     expected_attributes = {
         **dict(attributes),
         "fugue.evidence.object_kind": kind,
     }
-    if call is None:
-        call = client.create_call(
+    matches = _query_weave_publication_calls(
+        client,
+        publication_id=publication_id,
+        attempt_id=attempt_id,
+        kind=kind,
+    )
+    if len(matches) > 1:
+        raise RuntimeError(
+            "Weave publication found duplicate Calls for one immutable "
+            "evidence identity"
+        )
+    if matches:
+        call = matches[0]
+    else:
+        created = client.create_call(
             op,
             dict(inputs),
             parent=parent,
             attributes=expected_attributes,
             display_name=display_name,
             use_stack=False,
-            _call_id_override=call_id,
         )
+        created_id = str(getattr(created, "id", "") or "")
+        if not created_id:
+            raise RuntimeError("Weave did not return an identity for a created Call")
+        client.flush()
+        matches = _read_back_weave_publication_calls(
+            client,
+            publication_id=publication_id,
+            attempt_id=attempt_id,
+            kind=kind,
+        )
+        if len(matches) > 1:
+            raise RuntimeError(
+                "Weave publication created a duplicate Call race for one "
+                "immutable evidence identity"
+            )
+        if not matches:
+            raise RuntimeError(
+                "authoritative Weave readback could not resolve a created Call"
+            )
+        call = matches[0]
+        if str(getattr(call, "id", "") or "") != created_id:
+            raise RuntimeError(
+                "authoritative Weave readback returned another Call for a "
+                "created evidence identity"
+            )
+    call_id = str(getattr(call, "id", "") or "")
+    if not call_id:
+        raise RuntimeError("published Weave Call has no identity")
     _verify_weave_call(
         call,
         target=target,
@@ -1250,13 +1379,58 @@ def _finish_or_verify_weave_call(
     client.finish_call(call, output=dict(output))
 
 
-def _get_weave_call_or_none(client: Any, call_id: str) -> Any | None:
-    try:
-        return client.get_call(call_id)
-    except ValueError as exc:
-        if "call not found" in str(exc).lower():
-            return None
-        raise
+def _query_weave_publication_calls(
+    client: Any,
+    *,
+    publication_id: str,
+    attempt_id: str,
+    kind: str,
+) -> list[Any]:
+    query = {
+        "$expr": {
+            "$and": [
+                {
+                    "$eq": [
+                        {"$getField": "attributes.fugue.publication_id"},
+                        {"$literal": publication_id},
+                    ]
+                },
+                {
+                    "$eq": [
+                        {"$getField": "attributes.fugue.attempt_id"},
+                        {"$literal": attempt_id},
+                    ]
+                },
+                {
+                    "$eq": [
+                        {"$getField": "attributes.fugue.evidence.object_kind"},
+                        {"$literal": kind},
+                    ]
+                },
+            ]
+        }
+    }
+    return list(client.get_calls(query=query, limit=2))
+
+
+def _read_back_weave_publication_calls(
+    client: Any,
+    *,
+    publication_id: str,
+    attempt_id: str,
+    kind: str,
+) -> list[Any]:
+    for retry in range(5):
+        matches = _query_weave_publication_calls(
+            client,
+            publication_id=publication_id,
+            attempt_id=attempt_id,
+            kind=kind,
+        )
+        if matches or retry == 4:
+            return matches
+        time.sleep(0.05 * (retry + 1))
+    raise AssertionError("unreachable Weave publication query retry state")
 
 
 def _read_back_weave_call(client: Any, call_id: str) -> Any:
@@ -1667,8 +1841,22 @@ def _validate_result_local_evidence_binding(
                 usage_reconciliation_status=attempt.usage_reconciliation_status,
                 score_details=_attempt_score_details(attempt),
                 judge_reviews=_attempt_judge_reviews(attempt),
+                task_presentation=(
+                    attempt.task_presentation.to_dict()
+                    if getattr(attempt, "task_presentation", None) is not None
+                    else None
+                ),
+                arm_label=getattr(attempt, "arm_label", None),
+                treatment_summary=getattr(attempt, "treatment_summary", None),
+                task_result=(
+                    attempt.task_result.to_dict()
+                    if getattr(attempt, "task_result", None) is not None
+                    else None
+                ),
             )
-            if stable_digest(projection) != record.result_row_projection_digest:
+            if record.result_row_projection_digest not in (
+                local_result_projection_digest_candidates_v1(projection)
+            ):
                 raise LocalResultPublicationError(
                     "comparison attempt decision fields disagree with its immutable "
                     f"prediction artifact: {attempt.attempt_id}"

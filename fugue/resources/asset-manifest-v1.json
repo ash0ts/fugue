@@ -37,6 +37,11 @@
       "size_bytes": 10212
     },
     {
+      "path": "compatibility/legacy-hosted-v3-admissions-v1.json",
+      "sha256": "93aca19ca5fd5de14600c6c69c250da8053e65417d0c56df521004a2b0a2086a",
+      "size_bytes": 1657
+    },
+    {
       "path": "context-systems/agentsmd.yaml",
       "sha256": "06b70b67de187b77c3b5c7535aa9edfbc59f30fa1cdcc5e3cfcfac67b55fb151",
       "size_bytes": 362
@@ -118,8 +123,8 @@
     },
     {
       "path": "reference-studies/wandb-mcp/comparison.yaml.template",
-      "sha256": "078205b838a3c88381c36b43cfc374e0b78cfea050eb2f5e9821a42b98b7a62d",
-      "size_bytes": 4869
+      "sha256": "bc1a11690c7f83469184aa4a7f5cdf94250693d8ad5240e962c0902c87c12c39",
+      "size_bytes": 5210
     },
     {
       "path": "reference-studies/wandb-mcp/configs/fugue/task-authoring/profiles.yaml",
@@ -128,7 +133,7 @@
     },
     {
       "path": "reference-studies/wandb-mcp/human-readable-evidence-canary.yaml.template",
-      "sha256": "d48e1a8eb1c7bc4652eef4972c97106965f242df1b510e4ac4bde2626a24be9a",
+      "sha256": "b552b23b0941c4249c83aa4ab6d8cd2d1a7a9f3a4fd18e4db327f342d422259f",
       "size_bytes": 4896
     },
     {
@@ -148,8 +153,8 @@
     },
     {
       "path": "reference-studies/wandb-mcp/tasks.jsonl",
-      "sha256": "5ca6939b63bcf4a5ae7a5d27dfe0cfeaa7af0f64b2c75945d190ed5f77ae0336",
-      "size_bytes": 7568
+      "sha256": "09a7ef7a4aea81f5f051e691452df625fa31b7784ff8300d64c00a2e788b7966",
+      "size_bytes": 7616
     },
     {
       "path": "reference-studies/wandb-mcp/tool_surface_scorer_v7.py",

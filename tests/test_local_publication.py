@@ -10,9 +10,19 @@ from types import SimpleNamespace
 from typing import Any
 
 import pytest
+import yaml
 
 import fugue.bench.local_publication as publication
 from fugue.bench.candidates import attempt_id, attempt_identity, stable_digest
+from fugue.bench.comparison import (
+    ComparisonResultV3,
+    analyze_comparison_rows,
+    comparison_from_dict,
+    materialize_comparison,
+    preview_comparison,
+    scaffold_comparison,
+    write_comparison_result,
+)
 from fugue.bench.export import PredictionRowV1
 from fugue.bench.files import atomic_write_json
 from fugue.bench.local_evidence import (
@@ -22,6 +32,7 @@ from fugue.bench.local_evidence import (
     LocalEvidenceCoordinator,
     LocalEvidenceStore,
     build_local_evidence_run_plan,
+    local_attempt_refs,
 )
 from fugue.bench.local_publication import (
     LocalResultPublicationError,
@@ -36,6 +47,7 @@ from fugue.bench.local_publication import (
     weave_publication_receipt_from_dict,
     weave_publisher_from_environment,
 )
+from fugue.bench.operator import OperatorService
 from fugue.bench.task_presentation import (
     PublicPromptPartV1,
     TaskPresentationV1,
@@ -113,7 +125,7 @@ class _FakeComparisonResultV3:
                     queried_projects=(),
                     scores={},
                     score_explanations={},
-                    sanitized_answer_excerpt="bounded public answer",
+                    sanitized_answer_excerpt=None,
                     actual_query_scope=(),
                     reported_project_identity=None,
                     execution_fingerprint=None,
@@ -264,6 +276,280 @@ def _canonical_manifest(tmp_path: Path, *, complete: bool = True):
     return store.manifest_path, manifest
 
 
+def _real_interrupted_v3_result(
+    tmp_path: Path,
+) -> tuple[Path, ComparisonResultV3, Path, Any]:
+    """Build one digest-valid local V3 result with no behavioral verdicts."""
+
+    comparison_path = scaffold_comparison(tmp_path)
+    raw = yaml.safe_load(comparison_path.read_text(encoding="utf-8"))
+    raw["execution"]["attempts"] = 1
+    task_path = tmp_path / raw["taskset"]["tasks"]
+    label_path = tmp_path / raw["taskset"]["private_labels"]
+    task_line = task_path.read_text(encoding="utf-8").splitlines()[0]
+    label_line = label_path.read_text(encoding="utf-8").splitlines()[0]
+    task_path.write_text(task_line + "\n", encoding="utf-8")
+    label_path.write_text(label_line + "\n", encoding="utf-8")
+    spec = comparison_from_dict(raw, repo_root=tmp_path, source=tmp_path)
+    operator = OperatorService(tmp_path)
+    preview = preview_comparison(spec, repo_root=tmp_path, operator=operator)
+    _experiment, request = materialize_comparison(
+        preview,
+        repo_root=tmp_path,
+        operator=operator,
+        approval_digest="a" * 64,
+    )
+    approved = request.approved_comparison
+    run_id = "local-v3-interrupted-publication"
+    task_id = str(approved["expected_cells"][0]["task_id"])
+    presentation = TaskPresentationV1(
+        task_id=task_id,
+        title="Find the current reimbursement cap",
+        public_prompt=(
+            PublicPromptPartV1(
+                order=1,
+                text="Inspect the supplied policy files and return the current cap.",
+            ),
+        ),
+        required_output="Return JSON with amount_usd and source.",
+        public_acceptance_criteria=(
+            "Use the currently effective policy file.",
+            "Return the requested JSON fields.",
+        ),
+        scenario="Policy maintenance",
+        tags=("skill", "current-source"),
+        partition="development",
+    )
+    plans: list[LocalAttemptPlanV1] = []
+    rows: list[dict[str, Any]] = []
+    drift = {
+        "status": "matched",
+        "expected_digest": approved["source_lock_digest"],
+        "observed_digest": approved["source_lock_digest"],
+    }
+    for cell in approved["expected_cells"]:
+        arm = str(cell["variant_id"])
+        arm_label = "Baseline" if arm == "baseline" else "Candidate"
+        treatment_summary = (
+            "Claude Code without the assigned Skill."
+            if arm == "baseline"
+            else "Claude Code with the locked verify-current-source Skill."
+        )
+        prediction_id = stable_digest(
+            {"record_type": "prediction", "attempt_id": cell["attempt_id"]}
+        )
+        plan = LocalAttemptPlanV1(
+            run_id=run_id,
+            cell_id=str(cell.get("cell_id") or cell["attempt_id"]),
+            attempt_id=str(cell["attempt_id"]),
+            attempt_identity=dict(cell["attempt_identity"]),
+            prediction_id=prediction_id,
+            evaluation_scope_id=stable_digest(
+                {"run_id": run_id, "attempt_id": cell["attempt_id"], "kind": "eval"}
+            ),
+            dataset_id=stable_digest(
+                {
+                    "run_id": run_id,
+                    "attempt_id": cell["attempt_id"],
+                    "kind": "dataset",
+                }
+            ),
+            arm_label=arm_label,
+            treatment_summary=treatment_summary,
+            task_presentation=presentation,
+        )
+        plans.append(plan)
+        refs = local_attempt_refs(plan)
+        rows.append(
+            {
+                **dict(cell),
+                "run_id": run_id,
+                "prediction_id": prediction_id,
+                "approved_comparison": approved,
+                "trace_receipt": approved["evidence_destination"],
+                "source_pre_run_drift": drift,
+                "source_checkpoint_drift": drift,
+                "source_post_run_drift": drift,
+                "status": "failed",
+                "runtime_outcome": "interrupted",
+                "terminal_kind": "transport_interrupted",
+                "benchmark_outcome": "unscored",
+                "pass": None,
+                "comparison_evaluation_status": "unavailable",
+                "comparison_evaluation_reason": (
+                    "Agent execution was interrupted; no behavioral output is "
+                    "available to score"
+                ),
+                "comparison_required_evaluation_complete": False,
+                "evidence_backend": "local",
+                "task_presentation": presentation.to_dict(),
+                "arm_label": arm_label,
+                "treatment_summary": treatment_summary,
+                "local_evidence_links": [
+                    {
+                        "kind": kind,
+                        "status": "resolved",
+                        "system": "local_artifact",
+                        "ref": refs[kind],
+                    }
+                    for kind in (
+                        "evaluation_root",
+                        "prediction_and_score",
+                        "prediction",
+                        "agent_root",
+                        "dataset",
+                    )
+                ],
+                "privacy_contract_version": 2,
+                "local_artifact_privacy_scan_status": "passed",
+                "hosted_evidence_privacy_scan_status": "not_applicable",
+                "private_label_boundary_verified": True,
+                "cost_reconciliation_status": "unavailable",
+                "latency_reconciliation_status": "unavailable",
+                "usage_reconciliation_status": "unavailable",
+            }
+        )
+
+    plan = build_local_evidence_run_plan(
+        run_id=run_id,
+        run_snapshot_sha256=stable_digest({"snapshot": run_id}),
+        evaluation_asset_lock_sha256=stable_digest({"assets": run_id}),
+        attempts=tuple(plans),
+    )
+    store = LocalEvidenceStore(tmp_path, run_id)
+    coordinator = LocalEvidenceCoordinator(store, plan)
+    harbor_receipt = {
+        "schema_version": 2,
+        "run_id": run_id,
+        "backend": "local_harbor_docker",
+        "status": "passed",
+        "enforced": True,
+        "generated_at": "2026-08-19T20:00:00+00:00",
+        "receipt_sha256": "",
+    }
+    harbor_receipt["receipt_sha256"] = stable_digest(harbor_receipt)
+    atomic_write_json(store.run_conformance_path, harbor_receipt)
+    for plan_attempt, row in zip(plans, rows, strict=True):
+        session_id = f"session-{plan_attempt.attempt_id[:16]}"
+        transcript_path = (
+            tmp_path
+            / ".fugue"
+            / "runtime"
+            / run_id
+            / "agent-native"
+            / plan_attempt.attempt_id
+            / "transcript.jsonl"
+        )
+        transcript_path.parent.mkdir(parents=True, exist_ok=True)
+        transcript_path.write_text(
+            json.dumps(
+                {
+                    "attempt_id": plan_attempt.attempt_id,
+                    "session_id": session_id,
+                    "event": "Agent session started before controller interruption.",
+                },
+                sort_keys=True,
+            )
+            + "\n",
+            encoding="utf-8",
+        )
+        transcript_raw = transcript_path.read_bytes()
+        transcript = LocalArtifactRefV1(
+            path=transcript_path.relative_to(tmp_path).as_posix(),
+            sha256=hashlib.sha256(transcript_raw).hexdigest(),
+            size_bytes=len(transcript_raw),
+            media_type="application/x-ndjson",
+        )
+        coordinator.begin_attempt(plan_attempt.attempt_id)
+        coordinator.finish_attempt(
+            plan_attempt.attempt_id,
+            terminal_status="failed",
+            prediction_row=PredictionRowV1(
+                prediction_id=plan_attempt.prediction_id,
+                run_id=run_id,
+                candidate_id=plan_attempt.candidate_id,
+                comparison_example_id=stable_digest(
+                    {"task_id": task_id, "attempt_id": plan_attempt.attempt_id}
+                ),
+                trial_index=1,
+                execution_kind="agent",
+                source_record_type="trial",
+                payload=row,
+            ).to_dict(),
+            scores={},
+            attempt_payload={
+                "attempt_id": plan_attempt.attempt_id,
+                "terminal_status": "failed",
+                "receipts": {
+                    "privacy": {"status": "passed"},
+                    "policy": {"status": "passed"},
+                    "usage": {"status": "not_applicable"},
+                    "cleanup": {"status": "passed"},
+                },
+            },
+            agent_receipt=AgentEvidenceReceiptV1(
+                attempt_id=plan_attempt.attempt_id,
+                planned_conversation_id=f"planned-{plan_attempt.attempt_id[:16]}",
+                primary_session_id=session_id,
+                child_session_ids=(),
+                artifacts=(transcript,),
+                transcript_artifact=transcript,
+                transcript_session_id=session_id,
+                correlation_verified=True,
+                tool_event_count=0,
+                tool_events_sha256=stable_digest([]),
+                response_sha256=None,
+            ),
+            recorded_at="2026-08-19T20:00:00+00:00",
+        )
+    manifest = coordinator.finalize()
+    manifest_file_sha256 = hashlib.sha256(store.manifest_path.read_bytes()).hexdigest()
+    records = {item.attempt_id: item for item in manifest.attempt_records}
+    conformance = manifest.run_conformance
+    assert conformance is not None
+    binding = {
+        "local_evidence_manifest_digest": manifest.manifest_digest,
+        "local_evidence_manifest_file_sha256": manifest_file_sha256,
+        "local_evidence_plan_digest": manifest.plan_digest,
+        "local_evidence_attempt_record_set_digest": manifest.attempt_record_set_digest,
+        "local_evidence_prediction_row_set_digest": manifest.prediction_row_set_digest,
+        "local_evidence_result_row_projection_set_digest": (
+            manifest.result_row_projection_set_digest
+        ),
+        "local_evidence_run_receipt_digest": conformance.receipt_sha256,
+        "local_evidence_run_receipt_file_sha256": conformance.sha256,
+    }
+    for row in rows:
+        record = records[str(row["attempt_id"])]
+        row.update(binding)
+        row["local_evidence_record_digest"] = record.record_digest
+        row["local_evidence_prediction_row_sha256"] = record.prediction_row_sha256
+        row["local_evidence_result_row_projection_digest"] = (
+            record.result_row_projection_digest
+        )
+    result = analyze_comparison_rows(
+        comparison_id=spec.id,
+        preview_digest=preview.preview_digest,
+        rows=rows,
+        source=run_id,
+        approved_comparison=approved,
+        result_schema_version=3,
+        study_intent="local_publication_nonbehavioral_regression",
+    )
+    assert isinstance(result, ComparisonResultV3)
+    destination = tmp_path / "real-v3-result"
+    destination.mkdir()
+    (destination / "attempts.jsonl").write_text(
+        "".join(json.dumps(row, sort_keys=True) + "\n" for row in rows),
+        encoding="utf-8",
+    )
+    result_path, _markdown_path = write_comparison_result(
+        result,
+        destination=destination,
+    )
+    return result_path, result, store.manifest_path, manifest
+
+
 def _result_fixture(tmp_path: Path, manifest: Any) -> tuple[Path, Any]:
     result_path = tmp_path / "results" / "result.json"
     atomic_write_json(
@@ -390,6 +676,53 @@ def test_publication_is_digest_bound_idempotent_and_does_not_rewrite_result(
         )
         == receipt
     )
+
+
+def test_real_digest_valid_nonbehavioral_v3_publishes_no_task_claims(
+    tmp_path: Path,
+) -> None:
+    result_path, result, manifest_path, manifest = _real_interrupted_v3_result(
+        tmp_path
+    )
+    target = _target(project="nonbehavioral-publication")
+    observed: list[ComparisonResultV3] = []
+
+    def publisher(
+        published_result: ComparisonResultV3,
+        _manifest: Any,
+        _target: WeavePublicationTargetV1,
+    ) -> WeavePublicationOutcomeV1:
+        observed.append(published_result)
+        return _outcome(manifest, target)
+
+    receipt = publish_local_result_to_weave(
+        result_path,
+        manifest_path,
+        target=target,
+        publisher=publisher,
+        clock=lambda: datetime(2026, 8, 19, 20, tzinfo=UTC),
+    )
+
+    assert receipt.result_digest == result.result_digest
+    assert observed == [result]
+    assert result.behavioral_summary.status == "incomplete"
+    assert result.deterministic_summary == {
+        "baseline": {"passed": 0, "evaluated": 0, "dimensions": {}},
+        "candidate": {"passed": 0, "evaluated": 0, "dimensions": {}},
+    }
+    assert result.judge_summary["status"] == "not_used"
+    assert result.mechanism_summary == {}
+    assert all(
+        attempt is not None
+        and attempt.execution_status == "interrupted"
+        and attempt.passed is None
+        and attempt.scores == {}
+        and attempt.task_result is None
+        for pair in result.paired_cases
+        for attempt in (pair.baseline, pair.candidate)
+    )
+    assert receipt.target.project_slug == "wandb/nonbehavioral-publication"
+    assert len(receipt.hosted_objects) == 10
 
 
 def test_publication_rejects_incomplete_local_chain_before_publisher(
@@ -1029,9 +1362,12 @@ class _FakeWeaveClient:
         self.finished_call_ids: list[str] = []
         self.published_object_refs: list[str] = []
         self.fail_after_finish: int | None = None
+        self.fail_after_create: int | None = None
+        self.duplicate_after_create_kind: str | None = None
         self.tamper_call_kind: str | None = None
         self.tamper_call_field = "output"
         self.tamper_dataset = False
+        self.call_queries: list[dict[str, Any]] = []
 
     def create_call(
         self,
@@ -1042,15 +1378,17 @@ class _FakeWeaveClient:
         display_name=None,
         *,
         use_stack=True,
-        _call_id_override=None,
     ):
         del use_stack
-        assert _call_id_override not in self.calls
+        call_id = f"call-{len(self.created_call_ids) + 1:04d}"
+        trace_id = getattr(parent, "trace_id", None) or (
+            f"trace-{len(self.created_call_ids) + 1:04d}"
+        )
         call = SimpleNamespace(
-            id=_call_id_override,
+            id=call_id,
             parent_id=getattr(parent, "id", None),
             project_id=self.target.project_slug,
-            trace_id=(getattr(parent, "trace_id", None) or _call_id_override),
+            trace_id=trace_id,
             inputs=dict(inputs),
             attributes=dict(attributes or {}),
             display_name=display_name,
@@ -1060,6 +1398,20 @@ class _FakeWeaveClient:
         )
         self.calls[call.id] = call
         self.created_call_ids.append(call.id)
+        if self.duplicate_after_create_kind == call.attributes.get(
+            "fugue.evidence.object_kind"
+        ):
+            duplicate_id = f"duplicate-{call.id}"
+            self.calls[duplicate_id] = SimpleNamespace(
+                **{
+                    **vars(call),
+                    "id": duplicate_id,
+                }
+            )
+            self.duplicate_after_create_kind = None
+        if self.fail_after_create == len(self.created_call_ids):
+            self.fail_after_create = None
+            raise RuntimeError("simulated controller interruption during Call creation")
         return call
 
     def finish_call(self, call, output=None):
@@ -1105,6 +1457,23 @@ class _FakeWeaveClient:
                 }
             )
         return call
+
+    def get_calls(self, *, query=None, limit=None, **_kwargs):
+        assert isinstance(query, dict)
+        self.call_queries.append(query)
+        conditions = query["$expr"]["$and"]
+        expected: dict[str, Any] = {}
+        for condition in conditions:
+            field, literal = condition["$eq"]
+            path = field["$getField"]
+            assert path.startswith("attributes.")
+            expected[path.removeprefix("attributes.")] = literal["$literal"]
+        matches = [
+            call
+            for call in self.calls.values()
+            if all(call.attributes.get(key) == value for key, value in expected.items())
+        ]
+        return matches[:limit]
 
     def get(self, ref, *, objectify=True):
         del objectify
@@ -1233,7 +1602,30 @@ def test_real_weave_adapter_emits_nested_five_object_chain(
     by_kind = {item.kind: item for item in outcome.objects}
     assert by_kind["agent_evidence_receipt"].native_agent_call is False
     assert by_kind["dataset"].ref.startswith(f"weave:///{target.project_slug}/object/")
-    assert outcome.publisher_revision == "v2-readback+weave-test-sdk"
+    assert outcome.publisher_revision == (
+        "v3-public-query-readback+weave-test-sdk"
+    )
+    root = next(
+        call
+        for call in client.calls.values()
+        if call.attributes["fugue.evidence.object_kind"] == "evaluation_root"
+    )
+    assert root.trace_id != root.id
+    assert all(call.trace_id == root.trace_id for call in client.calls.values())
+    expected_query_fields = {
+        "attributes.fugue.publication_id",
+        "attributes.fugue.attempt_id",
+        "attributes.fugue.evidence.object_kind",
+    }
+    assert client.call_queries
+    assert all(
+        {
+            condition["$eq"][0]["$getField"]
+            for condition in query["$expr"]["$and"]
+        }
+        == expected_query_fields
+        for query in client.call_queries
+    )
 
 
 def test_real_weave_adapter_publishes_human_task_and_result_contracts(
@@ -1244,6 +1636,8 @@ def test_real_weave_adapter_publishes_human_task_and_result_contracts(
     _result_path, result = _result_fixture(tmp_path, manifest)
     pair = result.paired_cases[0]
     attempt = pair.baseline
+    attempt.execution_status = "completed"
+    attempt.evaluation_status = "scored"
     presentation = TaskPresentationV1(
         task_id="task-1",
         title="Create a platform-bound Skill",
@@ -1344,6 +1738,70 @@ def test_real_weave_adapter_publishes_human_task_and_result_contracts(
     assert agent.output["native_agent_call"] is False
 
 
+def test_real_weave_adapter_does_not_recreate_pre_agent_task_verdict(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _manifest_path, manifest = _canonical_manifest(tmp_path)
+    _result_path, result = _result_fixture(tmp_path, manifest)
+    attempt = result.paired_cases[0].baseline
+    attempt.execution_status = "not_started"
+    attempt.evaluation_status = "unavailable"
+    # Reproduce a malformed downstream replay. Publication must trust the
+    # typed runtime outcome and withhold every stale behavioral claim.
+    attempt.passed = True
+    attempt.scores = {"answer_correct": True}
+    attempt.score_details = {
+        "answer_correct": {
+            "what": "The answer must be correct.",
+            "observed": "A stale scorer said it passed.",
+            "why": "This must not survive a pre-Agent terminal.",
+        }
+    }
+    attempt.score_explanations = {"answer_correct": "stale pass"}
+    attempt.judge_reviews = {
+        "usefulness": {
+            "label": "strong",
+            "reason": "stale review",
+            "missing_evidence": False,
+        }
+    }
+    attempt.task_result = {
+        "schema_version": 1,
+        "task_passed": True,
+        "outcome_summary": "A stale task verdict.",
+        "failed_required_checks": [],
+        "answer_digest": None,
+        "agent_execution_status": "completed",
+        "evidence_integrity_status": "verified",
+    }
+    target = _target()
+    client = _FakeWeaveClient(target)
+    _install_fake_weave(monkeypatch, target, client)
+
+    publisher = weave_publisher_from_environment({"WANDB_API_KEY": "test-only-key"})
+    publisher(result, manifest, target)
+
+    by_kind = {
+        call.attributes["fugue.evidence.object_kind"]: call
+        for call in client.calls.values()
+    }
+    scored = by_kind["prediction_and_score"]
+    prediction = by_kind["prediction"]
+    agent = by_kind["agent_evidence_receipt"]
+    assert scored.display_name.startswith("Published scored attempt: UNSCORED")
+    assert "fugue.task_verdict" not in scored.attributes
+    assert "task_result" not in scored.output
+    assert "task_result" not in prediction.output
+    assert scored.output["scores"] == {}
+    assert scored.output["score_details"] == {}
+    assert scored.output["judge_evidence"]["status"] == "not_applicable"
+    assert prediction.output["score_explanations"] == {}
+    assert prediction.output["sanitized_answer_excerpt"] is None
+    assert "Agent execution (no scored answer)" in prediction.display_name
+    assert agent.output["agent_execution_status"] == "not_started"
+
+
 @pytest.mark.parametrize(
     "tamper",
     ["dataset", "prediction_output", "parent", "project", "identity"],
@@ -1396,3 +1854,83 @@ def test_real_weave_adapter_resumes_partial_deterministic_publication(
     assert len(set(client.published_object_refs)) == 1
     assert len(outcome.objects) == 5
     assert len({(item.attempt_id, item.kind) for item in outcome.objects}) == 5
+
+
+def test_real_weave_adapter_recovers_call_creation_interruption_without_duplicates(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _manifest_path, manifest = _canonical_manifest(tmp_path)
+    _result_path, result = _result_fixture(tmp_path, manifest)
+    target = _target()
+    client = _FakeWeaveClient(target)
+    client.fail_after_create = 2
+    _install_fake_weave(monkeypatch, target, client)
+    publisher = weave_publisher_from_environment({"WANDB_API_KEY": "test-only-key"})
+
+    with pytest.raises(
+        RuntimeError,
+        match="simulated controller interruption during Call creation",
+    ):
+        publisher(result, manifest, target)
+    assert tuple(client.created_call_ids) == ("call-0001", "call-0002")
+
+    outcome = publisher(result, manifest, target)
+
+    assert tuple(client.created_call_ids) == (
+        "call-0001",
+        "call-0002",
+        "call-0003",
+        "call-0004",
+    )
+    assert len(outcome.objects) == 5
+    assert len({(item.attempt_id, item.kind) for item in outcome.objects}) == 5
+
+
+def test_real_weave_adapter_fails_closed_on_duplicate_call_race(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _manifest_path, manifest = _canonical_manifest(tmp_path)
+    _result_path, result = _result_fixture(tmp_path, manifest)
+    target = _target()
+    client = _FakeWeaveClient(target)
+    client.duplicate_after_create_kind = "prediction"
+    _install_fake_weave(monkeypatch, target, client)
+    publisher = weave_publisher_from_environment({"WANDB_API_KEY": "test-only-key"})
+
+    with pytest.raises(RuntimeError, match="duplicate Call race"):
+        publisher(result, manifest, target)
+
+    predictions = [
+        call
+        for call in client.calls.values()
+        if call.attributes["fugue.evidence.object_kind"] == "prediction"
+    ]
+    assert len(predictions) == 2
+    assert all(call.ended_at is None for call in predictions)
+
+
+def test_real_weave_adapter_rejects_conflicting_existing_call_identity(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _manifest_path, manifest = _canonical_manifest(tmp_path)
+    _result_path, result = _result_fixture(tmp_path, manifest)
+    target = _target()
+    client = _FakeWeaveClient(target)
+    _install_fake_weave(monkeypatch, target, client)
+    publisher = weave_publisher_from_environment({"WANDB_API_KEY": "test-only-key"})
+    publisher(result, manifest, target)
+    prediction = next(
+        call
+        for call in client.calls.values()
+        if call.attributes["fugue.evidence.object_kind"] == "prediction"
+    )
+    prediction.attributes["fugue.evidence.destination_digest"] = "f" * 64
+    created_before_retry = tuple(client.created_call_ids)
+
+    with pytest.raises(RuntimeError, match="attributes disagree"):
+        publisher(result, manifest, target)
+
+    assert tuple(client.created_call_ids) == created_before_retry

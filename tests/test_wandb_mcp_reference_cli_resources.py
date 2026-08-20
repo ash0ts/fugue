@@ -230,7 +230,7 @@ def test_packaged_comparison_is_local_and_reference_bound() -> None:
     template = yaml.safe_load(_resource_text("comparison.yaml.template"))
     assert template["schema_version"] == 3
     assert template["id"] == (
-        "mcp-main-vs-0-4-{{CANDIDATE_SHORT}}-harbor-canary-v11"
+        "mcp-main-vs-0-4-{{CANDIDATE_SHORT}}-harbor-canary-v12"
     )
     assert template["execution"]["evidence_mode"] == "local"
     assert template["execution"]["environment"] == {"type": "docker"}
@@ -244,6 +244,17 @@ def test_packaged_comparison_is_local_and_reference_bound() -> None:
         "http://127.0.0.1:18080"
     )
     assert template["supersedes"] == [
+        {
+            "result_digest": (
+                "09e9a30fd9ab3e53e98461273ec49c580af807b687bfbb3a327589f401e8424e"
+            ),
+            "reason": (
+                "V11 measured the same locked revisions and tasks under the prior "
+                "evidence-presentation contract; V12 validates the current canonical "
+                "local evidence and human-readable publication path without pooling "
+                "the runs."
+            ),
+        },
         {
             "result_digest": (
                 "e062f5b392a36d9ebd97adc3ab58b6e253cdd9dd943381342d51d76303bbcf38"
@@ -306,7 +317,7 @@ def test_packaged_human_readable_canary_is_a_distinct_four_cell_study() -> None:
 
     assert canary["id"] == (
         "mcp-main-vs-0-4-{{CANDIDATE_SHORT}}-"
-        "human-readable-evidence-canary-v1"
+        "human-readable-evidence-canary-v2"
     )
     assert canary["id"] != full["id"]
     assert canary["taskset"] == {

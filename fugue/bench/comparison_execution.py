@@ -9,7 +9,11 @@ from pathlib import Path
 from typing import Any
 
 from fugue.bench.candidates import stable_digest
-from fugue.bench.execution import CellOutcome, PlannedCell
+from fugue.bench.execution import (
+    HARBOR_PARENT_RUNNER_CLASSIFIER_DIGEST,
+    CellOutcome,
+    PlannedCell,
+)
 from fugue.bench.execution_recovery import (
     AdmittedWaveLifecycle,
     CanonicalizationObservationV1,
@@ -484,7 +488,10 @@ def execute_durable_comparison_cells(  # noqa: C901 - one recovery boundary
         physical: PhysicalExecutionIdentityV1,
         outcome: CellOutcome,
     ) -> CleanupObservationV1:
-        if outcome.terminal_kind == "runner_start_failure":
+        if (
+            outcome.terminal_kind == "runner_start_failure"
+            and outcome.returncode is None
+        ):
             config_path = _absolute(cell.config_path, repo_root)
             if not config_path.is_file() or config_path.is_symlink():
                 raise ValueError("no-start physical config is unavailable")
@@ -1001,6 +1008,14 @@ def _physical_parent_runner_terminal_observation(
         )
     except (KeyError, TypeError, ValueError):
         return None
+    if (
+        outcome.terminal_kind == "runner_start_failure"
+        and outcome.returncode is not None
+        and not _valid_pre_agent_runner_evidence(
+            receipt.get("runner_start_evidence")
+        )
+    ):
+        return None
     result_reference = receipt.get("result_reference")
     result_sha256 = receipt.get("result_sha256")
     result_path = _absolute(cell.result_path, repo_root)
@@ -1316,6 +1331,29 @@ def _local_attempt_cost(
     return _usd_to_micro(total), True
 
 
+def _valid_pre_agent_runner_evidence(value: Any) -> bool:
+    if not isinstance(value, Mapping):
+        return False
+    return (
+        set(value)
+        == {
+            "schema_version",
+            "kind",
+            "classifier_digest",
+            "result_status",
+            "observed_agent_session_or_tool_artifacts",
+            "verified_no_agent_evidence",
+        }
+        and value.get("schema_version") == 1
+        and value.get("kind") == "harbor_pre_agent_failure_evidence"
+        and value.get("classifier_digest")
+        == HARBOR_PARENT_RUNNER_CLASSIFIER_DIGEST
+        and value.get("result_status") in {"missing", "unreadable", "malformed"}
+        and value.get("observed_agent_session_or_tool_artifacts") == []
+        and value.get("verified_no_agent_evidence") is True
+    )
+
+
 def _infrastructure_attempt_cost(
     *,
     repo_root: Path,
@@ -1326,16 +1364,14 @@ def _infrastructure_attempt_cost(
 ) -> tuple[int | None, bool, str]:
     """Resolve typed infrastructure spend from that physical execution only."""
 
-    if terminal_kind == "runner_start_failure":
-        return 0, True, "typed-runner-start-receipt"
-    if terminal_kind == "sandbox_lost":
-        terminal = _physical_harbor_terminal_observation(
-            repo_root=repo_root,
-            cell=cell,
-            physical=physical,
-        )
-        if terminal is not None and terminal[0].terminal_kind == "sandbox_lost":
-            return 0, True, "typed-pre-agent-harbor-terminal"
+    known_zero = _known_zero_infrastructure_cost(
+        repo_root=repo_root,
+        cell=cell,
+        physical=physical,
+        terminal_kind=terminal_kind,
+    )
+    if known_zero is not None:
+        return known_zero
     physical_root = (
         repo_root
         / ".fugue"
@@ -1439,6 +1475,32 @@ def _infrastructure_attempt_cost(
             continue
         return _usd_to_micro(float(value)), True, "physical-harbor-result"
     return None, False, "physical-harbor-result"
+
+
+def _known_zero_infrastructure_cost(
+    *,
+    repo_root: Path,
+    cell: PlannedCell,
+    physical: PhysicalExecutionIdentityV1,
+    terminal_kind: str,
+) -> tuple[int, bool, str] | None:
+    if terminal_kind == "runner_start_failure":
+        terminal = _physical_parent_runner_terminal_observation(
+            repo_root=repo_root,
+            cell=cell,
+            physical=physical,
+        )
+        if terminal is not None and terminal[0].returncode is None:
+            return 0, True, "typed-runner-process-start-receipt"
+    if terminal_kind == "sandbox_lost":
+        terminal = _physical_harbor_terminal_observation(
+            repo_root=repo_root,
+            cell=cell,
+            physical=physical,
+        )
+        if terminal is not None and terminal[0].terminal_kind == "sandbox_lost":
+            return 0, True, "typed-pre-agent-harbor-terminal"
+    return None
 
 
 def _receipt_path(
