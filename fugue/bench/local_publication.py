@@ -1395,24 +1395,34 @@ def _query_weave_publication_calls(
     attempt_id: str,
     kind: str,
 ) -> list[Any]:
+    # Fugue stores namespaced attributes as flat keys (for example,
+    # ``{"fugue.publication_id": ...}``).  Weave's public query grammar uses
+    # an unescaped dot as a JSON path separator, so literal dots in one key
+    # must be escaped.  Without the escapes, the server looks for a nested
+    # ``attributes["fugue"]["publication_id"]`` value and cannot recover a
+    # terminal publication after a controller retry.
     query = {
         "$expr": {
             "$and": [
                 {
                     "$eq": [
-                        {"$getField": "attributes.fugue.publication_id"},
+                        {"$getField": r"attributes.fugue\.publication_id"},
                         {"$literal": publication_id},
                     ]
                 },
                 {
                     "$eq": [
-                        {"$getField": "attributes.fugue.attempt_id"},
+                        {"$getField": r"attributes.fugue\.attempt_id"},
                         {"$literal": attempt_id},
                     ]
                 },
                 {
                     "$eq": [
-                        {"$getField": "attributes.fugue.evidence.object_kind"},
+                        {
+                            "$getField": (
+                                r"attributes.fugue\.evidence\.object_kind"
+                            )
+                        },
                         {"$literal": kind},
                     ]
                 },

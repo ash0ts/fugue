@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import re
 from contextlib import contextmanager
 from dataclasses import replace
 from datetime import UTC, datetime
@@ -1465,16 +1466,31 @@ class _FakeWeaveClient:
         assert isinstance(query, dict)
         self.call_queries.append(query)
         conditions = query["$expr"]["$and"]
-        expected: dict[str, Any] = {}
-        for condition in conditions:
-            field, literal = condition["$eq"]
-            path = field["$getField"]
-            assert path.startswith("attributes.")
-            expected[path.removeprefix("attributes.")] = literal["$literal"]
+
+        def field_value(call: Any, path: str) -> Any:
+            # Match Weave 0.53.6 dynamic-field semantics: unescaped dots
+            # traverse JSON objects, while ``\.`` addresses a literal dot in
+            # one key.  Fugue deliberately publishes flat namespaced keys.
+            parts = [
+                part.replace(r"\.", ".")
+                for part in re.split(r"(?<!\\)\.", path)
+            ]
+            value: Any = {"attributes": call.attributes}
+            for part in parts:
+                if not isinstance(value, dict) or part not in value:
+                    return None
+                value = value[part]
+            return value
+
         matches = [
             call
             for call in self.calls.values()
-            if all(call.attributes.get(key) == value for key, value in expected.items())
+            if all(
+                field_value(call, field["$getField"]) == literal["$literal"]
+                for field, literal in (
+                    condition["$eq"] for condition in conditions
+                )
+            )
         ]
         return matches[:limit]
 
@@ -1617,9 +1633,9 @@ def test_real_weave_adapter_emits_nested_five_object_chain(
     assert root.trace_id != root.id
     assert all(call.trace_id == root.trace_id for call in client.calls.values())
     expected_query_fields = {
-        "attributes.fugue.publication_id",
-        "attributes.fugue.attempt_id",
-        "attributes.fugue.evidence.object_kind",
+        r"attributes.fugue\.publication_id",
+        r"attributes.fugue\.attempt_id",
+        r"attributes.fugue\.evidence\.object_kind",
     }
     assert client.call_queries
     assert all(
@@ -1850,11 +1866,16 @@ def test_real_weave_adapter_resumes_fully_terminal_publication(
     with pytest.raises(RuntimeError, match="simulated controller interruption"):
         publisher(result, manifest, target)
     created_before_retry = tuple(client.created_call_ids)
+    finished_before_retry = tuple(client.finished_call_ids)
     assert len(created_before_retry) == 4
+    assert len(finished_before_retry) == 4
+    assert client.flush_count == 0
 
     outcome = publisher(result, manifest, target)
 
     assert tuple(client.created_call_ids) == created_before_retry
+    assert tuple(client.finished_call_ids) == finished_before_retry
+    assert client.flush_count == 1
     assert len(set(client.published_object_refs)) == 1
     assert len(outcome.objects) == 5
     assert len({(item.attempt_id, item.kind) for item in outcome.objects}) == 5
